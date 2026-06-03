@@ -19,7 +19,7 @@
 
 **技术底座**
 
-- **Powered by [Agentao](../agentao)** —— 受治理的 Agent 运行时（Python，可嵌入 / CLI / ACP server）。观澜不自己造 Agent 内核，而是把"知识 wiki 的维护逻辑"做成 Agentao 的 **Skill + Python 脚本**（MVP，CLI 即可跑）；自定义 Tool 注入等嵌入式能力留到 P4 的嵌入式宿主。
+- **Powered by Agentao** —— 受治理的 Agent 运行时（Python，可嵌入 / CLI / ACP server）。观澜不自己造 Agent 内核，而是把"知识 wiki 的维护逻辑"做成 Agentao 的 **Skill + Python 脚本**（MVP，CLI 即可跑）；自定义 Tool 注入等嵌入式能力留到 P4 的嵌入式宿主。
 - **观澜 Web UI（P4，可选）** —— 一个进程内嵌 Agentao 的可选 Web 宿主，复用同一文件库，给 CLI 之外加一个图形入口。它不是 MVP 前置依赖；技术细节见**附录 A**。
 
 ### 核心设计原则
@@ -262,7 +262,7 @@ P4 起把 Agentao 当库嵌入（`Agentao(...)`），启用 Tool 注入（包装
 - 纯 Skill 实现（个人版蓝本）：[`../llm-wiki/llm-wiki-agent`](../llm-wiki/llm-wiki-agent) · [github](https://github.com/SamurAIGPT/llm-wiki-agent)
 - 桌面应用实现：[`../llm-wiki/llm_wiki`](../llm-wiki/llm_wiki) · [github](https://github.com/nashsu/llm_wiki)
 - 生产级 daemon（企业版蓝本）：[`../llm-wiki/gbrain`](../llm-wiki/gbrain) · [github](https://github.com/garrytan/gbrain)
-- Agentao 运行时：[`../agentao`](../agentao)（核心 API `agentao/agent.py`、ACP `docs/ACP.md`、配置 `docs/CONFIGURATION.md`、示例 `examples/`）
+- Agentao 运行时：受治理的 Agent 运行时（Python，可嵌入 / CLI / ACP server）；核心 API、ACP 协议、配置与示例见其自带文档
 
 ---
 
@@ -270,4 +270,4 @@ P4 起把 Agentao 当库嵌入（`Agentao(...)`），启用 Tool 注入（包装
 
 P4 可选：一个进程内嵌 Agentao 的 Web host，复用同一 wiki 目录，给 CLI 之外加图形入口。
 `SdkTransport` 流式转发、仓库内权限编程注入、多会话并发、ACP 备选等都**不是 MVP 决策**，不在此展开。
-真要做 P4 时另开实现方案文档（参考 `../agentao/examples/` 与开发指南 `part-4`）。
+真要做 P4 时另开实现方案文档（参考 Agentao 的示例与嵌入式开发指南）。
