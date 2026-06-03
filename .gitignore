@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Dev-only sample wiki data & derived (local testing only — never pushed; see docs/DESIGN.md §4.7)
+# Templates live in examples/; only the repo-root sample config + data/derived dirs are ignored.
+/raw/
+/wiki/
+/graph/
+/workspace/
+
+# Repo-root sample config copied from examples/ (may carry machine paths / private dev settings).
+# Anchored to root so examples/AGENTAO.md and examples/SCHEMA.md stay tracked.
+/AGENTAO.md
+/SCHEMA.md
