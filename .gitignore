@@ -12,6 +12,18 @@ wheels/
 # Virtual environments
 .venv
 
+# Local agentao residue (from previous experiments in this dir, if any)
+.agentao/
+agentao.log
+agentao.log.*
+
+# Claude Code 本机运行时状态（scheduled_tasks.lock 含 sessionId / pid / 进程起始时间），
+# per-machine 不入仓——否则别的 checkout 会继承陈旧锁 + 本地会话元数据。
+.claude/
+
+# Qoder
+.qoder/
+
 # Dev-only sample wiki data & derived (local testing only — never pushed; see docs/DESIGN.md §4.7)
 # Templates live in examples/; only the repo-root sample config + data/derived dirs are ignored.
 /raw/
