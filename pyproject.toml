@@ -4,7 +4,14 @@ version = "0.1.0"
 description = "观澜 — 增量构建并维护结构化、互链的 markdown 知识 wiki（Karpathy LLM Wiki 模式）"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "jin-bo" }]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/jin-bo/guanlan"
+Repository = "https://github.com/jin-bo/guanlan"
 
 [project.scripts]
 guanlan = "guanlan.cli:main"
