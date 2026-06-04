@@ -13,8 +13,8 @@
 
 ## 状态
 
-🚧 **P1（骨架）** —— 当前仅 `guanlan init`（确定性生成最小模板）可用。
-`ingest` / `query`（P2）、`health` / `lint` / `graph`（P3）尚未实现，CLI 中已占位并标注阶段。
+🚀 **P2（最小闭环）** —— `guanlan init` 以及 `ingest` / `query` / `check` / `install-skill` 均已实现，经 Agentao 运行时治理。
+`health` / `lint` / `graph`（P3）尚未实现。
 
 ## 快速开始
 

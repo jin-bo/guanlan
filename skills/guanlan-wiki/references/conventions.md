@@ -26,14 +26,14 @@ last_updated: YYYY-MM-DD
 ---
 ```
 
-- `sources` 列 source 页的 slug（不含路径/扩展名），用于追溯与 `check.py` 校验。
+- `sources` 列 source 页的 slug（不含路径/扩展名），用于追溯与 `guanlan check` 校验。
 - `last_updated` 每次实质修改时更新为当天日期（ISO `YYYY-MM-DD`）。
 
 ## wikilink
 
 - 正文用 `[[PageName]]` 链接实体/概念/资料；**大小写不敏感，按文件 stem 解析**。
 - 例：`[[Transformer]]`、`[[注意力机制]]`。出现的实体/概念**一律链接**，便于交叉引用与建图。
-- ingest / `--backfill` 收尾由 `check.py` 校验断链（指向不存在页面即失败）。
+- ingest / `--backfill` 收尾由 `guanlan check` 校验断链（指向不存在页面即失败）。
 
 ## index.md
 

@@ -44,13 +44,13 @@ description: >
 
 摄入一篇 `.md` 资料。**单轮优先，必要时分步**（一篇资料可能触及 10–15 个页面）：
 
-1. 读 `raw/` 里的 `.md` 源；读 `wiki/index.md` 与 `wiki/overview.md` 建立上下文。
+1. 读 `raw/` 里的 `.md` 源；路径必须按用户/wrapper 给出的原样使用，不要替换其中的引号、空格或 CJK 字符；读 `wiki/index.md` 与 `wiki/overview.md` 建立上下文。
 2. 在 `wiki/sources/<slug>.md` 写**摘要页**（slug = 同源文件名 kebab-case；frontmatter `type: source`）。
 3. 抽取实体/概念，**建或更新** `wiki/entities/<Name>.md`、`wiki/concepts/<Name>.md`；正文术语转 `[[wikilink]]`。
 4. 更新 `wiki/index.md`（对应分区追加/修订一行）与 `wiki/overview.md`（活体综述）。
 5. 若新资料与既有页**冲突**，就地在相关页维护 `## ⚠️ 矛盾与存疑` 节（格式见 conventions）。
 6. 向 `wiki/log.md` 追加一条：`## [YYYY-MM-DD] ingest | <title>`。
-7. **收尾**：wrapper 强制跑 `scripts/check.py`（frontmatter + 断链）并比对 `raw/` 前后快照；两项全过才算成功。
+7. **收尾**：不要自行运行 shell 命令或 `guanlan check`；读写文件只用内置文件工具；只返回简短完成说明。wrapper 会在你返回后强制跑 `guanlan check`（frontmatter + 断链 + `sources` 解析）并比对 `raw/` 前后快照；两项全过才算成功。
 
 ### query（P2）— `guanlan query "…"` / `--backfill`
 
@@ -60,9 +60,9 @@ description: >
 
 ### 确定性脚本（零 LLM）
 
-- `scripts/check.py`（P2）— 基础校验：frontmatter 合规 + wikilink 断链。ingest / `--backfill` 收尾**强制**运行；亦可独立 `guanlan check`。
-- `scripts/health.py`（P3）— 结构检查：空页/桩页、index 与磁盘同步、log 覆盖。
-- `scripts/build_graph.py`（P3）— 解析 `[[wikilink]]` → 边，输出 `graph.json` + 自包含 `graph.html`。
+- `guanlan check`（P2）— 基础校验：frontmatter 合规 + wikilink 断链 + `sources` 解析。ingest / `--backfill` 收尾**强制**运行；亦可独立 shell 调用。实现在 `guanlan` 包内（`guanlan/check.py`），无 `scripts/`。
+- `health.py`（P3）— 结构检查：空页/桩页、index 与磁盘同步、log 覆盖。
+- `build_graph.py`（P3）— 解析 `[[wikilink]]` → 边，输出 `graph.json` + 自包含 `graph.html`。
 
 > `index.md` / `log.md` / `overview.md` / `SCHEMA.md` 是 config 非 content，**排除出 index/graph/lint 扫描**。
 > LLM 只用于 ingest / query；其余工作流全部零 LLM。语义 lint（矛盾复检/过期论断/资料缺口）属 P3 之后。

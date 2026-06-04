@@ -7,7 +7,12 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "jin-bo" }]
-dependencies = []
+dependencies = [
+    # [cli] extra 带 rich/prompt-toolkit/readchar/pygments —— `agentao run` 控制台脚本预检需要，
+    # wrapper 经子进程调它（见 guanlan/runtime.py），缺 extra 则 ingest/query 立即失败。
+    "agentao[cli]>=0.4.8",
+    "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
+]
 
 [project.urls]
 Homepage = "https://github.com/jin-bo/guanlan"
@@ -32,3 +37,5 @@ packages = ["guanlan"]
 "examples/AGENTAO.md" = "guanlan/_templates/AGENTAO.md"
 "examples/SCHEMA.md" = "guanlan/_templates/SCHEMA.md"
 "examples/wiki" = "guanlan/_templates/wiki"
+# 维护引擎 skill 随包携带；安装态下由 wrapper 幂等装入 ~/.agentao/skills/（见 guanlan/skill.py）。
+"skills/guanlan-wiki" = "guanlan/_skill/guanlan-wiki"
