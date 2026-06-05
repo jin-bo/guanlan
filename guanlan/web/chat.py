@@ -7,8 +7,11 @@
 
 四坑化解：① 凭据缺失 → `build_from_environment`（读 `.env`/`~/.agentao`）；② skill 不自动激活
 → 构造后显式激活 `guanlan-wiki`（且构造前 `ensure_skill_available` 保其可发现）；③ `<wd>/
-agentao.log` 污染 → 传我们自己的 `logger=`（无文件 handler）；④ 内部 API 耦合 → 只用
-`build_from_environment`/`.arun`/`transport` 这一组面。
+agentao.log` 由**我们自己的 `logger=`** 接管（嵌入契约：注入 logger = 宿主自管日志栈，
+LLMClient 不再自挂 handler）——默认经 `configure_agent_log` 给这个共享 logger 挂**一个**
+`RotatingFileHandler` 落 `<wd>/agentao.log`（**像 CLI 一样**记会话日志，`guanlan web
+--no-agent-log` 可关）；④ 内部 API 耦合 → 只用 `build_from_environment`/`.arun`/`transport`
+这一组面。
 
 只读姿态在构造后**两点同步置位**（照搬 `cli/run.py`）：engine 的 read-only 预设为空，真正拦截
 写/shell 的是 `ToolRunner.readonly_mode`，少调第二步就不是真只读。
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -28,11 +32,40 @@ from agentao.permissions import PermissionMode
 
 from ..skill import SKILL_NAME, ensure_skill_available
 
-# 自带 logger（无文件 handler）→ 不落 <wd>/agentao.log，不污染知识库（坑③）。
+# 嵌入会话共享的 logger（坑③：注入它 = 我们自管日志栈）。默认由 configure_agent_log 给它挂
+# 一个落 <wd>/agentao.log 的 file handler；不挂时无 handler、不写文件（如测试 / --no-agent-log）。
 _logger = logging.getLogger("guanlan.web.chat")
+
+# 已接上 agentao.log 的库根（幂等：重复 serve/create_app 不重挂 handler，避免每行写多遍）。
+_agent_log_paths: set[str] = set()
 
 # 内存会话数硬上限：超出拒新建（决策P4-8：v1 不上 LRU，仅一个保守上界给内存设界）。
 MAX_CONVERSATIONS = 100
+
+
+def configure_agent_log(root: Path) -> Path:
+    """把嵌入 chat 的会话日志接到 `<root>/agentao.log`（与 CLI 同名同轮转），**全进程仅挂一次**。
+
+    嵌入契约（见 agentao `LLMClient` 文档）：一旦注入 `logger=`，宿主就**自管日志栈**——
+    LLMClient 不再往 `logging.getLogger("agentao")` 自挂 file handler。故这里给共享单例
+    `_logger` 挂**一个** `RotatingFileHandler`，chat 的 LLM 交互便像 CLI 那样落 `agentao.log`。
+    只挂一次很关键：`build_from_environment` 每会话构造一次，若每次都挂 handler（LLMClient
+    对重复 handler **不去重**）会把每行写 N 遍。文件已被 `.gitignore`（`agentao.log[.*]`）、
+    且扫描只看 `*.md`，不污染知识库。
+    """
+    target = (root / "agentao.log").resolve()
+    key = str(target)
+    if key in _agent_log_paths:
+        return target
+    handler = logging.handlers.RotatingFileHandler(
+        target, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    handler.setLevel(logging.DEBUG)  # LLM 交互打在 INFO；DEBUG 全收，与 agentao 默认一致。
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    _logger.setLevel(logging.DEBUG)
+    _logger.addHandler(handler)
+    _agent_log_paths.add(key)
+    return target
 
 # 当前 turn 的事件发射器：emit(kind, data)。kind ∈ {"token"}（done/error 由端点补）。
 Emit = Callable[[str, object], None]

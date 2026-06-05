@@ -19,6 +19,7 @@ from ..errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from ..paths import require_kb_root
 from ..runtime import AgentRunner
 from .app import create_app
+from .chat import configure_agent_log
 
 HOST = "127.0.0.1"  # 红线：绝不 0.0.0.0（决策P4-4，写端口严禁暴露网络）。
 
@@ -72,14 +73,18 @@ def serve(
     open_browser: bool = True,
     model: str | None = None,
     runner: AgentRunner | None = None,
+    agent_log: bool = True,
 ) -> int:
     """起本地 Web 宿主，长驻直到 Ctrl-C；正常停服返回 `EXIT_OK`。
 
     前置 `require_kb_root(writable=True)`（Web 含写入口，要求 raw/wiki/AGENTAO.md/SCHEMA.md
     齐全）与端口探测都可能抛 `GuanlanError(EXIT_USAGE)`，由 CLI 捕获转退出码。
+    `agent_log`（默认开）把会话 agent 日志像 CLI 那样落 `<kb>/agentao.log`；`--no-agent-log` 关。
     """
     kb = require_kb_root(root, writable=True)
     _ensure_port_free(HOST, port)
+    if agent_log:
+        configure_agent_log(kb)  # chat 会话日志落 <kb>/agentao.log（像 CLI；已 gitignore/不扫描）
 
     app = create_app(kb, model=model, runner=runner)
     if open_browser:

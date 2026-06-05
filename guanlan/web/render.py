@@ -72,6 +72,38 @@ def _stem_to_path(wiki: Path) -> dict[str, str]:
     return mapping
 
 
+def _code_ref_target(content: str, stem_to_path: dict[str, str]) -> str | None:
+    """`content` 是【对某现有页的忠实整体引用】才返回其相对路径，否则 None（行内 code 兜底用）。
+
+    忠实 = `content`（规整后）**整体恰好等于**该页的某种合法写法之一：完整相对路径 /
+    去 `wiki/` 前缀 / 纯文件名 / 纯 stem（各自可带或不带 `.md`，大小写不敏感）。如此既放行
+    **含空格的合法页名**（如 `Smart Tools 模块`），又挡住命令/多 token 代码
+    （如 `cat wiki/x.md`）——后者经 `link_stem` 取末段虽与某页共享 stem，但整体不等于该页的
+    任何合法写法，故不误判为引用。
+    """
+    norm = content.strip().replace("\\", "/")
+    stem = link_stem(norm) if norm else ""
+    target = stem_to_path.get(stem) if stem else None
+    if target is None:
+        return None
+    forms: set[str] = set()
+    for base in (
+        target,  # wiki/sources/foo.md
+        target[len("wiki/") :] if target.startswith("wiki/") else target,  # sources/foo.md
+        target.rsplit("/", 1)[-1],  # foo.md
+    ):
+        forms.add(base.lower())
+        if base.lower().endswith(".md"):
+            forms.add(base[:-3].lower())  # 各形式去 .md 后缀
+    return target if norm.lower() in forms else None
+
+
+def _code_wikilink_raw(content: str) -> str | None:
+    """行内 code 的整段内容恰好是 `[[...]]` 时返回内部 raw，否则 None。"""
+    match = WIKILINK_RE.fullmatch(content.strip())
+    return match.group(1) if match is not None else None
+
+
 if _HAS_MARKDOWN:
 
     class _EscapeHtmlExtension(_Extension):
@@ -142,12 +174,85 @@ if _HAS_MARKDOWN:
                 175,
             )
 
+    class _CodePathLinkTreeprocessor(_Treeprocessor):
+        """把【整段恰好是页面引用】的**行内** `<code>` 破例转成站内 wikilink。
+
+        源出处常被 LLM 写成 `wiki/sources/x.md` 或 `[[x]]` 并套反引号，渲染成 `<code>` 后
+        默认不联链。这里只对两类**整段忠实引用**破例：① 整段就是 `[[...]]`；② 整段精确等于
+        某现有页的合法路径 / 文件名 / stem 写法。后者与 `[[wikilink]]` 完全同口径
+        （`link_stem` + stem 表），不是正则猜路径，假阳性极低（除非把恰好等于某页名的串当
+        代码示例写）。
+        仅作用于行内 code：`<pre>` 下的缩进代码块跳过，围栏代码已被 fenced_code 预处理器
+        搬进 htmlStash、本就不在树里——故代码块的字面语义（决策P4-3）不受影响。**已在
+        `<a>` 内的 code 也跳过**：`[`wiki/sources/x.md`](url)` 这种 code 当链接文字的情形，
+        若再把内层 code 转成 `<a>` 会产生嵌套锚（非法 HTML，浏览器会拆链、连累内外两个链接）。
+        """
+
+        def __init__(self, md, stem_to_path: dict[str, str]) -> None:
+            super().__init__(md)
+            self._stem_to_path = stem_to_path
+
+        def run(self, root):  # noqa: N802 (markdown API 命名)
+            # 排除已在 <pre>（缩进代码块）或 <a>（code 作链接文字）内的 code：前者保字面，
+            # 后者避免嵌套锚。围栏代码已进 htmlStash、本就不在树里。
+            skip = {
+                id(code)
+                for parent in (*root.iter("pre"), *root.iter("a"))
+                for code in parent.iter("code")
+            }
+            for el in root.iter("code"):
+                if id(el) in skip or len(el) or el.text is None:
+                    continue  # 代码块内 / 链接内 / 含子元素 / 空 → 不碰
+                raw_wikilink = _code_wikilink_raw(el.text)
+                if raw_wikilink is not None:
+                    display = _wikilink_display(raw_wikilink) or raw_wikilink.strip()
+                    stem = link_stem(raw_wikilink)
+                    target = self._stem_to_path.get(stem) if stem else None
+                    if target is not None:
+                        el.tag = "a"
+                        el.attrib.clear()
+                        el.set("class", "wikilink")
+                        el.set("data-page", target)
+                    else:
+                        el.tag = "span"
+                        el.attrib.clear()
+                        el.set("class", "wikilink broken")
+                        el.set("title", "无对应页面")
+                    el.text = display
+                    continue
+
+                # 仅当整段是【对某现有页的忠实引用】才联链：放行含空格的合法页名，
+                # 同时挡住命令/多 token 代码（如 `cat wiki/x.md`、`git status`）。
+                target = _code_ref_target(el.text, self._stem_to_path)
+                if target is None:
+                    continue  # 非忠实引用 / 解析不到现有页 → 保持字面 code
+                el.tag = "a"
+                el.attrib.clear()
+                el.set("class", "wikilink")
+                el.set("data-page", target)  # 与 [[…]] 同：前端据此站内导航
+                el.text = Path(target).stem  # 显示干净 stem（去 sources/ 前缀与 .md 后缀）
+            return None
+
+    class _CodePathLinkExtension(_Extension):
+        def __init__(self, stem_to_path: dict[str, str]) -> None:
+            super().__init__()
+            self._stem_to_path = stem_to_path
+
+        def extendMarkdown(self, md) -> None:  # noqa: N802 (markdown API 命名)
+            # 树处理阶段跑（行内 code 节点此时已生成）；data-page 无 href，与 safelink 不冲突。
+            md.treeprocessors.register(
+                _CodePathLinkTreeprocessor(md, self._stem_to_path),
+                "guanlan_codepathlink",
+                4,
+            )
+
 
 def render_markdown(text: str, wiki: Path | None = None) -> str:
     """把 markdown 文本渲染为**安全** HTML（供单页与对话输出共用）。
 
     始终带两道安全闸：`_EscapeHtmlExtension`（关原始 HTML 透传）+ `_SafeLinkExtension`
-    （中和 javascript:/data: 链接）。给了 `wiki` 才挂 `[[wikilink]]` 重写（解析到该库页面）。
+    （中和 javascript:/data: 链接）。给了 `wiki` 才挂 `[[wikilink]]` 重写（解析到该库页面），
+    并对【整段精确解析到现有页】的行内 `<code>` 破例联链（兜底 LLM 把源出处写成路径+反引号）。
     缺 markdown extra 时回退转义 `<pre>` 源码视图。
     """
     if not _HAS_MARKDOWN:
@@ -159,7 +264,9 @@ def render_markdown(text: str, wiki: Path | None = None) -> str:
         _SafeLinkExtension(),  # 安全：中和 javascript:/data: 链接。
     ]
     if wiki is not None:
-        extensions.append(_WikiLinkExtension(_stem_to_path(wiki)))
+        stem_map = _stem_to_path(wiki)  # 单次扫库，两个扩展共享（避免重复 rglob）。
+        extensions.append(_WikiLinkExtension(stem_map))
+        extensions.append(_CodePathLinkExtension(stem_map))
     return _markdown.Markdown(extensions=extensions).convert(text)
 
 
