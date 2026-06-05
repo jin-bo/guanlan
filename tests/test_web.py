@@ -179,6 +179,21 @@ def test_graph_static_404_before_build(client) -> None:
     assert client.get("/graph/graph.json").status_code == 404
 
 
+def test_unknown_report_name_404(client) -> None:
+    """表驱动 /api/report/{name}：未知报告名 → 404（白名单，不是 500/任意执行）。"""
+    assert client.get("/api/report/check").status_code == 200
+    assert client.get("/api/report/bogus").status_code == 404
+
+
+def test_graph_file_whitelist_404(client, kb) -> None:
+    """/graph/{filename} 限死 graph.html/json 白名单：未知名 → 404，挡穿越（无 ../ 逃逸）。"""
+    client.get("/graph")  # 先建，确保白名单内的文件确实存在
+    assert client.get("/graph/graph.html").status_code == 200
+    assert client.get("/graph/bogus.txt").status_code == 404
+    # 穿越式文件名不在白名单 → 404（且 . 段会被 starlette 规整，绝不读到 graph/ 外）
+    assert client.get("/graph/graph.html.bak").status_code == 404
+
+
 # ───────────────────────── 静态 / 浏览（C2） ─────────────────────────
 
 
@@ -694,6 +709,8 @@ def test_chat_error_event_on_failure(kb, monkeypatch) -> None:
         tokens, done, error = _chat(client, "问")
     assert done is None
     assert error is not None and "炸了" in error["message"]
+    # 即便首轮失败，error 也带 conversation_id：前端据此记住已建会话，不会下次另起新会话堆到 503。
+    assert error.get("conversation_id")
 
 
 def test_chat_invalid_body_422(client) -> None:

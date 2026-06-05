@@ -252,3 +252,33 @@ def test_entrypoint_write_failure_returns_usage(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(Path, "write_text", boom)
     assert graph_mod.graph_entrypoint(kb, json_only=True) == 1
+
+
+def test_entrypoint_write_failure_labels_write_not_read(tmp_path: Path, monkeypatch, capsys):
+    """写派生 graph/ 失败 → 仍标"写...失败"（OSError 来自写阶段，归因正确）。"""
+    kb = _kb(tmp_path)
+    _page(kb / "wiki", "entities/Foo.md", type="entity")
+    import guanlan.graph as graph_mod
+
+    def boom(_g, _root, *, json_only):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(graph_mod, "write_graph", boom)
+    assert graph_mod.graph_entrypoint(kb, json_only=True) == 1
+    assert "写" in capsys.readouterr().err  # 写阶段错才贴"写...失败"标签
+
+
+def test_entrypoint_read_failure_not_mislabeled_as_write(tmp_path: Path, monkeypatch):
+    """读 wiki/ 页时的 OSError **不**被当成"写 graph 失败"吞掉，而是外抛（不误导用户去查 graph/）。"""
+    import pytest
+
+    kb = _kb(tmp_path)
+    _page(kb / "wiki", "entities/Foo.md", type="entity")
+    import guanlan.graph as graph_mod
+
+    def boom(_wiki):
+        raise OSError("Permission denied: wiki/Foo.md")
+
+    monkeypatch.setattr(graph_mod, "build_graph", boom)
+    with pytest.raises(OSError, match="Permission denied"):
+        graph_mod.graph_entrypoint(kb, json_only=True)  # 读错外抛，不被 except OSError 误标为写失败

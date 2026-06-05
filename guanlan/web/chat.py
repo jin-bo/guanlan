@@ -34,7 +34,11 @@ from ..skill import SKILL_NAME, ensure_skill_available
 
 # 嵌入会话共享的 logger（坑③：注入它 = 我们自管日志栈）。默认由 configure_agent_log 给它挂
 # 一个落 <wd>/agentao.log 的 file handler；不挂时无 handler、不写文件（如测试 / --no-agent-log）。
+# propagate=False：日志栈归我们自管，绝不上抛 root——否则 --no-agent-log 下无 handler 的
+# WARNING+ 会经 logging.lastResort 落到 sys.stderr，而 ingest worker 正用进程级 redirect_stderr
+# 捕获输出（jobs.py），并发会话的日志会被串进某个 ingest 作业的结果面板。
 _logger = logging.getLogger("guanlan.web.chat")
+_logger.propagate = False
 
 # 已接上 agentao.log 的库根（幂等：重复 serve/create_app 不重挂 handler，避免每行写多遍）。
 _agent_log_paths: set[str] = set()

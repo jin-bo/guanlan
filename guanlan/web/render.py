@@ -17,7 +17,7 @@ import re
 import xml.etree.ElementTree as _etree  # stdlib，始终可用；只有 markdown 是可选 extra。
 from pathlib import Path
 
-from ..pages import WIKILINK_RE, link_stem, load_page
+from ..pages import WIKILINK_RE, link_stem, load_page, page_stem_index
 
 try:  # markdown 是 web extra 的一部分；缺失时回退 <pre> 源码视图（§6）。
     import markdown as _markdown
@@ -55,47 +55,50 @@ def _wikilink_display(raw: str) -> str:
     return raw.split("#", 1)[0].strip()
 
 
-def _stem_to_path(wiki: Path) -> dict[str, str]:
-    """全页面 stem（小写）→ 相对知识库根的 posix 路径，供 `[[wikilink]]` 解析为站内导航目标。
-
-    解析集含 config 页（与 `check`/`graph` 同口径）。stem 全库唯一是 wikilink 按名解析的固有
-    前提（见 graph.py）；万一重名，按排序取第一个，保持确定性。
-
-    **故意每次渲染重建**（不缓存）：ingest 随时增删页面，每请求重扫保证新页立刻被解析为可点
-    链接、删页立刻标灰——本地单用户工具下 O(N) 重扫的代价远小于缓存失效导致的"链接对不上"。
-    """
-    mapping: dict[str, str] = {}
-    root = wiki.parent
-    for path in sorted(wiki.rglob("*.md")):
-        if path.is_file():
-            mapping.setdefault(path.stem.lower(), path.relative_to(root).as_posix())
-    return mapping
+# 全页面 stem(小写) → 相对库根 posix 路径，供 `[[wikilink]]` 解析为站内导航目标。归口于
+# `pages.page_stem_index`（与 check/graph 同口径、含 config 可链）。**故意每次渲染重建**（不缓存）：
+# ingest 随时增删页面，每请求重扫保证新页立刻可点、删页立刻标灰——本地单用户下 O(N) 重扫的代价
+# 远小于缓存失效导致的"链接对不上"。
+_stem_to_path = page_stem_index
 
 
 def _code_ref_target(content: str, stem_to_path: dict[str, str]) -> str | None:
     """`content` 是【对某现有页的忠实整体引用】才返回其相对路径，否则 None（行内 code 兜底用）。
 
     忠实 = `content`（规整后）**整体恰好等于**该页的某种合法写法之一：完整相对路径 /
-    去 `wiki/` 前缀 / 纯文件名 / 纯 stem（各自可带或不带 `.md`，大小写不敏感）。如此既放行
-    **含空格的合法页名**（如 `Smart Tools 模块`），又挡住命令/多 token 代码
-    （如 `cat wiki/x.md`）——后者经 `link_stem` 取末段虽与某页共享 stem，但整体不等于该页的
-    任何合法写法，故不误判为引用。
+    去 `wiki/` 前缀 / 纯文件名（均可带或不带 `.md`，大小写不敏感）。如此既放行**含空格的
+    合法页名**（如 `Smart Tools 模块`），又挡住命令/多 token 代码（如 `cat wiki/x.md`）——后者经
+    `link_stem` 取末段虽与某页共享 stem，但整体不等于该页的任何合法写法，故不误判为引用。
     """
     norm = content.strip().replace("\\", "/")
     stem = link_stem(norm) if norm else ""
     target = stem_to_path.get(stem) if stem else None
     if target is None:
         return None
-    forms: set[str] = set()
-    for base in (
-        target,  # wiki/sources/foo.md
-        target[len("wiki/") :] if target.startswith("wiki/") else target,  # sources/foo.md
-        target.rsplit("/", 1)[-1],  # foo.md
-    ):
-        forms.add(base.lower())
-        if base.lower().endswith(".md"):
-            forms.add(base[:-3].lower())  # 各形式去 .md 后缀
-    return target if norm.lower() in forms else None
+    # 两边各去掉可选 .md 再比：content 整体须恰好等于 target 的某种合法写法之一。
+    want = norm[:-3].lower() if norm.lower().endswith(".md") else norm.lower()
+    base = target[:-3].lower() if target.lower().endswith(".md") else target.lower()
+    return target if want in (base, base.removeprefix("wiki/"), base.rsplit("/", 1)[-1]) else None
+
+
+def _resolve_wikilink(raw: str, stem_to_path: dict[str, str]) -> tuple[str, dict[str, str], str]:
+    """把 `[[…]]` 内部 raw 解析为 `(tag, attrib, display)`：命中现有页 → `a.wikilink[data-page]`，
+    断链 → `span.wikilink.broken`。行内 `[[…]]` 与 code 兜底两路共用，杜绝两处样式/类名漂移。"""
+    display = _wikilink_display(raw) or raw.strip()
+    stem = link_stem(raw)
+    target = stem_to_path.get(stem) if stem else None
+    if target is not None:
+        return "a", {"class": "wikilink", "data-page": target}, display
+    return "span", {"class": "wikilink broken", "title": "无对应页面"}, display
+
+
+def _retag(el, tag: str, attrib: dict[str, str], text: str) -> None:
+    """就地把树上某元素改写成 `(tag, attrib, text)`（清掉旧属性，避免 copy-paste 漏 clear）。"""
+    el.tag = tag
+    el.attrib.clear()
+    for key, value in attrib.items():
+        el.set(key, value)
+    el.text = text
 
 
 def _code_wikilink_raw(content: str) -> str | None:
@@ -146,18 +149,8 @@ if _HAS_MARKDOWN:
             self._stem_to_path = stem_to_path
 
         def handleMatch(self, m, data):  # noqa: N802 (markdown API 命名)
-            raw = m.group(1)
-            display = _wikilink_display(raw) or raw.strip()
-            stem = link_stem(raw)
-            target = self._stem_to_path.get(stem) if stem else None
-            if target is not None:
-                el = _etree.Element("a")
-                el.set("class", "wikilink")
-                el.set("data-page", target)  # 前端据此切到目标页（站内导航，无 href 跳转）
-            else:
-                el = _etree.Element("span")
-                el.set("class", "wikilink broken")
-                el.set("title", "无对应页面")
+            tag, attrib, display = _resolve_wikilink(m.group(1), self._stem_to_path)
+            el = _etree.Element(tag, attrib)  # 命中→a[data-page]（前端站内导航，无 href 跳转）
             el.text = display
             return el, m.start(0), m.end(0)
 
@@ -205,20 +198,8 @@ if _HAS_MARKDOWN:
                     continue  # 代码块内 / 链接内 / 含子元素 / 空 → 不碰
                 raw_wikilink = _code_wikilink_raw(el.text)
                 if raw_wikilink is not None:
-                    display = _wikilink_display(raw_wikilink) or raw_wikilink.strip()
-                    stem = link_stem(raw_wikilink)
-                    target = self._stem_to_path.get(stem) if stem else None
-                    if target is not None:
-                        el.tag = "a"
-                        el.attrib.clear()
-                        el.set("class", "wikilink")
-                        el.set("data-page", target)
-                    else:
-                        el.tag = "span"
-                        el.attrib.clear()
-                        el.set("class", "wikilink broken")
-                        el.set("title", "无对应页面")
-                    el.text = display
+                    # 整段就是 `[[…]]`：与行内 [[…]] 完全同路（_resolve_wikilink），就地改写。
+                    _retag(el, *_resolve_wikilink(raw_wikilink, self._stem_to_path))
                     continue
 
                 # 仅当整段是【对某现有页的忠实引用】才联链：放行含空格的合法页名，
@@ -226,11 +207,8 @@ if _HAS_MARKDOWN:
                 target = _code_ref_target(el.text, self._stem_to_path)
                 if target is None:
                     continue  # 非忠实引用 / 解析不到现有页 → 保持字面 code
-                el.tag = "a"
-                el.attrib.clear()
-                el.set("class", "wikilink")
-                el.set("data-page", target)  # 与 [[…]] 同：前端据此站内导航
-                el.text = Path(target).stem  # 显示干净 stem（去 sources/ 前缀与 .md 后缀）
+                # 与 [[…]] 命中同形；显示干净 stem（去 sources/ 前缀与 .md 后缀）。
+                _retag(el, "a", {"class": "wikilink", "data-page": target}, Path(target).stem)
             return None
 
     class _CodePathLinkExtension(_Extension):
