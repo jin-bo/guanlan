@@ -13,8 +13,13 @@
 
 ## 状态
 
-🚀 **P2（最小闭环）** —— `guanlan init` 以及 `ingest` / `query` / `check` / `install-skill` 均已实现，经 Agentao 运行时治理。
-`health` / `lint` / `graph`（P3）尚未实现。
+🚀 **P3（健康与图谱）** —— 在 P2 最小闭环（`guanlan init` / `ingest` / `query` / `check` / `install-skill`，经 Agentao 运行时治理）之上，新增三个按需、零-LLM 的维护工具：
+
+- `guanlan health` —— stub 页面 + index↔disk 同步（advisory；`--strict` → 退出码 6）。
+- `guanlan lint` —— 孤儿页 / 断链 / 缺失实体（advisory）。
+- `guanlan graph` —— 确定性 `[[wikilink]]` 图谱 → `graph/graph.json` + 自包含 `graph/graph.html`（`--json-only` 跳过 html）。
+
+语义 lint、推断图谱边、Web UI、多格式 ingest 留待 P3 之后（见 DESIGN §8）。
 
 ## 快速开始
 
@@ -27,6 +32,20 @@ guanlan init
 ```
 
 `init` 是确定性的（零 LLM），已存在的文件不会被覆盖，可安全重复运行。
+
+投喂资料、提问、维护：
+
+```bash
+# 投喂资料 / 提问（需配置模型，经 Agentao 运行时）
+guanlan -C my-wiki ingest path/to/source.md
+guanlan -C my-wiki query "..."
+
+# 零-LLM、可离线运行的确定性工具
+guanlan -C my-wiki check     # frontmatter / 断链 / 来源校验
+guanlan -C my-wiki health    # stub 页面 + index↔disk 同步（--strict → exit 6）
+guanlan -C my-wiki lint      # 孤儿页 / 断链 / 缺失实体
+guanlan -C my-wiki graph     # 写出 graph/graph.json + graph.html（--json-only 跳过 html）
+```
 
 生成结构：
 
