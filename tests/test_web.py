@@ -93,6 +93,71 @@ def test_web_port_in_use(kb) -> None:
     assert excinfo.value.exit_code == 1
 
 
+# ───────────────────────── 零 LLM 报告（C3） ─────────────────────────
+
+
+def test_report_check_byte_aligned(client, kb) -> None:
+    from guanlan.check import format_report, run_check
+
+    write_page(kb, "wiki/concepts/Bad.md", body="引用断链 [[Ghost]]。")  # → 一条 wikilink.broken
+    expected = format_report(run_check(kb / "wiki"), json_output=True)
+
+    resp = client.get("/api/report/check")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.text == expected  # 字节级与 CLI --json 对齐（无尾换行、ensure_ascii=False）
+
+
+def test_report_health_byte_aligned(client, kb) -> None:
+    from guanlan.health import format_report, run_health
+
+    write_page(kb, "wiki/entities/Stub.md", type="entity", body="")  # 桩页 → 一条 finding
+    expected = format_report(run_health(kb / "wiki"), json_output=True)
+
+    resp = client.get("/api/report/health")
+    assert resp.status_code == 200
+    assert resp.text == expected
+
+
+def test_report_lint_byte_aligned(client, kb) -> None:
+    from guanlan.lint import format_report, run_lint
+
+    write_page(kb, "wiki/entities/Foo.md", type="entity", body="孤儿页正文内容足够长。")
+    expected = format_report(run_lint(kb / "wiki"), json_output=True)
+
+    resp = client.get("/api/report/lint")
+    assert resp.status_code == 200
+    assert resp.text == expected
+
+
+def test_graph_builds_and_redirects(client, kb) -> None:
+    write_page(kb, "wiki/entities/Foo.md", type="entity", body="see [[Bar]] 正文够长。")
+    write_page(kb, "wiki/concepts/Bar.md", type="concept", body="目标页正文内容足够长。")
+
+    resp = client.get("/graph", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/graph/graph.html"
+    assert (kb / "graph" / "graph.json").is_file()
+    assert (kb / "graph" / "graph.html").is_file()
+
+    html = client.get("/graph/graph.html")
+    assert html.status_code == 200
+    assert "观澜" in html.text
+
+
+def test_graph_json_only_redirects_to_json(client, kb) -> None:
+    resp = client.get("/graph", params={"json_only": True}, follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/graph/graph.json"
+    assert (kb / "graph" / "graph.json").is_file()
+    assert not (kb / "graph" / "graph.html").is_file()  # json_only 跳过 html
+
+
+def test_graph_static_404_before_build(client) -> None:
+    assert client.get("/graph/graph.html").status_code == 404
+    assert client.get("/graph/graph.json").status_code == 404
+
+
 # ───────────────────────── 静态 / 浏览（C2） ─────────────────────────
 
 
