@@ -74,19 +74,22 @@ def serve(
     model: str | None = None,
     runner: AgentRunner | None = None,
     agent_log: bool = True,
+    session_persist: bool = True,
 ) -> int:
     """起本地 Web 宿主，长驻直到 Ctrl-C；正常停服返回 `EXIT_OK`。
 
     前置 `require_kb_root(writable=True)`（Web 含写入口，要求 raw/wiki/AGENTAO.md/SCHEMA.md
     齐全）与端口探测都可能抛 `GuanlanError(EXIT_USAGE)`，由 CLI 捕获转退出码。
     `agent_log`（默认开）把会话 agent 日志像 CLI 那样落 `<kb>/agentao.log`；`--no-agent-log` 关。
+    `session_persist`（默认开，P4.2）把只读问答会话落 `<kb>/.agentao/sessions/` 并跨重启恢复；
+    `--no-session-persist` 关，退回 P4 纯内存。
     """
     kb = require_kb_root(root, writable=True)
     _ensure_port_free(HOST, port)
     if agent_log:
         configure_agent_log(kb)  # chat 会话日志落 <kb>/agentao.log（像 CLI；已 gitignore/不扫描）
 
-    app = create_app(kb, model=model, runner=runner)
+    app = create_app(kb, model=model, runner=runner, session_persist=session_persist)
     if open_browser:
         _open_browser_when_ready(HOST, port)
 

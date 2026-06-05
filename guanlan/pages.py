@@ -37,7 +37,9 @@ __all__ = [
     "link_stem",
     "iter_pages",
     "page_stem_index",
+    "alias_index",
     "link_target_stems",
+    "link_resolution_index",
     "index_md_links",
     "report_json",
 ]
@@ -193,13 +195,61 @@ def page_stem_index(wiki: Path) -> dict[str, str]:
     return index
 
 
-def link_target_stems(wiki: Path) -> frozenset[str]:
-    """`[[wikilink]]` 解析集 = `wiki/` 下**所有**页面 stem（**含 config**），小写、大小写不敏感。
+def alias_index(wiki: Path) -> dict[str, str]:
+    """content 页 frontmatter `aliases` → 拥有页 stem(小写)。**零 LLM。**（P3.1，决策P3.1-1/2/3）
 
-    与 `check` / `graph` 完全同口径（决策P3-6），从 `page_stem_index` 派生（同一归口）：扫描排除
-    （哪些页被校验/建节点）与链接解析集（哪些 stem 算合法目标）是两件事——config 不建节点但可链。
+    别名进入 `[[wikilink]]` 解析命名空间（与 stem 同口径、大小写不敏感）：`[[别名]]` 解析到声明页，
+    消假断链、补 CJK 同义召回（见 docs/P3.1-别名解析.md）。
+
+    - **仅 content 页**：只扫 `iter_pages`（config 页不声明别名）。
+    - **容错档**：用 `load_page` 读取，坏/缺 frontmatter 跳过、**绝不抛**（与 health/lint/graph 一致）。
+    - **归一**：别名经 `link_stem` 归一后入键，与 `[[…]]` 查找口径**完全对称**（决策P3.1-3）。
+    - **幂等**：同名别名按 `iter_pages` 稳定排序**先到先得**（`setdefault`）；真冲突（撞 stem / 撞另一
+      别名）由 `check` 报错（决策P3.1-4），此处不裁决，只保证确定性。
     """
-    return frozenset(page_stem_index(wiki))
+    out: dict[str, str] = {}
+    for path in iter_pages(wiki):
+        meta, _body = load_page(path)
+        if not isinstance(meta, dict):
+            continue
+        raw_aliases = meta.get("aliases")
+        if not isinstance(raw_aliases, list):
+            continue
+        owner = path.stem.lower()
+        for item in raw_aliases:
+            if not isinstance(item, str):
+                continue
+            key = link_stem(item)
+            if key:
+                out.setdefault(key, owner)
+    return out
+
+
+def link_target_stems(wiki: Path) -> frozenset[str]:
+    """`[[wikilink]]` 解析键集 = 全页面 stem（**含 config**）**∪ content 页别名**，小写不敏感。
+
+    与 `check` / `graph` 完全同口径（决策P3-6 / P3.1-5）：别名一并纳入这一个解析集，是保持核心
+    不变式 **`graph.broken ≡ check.wikilink.broken`** 的关键——两边断链判定共用此集、不分叉。
+    从 `page_stem_index`（stem）与 `alias_index`（别名）派生（同一归口）。
+    """
+    return frozenset(page_stem_index(wiki)) | frozenset(alias_index(wiki))
+
+
+def link_resolution_index(wiki: Path) -> dict[str, str]:
+    """解析键(stem | 别名, 小写) → 拥有页相对库根 posix 路径，供 Web 站内导航（P3.1，决策P3.1-6）。
+
+    在 `page_stem_index`（stem→path）之上叠加 别名→拥有页 path；**页面 stem 优先于别名**——撞名时
+    别名不遮蔽真实页（且该撞名已由 `check` 报 `aliases.collides_stem`）。指向别名拥有页缺失者跳过。
+    """
+    stem_to_path = page_stem_index(wiki)
+    resolved = dict(stem_to_path)
+    for alias, owner in alias_index(wiki).items():
+        if alias in resolved:
+            continue  # 页面 stem 优先；撞名由 check 报错
+        path = stem_to_path.get(owner)
+        if path is not None:
+            resolved[alias] = path
+    return resolved
 
 
 def report_json(*, ok: bool, pages_checked: int, items_key: str, items: list) -> str:
