@@ -259,15 +259,116 @@ async function pollJob(jobId, target) {
 // ── 问答 / 多轮会话（fetch 流式读 SSE）─────────────────────────────────────
 
 let conversationId = null;
+let chatLoadToken = 0; // 每次切换/新建自增；历史气泡异步回放回来若 token 已变则丢弃（防迟到覆盖）
 
 $("#chat-new").addEventListener("click", () => {
-  // 丢弃服务端旧会话，避免反复"新会话"在内存里堆积到 MAX_CONVERSATIONS 触 503（best-effort）。
-  if (conversationId) {
-    fetch(`/api/conversations/${conversationId}`, { method: "DELETE" }).catch(() => {});
-  }
+  // 仅清本地视图、开启新会话——**绝不** DELETE 旧会话：P4.2 起 DELETE 会级联删盘，删的是
+  // 持久历史，普通"切换/新建"不该销毁记录。旧会话持久化开时已落盘、可从"历史会话"再开；
+  // 持久化关时它仍是 live、列在历史里（进程退出即清）。要永久删除走历史列表的"删除"。
+  chatLoadToken++; // 作废任何在飞的历史气泡回放（用户已开新会话）
   conversationId = null;
   $("#chat-log").innerHTML = "";
 });
+
+// ── 历史会话（P4.2）：列出内存 ∪ 盘上会话，点开续聊、删除级联删盘 ────────────────
+$("#history-btn").addEventListener("click", openHistory);
+
+async function openHistory() {
+  showOverlay("历史会话", '<p class="muted">加载会话…</p>');
+  let conversations;
+  try {
+    ({ conversations } = await getJSON("/api/conversations"));
+  } catch (e) {
+    $("#overlay-body").innerHTML = `<p class="report-bad">加载会话失败：${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  if (!conversations.length) {
+    box.innerHTML = '<p class="muted">暂无会话：在左侧提问即开启一个。</p>';
+    return;
+  }
+  for (const c of conversations) {
+    const row = document.createElement("div");
+    row.className = "conv-row";
+    const meta = document.createElement("div");
+    meta.className = "conv-meta";
+    const title = document.createElement("span");
+    title.className = "conv-title";
+    title.textContent = c.title || "（空）"; // textContent：标题按字面显示，无注入
+    const tag = document.createElement("span");
+    tag.className = "conv-tag";
+    // live 条目报真实轮次，冷条目报消息总数（list_sessions 给 message_count，非轮次）。
+    const count = c.live ? `${c.turns ?? 0} 轮` : `${c.messages ?? 0} 条`;
+    tag.textContent = c.live ? `内存 · ${count}` : `落盘 · ${count}`;
+    meta.append(title, tag);
+    const open = document.createElement("button");
+    open.textContent = "打开";
+    open.addEventListener("click", () => openConversation(c));
+    const del = document.createElement("button");
+    del.className = "conv-del";
+    del.textContent = "删除";
+    del.addEventListener("click", () => deleteConversation(c.id, row));
+    row.append(meta, open, del);
+    box.appendChild(row);
+  }
+}
+
+async function openConversation(c) {
+  $("#overlay").classList.add("hidden");
+  // 点开自己正在的会话：不清屏、不误删、不重拉——否则会把当前可见的对话记录抹掉。
+  if (c.id === conversationId) {
+    $("#chat-input").focus();
+    return;
+  }
+  // 切到历史会话：仅切本地 id（下一条提问即触发后端透明 rebuild 懒恢复）。**绝不** DELETE
+  // 当前会话——它仍要留在历史里，普通切换不该销毁其持久记录（要永久删除走历史列表的"删除"）。
+  const tok = ++chatLoadToken;
+  conversationId = c.id;
+  const log = $("#chat-log");
+  log.innerHTML = "";
+  $("#chat-input").focus();
+  // 回放历史气泡（user/assistant）：拉该会话的消息，逐条上屏。失败仅降级为一条提示、不阻断续聊。
+  try {
+    const { messages } = await getJSON(`/api/conversations/${encodeURIComponent(c.id)}/messages`);
+    if (tok !== chatLoadToken) return; // 已切走（开了别的会话/新会话），丢弃迟到回放
+    if (!messages.length) {
+      addMsg("note", `已载入会话「${c.title || "（空）"}」（暂无历史消息），继续提问以续聊。`);
+      return;
+    }
+    for (const m of messages) {
+      if (m.role === "user") {
+        addMsg("user", m.content);
+      } else {
+        const el = addMsg("bot", "");
+        if (m.html !== undefined) {  // 富排版（[[页]]→站内链）；缺则回退纯文本
+          el.classList.add("rendered");
+          el.innerHTML = m.html;
+        } else {
+          el.textContent = m.content;
+        }
+      }
+    }
+  } catch (e) {
+    if (tok !== chatLoadToken) return;
+    addMsg("note", `已载入会话「${c.title || "（空）"}」，但历史消息加载失败（${e.message}）；仍可继续提问。`);
+  }
+}
+
+async function deleteConversation(id, row) {
+  try {
+    const res = await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+    if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
+    if (id === conversationId) conversationId = null; // 删的是当前会话则清掉本地引用
+    row.remove();
+    if (!$("#overlay-body").querySelector(".conv-row")) {
+      $("#overlay-body").innerHTML = '<p class="muted">暂无会话：在左侧提问即开启一个。</p>';
+    }
+  } catch (e) {
+    // 经 textContent 赋值，浏览器自会转义；勿再 escapeHtml（否则显示字面 &lt; 实体）。
+    row.querySelector(".conv-del").textContent = `删除失败（${e.message}）`;
+  }
+}
 
 function submitChat() {
   // 一轮在飞时（流式中 #chat-send 被禁用）不重复发送：回车与按钮共用此守卫，避免在同一会话
