@@ -85,6 +85,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             port=args.port,
             open_browser=not args.no_browser,
             model=args.model,
+            agent_log=not args.no_agent_log,
         )
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
@@ -190,6 +191,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-browser", action="store_true", help="起服后不自动打开浏览器"
     )
     p_web.add_argument("--model", default=None, help="覆盖 Agentao 模型（透传写作业与会话）")
+    p_web.add_argument(
+        "--no-agent-log",
+        action="store_true",
+        help="不把会话 agent 日志写入 <库>/agentao.log（默认像 CLI 那样写；ingest 子进程日志不受影响）",
+    )
     p_web.set_defaults(func=_cmd_web)
 
     p_skill = sub.add_parser(

@@ -271,6 +271,90 @@ def test_render_markdown_wikilink_resolves(client, kb) -> None:
     assert "wikilink broken" in html  # 不存在 → 标灰
 
 
+def test_render_markdown_code_path_linkifies_source_citation(client, kb) -> None:
+    """兜底：源出处被写成【路径+反引号】的行内 code，若精确解析到现有页 → 转 wikilink。"""
+    from guanlan.web.render import render_markdown
+
+    write_page(kb, "wiki/sources/s13-洗钱战法.md", type="source", body="正文足够长的内容。")
+    wiki = kb / "wiki"
+
+    # 路径+反引号、裸 stem+反引号 → 都联链到同一页，显示干净 stem（去 sources/ 与 .md）
+    for text in ("引自 `wiki/sources/s13-洗钱战法.md`", "见 `s13-洗钱战法`"):
+        html = render_markdown(text, wiki)
+        assert 'data-page="wiki/sources/s13-洗钱战法.md"' in html
+        assert ">s13-洗钱战法</a>" in html
+        assert "<code>" not in html  # 已从 code 转成 a
+
+    # 含空格的合法页名也应成链（不能被"有空格就跳过"误杀）
+    write_page(kb, "wiki/concepts/Smart Tools 模块.md", type="concept", body="正文足够长。")
+    for text in ("见 `Smart Tools 模块`", "见 `wiki/concepts/Smart Tools 模块.md`"):
+        html = render_markdown(text, wiki)
+        assert 'data-page="wiki/concepts/Smart Tools 模块.md"' in html
+        assert "<code>" not in html
+
+    # 解析不到的普通代码 / 命令（含某页末段但整体非忠实引用）/ 围栏代码块 → 保持字面 code
+    assert "<code>git status</code>" in render_markdown("跑 `git status`", wiki)
+    assert "<code>cat wiki/sources/s13-洗钱战法.md</code>" in render_markdown(
+        "`cat wiki/sources/s13-洗钱战法.md`", wiki
+    )
+    fenced = render_markdown("```\nwiki/sources/s13-洗钱战法.md\n```", wiki)
+    assert "wikilink" not in fenced  # 围栏代码块字面保留（决策P4-3）
+
+    # 不给 wiki（无解析集）→ 行内 code 原样，不联链
+    assert "<code>" in render_markdown("引自 `wiki/sources/s13-洗钱战法.md`")
+
+    # code 当 markdown 链接文字 → 不得转成嵌套锚（保留外层 [..](url)，内层留 code）
+    nested = render_markdown("[`wiki/sources/s13-洗钱战法.md`](https://example.com)", wiki)
+    assert nested.count("<a ") == 1  # 只有外层一个锚，无嵌套
+    assert "<code>" in nested and 'href="https://example.com"' in nested
+
+
+def test_render_markdown_code_wrapped_wikilink_is_tolerated(client, kb) -> None:
+    """兜底：模型把 `[[...]]` 套进行内 code 时，整段忠实 wikilink 仍按站内链接渲染。"""
+    from guanlan.web.render import render_markdown
+
+    write_page(kb, "wiki/entities/Foo.md", type="entity", body="正文足够长的内容。")
+    wiki = kb / "wiki"
+
+    html = render_markdown("见 `[[Foo]]`、`[[Foo|别名]]`、`[[Foo#要点]]` 与 `[[Ghost]]`。", wiki)
+    assert html.count('data-page="wiki/entities/Foo.md"') == 3
+    assert ">Foo</a>" in html
+    assert ">别名</a>" in html
+    assert "wikilink broken" in html
+    assert ">Ghost</span>" in html
+    assert "<code>[[Foo]]</code>" not in html
+
+    # 只有整段 code 恰好是 wikilink 才兜底；命令/代码块仍保持字面语义。
+    assert "<code>cat [[Foo]]</code>" in render_markdown("`cat [[Foo]]`", wiki)
+    fenced = render_markdown("```\n[[Foo]]\n```", wiki)
+    assert "wikilink" not in fenced
+
+
+def test_configure_agent_log_writes_and_is_idempotent(kb) -> None:
+    """会话日志像 CLI 那样落 <kb>/agentao.log；重复配置不重挂 handler（不会把每行写多遍）。"""
+    from guanlan.web import chat as chatmod
+
+    target = (kb / "agentao.log").resolve()
+    mine = lambda: [  # noqa: E731 — 本会话挂在共享 logger 上、指向本 kb 的 handler
+        h for h in chatmod._logger.handlers
+        if getattr(h, "baseFilename", None) == str(target)
+    ]
+    assert chatmod.configure_agent_log(kb) == target
+    try:
+        assert len(mine()) == 1  # 挂了且仅一个
+        chatmod._logger.info("hello-agentao-log")
+        for h in mine():
+            h.flush()
+        assert "hello-agentao-log" in target.read_text(encoding="utf-8")
+        chatmod.configure_agent_log(kb)  # 幂等：再配置不新增 handler
+        assert len(mine()) == 1
+    finally:  # 清理全局 logger 状态，避免泄漏到其它测试
+        for h in mine():
+            chatmod._logger.removeHandler(h)
+            h.close()
+        chatmod._agent_log_paths.discard(str(target))
+
+
 def test_is_safe_url_strips_control_chars() -> None:
     """控制符不能绕过协议白名单（浏览器会先剥控制符再导航）。"""
     from guanlan.web.render import _is_safe_url
