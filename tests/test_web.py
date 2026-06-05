@@ -4,6 +4,8 @@
 时整组 `pytest.importorskip("fastapi")` 跳过。
 """
 
+import asyncio
+import json
 import socket
 import sys
 import time
@@ -17,6 +19,8 @@ from conftest import make_runner, write_page
 
 pytest.importorskip("fastapi")
 
+from agentao.permissions import PermissionMode  # noqa: E402
+from agentao.transport.events import AgentEvent, EventType  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from guanlan.web.app import STATIC_DIR, create_app  # noqa: E402
@@ -376,6 +380,298 @@ def test_ingest_invalid_body_is_422(client) -> None:
 
 def test_unknown_job_is_404(client) -> None:
     assert client.get("/api/jobs/999999").status_code == 404
+
+
+# ───────────────────────── 只读多轮 chat（C5） ─────────────────────────
+
+
+class _Recorder:
+    """记录任意方法调用（permission_engine / tool_runner / skill_manager 桩）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def __getattr__(self, name):
+        def rec(*args, **kwargs):
+            self.calls.append((name, args, kwargs))
+
+        return rec
+
+
+class _FakeAgent:
+    """打桩 agent：arun 把 user/assistant 入 messages，并**从工作线程**经传入的 transport
+    发 LLM_TEXT（镜像真 arun 的 run_in_executor 线程模型，逼出 call_soon_threadsafe 桥）。"""
+
+    def __init__(self, kwargs: dict) -> None:
+        self.kwargs = kwargs
+        self.transport = kwargs["transport"]  # 构造期传入的真 transport（token 唯一活线）
+        self.messages: list[tuple[str, str]] = []
+        self.permission_engine = _Recorder()
+        self.tool_runner = _Recorder()
+        self.skill_manager = _Recorder()
+        self.closed = False
+
+    async def arun(self, msg: str, **_kw) -> str:
+        self.messages.append(("user", msg))
+        n = sum(1 for role, _ in self.messages if role == "user")
+        answer = f"#{n} 回应：{msg}"  # 含轮次 → 第二轮答案体现累积历史
+
+        loop = asyncio.get_running_loop()
+
+        def work() -> None:  # 在线程池线程发事件（镜像真 arun）
+            for ch in answer:
+                self.transport.emit(AgentEvent(EventType.LLM_TEXT, {"chunk": ch}))
+
+        await loop.run_in_executor(None, work)
+        self.messages.append(("assistant", answer))
+        return answer
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def chat_client(kb, monkeypatch):
+    """注入 fake build_from_environment + no-op ensure_skill_available；捕获 kwargs/agents。"""
+    import guanlan.web.chat as chat_mod
+
+    captured = {"kwargs": [], "agents": []}
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+
+    def fake_bfe(**kwargs):
+        agent = _FakeAgent(kwargs)
+        captured["kwargs"].append(kwargs)
+        captured["agents"].append(agent)
+        return agent
+
+    monkeypatch.setattr(chat_mod, "build_from_environment", fake_bfe)
+    with TestClient(create_app(kb)) as c:
+        yield c, captured
+
+
+def _chat(client, message, conversation_id=None, model=None):
+    """发一轮 chat，解析 SSE 流；返回 (tokens, done, error)。"""
+    body = {"message": message}
+    if conversation_id is not None:
+        body["conversation_id"] = conversation_id
+    if model is not None:
+        body["model"] = model
+
+    tokens: list[str] = []
+    done = error = None
+    with client.stream("POST", "/api/chat", json=body) as resp:
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        event = None
+        for line in resp.iter_lines():
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                data = json.loads(line.split(":", 1)[1].strip())
+                if event == "token":
+                    tokens.append(data)
+                elif event == "done":
+                    done = data
+                elif event == "error":
+                    error = data
+    return tokens, done, error
+
+
+def test_chat_new_conversation_streams_and_returns_id(chat_client) -> None:
+    client, _ = chat_client
+    tokens, done, error = _chat(client, "第一问")
+    assert error is None
+    assert done is not None
+    assert done["conversation_id"]  # 新建会话回传 id
+    # token 从工作线程流出，经 call_soon_threadsafe 桥回、完整到达（拼接 == 答案）。
+    assert "".join(tokens) == done["answer"]
+    assert done["answer"].startswith("#1")
+
+
+def test_chat_multiturn_accumulates_context(chat_client) -> None:
+    client, captured = chat_client
+    _, done1, _ = _chat(client, "第一问")
+    cid = done1["conversation_id"]
+    _, done2, _ = _chat(client, "第二问", conversation_id=cid)
+
+    assert done2["answer"].startswith("#2")  # 第二轮看到累积历史
+    assert len(captured["agents"]) == 1  # 同一会话只建一个 agent
+    assert len(captured["agents"][0].messages) == 4  # 2 user + 2 assistant 跨轮累积
+
+
+def test_chat_construction_contract(chat_client, kb) -> None:
+    client, captured = chat_client
+    _chat(client, "问")
+
+    kwargs = captured["kwargs"][0]
+    assert kwargs["working_directory"] == kb
+    assert "transport" in kwargs  # token 靠构造期 transport，非事后赋 llm_text_callback
+    assert "logger" in kwargs  # 自带 logger（不落 <wd>/agentao.log）
+    assert "permission_mode" not in kwargs  # 不传该形参（否则 TypeError）
+    assert "model" not in kwargs  # 省略 --model → 无 model 键（绝非 model=None）
+
+    agent = captured["agents"][0]
+    # 只读姿态两点同步置位。
+    assert any(c[0] == "set_mode" and c[1] == (PermissionMode.READ_ONLY,) for c in agent.permission_engine.calls)
+    assert any(c[0] == "set_readonly_mode" and c[1] == (True,) for c in agent.tool_runner.calls)
+    # guanlan-wiki 被激活。
+    assert any(c[0] == "activate_skill" and c[1][0] == "guanlan-wiki" for c in agent.skill_manager.calls)
+
+
+def test_chat_model_passed_only_when_given(chat_client) -> None:
+    client, captured = chat_client
+    _chat(client, "问", model="gpt-test")
+    assert captured["kwargs"][0]["model"] == "gpt-test"
+
+
+def test_chat_unknown_conversation_404(chat_client) -> None:
+    client, _ = chat_client
+    resp = client.post("/api/chat", json={"message": "x", "conversation_id": "999"})
+    assert resp.status_code == 404
+
+
+def test_chat_error_event_on_failure(kb, monkeypatch) -> None:
+    import guanlan.web.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+
+    class _BoomAgent(_FakeAgent):
+        async def arun(self, msg, **_kw):
+            raise RuntimeError("炸了")
+
+    monkeypatch.setattr(chat_mod, "build_from_environment", lambda **kw: _BoomAgent(kw))
+    with TestClient(create_app(kb)) as client:
+        tokens, done, error = _chat(client, "问")
+    assert done is None
+    assert error is not None and "炸了" in error["message"]
+
+
+def test_chat_invalid_body_422(client) -> None:
+    assert client.post("/api/chat", json={}).status_code == 422  # 缺 message
+
+
+def test_same_conversation_turns_serialized(kb, monkeypatch) -> None:
+    """同一会话两轮被 asyncio.Lock 串行（start/end 不交错）。"""
+    import guanlan.web.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+    events: list[str] = []
+
+    class _SlowAgent(_FakeAgent):
+        async def arun(self, msg, **_kw):
+            events.append(f"start:{msg}")
+            await asyncio.sleep(0.05)
+            events.append(f"end:{msg}")
+            return "ok"
+
+    monkeypatch.setattr(chat_mod, "build_from_environment", lambda **kw: _SlowAgent(kw))
+
+    async def main() -> None:
+        store = chat_mod.ConversationStore(kb, None)
+        conv = store.create()
+        await asyncio.gather(
+            conv.turn("A", lambda k, d: None),
+            conv.turn("B", lambda k, d: None),
+        )
+
+    asyncio.run(main())
+    # 串行 → 一轮的 end 必在下一轮 start 之前。
+    assert events[0].startswith("start") and events[1].startswith("end")
+    assert events[2].startswith("start") and events[3].startswith("end")
+
+
+def test_conversation_store_concurrent_create_no_collision(kb, monkeypatch) -> None:
+    """并发 create（经线程池）id 不撞、会话不被覆盖（threading.Lock 护 id 分配 + 字典写）。"""
+    import threading
+
+    import guanlan.web.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+    monkeypatch.setattr(chat_mod, "build_from_environment", lambda **kw: _FakeAgent(kw))
+
+    store = chat_mod.ConversationStore(kb, None)
+    ids: list[str] = []
+    ids_lock = threading.Lock()
+
+    def worker() -> None:
+        conv = store.create()
+        with ids_lock:
+            ids.append(conv.id)
+
+    threads = [threading.Thread(target=worker) for _ in range(30)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(ids) == 30
+    assert len(set(ids)) == 30  # 无 id 碰撞
+    assert len(store.list()) == 30  # 无会话被覆盖丢失
+
+
+def test_turn_on_deleted_conversation_refused(kb, monkeypatch) -> None:
+    """已删除（closed）会话拒绝排队 turn，不在已关闭 agent 上跑（决策P4-8 删除竞态）。"""
+    import guanlan.web.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+    monkeypatch.setattr(chat_mod, "build_from_environment", lambda **kw: _FakeAgent(kw))
+
+    async def main() -> None:
+        store = chat_mod.ConversationStore(kb, None)
+        conv = store.create()
+        store.delete(conv.id)  # close → conv.closed = True
+        with pytest.raises(RuntimeError):
+            await conv.turn("x", lambda k, d: None)
+
+    asyncio.run(main())
+
+
+def test_conversation_cap_is_hard(kb, monkeypatch) -> None:
+    """达上限后拒新建（硬上限，决策P4-8）。"""
+    import guanlan.web.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+    monkeypatch.setattr(chat_mod, "build_from_environment", lambda **kw: _FakeAgent(kw))
+    monkeypatch.setattr(chat_mod, "MAX_CONVERSATIONS", 2)
+
+    store = chat_mod.ConversationStore(kb, None)
+    store.create()
+    store.create()
+    with pytest.raises(RuntimeError):
+        store.create()
+
+
+def test_delete_conversation(chat_client) -> None:
+    client, _ = chat_client
+    _, done, _ = _chat(client, "问")
+    cid = done["conversation_id"]
+
+    assert any(c["id"] == cid for c in client.get("/api/conversations").json()["conversations"])
+    assert client.delete(f"/api/conversations/{cid}").status_code == 200
+    assert client.delete(f"/api/conversations/{cid}").status_code == 404  # 已丢
+
+
+def test_chat_does_not_persist_session(chat_client, monkeypatch) -> None:
+    """会话仅内存：不调 persist/load_session（决策P4-8）。"""
+    import agentao.embedding.sessions as sess
+
+    def _boom(*_a, **_k):
+        raise AssertionError("不应落盘会话")
+
+    monkeypatch.setattr(sess, "save_session", _boom, raising=False)
+    monkeypatch.setattr(sess, "load_session", _boom, raising=False)
+
+    client, _ = chat_client
+    _, done, error = _chat(client, "问")
+    assert error is None and done is not None
+
+
+def test_absent_endpoints(client) -> None:
+    """范围红线：无 /api/query、无 POST /api/raw、无写作业 SSE 订阅端点（§10）。"""
+    assert client.get("/api/query").status_code == 404
+    assert client.post("/api/query", json={"question": "x"}).status_code in (404, 405)
+    assert client.post("/api/raw", json={}).status_code in (404, 405)
+    assert client.get("/api/jobs/1/events").status_code == 404
 
 
 @pytest.mark.parametrize("bad_port", [99999, -1, 0])
