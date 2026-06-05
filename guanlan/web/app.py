@@ -162,21 +162,23 @@ def create_app(
     # 零 LLM 报告（决策P4-7）：只序列化既有 *Report，与 CLI `--json` 字节对齐；阻塞跑 to_thread。
     wiki = root / "wiki"
 
-    @app.get("/api/report/check")
-    async def report_check() -> Response:
-        result = await anyio.to_thread.run_sync(run_check, wiki)
-        return _report_response(_format_check(result, json_output=True))
+    # 名 → (跑报告, 序列化器)。三报告同形（跑 wiki → format(..., json_output=True) 字节对齐 CLI），
+    # 表驱动避免三份 copy-paste 漂移（如某个漏 json_output=True）。health 的 strict 只影响 CLI
+    # 退出码、不改 JSON 体（ok 已反映有无 findings），故 Web 不收该参。
+    _reports = {
+        "check": (run_check, _format_check),
+        "health": (run_health, _format_health),
+        "lint": (run_lint, _format_lint),
+    }
 
-    @app.get("/api/report/health")
-    async def report_health() -> Response:
-        # strict 只影响 CLI 退出码，不改 JSON 体（ok 已反映有无 findings），故 Web 不收该参。
-        report = await anyio.to_thread.run_sync(run_health, wiki)
-        return _report_response(_format_health(report, json_output=True))
-
-    @app.get("/api/report/lint")
-    async def report_lint() -> Response:
-        report = await anyio.to_thread.run_sync(run_lint, wiki)
-        return _report_response(_format_lint(report, json_output=True))
+    @app.get("/api/report/{name}")
+    async def report(name: str) -> Response:
+        entry = _reports.get(name)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"未知报告：{name}")
+        run_fn, format_fn = entry
+        result = await anyio.to_thread.run_sync(run_fn, wiki)
+        return _report_response(format_fn(result, json_output=True))
 
     # graph：构建（写派生 graph/）后 302 到自包含静态视图。json_only 时改跳 graph.json。
     @app.get("/graph")
@@ -192,19 +194,18 @@ def create_app(
         target = "/graph/graph.json" if json_only else "/graph/graph.html"
         return RedirectResponse(url=target, status_code=302)
 
-    @app.get("/graph/graph.html")
-    async def graph_html() -> FileResponse:
-        path = root / "graph" / "graph.html"
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail="graph.html 尚未生成，请先 GET /graph")
-        return FileResponse(path, media_type="text/html")
+    # 文件名 → media_type 白名单：既去掉两份 copy-paste，又把 {filename} 限死在这两项、杜绝穿越。
+    _graph_files = {"graph.html": "text/html", "graph.json": "application/json"}
 
-    @app.get("/graph/graph.json")
-    async def graph_json() -> FileResponse:
-        path = root / "graph" / "graph.json"
+    @app.get("/graph/{filename}")
+    async def graph_file(filename: str) -> FileResponse:
+        media_type = _graph_files.get(filename)
+        if media_type is None:
+            raise HTTPException(status_code=404, detail=f"未知 graph 文件：{filename}")
+        path = root / "graph" / filename
         if not path.is_file():
-            raise HTTPException(status_code=404, detail="graph.json 尚未生成，请先 GET /graph")
-        return FileResponse(path, media_type="application/json")
+            raise HTTPException(status_code=404, detail=f"{filename} 尚未生成，请先 GET /graph")
+        return FileResponse(path, media_type=media_type)
 
     # 写（唯一写入口 = ingest）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
     @app.post("/api/ingest")
@@ -262,15 +263,21 @@ def create_app(
                 # token。shield 让 turn 始终跑到自然结束（lock 全程持有），杜绝该竞态；代价是断开
                 # 后该轮仍跑完（本地单用户、轮次有界，可接受）。
                 answer = await asyncio.shield(conv.turn(body.message, emit))
-                # 把完整答案渲染成安全 markdown HTML（[[页]] → 站内链接）；阻塞调用卸到线程。
-                answer_html = await anyio.to_thread.run_sync(
-                    render_markdown, answer, root / "wiki"
-                )
-                emit("done", {"answer": answer, "answer_html": answer_html, "conversation_id": conv.id})
+                # 答案已完整流出；再渲染安全 markdown HTML（[[页]] → 站内链接）作收尾。渲染失败
+                # **不能**丢掉这条成功答案：省略 answer_html，前端回退用纯文本 answer 上屏。
+                payload: dict = {"answer": answer, "conversation_id": conv.id}
+                try:
+                    payload["answer_html"] = await anyio.to_thread.run_sync(
+                        render_markdown, answer, root / "wiki"
+                    )
+                except Exception:  # noqa: BLE001 — 渲染失败仅降级排版，不毁答案、不转 error
+                    pass
+                emit("done", payload)
             except asyncio.CancelledError:
                 raise  # 客户端已断开，流没了，不再 emit
             except Exception as exc:  # noqa: BLE001 — 任何失败都转 error 事件，不泄 traceback 到流
-                emit("error", {"message": f"{type(exc).__name__}: {exc}"})
+                # 带上 conversation_id：首轮失败时前端据此记住已建会话，避免下次另起新会话堆积。
+                emit("error", {"message": f"{type(exc).__name__}: {exc}", "conversation_id": conv.id})
             finally:
                 queue.put_nowait(None)  # 哨兵：通知流结束
 

@@ -36,6 +36,7 @@ __all__ = [
     "page_type",
     "link_stem",
     "iter_pages",
+    "page_stem_index",
     "link_target_stems",
     "index_md_links",
     "report_json",
@@ -176,13 +177,29 @@ def iter_pages(wiki: Path) -> Iterator[Path]:
         yield path
 
 
+def page_stem_index(wiki: Path) -> dict[str, str]:
+    """`wiki/` 下**所有**页面（**含 config**）的 stem(小写) → 相对知识库根的 posix 路径。
+
+    `[[wikilink]]` 解析的**单一归口**：`link_target_stems`（只要 stem 集）与 Web 渲染
+    （要 stem→路径，供站内导航）都由它派生，避免两处各扫一遍、解析口径漂移（决策P3-6：config
+    页不被校验/不建节点，但**可作合法链接目标**）。stem 全库唯一是按名解析的固有前提；万一
+    重名，按排序取第一个，保持确定性。
+    """
+    root = wiki.parent
+    index: dict[str, str] = {}
+    for path in sorted(wiki.rglob("*.md")):
+        if path.is_file():
+            index.setdefault(path.stem.lower(), path.relative_to(root).as_posix())
+    return index
+
+
 def link_target_stems(wiki: Path) -> frozenset[str]:
     """`[[wikilink]]` 解析集 = `wiki/` 下**所有**页面 stem（**含 config**），小写、大小写不敏感。
 
-    与 `check` / `graph` 完全同口径（决策P3-6）：扫描排除（哪些页被校验/建节点）与链接解析集
-    （哪些 stem 算合法目标）是两件事——config 页不被校验/不建节点，但可作合法链接目标。
+    与 `check` / `graph` 完全同口径（决策P3-6），从 `page_stem_index` 派生（同一归口）：扫描排除
+    （哪些页被校验/建节点）与链接解析集（哪些 stem 算合法目标）是两件事——config 不建节点但可链。
     """
-    return frozenset(p.stem.lower() for p in wiki.rglob("*.md") if p.is_file())
+    return frozenset(page_stem_index(wiki))
 
 
 def report_json(*, ok: bool, pages_checked: int, items_key: str, items: list) -> str:
