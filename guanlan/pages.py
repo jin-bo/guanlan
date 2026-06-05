@@ -32,8 +32,11 @@ __all__ = [
     "split_frontmatter",
     "parse_frontmatter",
     "load_page",
+    "page_title",
+    "page_type",
     "link_stem",
     "iter_pages",
+    "page_stem_index",
     "link_target_stems",
     "index_md_links",
     "report_json",
@@ -121,12 +124,38 @@ def load_page(path: Path) -> tuple[dict | None, str]:
 
     返回 `(meta, body)`：frontmatter 缺块 / 无法解析 / 非映射时 `meta=None`、**绝不抛**
     （决策P3-8）。frontmatter 正确性的报错单一归口 `check`，审计命令不复制这套校验。
+
+    非 UTF-8 字节用 `errors="replace"` 兜底（坏字符→`�`），兑现"绝不抛"承诺：否则一张
+    GBK/Latin-1 页面会让 health/lint/graph 乃至 Web 浏览整体崩在 `UnicodeDecodeError`。
+    严格档 `check` 自有读取（不走本函数），编码硬错仍可由其暴露。
     """
-    block, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    block, body = split_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
     if block is None:
         return None, body
     meta, _error = _load_yaml_mapping(block)  # 坏 meta → None，错误消息丢弃（不报错）。
     return meta, body
+
+
+def page_title(meta: dict | None, stem: str) -> str:
+    """容错取 title：无合法 meta / title 非非空字符串时回退 stem（决策P3-8）。
+
+    与 `page_type` 一起是 `graph` 节点标签 / Web 页面清单**共用**的 frontmatter 展示取值器
+    （单一归口，杜绝两处口径漂移）。**不**校验合法性——那是 `check` 的职责。
+    """
+    if isinstance(meta, dict):
+        title = meta.get("title")
+        if isinstance(title, str) and title.strip():
+            return title
+    return stem
+
+
+def page_type(meta: dict | None) -> str:
+    """容错取 type：无合法 meta / type 非字符串时回退 `'unknown'`（决策P3-8）。只作展示标签。"""
+    if isinstance(meta, dict):
+        type_ = meta.get("type")
+        if isinstance(type_, str) and type_:
+            return type_
+    return "unknown"
 
 
 def link_stem(target: str) -> str:
@@ -148,13 +177,29 @@ def iter_pages(wiki: Path) -> Iterator[Path]:
         yield path
 
 
+def page_stem_index(wiki: Path) -> dict[str, str]:
+    """`wiki/` 下**所有**页面（**含 config**）的 stem(小写) → 相对知识库根的 posix 路径。
+
+    `[[wikilink]]` 解析的**单一归口**：`link_target_stems`（只要 stem 集）与 Web 渲染
+    （要 stem→路径，供站内导航）都由它派生，避免两处各扫一遍、解析口径漂移（决策P3-6：config
+    页不被校验/不建节点，但**可作合法链接目标**）。stem 全库唯一是按名解析的固有前提；万一
+    重名，按排序取第一个，保持确定性。
+    """
+    root = wiki.parent
+    index: dict[str, str] = {}
+    for path in sorted(wiki.rglob("*.md")):
+        if path.is_file():
+            index.setdefault(path.stem.lower(), path.relative_to(root).as_posix())
+    return index
+
+
 def link_target_stems(wiki: Path) -> frozenset[str]:
     """`[[wikilink]]` 解析集 = `wiki/` 下**所有**页面 stem（**含 config**），小写、大小写不敏感。
 
-    与 `check` / `graph` 完全同口径（决策P3-6）：扫描排除（哪些页被校验/建节点）与链接解析集
-    （哪些 stem 算合法目标）是两件事——config 页不被校验/不建节点，但可作合法链接目标。
+    与 `check` / `graph` 完全同口径（决策P3-6），从 `page_stem_index` 派生（同一归口）：扫描排除
+    （哪些页被校验/建节点）与链接解析集（哪些 stem 算合法目标）是两件事——config 不建节点但可链。
     """
-    return frozenset(p.stem.lower() for p in wiki.rglob("*.md") if p.is_file())
+    return frozenset(page_stem_index(wiki))
 
 
 def report_json(*, ok: bool, pages_checked: int, items_key: str, items: list) -> str:
