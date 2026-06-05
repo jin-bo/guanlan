@@ -6,12 +6,14 @@
 
 import socket
 import sys
+import time
 
 import pytest
 
 from guanlan.errors import GuanlanError
+from guanlan.runtime import AgentRunResult
 
-from conftest import write_page
+from conftest import make_runner, write_page
 
 pytest.importorskip("fastapi")
 
@@ -275,6 +277,105 @@ def test_api_raw_lists_only(client, kb) -> None:
     names = {f["name"] for f in resp.json()["files"]}
     assert names == {"a.md", "b.md"}  # 只列 *.md
     assert all(isinstance(f["size"], int) for f in resp.json()["files"])
+
+
+# ───────────────────────── ingest 写作业（C4） ─────────────────────────
+
+
+def _put_raw(kb, name="doc.md") -> str:
+    (kb / "raw" / name).write_text("# 资料\n一些内容。\n", encoding="utf-8")
+    return f"raw/{name}"
+
+
+def _wait_job(client, job_id: str, timeout: float = 5.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        data = client.get(f"/api/jobs/{job_id}").json()
+        if data["state"] == "done":
+            return data
+        time.sleep(0.02)
+    raise AssertionError(f"作业 {job_id} 未在 {timeout}s 内完成")
+
+
+def _ingest_once(kb, runner, target) -> dict:
+    with TestClient(create_app(kb, runner=runner)) as client:
+        resp = client.post("/api/ingest", json={"target": target})
+        assert resp.status_code == 200
+        return _wait_job(client, resp.json()["job_id"])
+
+
+def test_ingest_job_success(kb) -> None:
+    target = _put_raw(kb)
+    runner = make_runner(lambda root: write_page(root, "wiki/concepts/New.md"))
+    data = _ingest_once(kb, runner, target)
+    assert data["kind"] == "ingest"
+    assert data["state"] == "done"
+    assert data["exit_code"] == 0  # EXIT_OK
+
+
+def test_ingest_job_check_failure_is_3(kb) -> None:
+    # 持续写出阻断性 frontmatter 违规（type 非法），自愈耗尽 → EXIT_CHECK_FAILED（断链只是警告，
+    # 不会到 3，见 test_ingest_broken_link_is_warning_ok）。
+    target = _put_raw(kb)
+
+    def action(root):
+        p = root / "wiki" / "concepts" / "Bad.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            '---\ntitle: "T"\ntype: bogus\ntags: []\nsources: []\nlast_updated: 2026-06-03\n---\n\n正文\n',
+            encoding="utf-8",
+        )
+
+    data = _ingest_once(kb, make_runner(action), target)
+    assert data["exit_code"] == 3  # EXIT_CHECK_FAILED
+
+
+def test_ingest_job_raw_mutation_is_4(kb) -> None:
+    target = _put_raw(kb)
+
+    def action(root):
+        (root / "raw" / "doc.md").write_text("被 agent 改了", encoding="utf-8")  # 动 raw/
+
+    data = _ingest_once(kb, make_runner(action), target)
+    assert data["exit_code"] == 4  # EXIT_RAW_MUTATED
+
+
+def test_ingest_job_agent_error_is_5(kb) -> None:
+    target = _put_raw(kb)
+    runner = make_runner(None, ok=False, final_text="boom", error_type="runtime_error")
+    data = _ingest_once(kb, runner, target)
+    assert data["exit_code"] == 5  # EXIT_AGENT_ERROR
+
+
+def test_two_ingests_run_serially(kb) -> None:
+    """两个 ingest FIFO 串行完成，raw/ 快照不互踩（决策P4-5）。"""
+    _put_raw(kb, "a.md")
+    _put_raw(kb, "b.md")
+    order: list[str] = []
+
+    def runner(prompt, **kwargs):
+        n = len(order) + 1
+        order.append(prompt)
+        write_page(kwargs["working_directory"], f"wiki/concepts/N{n}.md")
+        return AgentRunResult(ok=True, final_text="done")
+
+    with TestClient(create_app(kb, runner=runner)) as client:
+        id_a = client.post("/api/ingest", json={"target": "raw/a.md"}).json()["job_id"]
+        id_b = client.post("/api/ingest", json={"target": "raw/b.md"}).json()["job_id"]
+        data_a = _wait_job(client, id_a)
+        data_b = _wait_job(client, id_b)
+
+    assert data_a["exit_code"] == 0
+    assert data_b["exit_code"] == 0
+    assert len(order) == 2  # 两个作业都跑了（单 worker 串行）
+
+
+def test_ingest_invalid_body_is_422(client) -> None:
+    assert client.post("/api/ingest", json={}).status_code == 422  # 缺 target
+
+
+def test_unknown_job_is_404(client) -> None:
+    assert client.get("/api/jobs/999999").status_code == 404
 
 
 @pytest.mark.parametrize("bad_port", [99999, -1, 0])
