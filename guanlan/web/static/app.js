@@ -27,61 +27,104 @@ function escapeHtml(s) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ── Wiki：搜索 + 单页内容 ────────────────────────────────────────────────────
+// ── Wiki：合并视图（Concept 列表 ⇄ 单页）+ 回退/往前历史 ────────────────────
+//
+// 右栏只有一个 #wiki-view：启动显示 Concept 列表；点页进单页内容；正文 [[链接]] 续进。
+// 历史栈像浏览器：navigate 压栈、回退/往前移指针。视图分两种：
+//   {kind:"index"}        —— 按搜索过滤的页面列表（"首页"）
+//   {kind:"page", path}   —— 单页渲染
 
-let allPages = [];      // /api/pages 缓存
-let activePath = null;  // 当前查看页
+let allPages = [];          // /api/pages 缓存
+let pagesError = null;      // /api/pages 加载错误（与"空库"区分，避免误显"暂无页面"）
+let history = [];           // 视图历史栈；index 条目自带 query 快照，回退/往前可还原过滤态
+let histPos = -1;           // 当前视图在栈中的下标
+let renderToken = 0;        // 每次渲染自增；单页异步响应回来若 token 已变则丢弃（防迟到覆盖）
+
+const currentView = () => (histPos >= 0 ? history[histPos] : null);
 
 async function loadPages() {
   try {
-    const { pages } = await getJSON("/api/pages");
-    allPages = pages;
+    ({ pages: allPages } = await getJSON("/api/pages"));
+    pagesError = null;
   } catch (e) {
     allPages = [];
-    $("#wiki-results").innerHTML = `<div class="empty">加载页面失败：${escapeHtml(e.message)}</div>`;
-    return;
+    pagesError = e.message;
   }
-  renderResults($("#wiki-search").value);
+  const cur = currentView();
+  if (cur && cur.kind === "index") renderIndex(cur); // 已在列表态则就地刷新
 }
 
-function renderResults(query) {
-  const results = $("#wiki-results");
-  const q = query.trim().toLowerCase();
+function navigate(view) {
+  history = history.slice(0, histPos + 1); // 丢弃前进分支
+  history.push(view);
+  histPos = history.length - 1;
+  renderView(view);
+  updateNav();
+}
+
+function renderView(view) {
+  // 还原视图时同步搜索框（回退/往前到某个 index 条目要回到它当时的过滤词）。
+  if (view.kind === "index") {
+    $("#wiki-search").value = view.query || "";
+    renderIndex(view);
+  } else {
+    renderPage(view.path);
+  }
+}
+
+function goBack() {
+  if (histPos > 0) { histPos--; renderView(history[histPos]); updateNav(); }
+}
+function goForward() {
+  if (histPos < history.length - 1) { histPos++; renderView(history[histPos]); updateNav(); }
+}
+function updateNav() {
+  $("#wiki-back").disabled = histPos <= 0;
+  $("#wiki-fwd").disabled = histPos >= history.length - 1;
+}
+
+function renderIndex(entry) {
+  renderToken++; // 作废任何在飞的单页渲染（用户已切回列表）
+  const view = $("#wiki-view");
+  if (pagesError) {
+    view.innerHTML = `<div class="empty">加载页面失败：${escapeHtml(pagesError)}（请重试或检查服务端）</div>`;
+    return;
+  }
+  const q = ((entry && entry.query) || "").trim().toLowerCase();
   const matched = q
     ? allPages.filter((p) => p.title.toLowerCase().includes(q) || p.path.toLowerCase().includes(q))
     : allPages;
   if (!matched.length) {
-    results.innerHTML = `<div class="empty">${allPages.length ? "无匹配页面" : "暂无页面"}</div>`;
+    view.innerHTML = `<div class="empty">${allPages.length ? "无匹配页面" : "暂无页面"}</div>`;
     return;
   }
   const groups = Object.create(null); // null 原型：type 是容错用户值，防 __proto__/constructor 污染
   for (const p of matched) (groups[p.type] ||= []).push(p);
-  results.innerHTML = "";
+  view.innerHTML = "";
   for (const type of Object.keys(groups).sort()) {
     const title = document.createElement("div");
     title.className = "group-title";
     title.textContent = `${type} (${groups[type].length})`;
-    results.appendChild(title);
+    view.appendChild(title);
     for (const p of groups[type]) {
       const a = document.createElement("a");
+      a.className = "page-link";
       a.textContent = p.title;
       a.href = "#";
       a.dataset.path = p.path;
-      a.classList.toggle("active", p.path === activePath);
-      a.addEventListener("click", (e) => { e.preventDefault(); openPage(p.path); });
-      results.appendChild(a);
+      a.addEventListener("click", (e) => { e.preventDefault(); navigate({ kind: "page", path: p.path }); });
+      view.appendChild(a);
     }
   }
 }
 
-async function openPage(path) {
-  activePath = path;
-  document.querySelectorAll("#wiki-results a").forEach((a) =>
-    a.classList.toggle("active", a.dataset.path === path));
-  const body = $("#wiki-body");
-  body.innerHTML = '<p class="muted">加载中…</p>';
+async function renderPage(path) {
+  const tok = ++renderToken; // 本次渲染的序号
+  const view = $("#wiki-view");
+  view.innerHTML = '<p class="muted">加载中…</p>';
   try {
     const data = await getJSON(`/api/page?path=${encodeURIComponent(path)}`);
+    if (tok !== renderToken) return; // 已导航走（回退/搜索/续进），丢弃迟到响应
     let meta;
     if (data.meta) {
       const t = data.meta.type ? `<span class="ptype">${escapeHtml(String(data.meta.type))}</span>` : "";
@@ -90,18 +133,32 @@ async function openPage(path) {
     } else {
       meta = `<span>${escapeHtml(path)}</span> · <span class="muted">无 frontmatter</span>`;
     }
-    body.innerHTML = `<div class="page-meta">${meta}</div>` + data.html;
+    view.innerHTML = `<div class="page-meta">${meta}</div>` + data.html;
   } catch (e) {
-    body.innerHTML = `<p class="muted">打开失败：${escapeHtml(e.message)}</p>`;
+    if (tok !== renderToken) return;
+    view.innerHTML = `<p class="muted">打开失败：${escapeHtml(e.message)}</p>`;
   }
 }
 
-$("#wiki-search").addEventListener("input", (e) => renderResults(e.target.value));
+$("#wiki-home").addEventListener("click", () => navigate({ kind: "index", query: "" }));
+$("#wiki-back").addEventListener("click", goBack);
+$("#wiki-fwd").addEventListener("click", goForward);
 
-// 站内 wikilink 导航：事件委托到 wiki 正文。
-$("#wiki-body").addEventListener("click", (e) => {
+$("#wiki-search").addEventListener("input", (e) => {
+  const q = e.target.value;
+  const cur = currentView();
+  if (cur && cur.kind === "index") {
+    cur.query = q; // 就地更新当前 index 条目的过滤词（不压历史，保住回退还原）
+    renderIndex(cur);
+  } else {
+    navigate({ kind: "index", query: q }); // 在单页时回到列表态看结果（只压一次 index）
+  }
+});
+
+// 站内 wikilink 导航：事件委托到合并视图，续进单页历史。
+$("#wiki-view").addEventListener("click", (e) => {
   const a = e.target.closest("a.wikilink[data-page]");
-  if (a) { e.preventDefault(); openPage(a.dataset.page); }
+  if (a) { e.preventDefault(); navigate({ kind: "page", path: a.dataset.page }); }
 });
 
 // ── 浮层 ──────────────────────────────────────────────────────────────────────
@@ -229,6 +286,12 @@ function addMsg(cls, text) {
   return div;
 }
 
+// 对话气泡里的 [[wikilink]]（来自渲染后的答案）点了切到右栏 wiki 单页。
+$("#chat-log").addEventListener("click", (e) => {
+  const a = e.target.closest("a.wikilink[data-page]");
+  if (a) { e.preventDefault(); navigate({ kind: "page", path: a.dataset.page }); }
+});
+
 async function sendChat(message) {
   addMsg("user", message);
   const botEl = addMsg("bot", "");
@@ -284,7 +347,14 @@ function handleSSE(frame, botEl) {
     log.scrollTop = log.scrollHeight;
   } else if (event === "done") {
     conversationId = payload.conversation_id;
-    if (payload.answer) botEl.textContent = payload.answer; // 以完整答案收尾，避免增量拼接误差
+    // 收尾：用服务端渲染的安全 markdown HTML 替换流式纯文本（含 [[页]]→站内链接）。
+    if (payload.answer_html !== undefined) {
+      botEl.classList.add("rendered"); // 切到正常空白模型 + 富排版（见 app.css）
+      botEl.innerHTML = payload.answer_html;
+    } else if (payload.answer) {
+      botEl.textContent = payload.answer;
+    }
+    log.scrollTop = log.scrollHeight;
   } else if (event === "error") {
     botEl.classList.replace("bot", "err");
     botEl.textContent = `错误：${payload.message}`;
@@ -292,4 +362,7 @@ function handleSSE(frame, botEl) {
 }
 
 // ── 启动 ────────────────────────────────────────────────────────────────────
-loadPages();
+// 先拉页面再进"列表"视图（首页）——启动即显示 Concept 列表。
+// 仅当用户尚未导航时才进首页：否则页面慢加载期间用户已输入的搜索会被这次空首页覆盖
+// （loadPages 解析后会就地重渲染当前 index 条目，故用户的搜索结果照常出现）。
+loadPages().then(() => { if (histPos < 0) navigate({ kind: "index", query: "" }); });

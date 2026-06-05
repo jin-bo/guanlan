@@ -143,6 +143,26 @@ if _HAS_MARKDOWN:
             )
 
 
+def render_markdown(text: str, wiki: Path | None = None) -> str:
+    """把 markdown 文本渲染为**安全** HTML（供单页与对话输出共用）。
+
+    始终带两道安全闸：`_EscapeHtmlExtension`（关原始 HTML 透传）+ `_SafeLinkExtension`
+    （中和 javascript:/data: 链接）。给了 `wiki` 才挂 `[[wikilink]]` 重写（解析到该库页面）。
+    缺 markdown extra 时回退转义 `<pre>` 源码视图。
+    """
+    if not _HAS_MARKDOWN:
+        return "<pre>" + html_lib.escape(text) + "</pre>"
+    extensions = [
+        "fenced_code",
+        "tables",
+        _EscapeHtmlExtension(),  # 安全：关原始 HTML 透传。
+        _SafeLinkExtension(),  # 安全：中和 javascript:/data: 链接。
+    ]
+    if wiki is not None:
+        extensions.append(_WikiLinkExtension(_stem_to_path(wiki)))
+    return _markdown.Markdown(extensions=extensions).convert(text)
+
+
 def render_page(wiki: Path, page_path: Path) -> dict:
     """渲染单页：返回 `{meta, html}`。
 
@@ -150,17 +170,4 @@ def render_page(wiki: Path, page_path: Path) -> dict:
     富渲染 + `[[wikilink]]` 重写；否则回退转义 `<pre>` 源码视图。
     """
     meta, body = load_page(page_path)
-    if _HAS_MARKDOWN:
-        md = _markdown.Markdown(
-            extensions=[
-                "fenced_code",
-                "tables",
-                _EscapeHtmlExtension(),  # 安全：关原始 HTML 透传。
-                _SafeLinkExtension(),  # 安全：中和 javascript:/data: 链接。
-                _WikiLinkExtension(_stem_to_path(wiki)),
-            ]
-        )
-        html = md.convert(body)
-    else:
-        html = "<pre>" + html_lib.escape(body) + "</pre>"
-    return {"meta": meta, "html": html}
+    return {"meta": meta, "html": render_markdown(body, wiki)}

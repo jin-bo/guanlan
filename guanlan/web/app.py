@@ -34,7 +34,7 @@ from ..pages import iter_pages, load_page, page_title, page_type
 from ..runtime import AgentRunner
 from .chat import ConversationStore
 from .jobs import JobQueue
-from .render import render_page
+from .render import render_markdown, render_page
 
 
 class IngestBody(BaseModel):
@@ -262,7 +262,11 @@ def create_app(
                 # token。shield 让 turn 始终跑到自然结束（lock 全程持有），杜绝该竞态；代价是断开
                 # 后该轮仍跑完（本地单用户、轮次有界，可接受）。
                 answer = await asyncio.shield(conv.turn(body.message, emit))
-                emit("done", {"answer": answer, "conversation_id": conv.id})
+                # 把完整答案渲染成安全 markdown HTML（[[页]] → 站内链接）；阻塞调用卸到线程。
+                answer_html = await anyio.to_thread.run_sync(
+                    render_markdown, answer, root / "wiki"
+                )
+                emit("done", {"answer": answer, "answer_html": answer_html, "conversation_id": conv.id})
             except asyncio.CancelledError:
                 raise  # 客户端已断开，流没了，不再 emit
             except Exception as exc:  # noqa: BLE001 — 任何失败都转 error 事件，不泄 traceback 到流
