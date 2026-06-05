@@ -47,6 +47,21 @@ def test_index_served(kb) -> None:
         resp = client.get("/")
     assert resp.status_code == 200
     assert "观澜" in resp.text
+    # 前端引用随包静态资源（C6）。
+    assert "/static/app.js" in resp.text and "/static/app.css" in resp.text
+
+
+def test_static_assets_served(client) -> None:
+    """随包前端资源命中（C6：app.js / app.css）。"""
+    js = client.get("/static/app.js")
+    css = client.get("/static/app.css")
+    assert js.status_code == 200 and "fetch" in js.text
+    assert css.status_code == 200 and "--lan-ripple" in css.text  # 观澜配色变量
+
+
+def test_static_assets_bundled() -> None:
+    for name in ("index.html", "app.js", "app.css"):
+        assert (STATIC_DIR / name).is_file()
 
 
 def test_serve_binds_localhost_only(kb, monkeypatch) -> None:
@@ -221,6 +236,39 @@ def test_api_page_escapes_raw_html_xss(client, kb) -> None:
     # 关键：没有可执行的原始标签；payload 仅作为转义文本存在。
     assert "<img" not in html and "<script" not in html
     assert "&lt;img" in html and "&lt;script&gt;" in html
+
+
+def test_api_page_neutralizes_dangerous_link(client, kb) -> None:
+    """markdown 链接的 javascript:/data: 协议被中和（纵深防御 XSS）。"""
+    write_page(
+        kb,
+        "wiki/entities/Link.md",
+        type="entity",
+        body="点 [危险](javascript:fetch('/api/raw')) 与 [正常](https://example.com)。",
+    )
+    resp = client.get("/api/page", params={"path": "wiki/entities/Link.md"})
+    html = resp.json()["html"]
+    assert "javascript:" not in html  # 危险协议失活
+    assert 'href="#"' in html  # 被改写为锚点
+    assert "https://example.com" in html  # 安全链接保留
+
+
+def test_is_safe_url_strips_control_chars() -> None:
+    """控制符不能绕过协议白名单（浏览器会先剥控制符再导航）。"""
+    from guanlan.web.render import _is_safe_url
+
+    assert _is_safe_url("https://example.com") is True
+    assert _is_safe_url("/wiki/x.md") is True
+    assert _is_safe_url("#anchor") is True
+    assert _is_safe_url("javascript:alert(1)") is False
+    assert _is_safe_url("java\tscript:alert(1)") is False
+    assert _is_safe_url("java\nscript:alert(1)") is False
+    assert _is_safe_url("  javascript:alert(1)") is False
+    assert _is_safe_url("data:text/html,x") is False
+    # HTML 实体编码绕过（浏览器导航前会解码）。
+    assert _is_safe_url("&#106;avascript:alert(1)") is False
+    assert _is_safe_url("java&#x09;script:alert(1)") is False
+    assert _is_safe_url("https://x?a=1&b=2") is True  # 合法 query 不误伤
 
 
 def test_api_page_tolerates_bad_frontmatter(client, kb) -> None:

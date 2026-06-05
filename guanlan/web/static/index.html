@@ -3,10 +3,69 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>观澜 Web 宿主</title>
+<title>观澜 · Web 宿主</title>
+<link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<h1>观澜 Web 宿主</h1>
-<p>P4 占位页——完整前端（页面树 / 单页 / 对话区 + 顶栏动作）于提交 C6 落地。</p>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">观澜</span>
+    <span class="tagline">观水有术，必观其澜</span>
+  </div>
+  <nav class="actions">
+    <button data-report="check">check</button>
+    <button data-report="health">health</button>
+    <button data-report="lint">lint</button>
+    <button id="graph-btn">graph</button>
+  </nav>
+</header>
+
+<main class="layout">
+  <!-- 侧栏：raw 列表 + 页面树 -->
+  <aside class="sidebar">
+    <section class="panel">
+      <h2>raw/ 资料</h2>
+      <ul id="raw-list" class="raw-list"><li class="muted">加载中…</li></ul>
+    </section>
+    <section class="panel">
+      <h2>wiki 页面</h2>
+      <div id="page-tree" class="page-tree"><p class="muted">加载中…</p></div>
+    </section>
+  </aside>
+
+  <!-- 主区：单页 / 报告 -->
+  <section class="main">
+    <div id="page-meta" class="page-meta"></div>
+    <article id="page-body" class="page-body">
+      <p class="muted">从左侧选择一张页面浏览，或在右侧与 agent 对话。</p>
+    </article>
+  </section>
+
+  <!-- 对话区 -->
+  <aside class="chat">
+    <div class="chat-head">
+      <h2>对话</h2>
+      <button id="chat-new" title="开启新会话（清空上下文）">新会话</button>
+    </div>
+    <div id="chat-log" class="chat-log"></div>
+    <form id="chat-form" class="chat-form">
+      <textarea id="chat-input" rows="2" placeholder="向 agent 提问（只读，跨轮保留上下文）…"></textarea>
+      <button type="submit" id="chat-send">发送</button>
+    </form>
+  </aside>
+</main>
+
+<!-- 报告 / 作业浮层 -->
+<div id="overlay" class="overlay hidden">
+  <div class="overlay-card">
+    <div class="overlay-head">
+      <h3 id="overlay-title">报告</h3>
+      <button id="overlay-close">×</button>
+    </div>
+    <div id="overlay-body" class="overlay-body"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
 </body>
 </html>

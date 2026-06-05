@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import html as html_lib
+import re
 import xml.etree.ElementTree as _etree  # stdlib，始终可用；只有 markdown 是可选 extra。
 from pathlib import Path
 
@@ -22,10 +23,29 @@ try:  # markdown 是 web extra 的一部分；缺失时回退 <pre> 源码视图
     import markdown as _markdown
     from markdown.extensions import Extension as _Extension
     from markdown.inlinepatterns import InlineProcessor as _InlineProcessor
+    from markdown.treeprocessors import Treeprocessor as _Treeprocessor
 
     _HAS_MARKDOWN = True
 except ImportError:  # pragma: no cover - 仅在未装 markdown 时走到
     _HAS_MARKDOWN = False
+
+# URL 协议白名单：markdown 链接/图片即便原始 HTML 已被转义，仍可写出 [x](javascript:…) —— 渲染成
+# <a href="javascript:…"> 注入 UI 后点击即同源执行脚本、能打本地写 API。只放行安全协议与相对链接。
+_URL_SCHEME_RE = re.compile(r"^\s*([a-z][a-z0-9+.\-]*):", re.IGNORECASE)
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https", "mailto"})
+
+
+def _is_safe_url(url: str) -> bool:
+    """无协议（相对/锚点/路径）放行；有协议须 ∈ 白名单（拦下 javascript:/data:/vbscript: 等）。
+
+    依次：① HTML 实体解码（markdown 会把 `&#106;avascript:` 原样留在 href，浏览器导航前会解码
+    成 `javascript:`）；② 剥除所有 ASCII 控制符与空白（浏览器同样会去掉 URL 里的 Tab/换行）；
+    ③ 再判协议——任一步缺失都会让 `java&#x09;script:` 之类绕过 scheme 检测、在浏览器里复原执行。
+    """
+    decoded = html_lib.unescape(url)
+    cleaned = re.sub(r"[\x00-\x20]", "", decoded)
+    match = _URL_SCHEME_RE.match(cleaned)
+    return match is None or match.group(1).lower() in _ALLOWED_URL_SCHEMES
 
 
 def _wikilink_display(raw: str) -> str:
@@ -66,6 +86,25 @@ if _HAS_MARKDOWN:
         def extendMarkdown(self, md) -> None:  # noqa: N802 (markdown API 命名)
             md.preprocessors.deregister("html_block")
             md.inlinePatterns.deregister("html")
+
+    class _SafeLinkTreeprocessor(_Treeprocessor):
+        """中和危险协议的 <a href>/<img src>（javascript:/data: 等 → 失活），纵深防御 XSS。"""
+
+        def run(self, root):  # noqa: N802 (markdown API 命名)
+            for el in root.iter("a"):
+                href = el.get("href")
+                if href is not None and not _is_safe_url(href):
+                    el.set("href", "#")
+            for el in root.iter("img"):
+                src = el.get("src")
+                if src is not None and not _is_safe_url(src):
+                    el.set("src", "")
+            return None
+
+    class _SafeLinkExtension(_Extension):
+        def extendMarkdown(self, md) -> None:  # noqa: N802 (markdown API 命名)
+            # 优先级低 → 在内联/wikilink 处理之后跑，覆盖所有已生成的 a/img。
+            md.treeprocessors.register(_SafeLinkTreeprocessor(md), "guanlan_safelink", 5)
 
     class _WikiLinkInlineProcessor(_InlineProcessor):
         """把 `[[…]]` 渲染为站内锚链（resolved）或标灰 span（断链）。"""
@@ -116,7 +155,8 @@ def render_page(wiki: Path, page_path: Path) -> dict:
             extensions=[
                 "fenced_code",
                 "tables",
-                _EscapeHtmlExtension(),  # 安全：先关原始 HTML 透传（XSS 防御）。
+                _EscapeHtmlExtension(),  # 安全：关原始 HTML 透传。
+                _SafeLinkExtension(),  # 安全：中和 javascript:/data: 链接。
                 _WikiLinkExtension(_stem_to_path(wiki)),
             ]
         )
