@@ -86,6 +86,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             open_browser=not args.no_browser,
             model=args.model,
             agent_log=not args.no_agent_log,
+            session_persist=not args.no_session_persist,
         )
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
@@ -195,6 +196,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-agent-log",
         action="store_true",
         help="不把会话 agent 日志写入 <库>/agentao.log（默认像 CLI 那样写；ingest 子进程日志不受影响）",
+    )
+    p_web.add_argument(
+        "--no-session-persist",
+        action="store_true",
+        help="不把只读问答会话落盘 <库>/.agentao/sessions/（默认落盘+跨重启恢复；关时等价纯内存，隐私/临时场景用）",
     )
     p_web.set_defaults(func=_cmd_web)
 

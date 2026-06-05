@@ -17,7 +17,7 @@ import re
 import xml.etree.ElementTree as _etree  # stdlib，始终可用；只有 markdown 是可选 extra。
 from pathlib import Path
 
-from ..pages import WIKILINK_RE, link_stem, load_page, page_stem_index
+from ..pages import WIKILINK_RE, link_resolution_index, link_stem, load_page
 
 try:  # markdown 是 web extra 的一部分；缺失时回退 <pre> 源码视图（§6）。
     import markdown as _markdown
@@ -55,11 +55,11 @@ def _wikilink_display(raw: str) -> str:
     return raw.split("#", 1)[0].strip()
 
 
-# 全页面 stem(小写) → 相对库根 posix 路径，供 `[[wikilink]]` 解析为站内导航目标。归口于
-# `pages.page_stem_index`（与 check/graph 同口径、含 config 可链）。**故意每次渲染重建**（不缓存）：
-# ingest 随时增删页面，每请求重扫保证新页立刻可点、删页立刻标灰——本地单用户下 O(N) 重扫的代价
-# 远小于缓存失效导致的"链接对不上"。
-_stem_to_path = page_stem_index
+# 解析键(stem | 别名, 小写) → 相对库根 posix 路径，供 `[[wikilink]]` 解析为站内导航目标。归口于
+# `pages.link_resolution_index`（stem→path ∪ 别名→拥有页 path，stem 优先；与 check/graph 同口径、
+# 含 config 可链、别名可链，决策P3.1-6）。**故意每次渲染重建**（不缓存）：ingest 随时增删页面/别名，
+# 每请求重扫保证新页/新别名立刻可点、删页立刻标灰——本地单用户下 O(N) 重扫的代价远小于缓存失效。
+_stem_to_path = link_resolution_index
 
 
 def _code_ref_target(content: str, stem_to_path: dict[str, str]) -> str | None:

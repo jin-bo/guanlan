@@ -25,7 +25,9 @@ P3 三个零-LLM 维护工具（advisory）：
 - `guanlan lint` —— 孤儿页 / 断链 / 缺失实体。
 - `guanlan graph` —— 确定性 `[[wikilink]]` 图谱 → `graph/graph.json` + 自包含 `graph/graph.html`（`--json-only` 跳过 html）。
 
-Web 端写 `raw/`、`query --backfill`、可写多轮工作会话、会话落盘、多格式 ingest 留待 P4 之后（见 DESIGN §8 与 `docs/P4-Web宿主.md` §10）。
+**P3.1 别名解析（零-LLM 增强）** —— entity/concept 页可在 frontmatter 声明可选 `aliases`，让别名进入 `[[wikilink]]` 解析命名空间（与页名同口径、大小写不敏感）：`[[大模型]]` / `[[LLM]]` 都解析到声明它们的页，**消假断链**（check / lint / graph / Web 一致）、**补 CJK 同义召回**（别名纳入 query 2-gram 与 ingest 去重）。别名全局唯一由 `check` 确定性校验（撞页名 / 重复 → 阻断写门禁）。这不是新里程碑，P5 仍是多格式与自动化。细化见 [`docs/P3.1-别名解析.md`](docs/P3.1-别名解析.md)。
+
+Web 端写 `raw/`、`query --backfill`、可写多轮工作会话、会话落盘、多格式 ingest 留待 P4 之后（见 DESIGN §8 与 `docs/P4-Web宿主.md` §10）。别名自动物化建页（`heal`）、同义词表、向量检索按需驱动、另开方案。
 
 ## 快速开始
 
