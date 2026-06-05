@@ -72,3 +72,46 @@ def test_init_after_subcommand_dir(tmp_path):
 def test_missing_subcommand_errors():
     with pytest.raises(SystemExit):
         _parse([])
+
+
+# ---------- P3 子命令接线 ----------
+
+
+def test_health_flags():
+    args = _parse(["health", "-C", "/kb", "--json", "--strict"])
+    assert args.command == "health"
+    assert args.dir == "/kb" and args.json is True and args.strict is True
+
+
+def test_lint_flags_default_false():
+    args = _parse(["lint"])
+    assert args.command == "lint"
+    assert args.json is False and args.strict is False
+
+
+def test_graph_json_only_flag():
+    args = _parse(["graph", "--json-only"])
+    assert args.command == "graph"
+    assert args.json_only is True
+
+
+def test_graph_dir_before_subcommand():
+    args = _parse(["-C", "/kb", "graph"])
+    assert args.dir == "/kb" and args.json_only is False
+
+
+def test_graph_rejects_json_prefix_abbrev():
+    # graph 无 stdout JSON 概念：`--json` 不该静默前缀命中 `--json-only`（allow_abbrev=False）。
+    with pytest.raises(SystemExit):
+        _parse(["graph", "--json"])
+
+
+def test_p3_dispatch_end_to_end(tmp_path):
+    """三命令经 main 真正分发到各 entrypoint：在 init 出的库上各自退 0。"""
+    from guanlan.cli import main
+
+    assert main(["-C", str(tmp_path), "init"]) == 0
+    assert main(["-C", str(tmp_path), "health"]) == 0
+    assert main(["-C", str(tmp_path), "lint"]) == 0
+    assert main(["-C", str(tmp_path), "graph", "--json-only"]) == 0
+    assert (tmp_path / "graph" / "graph.json").is_file()

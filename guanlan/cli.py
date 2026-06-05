@@ -10,8 +10,11 @@ import argparse
 
 from . import __version__
 from .check import check_entrypoint
+from .graph import graph_entrypoint
+from .health import health_entrypoint
 from .ingest import run_ingest
 from .init import run_init
+from .lint import lint_entrypoint
 from .query import run_query
 from .skill import install_skill
 
@@ -49,6 +52,18 @@ def _cmd_query(args: argparse.Namespace) -> int:
 
 def _cmd_check(args: argparse.Namespace) -> int:
     return check_entrypoint(args.dir, json_output=args.json)
+
+
+def _cmd_health(args: argparse.Namespace) -> int:
+    return health_entrypoint(args.dir, json_output=args.json, strict=args.strict)
+
+
+def _cmd_lint(args: argparse.Namespace) -> int:
+    return lint_entrypoint(args.dir, json_output=args.json, strict=args.strict)
+
+
+def _cmd_graph(args: argparse.Namespace) -> int:
+    return graph_entrypoint(args.dir, json_only=args.json_only)
 
 
 def _cmd_install_skill(args: argparse.Namespace) -> int:
@@ -112,6 +127,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_check.add_argument("--json", action="store_true", help="输出 JSON 契约")
     p_check.set_defaults(func=_cmd_check)
+
+    p_health = sub.add_parser(
+        "health", parents=[dir_parent], help="文件级结构体检：桩页 + index↔磁盘同步（零 LLM，建议非门禁）"
+    )
+    p_health.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p_health.add_argument("--strict", action="store_true", help="有建议则以退出码 6 失败（供 CI/nightly）")
+    p_health.set_defaults(func=_cmd_health)
+
+    p_lint = sub.add_parser(
+        "lint", parents=[dir_parent], help="图感知结构 lint：孤儿 / 断链 / 缺失实体（零 LLM，建议非门禁）"
+    )
+    p_lint.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p_lint.add_argument("--strict", action="store_true", help="有建议则以退出码 6 失败（供 CI/nightly）")
+    p_lint.set_defaults(func=_cmd_lint)
+
+    # allow_abbrev=False：graph 无 stdout JSON 概念，故不让 `--json` 前缀静默命中 `--json-only`
+    # （在 health/lint 里 `--json` 是"机器输出"，语义不同；与其静默别名不如直接报未知参数）。
+    p_graph = sub.add_parser(
+        "graph",
+        parents=[dir_parent],
+        allow_abbrev=False,
+        help="确定性建图：[[wikilink]] → graph/graph.json + graph.html（零 LLM）",
+    )
+    p_graph.add_argument(
+        "--json-only", action="store_true", help="只写 graph.json，跳过 graph.html"
+    )
+    p_graph.set_defaults(func=_cmd_graph)
 
     p_skill = sub.add_parser(
         "install-skill", help="把随包 guanlan-wiki skill 装入 ~/.agentao/skills/（外部库用）"

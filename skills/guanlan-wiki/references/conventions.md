@@ -18,7 +18,7 @@
 
 ```yaml
 ---
-title: "页面标题"
+title: '页面标题'
 type: source | entity | concept | synthesis
 tags: []
 sources: []           # 支撑本页的 source slug 列表
@@ -26,6 +26,10 @@ last_updated: YYYY-MM-DD
 ---
 ```
 
+- **字符串值一律用单引号。** frontmatter 必须是合法 YAML，而标题/标签里常含 `"…"`（如 `"低值高报"型`）、`:`、`#`、`-` 等 YAML 元字符。**单引号** YAML 标量把 `"` 等当字面量、最稳：
+  - `title: '"低值高报"型骗取出口退税'` ✅（双引号原样保留）
+  - 值内出现**单引号**时翻倍转义：`title: 'it''s a case'` ✅
+  - **切勿在双引号里再套双引号**（`title: ""低值高报"型…"` 会让 YAML 在第二个 `"` 处断裂解析失败）。
 - `sources` 列 source 页的 slug（不含路径/扩展名），用于追溯与 `guanlan check` 校验。
 - `last_updated` 每次实质修改时更新为当天日期（ISO `YYYY-MM-DD`）。
 
@@ -33,7 +37,7 @@ last_updated: YYYY-MM-DD
 
 - 正文用 `[[PageName]]` 链接实体/概念/资料；**大小写不敏感，按文件 stem 解析**。
 - 例：`[[地下钱庄]]`、`[[POS机境外取现]]`。出现的实体/概念**一律链接**，便于交叉引用与建图。
-- ingest / `--backfill` 收尾由 `guanlan check` 校验断链（指向不存在页面即失败）。
+- 指向尚未建页的 `[[X]]` 是建库期正常的前向引用，会随后续资料加入自然消除：**写门禁把断链当警告、不阻断**（决策8），不要为消链接而提前造空桩页或删链接。独立 `guanlan check` 仍把断链全量报告，供按需审计。
 
 ## index.md
 
@@ -78,7 +82,7 @@ ingest 时若发现新资料与既有页冲突，**就地**在相关 entity/conc
 - <断言 A>（[[source-a]]）↔ <断言 B>（[[source-b]]）— <open|resolved> · <备注>
 ```
 
-并向 `log.md` 追加一条。**有无矛盾以 `## ⚠️ 矛盾与存疑` 标题为准**（lint/health 直接 grep 该标题统计，不另存 frontmatter 布尔）。ingest 只做"发现即就地标记"；系统性复检与状态流转（open→resolved）属语义 lint（P3 之后）。
+并向 `log.md` 追加一条。**有无矛盾以 `## ⚠️ 矛盾与存疑` 标题为准**（不另存 frontmatter 布尔）。ingest 只做"发现即就地标记"；系统性复检与状态流转（open→resolved）属语义 lint（P3 之后），确定性 health/lint 不统计矛盾。
 
 ## 页面模板
 
@@ -86,10 +90,10 @@ ingest 时若发现新资料与既有页冲突，**就地**在相关 entity/conc
 
 ```markdown
 ---
-title: "<资料标题>"
+title: '<资料标题>'
 type: source
 tags: []
-sources: ["<本页 slug>"]
+sources: ['<本页 slug>']
 last_updated: YYYY-MM-DD
 ---
 
@@ -111,7 +115,7 @@ last_updated: YYYY-MM-DD
 
 ```markdown
 ---
-title: "<名称>"
+title: '<名称>'
 type: entity   # 或 concept
 tags: []
 sources: []
@@ -135,7 +139,7 @@ last_updated: YYYY-MM-DD
 
 ```markdown
 ---
-title: "<问题/主题>"
+title: '<问题/主题>'
 type: synthesis
 tags: []
 sources: []

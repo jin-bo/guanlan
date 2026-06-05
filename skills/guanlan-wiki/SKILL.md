@@ -47,10 +47,13 @@ description: >
 1. 读 `raw/` 里的 `.md` 源；路径必须按用户/wrapper 给出的原样使用，不要替换其中的引号、空格或 CJK 字符；读 `wiki/index.md` 与 `wiki/overview.md` 建立上下文。
 2. 在 `wiki/sources/<slug>.md` 写**摘要页**（slug = 同源文件名 kebab-case；frontmatter `type: source`）。
 3. 抽取实体/概念，**建或更新** `wiki/entities/<Name>.md`、`wiki/concepts/<Name>.md`；正文术语转 `[[wikilink]]`。
+
+> **frontmatter 必须是合法 YAML**：字符串值（尤其 `title`）**一律用单引号**包裹，值内单引号翻倍为 `''`；**绝不在双引号里再套双引号**（标题含 `"…"` 时 `title: "…"` 会解析失败——见 conventions §frontmatter）。这是写门禁**会阻断**的硬错误，务必避免。
+> **断链不必强求**：尽量为重要术语建页，但正文里指向尚未建页的 `[[X]]` 是建库期的正常前向引用，会随后续资料加入自然消除——写门禁把断链当**警告**、不阻断，不要为了消链接而提前造空桩页或删链接。
 4. 更新 `wiki/index.md`（对应分区追加/修订一行）与 `wiki/overview.md`（活体综述）。
 5. 若新资料与既有页**冲突**，就地在相关页维护 `## ⚠️ 矛盾与存疑` 节（格式见 conventions）。
 6. 向 `wiki/log.md` 追加一条：`## [YYYY-MM-DD] ingest | <title>`。
-7. **收尾**：不要自行运行 shell 命令或 `guanlan check`；读写文件只用内置文件工具；只返回简短完成说明。wrapper 会在你返回后强制跑 `guanlan check`（frontmatter + 断链 + `sources` 解析）并比对 `raw/` 前后快照；两项全过才算成功。
+7. **收尾**：不要自行运行 shell 命令或 `guanlan check`；读写文件只用内置文件工具；只返回简短完成说明。wrapper 会在你返回后强制门禁：比对 `raw/` 前后快照（任何改动即失败）+ 跑 `guanlan check`，但**只追究本次新引入的阻断性违规**（frontmatter / `sources`，断链只记警告）。若有新阻断性违规，wrapper 会把清单回喂你自动修复（最多两轮）——所以把 frontmatter 一次写对最省事。
 
 ### query（P2）— `guanlan query "…"` / `--backfill`
 
@@ -61,8 +64,9 @@ description: >
 ### 确定性脚本（零 LLM）
 
 - `guanlan check`（P2）— 基础校验：frontmatter 合规 + wikilink 断链 + `sources` 解析。ingest / `--backfill` 收尾**强制**运行；亦可独立 shell 调用。实现在 `guanlan` 包内（`guanlan/check.py`），无 `scripts/`。
-- `health.py`（P3）— 结构检查：空页/桩页、index 与磁盘同步、log 覆盖。
-- `build_graph.py`（P3）— 解析 `[[wikilink]]` → 边，输出 `graph.json` + 自包含 `graph.html`。
+- `guanlan health`（P3）— 结构检查：空页/桩页、index 与磁盘同步。
+- `guanlan lint`（P3）— 图感知结构 lint：孤儿页、断链、缺失实体页。
+- `guanlan graph`（P3）— 解析 `[[wikilink]]` → 边，输出 `graph.json` + 自包含静态 `graph.html`。
 
 > `index.md` / `log.md` / `overview.md` / `SCHEMA.md` 是 config 非 content，**排除出 index/graph/lint 扫描**。
 > LLM 只用于 ingest / query；其余工作流全部零 LLM。语义 lint（矛盾复检/过期论断/资料缺口）属 P3 之后。

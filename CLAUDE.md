@@ -6,17 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 观澜 (GuānLán) is an implementation of the [Karpathy LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): an Agent incrementally builds and maintains a structured, cross-linked markdown knowledge wiki instead of doing fresh RAG retrieval on every query. The full design (in Chinese) is the authoritative spec — read [`docs/DESIGN.md`](docs/DESIGN.md) before any non-trivial change.
 
-**Current status: P2 (minimal closed loop).** `guanlan init` plus `ingest` / `query` / `check` / `install-skill` are implemented and wired through Agentao. `health` / `lint` / `graph` (P3) are not yet built. When adding features, match the phase boundaries described in DESIGN §4.4 / §7; do not pull P3+ scope into P2.
+**Current status: P3 (health + structural lint + deterministic graph).** P2's closed loop (`guanlan init` / `ingest` / `query` / `check` / `install-skill`, wired through Agentao) plus P3's three on-demand, zero-LLM maintenance tools — `guanlan health` (stub pages + index↔disk sync), `guanlan lint` (orphans / broken links / missing entities), `guanlan graph` (deterministic `[[wikilink]]` graph → `graph/graph.json` + self-contained `graph/graph.html`) — are all implemented. Semantic lint, inferred graph edges, Web UI, multi-format ingest remain post-P3 (DESIGN §8). When adding features, match the phase boundaries described in DESIGN §4.4 / §7.
 
-The **P2 implementation spec** (module layout, the deterministic gate, `raw/` snapshot + `check` contracts, exit codes, Agentao integration, test plan) is [`docs/P2-最小闭环.md`](docs/P2-最小闭环.md) — it documents how the current P2 code is structured.
+The **P2 implementation spec** (module layout, the deterministic gate, `raw/` snapshot + `check` contracts, exit codes, Agentao integration, test plan) is [`docs/P2-最小闭环.md`](docs/P2-最小闭环.md); the **P3 implementation spec** (`pages.py` shared primitives with strict/lenient frontmatter tiers, `graph`/`health`/`lint` contracts, `EXIT_LINT_FINDINGS`, advisory-not-gate exit semantics) is [`docs/P3-健康与图谱.md`](docs/P3-健康与图谱.md) — together they document how the current code is structured.
 
 ## Commands
 
 ```bash
-uv run guanlan init /tmp/demo   # run the CLI (init is the only working command)
-uv run pytest                   # run all tests
+uv run guanlan init /tmp/demo            # scaffold a knowledge base (deterministic, zero-LLM)
+uv run guanlan -C /tmp/demo check        # deterministic validation (frontmatter / broken links / sources)
+uv run guanlan -C /tmp/demo health       # P3: stub pages + index↔disk sync (advisory; --strict → exit 6)
+uv run guanlan -C /tmp/demo lint         # P3: orphans / broken links / missing entities (advisory)
+uv run guanlan -C /tmp/demo graph        # P3: write graph/graph.json + graph.html (--json-only skips html)
+uv run pytest                            # run all tests
 uv run pytest tests/test_init.py::test_init_is_idempotent_and_non_destructive  # single test
 ```
+
+(`ingest` / `query` drive Agentao + the skill and need a configured model; the commands above are the zero-LLM ones runnable offline.)
 
 Python 3.12+, dependencies managed by `uv` (see `uv.lock`). The package depends on `agentao` (the governed Agent runtime that will execute the LLM-driven `ingest`/`query` in P2).
 
