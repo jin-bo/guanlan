@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 观澜 (GuānLán) is an implementation of the [Karpathy LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): an Agent incrementally builds and maintains a structured, cross-linked markdown knowledge wiki instead of doing fresh RAG retrieval on every query. The full design (in Chinese) is the authoritative spec — read [`docs/DESIGN.md`](docs/DESIGN.md) before any non-trivial change.
 
-**Current status: P3 (health + structural lint + deterministic graph).** P2's closed loop (`guanlan init` / `ingest` / `query` / `check` / `install-skill`, wired through Agentao) plus P3's three on-demand, zero-LLM maintenance tools — `guanlan health` (stub pages + index↔disk sync), `guanlan lint` (orphans / broken links / missing entities), `guanlan graph` (deterministic `[[wikilink]]` graph → `graph/graph.json` + self-contained `graph/graph.html`) — are all implemented. Semantic lint, inferred graph edges, Web UI, multi-format ingest remain post-P3 (DESIGN §8). When adding features, match the phase boundaries described in DESIGN §4.4 / §7.
+**Current status: P4 (optional local Web host).** P2's closed loop (`guanlan init` / `ingest` / `query` / `check` / `install-skill`, wired through Agentao) + P3's three on-demand zero-LLM maintenance tools (`guanlan health` / `lint` / `graph`) + P4's **optional** Web host (`guanlan web`, needs `pip install 'guanlan[web]'`) are all implemented. P4 puts the existing commands in a browser via a thin FastAPI/uvicorn layer (127.0.0.1-only, `workers=1`) under a `guanlan/web/` subpackage that carries *no business intelligence*: it reuses `run_ingest` / `run_check` / `run_health` / `run_lint` / `build_and_write_graph` / `pages.*` and an embedded read-only `Agentao` for chat. **Read/write split** (DESIGN §5.2): the only write job `ingest` reuses the P2 subprocess + single-writer gate (one background worker, FIFO); all Q&A (one-shot + multi-turn) goes through a read-only in-process embedded `Agentao` (`.arun`, token-streamed, memory-only). Web-side `raw/` writes, `query --backfill`, writable work-sessions, session persistence, multi-format ingest remain post-P4 (DESIGN §8). When adding features, match the phase boundaries in DESIGN §4.4 / §7.
 
-The **P2 implementation spec** (module layout, the deterministic gate, `raw/` snapshot + `check` contracts, exit codes, Agentao integration, test plan) is [`docs/P2-最小闭环.md`](docs/P2-最小闭环.md); the **P3 implementation spec** (`pages.py` shared primitives with strict/lenient frontmatter tiers, `graph`/`health`/`lint` contracts, `EXIT_LINT_FINDINGS`, advisory-not-gate exit semantics) is [`docs/P3-健康与图谱.md`](docs/P3-健康与图谱.md) — together they document how the current code is structured.
+The **P2 spec** (module layout, deterministic gate, `raw/` snapshot + `check` contracts, exit codes, Agentao integration) is [`docs/P2-最小闭环.md`](docs/P2-最小闭环.md); the **P3 spec** (`pages.py` shared primitives with strict/lenient frontmatter tiers, `graph`/`health`/`lint` contracts, `EXIT_LINT_FINDINGS`, advisory-not-gate exit semantics) is [`docs/P3-健康与图谱.md`](docs/P3-健康与图谱.md); the **P4 spec** (`guanlan/web/` layout, the read/write split, single-worker `ingest` job, read-only embedded chat with the four embedding pitfalls + token-streaming transport contract, HTTP API + SSE contracts, no new exit codes) is [`docs/P4-Web宿主.md`](docs/P4-Web宿主.md) — together they document how the current code is structured.
 
 ## Commands
 
@@ -18,13 +18,15 @@ uv run guanlan -C /tmp/demo check        # deterministic validation (frontmatter
 uv run guanlan -C /tmp/demo health       # P3: stub pages + index↔disk sync (advisory; --strict → exit 6)
 uv run guanlan -C /tmp/demo lint         # P3: orphans / broken links / missing entities (advisory)
 uv run guanlan -C /tmp/demo graph        # P3: write graph/graph.json + graph.html (--json-only skips html)
+uv run guanlan -C /tmp/demo web --no-browser   # P4: optional local Web host (needs guanlan[web]; 127.0.0.1 only)
 uv run pytest                            # run all tests
+uv run pytest tests/test_web.py          # P4 Web host tests (skipped if guanlan[web] absent)
 uv run pytest tests/test_init.py::test_init_is_idempotent_and_non_destructive  # single test
 ```
 
-(`ingest` / `query` drive Agentao + the skill and need a configured model; the commands above are the zero-LLM ones runnable offline.)
+(`ingest` / `query` and the Web host's chat drive Agentao + the skill and need a configured model; `init` / `check` / `health` / `lint` / `graph` are the zero-LLM ones runnable offline. `guanlan web` needs the optional `web` extra: `uv pip install 'fastapi>=0.110' 'uvicorn>=0.29' 'markdown>=3'`, or `pip install 'guanlan[web]'`.)
 
-Python 3.12+, dependencies managed by `uv` (see `uv.lock`). The package depends on `agentao` (the governed Agent runtime that will execute the LLM-driven `ingest`/`query` in P2).
+Python 3.12+, dependencies managed by `uv` (see `uv.lock`). The package depends on `agentao` (the governed Agent runtime executing LLM-driven `ingest`/`query` via subprocess, and — in P4 — embedded read-only for Web chat). The `web` extra (fastapi/uvicorn/markdown) is optional and not part of the core install.
 
 ## Architecture
 
