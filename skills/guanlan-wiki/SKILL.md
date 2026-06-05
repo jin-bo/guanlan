@@ -47,7 +47,7 @@ description: >
 1. 读 `raw/` 里的 `.md` 源；路径必须按用户/wrapper 给出的原样使用，不要替换其中的引号、空格或 CJK 字符；读 `wiki/index.md` 与 `wiki/overview.md` 建立上下文；**先查根级 `SCHEMA.md`**——本库若定义了自定义页面类型或目录（如某域的 `论文/` `模型/` `数据集/`），**优先按它路由**，仅当 SCHEMA.md 未给更具体去处时才回落到默认 `entities/` `concepts/`（SCHEMA.md 是路由权威）。
 2. 在 `wiki/sources/<slug>.md` 写**摘要页**（slug = 同源文件名 kebab-case；frontmatter `type: source`）。
 3. 抽取实体/概念，**建或更新** `wiki/entities/<Name>.md`、`wiki/concepts/<Name>.md`；正文术语一律转 `[[wikilink]]`。**建页前先去重消歧、再按重要度决定建不建**：
-   - **先查重**：建新页前扫 `index.md` 找是否已有同一实体的**变体命名页**（AI 领域高发：「ViT」/「Vision Transformer」、「自注意力」/「self-attention」、中英缩写混用）。命中就**更新既有页**（必要时在该页补一行常用别名），**绝不新建重复页**。
+   - **先查重**：建新页前扫 `index.md` 与现有页的 `aliases` frontmatter，找是否已有同一实体的**变体命名页**（AI 领域高发：「ViT」/「Vision Transformer」、「自注意力」/「self-attention」、中英缩写混用）。命中就**更新既有页**（把新变体追加进该页 `aliases`——结构化声明，解析器/召回都吃，见 conventions §别名），**绝不新建重复页**。别名须全局唯一、不与任何页名同名（`check` 会阻断撞名/重复）。
    - **再判建页阈值**：核心/被多篇资料反复提及的术语才建专页；**偶现术语只写裸 `[[X]]` 前向引用、不提前造空桩页**——它会随后续资料自然达到「被 ≥2 页引用」而由 `lint.missing_entity` 提示补页（与 §确定性脚本同口径）。这把"不要造桩页"从禁令落成正向操作：宁可暂留断链，不可造空页。
 
 > **frontmatter 必须是合法 YAML**：字符串值（尤其 `title`）**一律用单引号**包裹，值内单引号翻倍为 `''`；**绝不在双引号里再套双引号**（标题含 `"…"` 时 `title: "…"` 会解析失败——见 conventions §frontmatter）。这是写门禁**会阻断**的硬错误，务必避免。
@@ -59,7 +59,7 @@ description: >
 
 ### query（P2）— `guanlan query "…"` / `--backfill`
 
-1. 读 `wiki/index.md` 定位相关页（CJK 用 2-gram 粗召回；不中时扫相关目录或请用户补关键词——graceful fallback）。
+1. 读 `wiki/index.md` 定位相关页（CJK 用 2-gram 粗召回，**别名串一并纳入匹配面**——同义不同名时命中声明该别名的页；不中时扫相关目录或现有页 `aliases`，或请用户补关键词——graceful fallback）。
 2. 读相关页，**综合出带 `[[页]]` 引用的答案**；无可靠来源时明说，不编造。
 3. **默认只读**。仅当显式 `--backfill` 时把好答案回填 `wiki/syntheses/<slug>.md`（`type: synthesis`），并走与 ingest 同一套门禁。
 

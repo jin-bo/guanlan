@@ -16,6 +16,7 @@ import argparse
 import datetime
 import re
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from .pages import (
     iter_pages,
     link_stem,
     link_target_stems,
+    page_stem_index,
     parse_frontmatter,
     report_json,
     split_frontmatter,
@@ -127,6 +129,55 @@ def _check_sources(page: str, meta: dict | None, wiki: Path) -> list[Violation]:
     return violations
 
 
+def _check_aliases_type(page: str, meta: dict) -> tuple[list[Violation], list[str]]:
+    """校验 frontmatter `aliases` 类型，返回 `(violations, 归一别名键)`（P3.1，决策P3.1-4）。
+
+    `aliases` 可选——缺键合法、返回空。存在时须为**非空字符串列表**，否则记一条 `bad_type`
+    （阻断，已被自愈 prompt 覆盖）。归一用 `link_stem`，与 `[[…]]` 查找口径对称（决策P3.1-3）。
+    """
+    if "aliases" not in meta:
+        return [], []
+    raw = meta["aliases"]
+    if not isinstance(raw, list) or not all(isinstance(a, str) and a.strip() for a in raw):
+        return [Violation(page, "frontmatter.bad_type", "aliases 须为非空字符串列表")], []
+    return [], [k for k in (link_stem(a) for a in raw) if k]
+
+
+def _check_aliases_global(
+    alias_owners: dict[str, list[str]], page_stems: frozenset[str]
+) -> list[Violation]:
+    """别名命名空间全局唯一校验（跨页聚合，P3.1 决策P3.1-4）。**纯算术、零 LLM。**
+
+    别名与页面 stem 同一解析命名空间，歧义会破坏确定性解析，故两类违规均阻断：
+      - `aliases.collides_stem`：归一别名撞某现有页 stem；
+      - `aliases.duplicate`：同一归一别名在库内被声明 ≥2 次（跨页或同页）。
+    `page_stems` 是纯页面 stem 集（不含别名），用于撞名判定。输出按页排序，确定可重建。
+    """
+    violations: list[Violation] = []
+    for alias in sorted(alias_owners):
+        owners = alias_owners[alias]
+        unique_owners = sorted(set(owners))
+        if alias in page_stems:
+            for page in unique_owners:
+                violations.append(
+                    Violation(
+                        page,
+                        "aliases.collides_stem",
+                        f"别名 {alias!r} 与现有页面 stem 同名，会产生解析歧义",
+                    )
+                )
+        if len(owners) > 1:  # 跨页或同页重复声明同一别名
+            for page in unique_owners:
+                violations.append(
+                    Violation(
+                        page,
+                        "aliases.duplicate",
+                        f"别名 {alias!r} 在库内被声明 {len(owners)} 次（须全局唯一）",
+                    )
+                )
+    return violations
+
+
 def run_check(wiki: Path) -> CheckResult:
     """对 `wiki/` 下所有页面跑确定性校验，返回 `CheckResult`。
 
@@ -148,8 +199,11 @@ def run_check(wiki: Path) -> CheckResult:
     # 注意：扫描排除（哪些页被校验，iter_pages 排 config）与解析集（哪些 stem 算合法目标，
     # 含 config）是两件事——口径单一归口 pages.py，与 graph/lint 完全一致（决策P3-2/P3-6）。
     link_targets = link_target_stems(wiki)
+    # 别名撞名判定要的是**纯页面 stem 集**（不含别名），与 link_targets（stem∪别名）不同（决策P3.1-4）。
+    page_stems = frozenset(page_stem_index(wiki))
 
     violations: list[Violation] = []
+    alias_owners: dict[str, list[str]] = defaultdict(list)  # 归一别名 → 声明页（含重复）
     pages_checked = 0
     for path in iter_pages(wiki):
         pages_checked += 1
@@ -160,8 +214,14 @@ def run_check(wiki: Path) -> CheckResult:
             violations.append(Violation(page, fatal.kind, fatal.detail))
         else:
             violations.extend(_check_frontmatter(page, meta))
+            alias_vios, alias_keys = _check_aliases_type(page, meta)
+            violations.extend(alias_vios)
+            for key in alias_keys:
+                alias_owners[key].append(page)
         violations.extend(_check_wikilinks(page, body, link_targets))
         violations.extend(_check_sources(page, meta, wiki))
+
+    violations.extend(_check_aliases_global(alias_owners, page_stems))
 
     return CheckResult(ok=not violations, pages_checked=pages_checked, violations=violations)
 
