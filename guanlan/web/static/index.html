@@ -28,6 +28,9 @@
     <div id="chat-log" class="chat-log"></div>
   </section>
 
+  <div id="col-split" class="col-split" role="separator" aria-orientation="vertical"
+       tabindex="0" title="拖动调整左右宽度（双击复位）" aria-label="调整左右两栏宽度"></div>
+
   <aside class="wiki" aria-label="Wiki">
     <div class="wiki-bar">
       <button id="wiki-home" class="nav-btn" title="回到 Concept 目录">⌂ Home</button>
@@ -39,7 +42,7 @@
   </aside>
 
   <form id="chat-form" class="chat-form" aria-label="对话输入框">
-    <textarea id="chat-input" rows="2" placeholder="向 agent 提问（只读，跨轮保留上下文）…"></textarea>
+    <textarea id="chat-input" rows="2" placeholder="向 agent 提问（只读，跨轮保留上下文）… 回车发送，Option-Enter 换行"></textarea>
     <button type="submit" id="chat-send">发送</button>
   </form>
 </main>

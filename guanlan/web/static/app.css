@@ -45,17 +45,32 @@ body {
 }
 .actions button:hover { background: var(--lan-ripple); border-color: var(--lan-ripple); }
 
-/* ── 主体三区：grid（chat | wiki / input 满宽） ── */
+/* ── 主体：grid（chat │split│ wiki / input 满宽） ──
+   右栏宽度由 --wiki-w 驱动（默认 26rem），中间一条可拖动的分隔条改写它；JS 持久化到 localStorage。 */
 .layout {
   flex: 1;
   display: grid;
-  grid-template-columns: 1fr 26rem;
+  --wiki-w: 26rem;
+  grid-template-columns: minmax(0, 1fr) 6px var(--wiki-w);
   grid-template-rows: 1fr auto;
   grid-template-areas:
-    "chat  wiki"
-    "input input";
+    "chat  split wiki"
+    "input input input";
   min-height: 0;
 }
+
+/* 左右两栏分隔条：细条 + 居中澜纹握把；拖动中（body.col-resizing）整体高亮。 */
+.col-split {
+  grid-area: split; position: relative; cursor: col-resize;
+  background: var(--lan-mist); transition: background .15s;
+}
+.col-split::before {  /* 加宽命中区，又不撑开 6px 视觉宽度 */
+  content: ""; position: absolute; inset: 0 -4px;
+}
+.col-split:hover, body.col-resizing .col-split { background: var(--lan-ripple); }
+.col-split:focus-visible { outline: 2px solid var(--lan-ripple); outline-offset: -1px; }
+/* 拖动时全局禁选 + 统一光标，避免选中文字/光标闪烁 */
+body.col-resizing { user-select: none; cursor: col-resize; }
 
 /* ── 对话内容（左） ── */
 .chat { grid-area: chat; min-height: 0; display: flex; flex-direction: column; background: var(--lan-surface); }

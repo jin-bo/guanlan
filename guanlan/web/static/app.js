@@ -269,11 +269,37 @@ $("#chat-new").addEventListener("click", () => {
   $("#chat-log").innerHTML = "";
 });
 
-$("#chat-form").addEventListener("submit", (e) => {
-  e.preventDefault();
+function submitChat() {
+  // 一轮在飞时（流式中 #chat-send 被禁用）不重复发送：回车与按钮共用此守卫，避免在同一会话
+  // 上叠起并发轮次（服务端 conv.lock 会把第二轮挂住、前端则堆出空 bot 气泡）。输入保留不清。
+  if ($("#chat-send").disabled) return;
   const input = $("#chat-input");
   const msg = input.value.trim();
   if (msg) { input.value = ""; sendChat(msg); }
+}
+
+$("#chat-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  submitChat();
+});
+
+// 回车直接发送；Option(Alt)-Enter / Shift-Enter 插入换行。直接调 submitChat()，不走
+// form.requestSubmit()——后者 Safari 16 前不存在，调用即抛、裸回车看似"没反应"（这正是
+// Mac 上发不出去的根因）。e.isComposing / keyCode 229（中文输入法回车确认候选词）一律放行
+// 默认行为，绝不误发。
+$("#chat-input").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
+  if (e.altKey || e.shiftKey) {
+    // 换行：手动在光标处插入 \n（裸回车已被我们接管，不能靠默认行为换行）。
+    e.preventDefault();
+    const ta = e.target;
+    const { selectionStart: s, selectionEnd: t, value } = ta;
+    ta.value = value.slice(0, s) + "\n" + value.slice(t);
+    ta.selectionStart = ta.selectionEnd = s + 1;
+    return;
+  }
+  e.preventDefault();
+  submitChat();
 });
 
 function addMsg(cls, text) {
@@ -356,10 +382,62 @@ function handleSSE(frame, botEl) {
     }
     log.scrollTop = log.scrollHeight;
   } else if (event === "error") {
+    // 记下服务端已建会话（即便本轮失败）：否则首轮失败时下次又以 null 另起新会话，堆到 503。
+    if (payload.conversation_id) conversationId = payload.conversation_id;
     botEl.classList.replace("bot", "err");
     botEl.textContent = `错误：${payload.message}`;
   }
 }
+
+// ── 左右两栏可拖动分隔 ───────────────────────────────────────────────────────
+// 拖 #col-split 改写 .layout 的 --wiki-w（右栏宽 = 窗口右缘到光标距离），夹在
+// [右栏最小, 窗口宽-左栏最小] 内；持久化 localStorage、刷新恢复；双击复位默认；方向键微调。
+(function setupColumnResize() {
+  const layout = $(".layout"), split = $("#col-split"), wiki = $(".wiki");
+  if (!layout || !split || !wiki) return;
+  const KEY = "guanlan.wikiWidth", MIN_WIKI = 240, MIN_CHAT = 320;
+  const clamp = (px) => Math.max(MIN_WIKI, Math.min(px, window.innerWidth - MIN_CHAT));
+  const apply = (px) => layout.style.setProperty("--wiki-w", `${clamp(px)}px`);
+  const persist = (px) => localStorage.setItem(KEY, String(clamp(px)));
+  const widthAt = (clientX) => layout.getBoundingClientRect().right - clientX;
+  const curWidth = () => wiki.getBoundingClientRect().width;
+
+  const saved = parseFloat(localStorage.getItem(KEY));
+  if (Number.isFinite(saved)) apply(saved);  // 恢复上次；无则保留 CSS 默认 26rem
+
+  const onMove = (e) => apply(widthAt(e.clientX));
+  const onUp = (e) => {
+    document.body.classList.remove("col-resizing");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    persist(widthAt(e.clientX));
+  };
+  split.addEventListener("pointerdown", (e) => {
+    e.preventDefault();  // 阻止拖动起手时选中文字
+    document.body.classList.add("col-resizing");
+    // 监听挂在 window：光标拖出 6px 细条外仍跟手，松手在任意位置都能收尾。
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  });
+
+  split.addEventListener("dblclick", () => {  // 复位到 CSS 默认（清掉内联与存储）
+    layout.style.removeProperty("--wiki-w");
+    localStorage.removeItem(KEY);
+  });
+
+  split.addEventListener("keydown", (e) => {  // 方向键微调（无障碍：role=separator 可聚焦）
+    const dir = e.key === "ArrowLeft" ? 1 : e.key === "ArrowRight" ? -1 : 0;
+    if (!dir) return;
+    e.preventDefault();
+    const next = curWidth() + dir * (e.shiftKey ? 64 : 24);  // ← 加宽右栏 / → 收窄
+    apply(next); persist(next);
+  });
+
+  window.addEventListener("resize", () => {  // 窗口缩小致越界 → 重夹（仅当用过自定义宽度）
+    const inline = parseFloat(layout.style.getPropertyValue("--wiki-w"));
+    if (Number.isFinite(inline)) apply(inline);
+  });
+})();
 
 // ── 启动 ────────────────────────────────────────────────────────────────────
 // 先拉页面再进"列表"视图（首页）——启动即显示 Concept 列表。
