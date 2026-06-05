@@ -48,7 +48,8 @@ REPAIR_PROMPT = (
     "逐条修正：frontmatter 必须是合法 YAML（字符串值一律用**单引号**包裹，"
     "值内出现单引号时翻倍为 `''`，**切勿在双引号里再套双引号**）、"
     "必备键 `title/type/tags/sources/last_updated` 齐全且类型正确；"
-    "`sources` 列的每个 slug 必须对应存在的 `wiki/sources/<slug>.md`。"
+    "`sources` 列的每个 slug 必须对应存在的 `wiki/sources/<slug>.md`；"
+    "若有 `aliases`，须为非空字符串列表、全局唯一、且不与任何页面名（stem）同名。"
     "**不要运行 shell 命令或 `guanlan check`；读写文件只用内置文件工具。** "
     "修完用一句话说明改了什么。"
 )
