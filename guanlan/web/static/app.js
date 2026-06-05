@@ -1,6 +1,7 @@
 "use strict";
 // 观澜 Web 宿主前端（P4，见 docs/P4-Web宿主.md §6 决策P4-3）。
 // vanilla JS + fetch，无 npm/构建/CDN/第三方运行时；流式只用 fetch 读 response.body（不用 EventSource）。
+// 布局：对话内容(左) / Wiki 搜索+内容(右) / 对话输入框(底部满宽)。
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -10,91 +11,100 @@ async function getJSON(url) {
   return res.json();
 }
 
-// ── 浏览：页面树 / raw 列表 / 单页 ──────────────────────────────────────────
-
-async function loadPages() {
-  const tree = $("#page-tree");
-  try {
-    const { pages } = await getJSON("/api/pages");
-    if (!pages.length) { tree.innerHTML = '<p class="muted">暂无页面。</p>'; return; }
-    // null 原型：type 是容错的用户值，可能是 "__proto__"/"constructor"，普通对象会命中
-    // 继承属性而非新建数组、令 .push 抛错、整棵树崩。
-    const groups = Object.create(null);
-    for (const p of pages) (groups[p.type] ||= []).push(p);
-    tree.innerHTML = "";
-    for (const type of Object.keys(groups).sort()) {
-      const g = document.createElement("div");
-      g.className = "group";
-      const title = document.createElement("div");
-      title.className = "group-title";
-      title.textContent = `${type} (${groups[type].length})`;
-      g.appendChild(title);
-      for (const p of groups[type]) {
-        const a = document.createElement("a");
-        a.textContent = p.title;
-        a.dataset.path = p.path;
-        a.href = "#";
-        a.addEventListener("click", (e) => { e.preventDefault(); openPage(p.path); });
-        g.appendChild(a);
-      }
-      tree.appendChild(g);
-    }
-  } catch (e) {
-    tree.innerHTML = `<p class="muted">加载页面失败：${e.message}</p>`;
-  }
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${url} → ${res.status}`);
+  return res.json();
 }
 
-async function loadRaw() {
-  const list = $("#raw-list");
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── Wiki：搜索 + 单页内容 ────────────────────────────────────────────────────
+
+let allPages = [];      // /api/pages 缓存
+let activePath = null;  // 当前查看页
+
+async function loadPages() {
   try {
-    const { files } = await getJSON("/api/raw");
-    if (!files.length) { list.innerHTML = '<li class="muted">raw/ 为空</li>'; return; }
-    list.innerHTML = "";
-    for (const f of files) {
-      const li = document.createElement("li");
-      const name = document.createElement("span");
-      name.textContent = f.name;
-      const btn = document.createElement("button");
-      btn.className = "ingest-btn";
-      btn.textContent = "ingest";
-      btn.addEventListener("click", () => triggerIngest(`raw/${f.name}`));
-      li.append(name, btn);
-      list.appendChild(li);
-    }
+    const { pages } = await getJSON("/api/pages");
+    allPages = pages;
   } catch (e) {
-    list.innerHTML = `<li class="muted">加载 raw 失败：${e.message}</li>`;
+    allPages = [];
+    $("#wiki-results").innerHTML = `<div class="empty">加载页面失败：${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  renderResults($("#wiki-search").value);
+}
+
+function renderResults(query) {
+  const results = $("#wiki-results");
+  const q = query.trim().toLowerCase();
+  const matched = q
+    ? allPages.filter((p) => p.title.toLowerCase().includes(q) || p.path.toLowerCase().includes(q))
+    : allPages;
+  if (!matched.length) {
+    results.innerHTML = `<div class="empty">${allPages.length ? "无匹配页面" : "暂无页面"}</div>`;
+    return;
+  }
+  const groups = Object.create(null); // null 原型：type 是容错用户值，防 __proto__/constructor 污染
+  for (const p of matched) (groups[p.type] ||= []).push(p);
+  results.innerHTML = "";
+  for (const type of Object.keys(groups).sort()) {
+    const title = document.createElement("div");
+    title.className = "group-title";
+    title.textContent = `${type} (${groups[type].length})`;
+    results.appendChild(title);
+    for (const p of groups[type]) {
+      const a = document.createElement("a");
+      a.textContent = p.title;
+      a.href = "#";
+      a.dataset.path = p.path;
+      a.classList.toggle("active", p.path === activePath);
+      a.addEventListener("click", (e) => { e.preventDefault(); openPage(p.path); });
+      results.appendChild(a);
+    }
   }
 }
 
 async function openPage(path) {
-  document.querySelectorAll(".page-tree a").forEach((a) =>
+  activePath = path;
+  document.querySelectorAll("#wiki-results a").forEach((a) =>
     a.classList.toggle("active", a.dataset.path === path));
-  const meta = $("#page-meta");
-  const body = $("#page-body");
+  const body = $("#wiki-body");
   body.innerHTML = '<p class="muted">加载中…</p>';
-  meta.innerHTML = "";
   try {
     const data = await getJSON(`/api/page?path=${encodeURIComponent(path)}`);
+    let meta;
     if (data.meta) {
       const t = data.meta.type ? `<span class="ptype">${escapeHtml(String(data.meta.type))}</span>` : "";
       const lu = data.meta.last_updated ? `更新于 ${escapeHtml(String(data.meta.last_updated))}` : "";
-      meta.innerHTML = `${t}<span>${escapeHtml(path)}</span> · <span>${lu}</span>`;
+      meta = `${t}<span>${escapeHtml(path)}</span> · <span>${lu}</span>`;
     } else {
-      meta.innerHTML = `<span>${escapeHtml(path)}</span> · <span class="muted">无 frontmatter</span>`;
+      meta = `<span>${escapeHtml(path)}</span> · <span class="muted">无 frontmatter</span>`;
     }
-    body.innerHTML = data.html;
+    body.innerHTML = `<div class="page-meta">${meta}</div>` + data.html;
   } catch (e) {
-    body.innerHTML = `<p class="muted">打开失败：${e.message}</p>`;
+    body.innerHTML = `<p class="muted">打开失败：${escapeHtml(e.message)}</p>`;
   }
 }
 
-// 站内 wikilink 导航：事件委托到正文，点 .wikilink[data-page] 切页。
-$("#page-body").addEventListener("click", (e) => {
+$("#wiki-search").addEventListener("input", (e) => renderResults(e.target.value));
+
+// 站内 wikilink 导航：事件委托到 wiki 正文。
+$("#wiki-body").addEventListener("click", (e) => {
   const a = e.target.closest("a.wikilink[data-page]");
   if (a) { e.preventDefault(); openPage(a.dataset.page); }
 });
 
-// ── 零 LLM 报告 / graph ─────────────────────────────────────────────────────
+// ── 浮层 ──────────────────────────────────────────────────────────────────────
 
 function showOverlay(title, html) {
   $("#overlay-title").textContent = title;
@@ -103,6 +113,8 @@ function showOverlay(title, html) {
 }
 $("#overlay-close").addEventListener("click", () => $("#overlay").classList.add("hidden"));
 $("#overlay").addEventListener("click", (e) => { if (e.target.id === "overlay") $("#overlay").classList.add("hidden"); });
+
+// ── 零 LLM 报告 / graph ─────────────────────────────────────────────────────
 
 function renderReport(name, data) {
   const itemsKey = "violations" in data ? "violations" : "findings";
@@ -121,8 +133,7 @@ document.querySelectorAll(".actions button[data-report]").forEach((btn) => {
     const name = btn.dataset.report;
     showOverlay(name, '<p class="muted">运行中…</p>');
     try {
-      const data = await getJSON(`/api/report/${name}`);
-      showOverlay(name, renderReport(name, data));
+      showOverlay(name, renderReport(name, await getJSON(`/api/report/${name}`)));
     } catch (e) {
       showOverlay(name, `<p class="report-bad">失败：${escapeHtml(e.message)}</p>`);
     }
@@ -131,7 +142,37 @@ document.querySelectorAll(".actions button[data-report]").forEach((btn) => {
 
 $("#graph-btn").addEventListener("click", () => window.open("/graph", "_blank"));
 
-// ── 写：ingest（入队 → 轮询）────────────────────────────────────────────────
+// ── 写：ingest（从 raw/ 选一篇 → 入队 → 轮询）────────────────────────────────
+
+$("#ingest-btn").addEventListener("click", openIngestPicker);
+
+async function openIngestPicker() {
+  showOverlay("ingest", '<p class="muted">加载 raw/…</p>');
+  let files;
+  try {
+    ({ files } = await getJSON("/api/raw"));
+  } catch (e) {
+    $("#overlay-body").innerHTML = `<p class="report-bad">加载 raw/ 失败：${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  if (!files.length) {
+    box.innerHTML = '<p class="muted">raw/ 为空：把 .md 放进 raw/ 再来。</p>';
+    return;
+  }
+  for (const f of files) {
+    const row = document.createElement("div");
+    row.className = "raw-pick";
+    const name = document.createElement("span");
+    name.textContent = `${f.name} (${f.size}B)`; // textContent：文件名按字面显示，无注入
+    const btn = document.createElement("button");
+    btn.textContent = "ingest";
+    btn.addEventListener("click", () => triggerIngest(`raw/${f.name}`));
+    row.append(name, btn);
+    box.appendChild(row);
+  }
+}
 
 async function triggerIngest(target) {
   showOverlay("ingest", `<p class="muted">已提交 <code>${escapeHtml(target)}</code>，排队中…</p>`);
@@ -139,7 +180,7 @@ async function triggerIngest(target) {
     const { job_id } = await postJSON("/api/ingest", { target });
     await pollJob(job_id, target);
   } catch (e) {
-    showOverlay("ingest", `<p class="report-bad">提交失败：${escapeHtml(e.message)}</p>`);
+    $("#overlay-body").innerHTML = `<p class="report-bad">提交失败：${escapeHtml(e.message)}</p>`;
   }
 }
 
@@ -149,11 +190,11 @@ async function pollJob(jobId, target) {
     if (job.state === "done") {
       const ok = job.exit_code === 0;
       const badge = ok ? '<span class="report-ok">✓ 通过</span>' : `<span class="report-bad">✗ 退出码 ${job.exit_code}</span>`;
-      showOverlay("ingest", `<p>${escapeHtml(target)} ${badge}</p><pre>${escapeHtml(job.output || "(无输出)")}</pre>`);
-      await Promise.all([loadPages(), loadRaw()]); // 写后刷新页面树
+      $("#overlay-body").innerHTML = `<p>${escapeHtml(target)} ${badge}</p><pre>${escapeHtml(job.output || "(无输出)")}</pre>`;
+      await loadPages(); // 写后刷新 wiki 搜索列表
       return;
     }
-    showOverlay("ingest", `<p class="muted">${escapeHtml(target)} · ${job.state}…</p>`);
+    $("#overlay-body").innerHTML = `<p class="muted">${escapeHtml(target)} · ${job.state}…</p>`;
     await sleep(400);
   }
 }
@@ -182,8 +223,9 @@ function addMsg(cls, text) {
   const div = document.createElement("div");
   div.className = `msg ${cls}`;
   div.textContent = text;
-  $("#chat-log").appendChild(div);
-  $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+  const log = $("#chat-log");
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
   return div;
 }
 
@@ -236,9 +278,10 @@ function handleSSE(frame, botEl) {
   } catch {
     return; // 跳过坏帧，绝不让单帧解析失败中断整条流、抹掉已上屏的答案
   }
+  const log = $("#chat-log");
   if (event === "token") {
     botEl.textContent += payload;
-    $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+    log.scrollTop = log.scrollHeight;
   } else if (event === "done") {
     conversationId = payload.conversation_id;
     if (payload.answer) botEl.textContent = payload.answer; // 以完整答案收尾，避免增量拼接误差
@@ -248,25 +291,5 @@ function handleSSE(frame, botEl) {
   }
 }
 
-// ── 工具 ────────────────────────────────────────────────────────────────────
-
-async function postJSON(url, body) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`${url} → ${res.status}`);
-  return res.json();
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 // ── 启动 ────────────────────────────────────────────────────────────────────
 loadPages();
-loadRaw();
