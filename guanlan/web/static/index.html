@@ -4,16 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>观澜 · Web 宿主</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
+<link rel="apple-touch-icon" href="/static/logo.png">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
 <header class="topbar">
   <div class="brand">
-    <span class="logo">观澜</span>
-    <span class="tagline">观水有术，必观其澜</span>
+    <img class="brand-icon" src="/static/logo.png" alt="观澜 logo" width="38" height="38">
+    <span class="wordmark">
+      <span class="logo">观澜</span>
+      <span class="tagline">观水有术，必观其澜</span>
+    </span>
   </div>
   <nav class="actions">
     <button id="chat-new" title="开启新会话（清空上下文）">新会话</button>
+    <button id="history-btn" title="历史会话：列出、点开续聊、删除">历史会话</button>
     <button id="ingest-btn" title="从 raw/ 选一篇触发 ingest">ingest</button>
     <button data-report="check">check</button>
     <button data-report="health">health</button>

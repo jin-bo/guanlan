@@ -9,6 +9,7 @@ import json
 import socket
 import sys
 import time
+import uuid
 
 import pytest
 
@@ -60,8 +61,18 @@ def test_static_assets_served(client) -> None:
 
 
 def test_static_assets_bundled() -> None:
-    for name in ("index.html", "app.js", "app.css"):
+    for name in ("index.html", "app.js", "app.css", "logo.png"):
         assert (STATIC_DIR / name).is_file()
+
+
+def test_logo_served_and_referenced(client) -> None:
+    """观澜图标随包、可经 /static/logo.png 取到，且首页用作 favicon + 顶栏品牌标记。"""
+    resp = client.get("/static/logo.png")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] in ("image/png", "image/x-png")
+    index = client.get("/").text
+    assert 'rel="icon"' in index and "/static/logo.png" in index
+    assert 'class="brand-icon"' in index
 
 
 def test_serve_binds_localhost_only(kb, monkeypatch) -> None:
@@ -563,22 +574,39 @@ class _Recorder:
         return rec
 
 
+class _FakeSkillManager:
+    """打桩 skill_manager：记录 activate_skill 调用，并让 get_active_skills 反映已激活的 skill
+    （P4.2 `_save` 镜像 cli/session.py 取 `get_active_skills().keys()` 落 active_skills）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self._active: dict[str, dict] = {}
+
+    def activate_skill(self, name, *args, **kwargs):
+        self.calls.append(("activate_skill", (name, *args), kwargs))
+        self._active[name] = {}
+
+    def get_active_skills(self) -> dict:
+        return dict(self._active)
+
+
 class _FakeAgent:
-    """打桩 agent：arun 把 user/assistant 入 messages，并**从工作线程**经传入的 transport
-    发 LLM_TEXT（镜像真 arun 的 run_in_executor 线程模型，逼出 call_soon_threadsafe 桥）。"""
+    """打桩 agent：arun 把 user/assistant 入 messages（**dict 形态，镜像真 agent.messages**），
+    并**从工作线程**经传入的 transport 发 LLM_TEXT（镜像真 arun 的 run_in_executor 线程模型，
+    逼出 call_soon_threadsafe 桥）。messages 可被外部赋值（恢复路径 agent.messages = loaded）。"""
 
     def __init__(self, kwargs: dict) -> None:
         self.kwargs = kwargs
         self.transport = kwargs["transport"]  # 构造期传入的真 transport（token 唯一活线）
-        self.messages: list[tuple[str, str]] = []
+        self.messages: list[dict] = []  # dict 形态 {"role","content"}：可被 save/load_session 序列化
         self.permission_engine = _Recorder()
         self.tool_runner = _Recorder()
-        self.skill_manager = _Recorder()
+        self.skill_manager = _FakeSkillManager()
         self.closed = False
 
     async def arun(self, msg: str, **_kw) -> str:
-        self.messages.append(("user", msg))
-        n = sum(1 for role, _ in self.messages if role == "user")
+        self.messages.append({"role": "user", "content": msg})
+        n = sum(1 for m in self.messages if m.get("role") == "user")
         answer = f"#{n} 回应：{msg}"  # 含轮次 → 第二轮答案体现累积历史
 
         loop = asyncio.get_running_loop()
@@ -588,7 +616,7 @@ class _FakeAgent:
                 self.transport.emit(AgentEvent(EventType.LLM_TEXT, {"chunk": ch}))
 
         await loop.run_in_executor(None, work)
-        self.messages.append(("assistant", answer))
+        self.messages.append({"role": "assistant", "content": answer})
         return answer
 
     def close(self) -> None:
@@ -596,8 +624,12 @@ class _FakeAgent:
 
 
 @pytest.fixture
-def chat_client(kb, monkeypatch):
-    """注入 fake build_from_environment + no-op ensure_skill_available；捕获 kwargs/agents。"""
+def chat_env(kb, monkeypatch):
+    """注入 fake build_from_environment + no-op ensure_skill_available；返回 (kb, captured)。
+
+    供需要多 store / 模拟重启 / 自定 session_persist 的 P4.2 测试用——它们自建 TestClient 或
+    直接构造 ConversationStore（同一 monkeypatch 对后建的 app/store 同样生效）。
+    """
     import guanlan.web.chat as chat_mod
 
     captured = {"kwargs": [], "agents": []}
@@ -610,6 +642,13 @@ def chat_client(kb, monkeypatch):
         return agent
 
     monkeypatch.setattr(chat_mod, "build_from_environment", fake_bfe)
+    return kb, captured
+
+
+@pytest.fixture
+def chat_client(chat_env):
+    """绑定到临时知识库、注入 fake agent 的 TestClient（默认 session_persist 开）。"""
+    kb, captured = chat_env
     with TestClient(create_app(kb)) as c:
         yield c, captured
 
@@ -818,21 +857,6 @@ def test_delete_conversation(chat_client) -> None:
     assert client.delete(f"/api/conversations/{cid}").status_code == 404  # 已丢
 
 
-def test_chat_does_not_persist_session(chat_client, monkeypatch) -> None:
-    """会话仅内存：不调 persist/load_session（决策P4-8）。"""
-    import agentao.embedding.sessions as sess
-
-    def _boom(*_a, **_k):
-        raise AssertionError("不应落盘会话")
-
-    monkeypatch.setattr(sess, "save_session", _boom, raising=False)
-    monkeypatch.setattr(sess, "load_session", _boom, raising=False)
-
-    client, _ = chat_client
-    _, done, error = _chat(client, "问")
-    assert error is None and done is not None
-
-
 def test_absent_endpoints(client) -> None:
     """范围红线：无 /api/query、无 POST /api/raw、无写作业 SSE 订阅端点（§10）。"""
     assert client.get("/api/query").status_code == 404
@@ -864,3 +888,448 @@ def test_web_missing_extra_degrades(kb, monkeypatch, capsys) -> None:
     rc = main(["-C", str(kb), "web", "--no-browser"])
     assert rc == 1
     assert "guanlan[web]" in capsys.readouterr().err
+
+
+# ───────────────────────── 会话落盘与跨重启恢复（P4.2） ─────────────────────────
+
+from guanlan.skill import SKILL_NAME  # noqa: E402
+
+
+def _session_files(kb) -> list:
+    """盘上现存的会话快照文件（newest-first 无关，仅做计数/读内容用）。"""
+    d = kb / ".agentao" / "sessions"
+    return sorted(d.glob("*.json")) if d.exists() else []
+
+
+def _snapshots_for(kb, session_id: str) -> list:
+    """盘上属于某 `session_id` 的快照文件（验 prune 后每会话仅 1 份）。"""
+    out = []
+    for p in _session_files(kb):
+        try:
+            if json.loads(p.read_text(encoding="utf-8")).get("session_id") == session_id:
+                out.append(p)
+        except (OSError, json.JSONDecodeError):
+            continue
+    return out
+
+
+def _write_foreign_session(kb, session_id: str, *, active_skills=None) -> None:
+    """直接落一份会话快照（模拟 agentao CLI 或构造特定 active_skills 的会话）。"""
+    from agentao.embedding import save_session
+
+    save_session(
+        [{"role": "user", "content": "外部会话"}, {"role": "assistant", "content": "回应"}],
+        "m",
+        active_skills=active_skills if active_skills is not None else ["other-skill"],
+        session_id=session_id,
+        project_root=kb,
+    )
+
+
+def test_session_persist_round_trip(chat_client, kb) -> None:
+    """一轮后盘上出现该会话文件；load_session 取回含本轮 user/assistant；文件内 session_id==conv.id。"""
+    from agentao.embedding import load_session
+
+    client, _ = chat_client
+    _, done, _ = _chat(client, "第一问")
+    cid = done["conversation_id"]
+
+    snaps = _snapshots_for(kb, cid)
+    assert len(snaps) == 1  # 落盘且 session_id 写进文件内容
+    assert uuid.UUID(cid)  # conv.id 是规范 UUID（决策P4.2-2）
+
+    messages, _model, active = load_session(cid, project_root=kb)
+    assert {m["role"] for m in messages} == {"user", "assistant"}
+    assert any(m["content"] == "第一问" for m in messages)
+    assert SKILL_NAME in active  # 落了 guanlan-wiki（恢复时据此过滤/激活）
+
+
+def test_session_multiturn_dedup_and_restore_latest(chat_client, kb) -> None:
+    """同会话连发 3 轮：①GET 只 1 条（按 session_id 去重）；②盘上该会话仅 1 份；③恢复到第 3 轮最新。"""
+    client, captured = chat_client
+    _, done, _ = _chat(client, "Q1")
+    cid = done["conversation_id"]
+    _chat(client, "Q2", conversation_id=cid)
+    _chat(client, "Q3", conversation_id=cid)
+
+    convs = client.get("/api/conversations").json()["conversations"]
+    assert sum(1 for c in convs if c["id"] == cid) == 1  # 去重：非 3 条快照
+    assert len(_snapshots_for(kb, cid)) == 1  # prune：每会话仅 1 份
+
+    # 模拟重启：新 store 读盘恢复，messages 已到第 3 轮最新状态。
+    import guanlan.web.chat as chat_mod
+
+    store2 = chat_mod.ConversationStore(kb, None)
+    conv = store2.restore(cid)
+    assert conv is not None
+    contents = [m["content"] for m in conv.agent.messages]
+    assert "Q3" in contents and "#3 回应：Q3" in contents  # 第 3 轮内容在
+    assert conv.turns == 3
+
+
+def test_cross_restart_restore_via_http(chat_env, kb) -> None:
+    """模拟重启：用同一 kb 新建 store/app → GET 列出上一进程会话（live=false）→ 带 id 续聊。"""
+    _kb, _ = chat_env
+    with TestClient(create_app(kb)) as c1:
+        _, done, _ = _chat(c1, "重启前一问")
+        cid = done["conversation_id"]
+
+    # 新进程：全新 app（空内存），盘上 catalog 仍在。
+    with TestClient(create_app(kb)) as c2:
+        listed = c2.get("/api/conversations").json()["conversations"]
+        entry = next(e for e in listed if e["id"] == cid)
+        assert entry["live"] is False  # 来自盘上 catalog
+        assert "messages" in entry  # 冷条目报消息数（非 turns）
+
+        _, done2, error = _chat(c2, "重启后追问", conversation_id=cid)
+        assert error is None and done2 is not None
+        assert done2["conversation_id"] == cid
+        assert done2["answer"].startswith("#2")  # 看到重启前累积的上下文（第 2 轮）
+
+
+def test_restore_preserves_readonly_posture(chat_env, kb) -> None:
+    """恢复后两点只读置位 + 激活 guanlan-wiki（由共用构造，非回放盘上 active_skills）。"""
+    import guanlan.web.chat as chat_mod
+
+    with TestClient(create_app(kb)) as c1:
+        _, done, _ = _chat(c1, "一问")
+        cid = done["conversation_id"]
+
+    store2 = chat_mod.ConversationStore(kb, None)
+    conv = store2.restore(cid)
+    assert conv is not None
+    agent = conv.agent
+    assert any(call[0] == "set_mode" and call[1] == (PermissionMode.READ_ONLY,) for call in agent.permission_engine.calls)
+    assert any(call[0] == "set_readonly_mode" and call[1] == (True,) for call in agent.tool_runner.calls)
+    assert any(call[0] == "activate_skill" and call[1][0] == SKILL_NAME for call in agent.skill_manager.calls)
+
+
+def test_delete_live_cascades_to_disk(chat_client, kb) -> None:
+    """内存命中支：DELETE 后内存无对象 **且** 盘上该 session_id 全部快照被删。"""
+    client, _ = chat_client
+    _, done, _ = _chat(client, "问")
+    cid = done["conversation_id"]
+    assert _snapshots_for(kb, cid)  # 先有盘文件
+
+    assert client.delete(f"/api/conversations/{cid}").status_code == 200
+    assert not _snapshots_for(kb, cid)  # 级联删盘
+    assert not any(c["id"] == cid for c in client.get("/api/conversations").json()["conversations"])
+
+
+def test_delete_disk_only_session(chat_env, kb) -> None:
+    """仅在盘上（内存无对象）：规范 UUID + 作用域命中 → 删成功；皆无 → 404。"""
+    _kb, _ = chat_env
+    with TestClient(create_app(kb)) as c1:
+        _, done, _ = _chat(c1, "问")
+        cid = done["conversation_id"]
+
+    with TestClient(create_app(kb)) as c2:  # 新进程：cid 仅在盘上
+        assert c2.delete(f"/api/conversations/{cid}").status_code == 200
+        assert not _snapshots_for(kb, cid)
+        assert c2.delete(f"/api/conversations/{cid}").status_code == 404  # 已删
+        assert c2.delete(f"/api/conversations/{uuid.uuid4()}").status_code == 404  # 皆无
+
+
+def test_delete_live_even_when_disk_rotated(chat_env, kb, monkeypatch) -> None:
+    """live 但盘文件已被删：仍走内存命中支删内存（best-effort delete_session 不报错）。"""
+    _kb, _ = chat_env
+    with TestClient(create_app(kb)) as client:
+        _, done, _ = _chat(client, "问")
+        cid = done["conversation_id"]
+        # 模拟盘文件已被 rotate 掉：手动删光，再 DELETE，仍应 200（不被 _disk_session 闸挡）。
+        for p in _snapshots_for(kb, cid):
+            p.unlink()
+        assert client.delete(f"/api/conversations/{cid}").status_code == 200
+        assert not any(c["id"] == cid for c in client.get("/api/conversations").json()["conversations"])
+
+
+def test_restore_race_returns_404_not_error(chat_env, kb, monkeypatch) -> None:
+    """_disk_session 命中后、load_session 前文件被删/写坏 → restore 返回 None → 端点 404，不冒流式 error。"""
+    import guanlan.web.chat as chat_mod
+
+    with TestClient(create_app(kb)) as c1:
+        _, done, _ = _chat(c1, "问")
+        cid = done["conversation_id"]
+
+    # load_session 抛 JSONDecodeError（模拟竞态/坏文件）。
+    def _boom(*_a, **_k):
+        raise json.JSONDecodeError("x", "y", 0)
+
+    monkeypatch.setattr(chat_mod, "load_session", _boom)
+    with TestClient(create_app(kb)) as c2:
+        resp = c2.post("/api/chat", json={"message": "续", "conversation_id": cid})
+        assert resp.status_code == 404  # 不是流式 error、不冒 traceback
+
+
+def test_scope_filter_non_web_session(chat_env, kb) -> None:
+    """active_skills 不含 SKILL_NAME 的会话：GET 不列、restore → 404（决策P4.2-6）。"""
+    foreign = str(uuid.uuid4())
+    _write_foreign_session(kb, foreign, active_skills=["agentao-cli-skill"])
+
+    with TestClient(create_app(kb)) as client:
+        listed = client.get("/api/conversations").json()["conversations"]
+        assert not any(c["id"] == foreign for c in listed)  # 不列非 Web 会话
+        resp = client.post("/api/chat", json={"message": "x", "conversation_id": foreign})
+        assert resp.status_code == 404  # restore 拒之
+
+
+def test_exact_id_rejects_prefix_and_timestamp(chat_env, kb, monkeypatch) -> None:
+    """非规范 id（短前缀/时间戳 stem/乱串）→ 404，且 load_session 未被调用（_is_canonical_uuid 先挡）。"""
+    import guanlan.web.chat as chat_mod
+
+    with TestClient(create_app(kb)) as c1:
+        _, done, _ = _chat(c1, "问")
+        cid = done["conversation_id"]
+
+    called = []
+    real_load = chat_mod.load_session
+    monkeypatch.setattr(chat_mod, "load_session", lambda *a, **k: called.append(1) or real_load(*a, **k))
+
+    with TestClient(create_app(kb)) as c2:
+        for bad in (cid[:8], _session_files(kb)[0].stem, "not-a-uuid"):
+            resp = c2.post("/api/chat", json={"message": "x", "conversation_id": bad})
+            assert resp.status_code == 404, bad
+        assert called == []  # 规范化闸先挡，绝不喂前缀匹配的 load_session
+
+
+def test_delete_prefix_does_not_cross_delete(chat_env, kb) -> None:
+    """DELETE 传某会话 session_id 短前缀 → 404 且该会话快照仍在（不经 delete_session 前缀删一片）。"""
+    with TestClient(create_app(kb)) as c1:
+        _, done, _ = _chat(c1, "问")
+        cid = done["conversation_id"]
+
+    with TestClient(create_app(kb)) as c2:  # 新进程：仅在盘上
+        assert c2.delete(f"/api/conversations/{cid[:8]}").status_code == 404
+        assert _snapshots_for(kb, cid)  # 快照仍在，未被前缀误删
+
+
+def test_delete_foreign_session_scope_blocked(chat_env, kb) -> None:
+    """DELETE 传非 Web 会话（无 SKILL_NAME）全 UUID → 404 且文件保留（_disk_session 作用域拦截）。"""
+    foreign = str(uuid.uuid4())
+    _write_foreign_session(kb, foreign, active_skills=["other"])
+
+    with TestClient(create_app(kb)) as client:
+        assert client.delete(f"/api/conversations/{foreign}").status_code == 404
+        assert _snapshots_for(kb, foreign)  # 非 Web 会话不被 Web 端删
+
+
+def test_prune_single_long_conversation_keeps_one(chat_client, kb) -> None:
+    """单会话 >10 轮：每轮 best-effort prune，该会话盘上始终仅 1 份、不冲掉别人。"""
+    client, _ = chat_client
+    _, done, _ = _chat(client, "Q1")
+    cid = done["conversation_id"]
+    for i in range(2, 14):  # 共 13 轮
+        _chat(client, f"Q{i}", conversation_id=cid)
+    assert len(_snapshots_for(kb, cid)) == 1
+    assert len(_session_files(kb)) == 1  # 只有这一个会话
+
+
+def test_prune_ten_sessions_then_update_one(chat_env, kb) -> None:
+    """10 会话各 1 份后，更新其中一个：save-前-prune 不把目录顶到 11，另 9 个仍在（best-effort 口径）。"""
+    with TestClient(create_app(kb)) as client:
+        cids = []
+        for i in range(10):
+            _, done, _ = _chat(client, f"会话{i}")
+            cids.append(done["conversation_id"])
+        assert len({p.name for p in _session_files(kb)}) == 10
+
+        _chat(client, "会话0-续", conversation_id=cids[0])  # 更新会话 0
+        on_disk = {
+            json.loads(p.read_text(encoding="utf-8"))["session_id"] for p in _session_files(kb)
+        }
+        assert set(cids) <= on_disk  # 10 个会话都还在盘上（prune 在前没把别人顶出）
+        assert len(_session_files(kb)) == 10  # 仍 10 份（会话 0 prune 旧份后重存）
+
+
+def test_more_than_ten_sessions_rotate(chat_env, kb) -> None:
+    """>10 个不同会话各 1 轮：list_sessions 去重后受 _MAX_SESSIONS 文件轮转，盘上 catalog ≤10。"""
+    with TestClient(create_app(kb)) as client:
+        for i in range(13):
+            _chat(client, f"会话{i}")  # 各新建（无 conversation_id）
+
+    # 新进程（空内存）：合并视图只剩盘上 catalog，被 _rotate_sessions 截到 10。
+    with TestClient(create_app(kb)) as fresh:
+        listed = fresh.get("/api/conversations").json()["conversations"]
+        assert len(listed) == 10
+        assert all(c["live"] is False for c in listed)
+
+
+def test_prune_unlink_failure_does_not_block_save(chat_env, kb, monkeypatch) -> None:
+    """prune 删旧份抛 OSError → save_session 仍被调用、本轮答案正常返回（best-effort）。"""
+    import guanlan.web.chat as chat_mod
+
+    saved = []
+    real_save = chat_mod.save_session
+    monkeypatch.setattr(
+        chat_mod, "save_session", lambda *a, **k: saved.append(1) or real_save(*a, **k)
+    )
+
+    with TestClient(create_app(kb)) as client:
+        _, done, _ = _chat(client, "Q1")
+        cid = done["conversation_id"]
+        # 第二轮：prune 试删第一轮快照时抛 OSError。
+        orig_unlink = chat_mod.Path.unlink
+
+        def boom_unlink(self, *a, **k):
+            raise OSError("不可删")
+
+        monkeypatch.setattr(chat_mod.Path, "unlink", boom_unlink)
+        _, done2, error = _chat(client, "Q2", conversation_id=cid)
+        monkeypatch.setattr(chat_mod.Path, "unlink", orig_unlink)
+
+    assert error is None and done2 is not None  # 答案正常返回
+    assert len(saved) >= 2  # 两轮都调了 save（prune 失败跳过、不阻断）
+
+
+def test_restore_uses_current_model_not_persisted(chat_env, kb) -> None:
+    """恢复**不**用盘上持久的 model，而用当前进程模型（镜像 agentao PR #81）。"""
+    from agentao.embedding import load_session
+
+    import guanlan.web.chat as chat_mod
+
+    # 进程 1：默认模型 old-model，落盘记录该名字。
+    with TestClient(create_app(kb, model="old-model")) as c1:
+        _, done, _ = _chat(c1, "问")
+        cid = done["conversation_id"]
+    _msgs, saved_model, _ = load_session(cid, project_root=kb)
+    assert saved_model == "old-model"  # 快照里存的是存盘时的模型名
+
+    # 进程 2：默认模型 new-model → restore 必须用 new-model（当前进程），不回绑盘上 old-model。
+    store2 = chat_mod.ConversationStore(kb, "new-model")
+    conv = store2.restore(cid)
+    assert conv is not None
+    assert conv.agent.kwargs.get("model") == "new-model"  # 用当前进程模型
+    assert conv.agent.kwargs.get("model") != "old-model"  # 不回绑盘上持久模型
+
+
+def test_failed_save_does_not_break_answer(chat_env, kb, monkeypatch) -> None:
+    """save 抛错：off-loop 失败仅记日志，已成功的 arun 答案照常返回（失败不毁答案，§3.1）。"""
+    import guanlan.web.chat as chat_mod
+
+    with TestClient(create_app(kb)) as client:
+        _, done, _ = _chat(client, "Q1")
+        cid = done["conversation_id"]
+        monkeypatch.setattr(
+            chat_mod, "save_session", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+        )
+        _, done2, error = _chat(client, "Q2", conversation_id=cid)
+        assert error is None and done2 is not None  # 落盘失败不冒泡、不毁答案
+
+
+def test_restore_backfills_title_and_caps_memory(chat_env, kb) -> None:
+    """恢复回填 title（取自首条 user）；并发 restore 同一 id 只产 1 个；内存满 → restore 抛。"""
+    import guanlan.web.chat as chat_mod
+
+    with TestClient(create_app(kb)) as c1:
+        _, done, _ = _chat(c1, "标题来源问")
+        cid = done["conversation_id"]
+
+    store = chat_mod.ConversationStore(kb, None)
+    conv = store.restore(cid)
+    assert conv is not None and conv.title  # 非空（取自首条 user）
+    assert store.restore(cid) is conv  # double-check：再恢复同一 id 复用同一对象
+
+    # 内存满 → restore 抛 RuntimeError（同 create，端点转 503）。
+    store2 = chat_mod.ConversationStore(kb, None)
+    monkeypatch_max = chat_mod.MAX_CONVERSATIONS
+    try:
+        chat_mod.MAX_CONVERSATIONS = 0
+        with pytest.raises(RuntimeError):
+            store2.restore(cid)
+    finally:
+        chat_mod.MAX_CONVERSATIONS = monkeypatch_max
+
+
+def test_conversation_messages_replay_live(chat_client) -> None:
+    """live 会话：GET …/messages 回放 user/assistant 气泡，assistant 带渲染 html。"""
+    client, _ = chat_client
+    _, done, _ = _chat(client, "第一问")
+    cid = done["conversation_id"]
+
+    resp = client.get(f"/api/conversations/{cid}/messages")
+    assert resp.status_code == 200
+    msgs = resp.json()["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[0]["content"] == "第一问"
+    assert "html" in msgs[1] and "回应：第一问" in msgs[1]["html"]  # assistant 富排版（安全 HTML）
+
+
+def test_conversation_messages_replay_cold(chat_env, kb) -> None:
+    """冷会话（模拟重启）：GET …/messages 读盘回放、**不建 agent**（查看 ≠ 续聊懒恢复）。"""
+    _kb, captured = chat_env
+    with TestClient(create_app(kb)) as c1:
+        _, done, _ = _chat(c1, "重启前一问")
+        cid = done["conversation_id"]
+
+    built_before = len(captured["agents"])
+    with TestClient(create_app(kb)) as c2:
+        resp = c2.get(f"/api/conversations/{cid}/messages")
+        assert resp.status_code == 200
+        contents = [m["content"] for m in resp.json()["messages"]]
+        assert "重启前一问" in contents
+        assert len(captured["agents"]) == built_before  # 纯查看不构造 agent
+
+
+def test_conversation_messages_strips_system_reminder(chat_env, kb) -> None:
+    """回放剥掉 user 消息里的 <system-reminder> 噪声（与 list_sessions 取 title 同口径）。"""
+    from agentao.embedding import save_session
+
+    cid = str(uuid.uuid4())
+    save_session(
+        [
+            {"role": "user", "content": "真问题<system-reminder>隐藏注入</system-reminder>"},
+            {"role": "assistant", "content": "答案"},
+        ],
+        "m",
+        active_skills=[SKILL_NAME],
+        session_id=cid,
+        project_root=kb,
+    )
+    with TestClient(create_app(kb)) as client:
+        msgs = client.get(f"/api/conversations/{cid}/messages").json()["messages"]
+        assert msgs[0]["content"] == "真问题"  # 注入块被剥掉
+        assert "system-reminder" not in msgs[0]["content"]
+
+
+def test_conversation_messages_404_unknown_and_foreign(chat_env, kb) -> None:
+    """未知 / 非规范 id / 非 Web 会话（无 SKILL_NAME）→ 404（同 chat/delete 的作用域+精确闸）。"""
+    foreign = str(uuid.uuid4())
+    _write_foreign_session(kb, foreign, active_skills=["other"])
+    with TestClient(create_app(kb)) as client:
+        assert client.get(f"/api/conversations/{uuid.uuid4()}/messages").status_code == 404
+        assert client.get("/api/conversations/not-a-uuid/messages").status_code == 404
+        assert client.get(f"/api/conversations/{foreign}/messages").status_code == 404
+
+
+def test_conversation_messages_disk_only_404_when_persist_off(chat_env, kb) -> None:
+    """--no-session-persist：盘上遗留会话的 messages 一律 404（不读盘）；live 会话仍可回放。"""
+    leftover = str(uuid.uuid4())
+    _write_foreign_session(kb, leftover, active_skills=[SKILL_NAME])
+    with TestClient(create_app(kb, session_persist=False)) as client:
+        assert client.get(f"/api/conversations/{leftover}/messages").status_code == 404
+        _, done, _ = _chat(client, "问")
+        cid = done["conversation_id"]
+        assert client.get(f"/api/conversations/{cid}/messages").status_code == 200  # live 内存可回放
+
+
+def test_no_session_persist_equivalent_to_memory_only(chat_env, kb) -> None:
+    """--no-session-persist：turn 不落盘、GET 只见内存、disk-only id 一律 404、DELETE 内存命中只删内存。"""
+    _kb, _ = chat_env
+    with TestClient(create_app(kb, session_persist=False)) as client:
+        _, done, _ = _chat(client, "问")
+        cid = done["conversation_id"]
+        assert not _session_files(kb)  # 不落盘
+
+        # 即便盘上有遗留快照，带其 id 的 chat 也 404（restore 短路 not persist、不读盘）。
+        leftover = str(uuid.uuid4())
+        _write_foreign_session(kb, leftover, active_skills=[SKILL_NAME])
+        resp = client.post("/api/chat", json={"message": "x", "conversation_id": leftover})
+        assert resp.status_code == 404
+        # GET 只见内存会话，不列盘上遗留。
+        listed = client.get("/api/conversations").json()["conversations"]
+        assert [c["id"] for c in listed] == [cid]
+        # disk-only id（盘上遗留）DELETE → 404、不碰盘（遗留快照保留）。
+        assert client.delete(f"/api/conversations/{leftover}").status_code == 404
+        assert _snapshots_for(kb, leftover)
+        # 内存命中 DELETE：只删内存、不调 delete_session（无盘文件可删，本就没落）。
+        assert client.delete(f"/api/conversations/{cid}").status_code == 200
