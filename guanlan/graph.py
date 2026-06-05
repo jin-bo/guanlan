@@ -26,6 +26,8 @@ from .pages import (
     link_stem,
     link_target_stems,
     load_page,
+    page_title,
+    page_type,
 )
 from .paths import require_kb_root
 
@@ -66,27 +68,6 @@ class Graph:
     broken: list[Edge] = field(default_factory=list)  # edges 中 resolved=False 的子集。
 
 
-def _node_title(meta: dict | None, stem: str) -> str:
-    """容错取 title：无合法 meta / title 非非空字符串时回退 stem（决策P3-8）。"""
-    if isinstance(meta, dict):
-        title = meta.get("title")
-        if isinstance(title, str) and title.strip():
-            return title
-    return stem
-
-
-def _node_type(meta: dict | None) -> str:
-    """容错取 type：无合法 meta / type 非字符串时回退 'unknown'（决策P3-8）。
-
-    注意：graph **不**校验 type 是否 ∈ 合法集（那是 check 的职责），只当展示标签。
-    """
-    if isinstance(meta, dict):
-        type_ = meta.get("type")
-        if isinstance(type_, str) and type_:
-            return type_
-    return "unknown"
-
-
 def build_graph(wiki: Path) -> Graph:
     """建图：节点=非 config 页，边=已解析 `[[wikilink]]`（含断链边）。
 
@@ -115,8 +96,8 @@ def build_graph(wiki: Path) -> Graph:
         nodes.append(
             Node(
                 id=nid,
-                title=_node_title(meta, path.stem),
-                type=_node_type(meta),
+                title=page_title(meta, path.stem),
+                type=page_type(meta),
                 path=path.relative_to(root).as_posix(),
             )
         )

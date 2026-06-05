@@ -32,6 +32,8 @@ __all__ = [
     "split_frontmatter",
     "parse_frontmatter",
     "load_page",
+    "page_title",
+    "page_type",
     "link_stem",
     "iter_pages",
     "link_target_stems",
@@ -121,12 +123,38 @@ def load_page(path: Path) -> tuple[dict | None, str]:
 
     返回 `(meta, body)`：frontmatter 缺块 / 无法解析 / 非映射时 `meta=None`、**绝不抛**
     （决策P3-8）。frontmatter 正确性的报错单一归口 `check`，审计命令不复制这套校验。
+
+    非 UTF-8 字节用 `errors="replace"` 兜底（坏字符→`�`），兑现"绝不抛"承诺：否则一张
+    GBK/Latin-1 页面会让 health/lint/graph 乃至 Web 浏览整体崩在 `UnicodeDecodeError`。
+    严格档 `check` 自有读取（不走本函数），编码硬错仍可由其暴露。
     """
-    block, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    block, body = split_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
     if block is None:
         return None, body
     meta, _error = _load_yaml_mapping(block)  # 坏 meta → None，错误消息丢弃（不报错）。
     return meta, body
+
+
+def page_title(meta: dict | None, stem: str) -> str:
+    """容错取 title：无合法 meta / title 非非空字符串时回退 stem（决策P3-8）。
+
+    与 `page_type` 一起是 `graph` 节点标签 / Web 页面清单**共用**的 frontmatter 展示取值器
+    （单一归口，杜绝两处口径漂移）。**不**校验合法性——那是 `check` 的职责。
+    """
+    if isinstance(meta, dict):
+        title = meta.get("title")
+        if isinstance(title, str) and title.strip():
+            return title
+    return stem
+
+
+def page_type(meta: dict | None) -> str:
+    """容错取 type：无合法 meta / type 非字符串时回退 `'unknown'`（决策P3-8）。只作展示标签。"""
+    if isinstance(meta, dict):
+        type_ = meta.get("type")
+        if isinstance(type_, str) and type_:
+            return type_
+    return "unknown"
 
 
 def link_stem(target: str) -> str:
