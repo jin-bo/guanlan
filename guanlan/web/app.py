@@ -17,18 +17,27 @@ import anyio
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from ..check import format_report as _format_check
 from ..check import run_check
-from ..errors import EXIT_OK
-from ..graph import graph_entrypoint
+from ..graph import build_and_write_graph
 from ..health import format_report as _format_health
 from ..health import run_health
+from ..ingest import run_ingest
 from ..lint import format_report as _format_lint
 from ..lint import run_lint
 from ..pages import iter_pages, load_page, page_title, page_type
 from ..runtime import AgentRunner
+from .jobs import JobQueue
 from .render import render_page
+
+
+class IngestBody(BaseModel):
+    """`POST /api/ingest` 请求体。`target` 仍由 run_ingest 内部 _resolve_raw_target 兜底校验。"""
+
+    target: str
+    model: str | None = None
 
 # 随包前端静态资源目录（guanlan/web/static/，随 packages 自动入 wheel，见 pyproject）。
 STATIC_DIR = Path(__file__).parent / "static"
@@ -106,6 +115,9 @@ def create_app(
     app.state.root = root
     app.state.model = model
     app.state.runner = runner
+    # 单写者作业队列（唯一写作业 ingest 走它，FIFO 串行；决策P4-5）。
+    jobs = JobQueue()
+    app.state.jobs = jobs
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -149,12 +161,14 @@ def create_app(
     # graph：构建（写派生 graph/）后 302 到自包含静态视图。json_only 时改跳 graph.json。
     @app.get("/graph")
     async def graph(json_only: bool = False) -> RedirectResponse:
-        rc = await anyio.to_thread.run_sync(
-            functools.partial(graph_entrypoint, root, json_only=json_only)
-        )
-        # 构建失败（写 graph/ 出错等）→ 报 500，别 302 到一个并不存在的文件让用户撞 404。
-        if rc != EXIT_OK:
-            raise HTTPException(status_code=500, detail="graph 构建失败，详见服务端日志。")
+        # 用无打印的 build_and_write_graph（非 graph_entrypoint）：worker 的进程级 redirect_stdout
+        # 期间不引入并发打印者（决策P4-5 红线）。写失败 → 500，别 302 到缺失文件让用户撞 404。
+        try:
+            await anyio.to_thread.run_sync(
+                functools.partial(build_and_write_graph, root, json_only=json_only)
+            )
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"graph 构建失败：{exc}") from exc
         target = "/graph/graph.json" if json_only else "/graph/graph.html"
         return RedirectResponse(url=target, status_code=302)
 
@@ -171,5 +185,33 @@ def create_app(
         if not path.is_file():
             raise HTTPException(status_code=404, detail="graph.json 尚未生成，请先 GET /graph")
         return FileResponse(path, media_type="application/json")
+
+    # 写（唯一写入口 = ingest）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
+    @app.post("/api/ingest")
+    async def ingest(body: IngestBody) -> dict:
+        # target 不在此预校验：run_ingest 内部 _resolve_raw_target 是单一归口（须在 raw/、是 .md、
+        # 存在），Web 不旁路 P2 入口校验；非法 target → 作业以 EXIT_USAGE 完成，轮询可见。
+        def _job() -> int:
+            return run_ingest(
+                body.target,
+                root=root,
+                model=body.model or model,
+                runner=runner,
+            )
+
+        return {"job_id": jobs.enqueue("ingest", _job)}
+
+    @app.get("/api/jobs/{job_id}")
+    async def job_status(job_id: str) -> dict:
+        job = jobs.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"未知作业：{job_id}")
+        return {
+            "id": job.id,
+            "kind": job.kind,
+            "state": job.state,
+            "exit_code": job.exit_code,
+            "output": job.output,
+        }
 
     return app

@@ -40,6 +40,7 @@ __all__ = [
     "graph_to_dict",
     "dump_json",
     "render_html",
+    "build_and_write_graph",
     "graph_entrypoint",
     "main",
 ]
@@ -242,6 +243,23 @@ def render_html(g: Graph) -> str:
 """
 
 
+def build_and_write_graph(root: Path, *, json_only: bool) -> Graph:
+    """建图并写派生 `graph/`（**无打印、无退出码**），返回 `Graph`；写失败抛 `OSError`。
+
+    从 `graph_entrypoint` 抽出 IO 内核，供 Web 宿主复用（决策P4-7）：Web 写作业 worker 用
+    进程级 `redirect_stdout` 捕获 ingest 输出，故任何**并发**的 stdout 打印者都是隐患——`/graph`
+    端点改调本函数（不打印），就不会把"已写 graph"那行漏进某个并行 ingest 作业的捕获里。
+    只读 `wiki/`、只写派生 `graph/`，绝不碰 `raw/`/`wiki/`。
+    """
+    g = build_graph(root / "wiki")
+    graph_dir = root / "graph"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    (graph_dir / "graph.json").write_text(dump_json(g), encoding="utf-8")
+    if not json_only:
+        (graph_dir / "graph.html").write_text(render_html(g), encoding="utf-8")
+    return g
+
+
 def graph_entrypoint(root_dir: str | Path, *, json_only: bool) -> int:
     """`guanlan graph` 的单一落地：建图 → 写 graph/ → 退出码。
 
@@ -253,15 +271,10 @@ def graph_entrypoint(root_dir: str | Path, *, json_only: bool) -> int:
         print(exc, file=sys.stderr)
         return exc.exit_code
 
-    g = build_graph(root / "wiki")
-    graph_dir = root / "graph"
     try:
-        graph_dir.mkdir(parents=True, exist_ok=True)
-        (graph_dir / "graph.json").write_text(dump_json(g), encoding="utf-8")
-        if not json_only:
-            (graph_dir / "graph.html").write_text(render_html(g), encoding="utf-8")
+        g = build_and_write_graph(root, json_only=json_only)
     except OSError as exc:
-        print(f"写 {graph_dir} 失败：{exc}", file=sys.stderr)
+        print(f"写 {root / 'graph'} 失败：{exc}", file=sys.stderr)
         return EXIT_USAGE
 
     stats = graph_to_dict(g)["stats"]
