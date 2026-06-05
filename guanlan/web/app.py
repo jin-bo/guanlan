@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -103,6 +104,25 @@ def _report_response(json_text: str) -> Response:
     return Response(content=json_text, media_type="application/json")
 
 
+# 历史会话回放时用于把一条 message 的 content 归一为可显示文本：
+# ① content 可能是多模态 block 列表（取其中 type=="text" 的片段）；② 剥掉首条 user 里的
+# <system-reminder>…</system-reminder> 噪声（与 list_sessions 取 title 的口径一致，避免气泡显示
+# 一大段注入提示）。自含小实现，不耦合 agentao 私有 _content_to_text（只用其文档化会话面）。
+_SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+
+
+def _message_text(content: object) -> str:
+    if isinstance(content, list):
+        content = " ".join(
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    if not isinstance(content, str):
+        return ""
+    return _SYSTEM_REMINDER_RE.sub("", content).strip()
+
+
 def _list_raw(root: Path) -> list[dict]:
     """列 `raw/*.md`（**只列、不经 Web 写 raw**，§1 / 决策P4-1）。"""
     raw = root / "raw"
@@ -118,6 +138,7 @@ def create_app(
     *,
     model: str | None = None,
     runner: AgentRunner | None = None,
+    session_persist: bool = True,
 ) -> FastAPI:
     """构造绑定到知识库 `root` 的 FastAPI app。
 
@@ -125,6 +146,7 @@ def create_app(
         root: 已 `require_kb_root(writable=True)` 校验过的知识库根（绝对路径）。
         model: `--model` 透传给写作业（C4）与会话嵌入（C5）；None 表示不覆盖、由环境发现。
         runner: 可注入的 `AgentRunner`（测试用 fake，不打真实 LLM）；None 走默认子进程 runner。
+        session_persist: 会话落盘开关（P4.2，默认开）；关时退回 P4 纯内存（`--no-session-persist`）。
     """
     app = FastAPI(title="观澜 Web 宿主", docs_url=None, redoc_url=None)
     # 配置挂在 app.state：后续提交的端点（报告/写作业/会话）从这里读 root/model/runner，
@@ -135,8 +157,8 @@ def create_app(
     # 单写者作业队列（唯一写作业 ingest 走它，FIFO 串行；决策P4-5）。
     jobs = JobQueue()
     app.state.jobs = jobs
-    # 内存会话表（所有问答走只读嵌入，进程退出即清；决策P4-8）。
-    conversations = ConversationStore(root, model)
+    # 会话表（所有问答走只读嵌入）：persist 开时每轮落 .agentao/sessions/ + 懒恢复（P4.2 决策P4.2-1）。
+    conversations = ConversationStore(root, model, persist=session_persist)
     app.state.conversations = conversations
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -248,7 +270,19 @@ def create_app(
         else:
             conv = conversations.get(body.conversation_id)
             if conv is None:
-                raise HTTPException(status_code=404, detail=f"未知会话：{body.conversation_id}")
+                # 内存未命中 → 试懒恢复盘上的只读会话（P4.2 决策P4.2-3）。restore 含 load_session
+                # （磁盘）+ agent 构造（LLM client）两个慢操作，**必须** off-loop 卸到线程池——否则
+                # 在 async route 里同步调用会阻塞整个 ASGI 事件循环。
+                try:
+                    conv = await anyio.to_thread.run_sync(
+                        conversations.restore, body.conversation_id
+                    )
+                except RuntimeError as exc:  # 恢复时内存已满 → 同 create 转 503
+                    raise HTTPException(status_code=503, detail=str(exc)) from exc
+                if conv is None:  # 非规范 id / 盘上无此 Web 会话 / 持久化关 / catalog-文件竞态读不出
+                    raise HTTPException(
+                        status_code=404, detail=f"未知会话：{body.conversation_id}"
+                    )
 
         queue: asyncio.Queue[tuple[str, object] | None] = asyncio.Queue()
 
@@ -299,17 +333,54 @@ def create_app(
 
     @app.get("/api/conversations")
     async def list_conversations() -> dict:
-        return {"conversations": conversations.list()}
+        # persist 开时 list() 即时 list_sessions(kb) 读盘（合并去重），故 off-loop 卸到线程池。
+        return {"conversations": await anyio.to_thread.run_sync(conversations.list)}
+
+    @app.get("/api/conversations/{conversation_id}/messages")
+    async def conversation_messages(conversation_id: str) -> dict:
+        # 纯查看：回放历史会话的 user/assistant 气泡。内存命中读内存、冷会话读盘（**不建 agent**，
+        # 续聊时再由 POST /api/chat 懒恢复）。未知/非规范/非 Web/持久化关下盘上 id → 404（同 chat）。
+        messages = await anyio.to_thread.run_sync(
+            conversations.messages_for, conversation_id
+        )
+        if messages is None:
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        out: list[dict] = []
+        for m in messages:
+            role = m.get("role")
+            if role not in ("user", "assistant"):
+                continue  # 只回放对话气泡，跳过 system/tool 等内部消息
+            text = _message_text(m.get("content"))
+            if not text:
+                continue
+            item: dict = {"role": role, "content": text}
+            if role == "assistant":
+                # assistant 答案过同一安全 markdown 渲染（[[页]]→站内链），与流式收尾的 answer_html
+                # 一致；渲染失败仅省略 html、前端回退纯文本（不毁回放）。
+                try:
+                    item["html"] = await anyio.to_thread.run_sync(
+                        render_markdown, text, root / "wiki"
+                    )
+                except Exception:  # noqa: BLE001 — 渲染失败仅降级排版
+                    pass
+            out.append(item)
+        return {"messages": out}
 
     @app.delete("/api/conversations/{conversation_id}")
     async def delete_conversation(conversation_id: str) -> dict:
+        # 按内存命中与否分两支（决策P4.2-5）：勿把 disk-only 的精确闸加到内存命中支，否则一个
+        # live 但盘上已被 rotate 掉的会话会删不掉、`新会话` 的 best-effort DELETE 也会失效。
         conv = conversations.get(conversation_id)
-        if conv is None:
+        if conv is not None:
+            # 内存命中：先拿会话锁等当前/断开后仍在 shield 跑完的 turn 收尾，避免 agent.close() 与
+            # 在飞的 arun 抢同一 agent 资源（决策P4-8 单 agent 假设）；delete 内含 best-effort 删盘。
+            async with conv.lock:
+                await anyio.to_thread.run_sync(conversations.delete, conversation_id)
+            return {"deleted": conversation_id}
+        # 仅在盘上：须规范全 UUID + _disk_session 精确/作用域校验才删盘，否则 404（§3.3/§2.2）。
+        deleted = await anyio.to_thread.run_sync(conversations.delete_disk, conversation_id)
+        if not deleted:
             raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
-        # 先拿会话锁再删：等当前/断开后仍在 shield 跑完的 turn 收尾，避免 agent.close() 与在飞
-        # 的 arun 抢同一 agent 资源（决策P4-8 只读会话单 agent 假设）。close() 可能阻塞 → to_thread。
-        async with conv.lock:
-            await anyio.to_thread.run_sync(conversations.delete, conversation_id)
         return {"deleted": conversation_id}
 
     return app
