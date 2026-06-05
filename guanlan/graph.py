@@ -22,6 +22,7 @@ from pathlib import Path
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .pages import (
     WIKILINK_RE,
+    alias_index,
     iter_pages,
     link_stem,
     link_target_stems,
@@ -73,10 +74,11 @@ class Graph:
 def build_graph(wiki: Path) -> Graph:
     """建图：节点=非 config 页，边=已解析 `[[wikilink]]`（含断链边）。
 
-    每个 `[[…]]` 经 `link_stem` 归一后三分类（决策P3-6）：
-      ① 命中非 config 页 → resolved 边（进 adjacency）；
-      ② 命中 config 页（index/log/overview）→ 丢弃（不建边、不算断链）；
-      ③ 谁都没命中 → broken 边（resolved=False）。
+    每个 `[[…]]` 经 `link_stem` 归一后分类（决策P3-6 / P3.1-5）：
+      ① 命中非 config 页 stem → resolved 边（进 adjacency）；
+      ② 命中**别名** → resolved 边，归到「拥有页 stem」节点（不建别名幽灵节点，P3.1）；
+      ③ 命中 config 页（index/log/overview）→ 丢弃（不建边、不算断链）；
+      ④ 谁都没命中 → broken 边（resolved=False）。
     自环保留为边但 `(source,target)` 去重，避免可视化重边。
     """
     wiki = Path(wiki)
@@ -106,8 +108,9 @@ def build_graph(wiki: Path) -> Graph:
         node_ids.add(nid)
         bodies.append((nid, body))
 
-    # 解析集 = 全页面 stem（含 config），与 check 同口径；config-only stem 用于"丢弃"分类。
+    # 解析集 = 全页面 stem（含 config）∪ 别名，与 check 同口径；config-only stem 用于"丢弃"分类。
     all_stems = link_target_stems(wiki)
+    aliases = alias_index(wiki)  # 别名 → 拥有页 stem（决策P3.1-5）
 
     adjacency: dict[str, set[str]] = {nid: set() for nid in node_ids}
     resolved_pairs: set[tuple[str, str]] = set()
@@ -120,6 +123,11 @@ def build_graph(wiki: Path) -> Graph:
             if target in node_ids:
                 resolved_pairs.add((nid, target))
                 adjacency[nid].add(target)
+            elif target in aliases and aliases[target] in node_ids:
+                # 别名命中 → 边归到**拥有页 stem** 节点，不建别名幽灵节点（决策P3.1-5）。
+                owner = aliases[target]
+                resolved_pairs.add((nid, owner))
+                adjacency[nid].add(owner)
             elif target in all_stems:
                 continue  # 指向 config 页 → 丢弃（决策P3-6）。
             else:
