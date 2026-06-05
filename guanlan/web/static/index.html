@@ -29,13 +29,13 @@
   </section>
 
   <aside class="wiki" aria-label="Wiki">
-    <div class="wiki-search">
-      <input id="wiki-search" type="search" placeholder="Wiki Search — 搜索页面标题 / 路径…" autocomplete="off">
-      <div id="wiki-results" class="wiki-results"></div>
+    <div class="wiki-bar">
+      <button id="wiki-home" class="nav-btn" title="回到 Concept 目录">⌂ Home</button>
+      <button id="wiki-back" class="nav-btn" title="回退" disabled>←</button>
+      <button id="wiki-fwd" class="nav-btn" title="往前" disabled>→</button>
+      <input id="wiki-search" type="search" placeholder="Wiki Search…" autocomplete="off">
     </div>
-    <article id="wiki-body" class="wiki-body">
-      <p class="muted">搜索并选择一张 wiki 页面查看；正文里的 [[链接]] 可点击导航。</p>
-    </article>
+    <div id="wiki-view" class="wiki-view"></div>
   </aside>
 
   <form id="chat-form" class="chat-form" aria-label="对话输入框">

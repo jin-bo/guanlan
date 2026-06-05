@@ -253,6 +253,24 @@ def test_api_page_neutralizes_dangerous_link(client, kb) -> None:
     assert "https://example.com" in html  # 安全链接保留
 
 
+def test_render_markdown_for_chat() -> None:
+    """对话答案的 markdown 渲染：富排版 + 安全 + [[页]] 解析（给 wiki）。"""
+    from guanlan.web.render import render_markdown
+
+    html = render_markdown("# 标题\n\n- 一项\n- 两项\n\n正文 `代码` 与 <script>x</script>。")
+    assert "<h1>" in html and "<ul>" in html and "<code>" in html
+    assert "<script" not in html and "&lt;script&gt;" in html  # 原始 HTML 转义
+
+
+def test_render_markdown_wikilink_resolves(client, kb) -> None:
+    from guanlan.web.render import render_markdown
+
+    write_page(kb, "wiki/entities/Foo.md", type="entity", body="正文足够长的内容。")
+    html = render_markdown("见 [[Foo]] 与 [[Ghost]]。", kb / "wiki")
+    assert 'data-page="wiki/entities/Foo.md"' in html  # 解析到存在页
+    assert "wikilink broken" in html  # 不存在 → 标灰
+
+
 def test_is_safe_url_strips_control_chars() -> None:
     """控制符不能绕过协议白名单（浏览器会先剥控制符再导航）。"""
     from guanlan.web.render import _is_safe_url
