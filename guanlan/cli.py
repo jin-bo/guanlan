@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from . import __version__
 from .check import check_entrypoint
+from .errors import EXIT_USAGE, GuanlanError
 from .graph import graph_entrypoint
 from .health import health_entrypoint
 from .ingest import run_ingest
@@ -64,6 +66,29 @@ def _cmd_lint(args: argparse.Namespace) -> int:
 
 def _cmd_graph(args: argparse.Namespace) -> int:
     return graph_entrypoint(args.dir, json_only=args.json_only)
+
+
+def _cmd_web(args: argparse.Namespace) -> int:
+    # web 是可选叠加层：缺 `guanlan[web]`（fastapi/uvicorn 导入失败）时优雅降级、引导安装，
+    # 不让 CLI 抛 traceback（决策P4-2）。导入收在函数内，核心命令不为 Web 背 import 成本。
+    try:
+        from .web import serve
+    except ImportError:
+        print(
+            "`guanlan web` 需要可选依赖：请先 `pip install 'guanlan[web]'`。",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    try:
+        return serve(
+            args.dir,
+            port=args.port,
+            open_browser=not args.no_browser,
+            model=args.model,
+        )
+    except GuanlanError as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
 
 
 def _cmd_install_skill(args: argparse.Namespace) -> int:
@@ -154,6 +179,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--json-only", action="store_true", help="只写 graph.json，跳过 graph.html"
     )
     p_graph.set_defaults(func=_cmd_graph)
+
+    p_web = sub.add_parser(
+        "web",
+        parents=[dir_parent],
+        help="起本地 Web 宿主（可选叠加层，需 `pip install 'guanlan[web]'`）",
+    )
+    p_web.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765，仅 127.0.0.1）")
+    p_web.add_argument(
+        "--no-browser", action="store_true", help="起服后不自动打开浏览器"
+    )
+    p_web.add_argument("--model", default=None, help="覆盖 Agentao 模型（透传写作业与会话）")
+    p_web.set_defaults(func=_cmd_web)
 
     p_skill = sub.add_parser(
         "install-skill", help="把随包 guanlan-wiki skill 装入 ~/.agentao/skills/（外部库用）"
