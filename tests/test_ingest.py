@@ -19,6 +19,16 @@ def _put_raw(kb: Path, name="doc.md") -> str:
     return f"raw/{name}"
 
 
+def _write_bad_fm(root: Path, relpath: str) -> None:
+    """写一个 frontmatter 阻断性违规页（bad_type）—— 仍阻断写入、会触发自愈。"""
+    p = root / relpath
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        '---\ntitle: "T"\ntype: bogus\ntags: []\nsources: []\nlast_updated: 2026-06-03\n---\n\n正文\n',
+        encoding="utf-8",
+    )
+
+
 def test_ingest_writes_compliant_wiki_ok(kb: Path):
     target = _put_raw(kb)
 
@@ -30,16 +40,60 @@ def test_ingest_writes_compliant_wiki_ok(kb: Path):
     assert (kb / "wiki" / "sources" / "doc.md").is_file()
 
 
-def test_ingest_broken_page_check_failed(kb: Path):
+def test_ingest_broken_link_is_warning_ok(kb: Path):
+    """断链只作警告、不阻断写入（决策8）：写出断链页仍 EXIT_OK。"""
     target = _put_raw(kb)
 
     def action(root: Path):
         write_page(root, "wiki/concepts/Bad.md", body="[[Ghost]]")
 
     rc = run_ingest(target, root=kb, runner=make_runner(action))
-    assert rc == EXIT_CHECK_FAILED
-    # 失败时 wiki/ 改动留在磁盘待人工修正。
+    assert rc == EXIT_OK
     assert (kb / "wiki" / "concepts" / "Bad.md").is_file()
+
+
+def test_ingest_self_heals_check_failure(kb: Path):
+    """首轮写出阻断性 frontmatter 违规，自愈轮修好 → 最终 EXIT_OK（决策7）。"""
+    from guanlan.runtime import AgentRunResult
+
+    calls = {"n": 0}
+
+    def runner(prompt, **kwargs):
+        root = kwargs["working_directory"]
+        calls["n"] += 1
+        if calls["n"] == 1:  # 首轮：坏 frontmatter
+            _write_bad_fm(root, "wiki/concepts/Bad.md")
+        else:  # 自愈轮：写成合规页
+            write_page(root, "wiki/concepts/Bad.md")
+        return AgentRunResult(ok=True, final_text="done")
+
+    rc = run_ingest(_put_raw(kb), root=kb, runner=runner)
+    assert rc == EXIT_OK
+    assert calls["n"] == 2  # 首轮 + 1 次自愈
+
+
+def test_ingest_self_heal_bounded(kb: Path):
+    """自愈轮数有界：持续阻断性违规最多重试 MAX_REPAIR_ATTEMPTS 次后判 CHECK_FAILED。"""
+    from guanlan.gate import MAX_REPAIR_ATTEMPTS
+
+    def action(root: Path):
+        _write_bad_fm(root, "wiki/concepts/Bad.md")
+
+    runner = make_runner(action)
+    rc = run_ingest(_put_raw(kb), root=kb, runner=runner)
+    assert rc == EXIT_CHECK_FAILED
+    assert len(runner.calls) == 1 + MAX_REPAIR_ATTEMPTS  # 首轮 + N 次自愈
+
+
+def test_ingest_preexisting_blocking_does_not_fail(kb: Path):
+    """增量门禁（决策7）：库里已有的阻断性违规页不连累本次 ingest，仍 EXIT_OK。"""
+    _write_bad_fm(kb, "wiki/concepts/Old.md")  # ingest 前就坏了
+
+    def action(root: Path):
+        write_page(root, "wiki/concepts/New.md")  # 本次只写合规页
+
+    rc = run_ingest(_put_raw(kb), root=kb, runner=make_runner(action))
+    assert rc == EXIT_OK
 
 
 def test_ingest_mutates_raw_while_ok(kb: Path):

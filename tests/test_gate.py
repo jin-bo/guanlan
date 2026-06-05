@@ -5,6 +5,7 @@ from pathlib import Path
 from guanlan.errors import EXIT_AGENT_ERROR, EXIT_CHECK_FAILED, EXIT_RAW_MUTATED
 from guanlan.gate import (
     GateResult,
+    check_baseline,
     diff_raw,
     enforce,
     enforce_write_result,
@@ -32,9 +33,19 @@ def _good_page(tmp_path: Path) -> None:
 
 
 def _broken_page(tmp_path: Path) -> None:
+    """断链页（wikilink.broken）—— 在新语义下属**警告**，不阻断写入。"""
     p = tmp_path / "wiki" / "concepts" / "Bad.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(FM.format(type="concept", sources="[]", body="[[Ghost]]"), encoding="utf-8")
+
+
+def _bad_fm_page(tmp_path: Path, name: str = "BadFm") -> str:
+    """frontmatter 阻断性违规页（bad_type）—— 仍阻断写入。返回相对路径。"""
+    rel = f"wiki/concepts/{name}.md"
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(FM.format(type="bogus", sources="[]", body="正文"), encoding="utf-8")
+    return rel
 
 
 # --- snapshot_raw / diff_raw ---
@@ -198,12 +209,40 @@ def test_enforce_raw_before_check(tmp_path: Path):
 
 
 def test_enforce_check_failed(tmp_path: Path):
+    """阻断性违规（frontmatter bad_type）→ check_failed。"""
     _kb(tmp_path)
-    _broken_page(tmp_path)
+    _bad_fm_page(tmp_path)
     before = snapshot_raw(tmp_path)
     result = enforce(tmp_path, before)
     assert result.kind == "check_failed"
     assert result.exit_code == EXIT_CHECK_FAILED
+
+
+def test_enforce_broken_link_is_warning_not_blocking(tmp_path: Path):
+    """断链只作警告：enforce 通过、ok，但 warnings 非空（决策8）。"""
+    _kb(tmp_path)
+    _broken_page(tmp_path)
+    before = snapshot_raw(tmp_path)
+    result = enforce(tmp_path, before)
+    assert result.ok and result.kind is None
+    assert any(w.kind == "wikilink.broken" for w in result.warnings)
+
+
+def test_enforce_incremental_baseline_excuses_preexisting(tmp_path: Path):
+    """增量门禁：已在基线里的阻断性违规不连累本次；新引入的才判 check_failed（决策7）。"""
+    _kb(tmp_path)
+    _bad_fm_page(tmp_path, "Old")  # 写操作"前"就坏了
+    before = snapshot_raw(tmp_path)
+    baseline = check_baseline(tmp_path)
+
+    # 仅有历史欠债 → 增量门禁放行。
+    assert enforce(tmp_path, before, baseline=baseline).ok
+
+    # 再引入一个新的阻断页 → 只追究新的那条。
+    _bad_fm_page(tmp_path, "New")
+    result = enforce(tmp_path, before, baseline=baseline)
+    assert result.kind == "check_failed"
+    assert {v.page for v in result.violations} == {"wiki/concepts/New.md"}
 
 
 # --- enforce_write_result（写入口收尾裁决）---

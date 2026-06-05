@@ -14,34 +14,30 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import json
 import re
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 from .errors import EXIT_CHECK_FAILED, EXIT_OK, GuanlanError
+from .pages import (
+    Violation,
+    WIKILINK_RE,
+    iter_pages,
+    link_stem,
+    link_target_stems,
+    parse_frontmatter,
+    report_json,
+    split_frontmatter,
+)
 from .paths import require_kb_root
 
-# config 页（非 content）：排除出 frontmatter/断链校验。仅 wiki/ 顶层的这三个文件，
-# 子目录里的同名文件不算 config。SCHEMA.md 在根、不在 wiki/ 下，天然不被扫。
-_CONFIG_PAGES = frozenset({"index.md", "log.md", "overview.md"})
+# Violation 自 P3 起单一定义在 pages.py（共享原语）；此处 re-export 保持 `from guanlan.check
+# import Violation` 与 gate.py 的 `from .check import Violation` 不变。
+__all__ = ["CheckResult", "Violation", "run_check", "format_report", "check_entrypoint", "main"]
 
 _VALID_TYPES = frozenset({"source", "entity", "concept", "synthesis"})
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-# 非贪婪提取 [[…]]；目标里不含 ] 或换行。
-_WIKILINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
-
-
-@dataclass(frozen=True)
-class Violation:
-    """单条违规。`page` 是相对知识库根的 posix 路径（如 `wiki/entities/Foo.md`）。"""
-
-    page: str
-    kind: str
-    detail: str
 
 
 @dataclass
@@ -49,39 +45,6 @@ class CheckResult:
     ok: bool
     pages_checked: int
     violations: list[Violation]
-
-
-def _extract_frontmatter(text: str) -> tuple[str | None, str]:
-    """切出 frontmatter 块与正文。
-
-    返回 `(block, body)`：`block` 是两条 `---` 之间的原文（不含分隔线），无合法块时为 None，
-    此时 `body` 为全文（断链校验仍在全文上跑）。
-    """
-    lines = text.splitlines(keepends=True)
-    if not lines or lines[0].strip() != "---":
-        return None, text
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            return "".join(lines[1:i]), "".join(lines[i + 1 :])
-    # 起始有 --- 但无闭合 → 视作无合法 frontmatter。
-    return None, text
-
-
-def _parse_frontmatter(block: str | None) -> tuple[dict | None, Violation | None]:
-    """解析 frontmatter 块（每页只解析一次，供 frontmatter 与 sources 校验复用）。
-
-    返回 `(meta, fatal)`：成功时 `(dict, None)`；块缺失/无法解析/非映射时 `(None, 违规)`。
-    `page` 由调用方补到违规上——这里只关心解析本身。
-    """
-    if block is None:
-        return None, Violation("", "frontmatter.block_missing", "缺 frontmatter（--- 块）")
-    try:
-        meta = yaml.safe_load(block)
-    except yaml.YAMLError as exc:
-        return None, Violation("", "frontmatter.unparsable", f"frontmatter 无法解析：{exc}")
-    if not isinstance(meta, dict):
-        return None, Violation("", "frontmatter.unparsable", "frontmatter 不是键值映射")
-    return meta, None
 
 
 def _check_frontmatter(page: str, meta: dict) -> list[Violation]:
@@ -124,19 +87,10 @@ def _check_frontmatter(page: str, meta: dict) -> list[Violation]:
     return violations
 
 
-def _link_stem(target: str) -> str:
-    """把 `[[…]]` 目标归一为解析键：剥 `|别名`、`#锚点` 与可选 `.md` 后缀。"""
-    target = target.split("|", 1)[0].split("#", 1)[0].strip()
-    target = target.replace("\\", "/").rsplit("/", 1)[-1]
-    if target.lower().endswith(".md"):
-        target = target[:-3]
-    return target.lower()
-
-
 def _check_wikilinks(page: str, body: str, link_targets: frozenset[str]) -> list[Violation]:
     violations: list[Violation] = []
-    for raw in _WIKILINK_RE.findall(body):
-        stem = _link_stem(raw)
+    for raw in WIKILINK_RE.findall(body):
+        stem = link_stem(raw)
         if not stem:
             continue
         if stem not in link_targets:
@@ -190,23 +144,18 @@ def run_check(wiki: Path) -> CheckResult:
             violations=[Violation("wiki", "wiki.missing", "wiki/ 不存在或不是目录")],
         )
 
-    all_md = sorted(p for p in wiki.rglob("*.md") if p.is_file())
-
     # 链接解析集 = 所有页面 stem（含 config 页），大小写不敏感。
-    # 注意：扫描排除（哪些页被校验）与解析集（哪些 stem 算合法目标）是两件事。
-    link_targets = frozenset(p.stem.lower() for p in all_md)
+    # 注意：扫描排除（哪些页被校验，iter_pages 排 config）与解析集（哪些 stem 算合法目标，
+    # 含 config）是两件事——口径单一归口 pages.py，与 graph/lint 完全一致（决策P3-2/P3-6）。
+    link_targets = link_target_stems(wiki)
 
     violations: list[Violation] = []
     pages_checked = 0
-    for path in all_md:
-        is_config = path.parent == wiki and path.name in _CONFIG_PAGES
-        if is_config:
-            continue
+    for path in iter_pages(wiki):
         pages_checked += 1
         page = path.relative_to(root).as_posix()
-        text = path.read_text(encoding="utf-8")
-        block, body = _extract_frontmatter(text)
-        meta, fatal = _parse_frontmatter(block)  # 每页只解析一次。
+        block, body = split_frontmatter(path.read_text(encoding="utf-8"))
+        meta, fatal = parse_frontmatter(block)  # 严格档：每页只解析一次，坏块硬报。
         if fatal is not None:
             violations.append(Violation(page, fatal.kind, fatal.detail))
         else:
@@ -220,14 +169,11 @@ def run_check(wiki: Path) -> CheckResult:
 def format_report(result: CheckResult, *, json_output: bool) -> str:
     """渲染校验结果：`--json` 走稳定契约；否则人类可读逐行报告。"""
     if json_output:
-        return json.dumps(
-            {
-                "ok": result.ok,
-                "pages_checked": result.pages_checked,
-                "violations": [asdict(v) for v in result.violations],
-            },
-            ensure_ascii=False,
-            indent=2,
+        return report_json(
+            ok=result.ok,
+            pages_checked=result.pages_checked,
+            items_key="violations",
+            items=result.violations,
         )
 
     if result.ok:

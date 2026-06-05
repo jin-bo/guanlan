@@ -9,6 +9,7 @@
 | 3  | EXIT_CHECK_FAILED  | 内容校验失败（frontmatter / 断链 / sources） |
 | 4  | EXIT_RAW_MUTATED   | raw/ 被改动（调用前后快照 diff 非空） |
 | 5  | EXIT_AGENT_ERROR   | Agentao 运行时错误（子进程非零退出 / status==error / stdout 解析失败） |
+| 6  | EXIT_LINT_FINDINGS | health/lint 在 `--strict` 下有 findings（建议非门禁，见 P3 §7 决策P3-4） |
 
 > 占位码 2（P1 的"未实现"）随三个命令落地退出历史，保留给未来仍未实现的子命令。
 """
@@ -20,6 +21,7 @@ EXIT_USAGE = 1
 EXIT_CHECK_FAILED = 3
 EXIT_RAW_MUTATED = 4
 EXIT_AGENT_ERROR = 5
+EXIT_LINT_FINDINGS = 6
 
 
 class GuanlanError(Exception):

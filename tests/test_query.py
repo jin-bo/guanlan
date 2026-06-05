@@ -55,11 +55,26 @@ def test_backfill_compliant_synthesis_ok(kb: Path):
 
 
 def test_backfill_broken_check_failed(kb: Path):
+    """阻断性 frontmatter 违规（bad_type）→ CHECK_FAILED；断链已降级为警告，不再触发。"""
+    def action(root: Path):
+        p = root / "wiki" / "syntheses" / "q.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            '---\ntitle: "T"\ntype: bogus\ntags: []\nsources: []\nlast_updated: 2026-06-03\n---\n\n正文\n',
+            encoding="utf-8",
+        )
+
+    rc = run_query("q", root=kb, backfill=True, runner=make_runner(action))
+    assert rc == EXIT_CHECK_FAILED
+
+
+def test_backfill_broken_link_is_warning_ok(kb: Path):
+    """--backfill 写出断链综述 → 断链作警告、不阻断 → EXIT_OK（决策8）。"""
     def action(root: Path):
         write_page(root, "wiki/syntheses/q.md", type="synthesis", body="[[Ghost]]")
 
     rc = run_query("q", root=kb, backfill=True, runner=make_runner(action))
-    assert rc == EXIT_CHECK_FAILED
+    assert rc == EXIT_OK
 
 
 def test_backfill_mutates_raw_while_ok(kb: Path):
