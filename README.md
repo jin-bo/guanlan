@@ -13,13 +13,19 @@
 
 ## 状态
 
-🚀 **P3（健康与图谱）** —— 在 P2 最小闭环（`guanlan init` / `ingest` / `query` / `check` / `install-skill`，经 Agentao 运行时治理）之上，新增三个按需、零-LLM 的维护工具：
+🚀 **P4（Web 宿主，可选叠加层）** —— 在 P2 最小闭环（`guanlan init` / `ingest` / `query` / `check` / `install-skill`）与 P3 维护工具（`health` / `lint` / `graph`）之上，新增一个**可选**的本地 Web 宿主，把上述命令搬进浏览器：
 
-- `guanlan health` —— stub 页面 + index↔disk 同步（advisory；`--strict` → 退出码 6）。
-- `guanlan lint` —— 孤儿页 / 断链 / 缺失实体（advisory）。
+- `guanlan web` —— 起一个仅监听 `127.0.0.1` 的本地 Web 宿主（需 `pip install 'guanlan[web]'`）。浏览 wiki（`[[wikilink]]` 可点击导航）/ 跑 check·health·lint 看报告 / 看 graph / 从 `raw/` 选一篇触发 ingest（单 worker 串行，轮询结果）/ 与 agent **只读多轮对话**（token 流式）。
+- 它是 **MVP 之后的可选叠加层**：不装 `guanlan[web]`、不起 `guanlan web`，整套东西照旧用 CLI 跑通。markdown 仍是唯一事实来源，Web 只是 ingest 与问答的另一个入口、wiki 的只读浏览器。
+- **读写分线**：唯一写作业 `ingest` 复用 P2 子进程 + 单写者门禁；所有问答（一次性单轮 + 多轮）走只读进程内嵌入 `Agentao`（默认只读、不过门禁、仅内存）。
+
+P3 三个零-LLM 维护工具（advisory）：
+
+- `guanlan health` —— stub 页面 + index↔disk 同步（`--strict` → 退出码 6）。
+- `guanlan lint` —— 孤儿页 / 断链 / 缺失实体。
 - `guanlan graph` —— 确定性 `[[wikilink]]` 图谱 → `graph/graph.json` + 自包含 `graph/graph.html`（`--json-only` 跳过 html）。
 
-语义 lint、推断图谱边、Web UI、多格式 ingest 留待 P3 之后（见 DESIGN §8）。
+Web 端写 `raw/`、`query --backfill`、可写多轮工作会话、会话落盘、多格式 ingest 留待 P4 之后（见 DESIGN §8 与 `docs/P4-Web宿主.md` §10）。
 
 ## 快速开始
 
@@ -46,6 +52,18 @@ guanlan -C my-wiki health    # stub 页面 + index↔disk 同步（--strict → 
 guanlan -C my-wiki lint      # 孤儿页 / 断链 / 缺失实体
 guanlan -C my-wiki graph     # 写出 graph/graph.json + graph.html（--json-only 跳过 html）
 ```
+
+可选 Web 宿主（叠加层，需先装 `guanlan[web]`）：
+
+```bash
+pip install 'guanlan[web]'          # 装可选依赖（fastapi / uvicorn / markdown）
+guanlan -C my-wiki web              # 起本地 Web 宿主，仅监听 127.0.0.1，默认开浏览器
+guanlan -C my-wiki web --port 9000 --no-browser   # 换端口 / 不开浏览器
+```
+
+浏览器里可：浏览 wiki 并跟随 `[[wikilink]]` 导航、跑 check·health·lint 看报告、看 graph、
+从 `raw/` 选一篇触发 ingest（轮询结果）、与 agent 只读多轮对话（token 流式）。
+**仅供本机单用户**——绝不要把该端口暴露到网络。
 
 生成结构：
 
