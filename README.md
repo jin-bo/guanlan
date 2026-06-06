@@ -15,8 +15,8 @@
 
 🚀 **P4（Web 宿主，可选叠加层）** —— 在 P2 最小闭环（`guanlan init` / `ingest` / `query` / `check` / `install-skill`）与 P3 维护工具（`health` / `lint` / `graph`）之上，新增一个**可选**的本地 Web 宿主，把上述命令搬进浏览器：
 
-- `guanlan web` —— 起一个仅监听 `127.0.0.1` 的本地 Web 宿主（需 `pip install 'guanlan[web]'`）。浏览 wiki（`[[wikilink]]` 可点击导航）/ 跑 check·health·lint 看报告 / 看 graph / 从 `raw/` 选一篇触发 ingest（单 worker 串行，轮询结果）/ 与 agent **只读多轮对话**（token 流式）。
-- 它是 **MVP 之后的可选叠加层**：不装 `guanlan[web]`、不起 `guanlan web`，整套东西照旧用 CLI 跑通。markdown 仍是唯一事实来源，Web 只是 ingest 与问答的另一个入口、wiki 的只读浏览器。
+- `guanlan web` —— 起一个仅监听 `127.0.0.1` 的本地 Web 宿主（需 `pip install 'guanlan-wiki[web]'`）。浏览 wiki（`[[wikilink]]` 可点击导航）/ 跑 check·health·lint 看报告 / 看 graph / 从 `raw/` 选一篇触发 ingest（单 worker 串行，轮询结果）/ 与 agent **只读多轮对话**（token 流式）。
+- 它是 **MVP 之后的可选叠加层**：不装 `guanlan-wiki[web]`、不起 `guanlan web`，整套东西照旧用 CLI 跑通。markdown 仍是唯一事实来源，Web 只是 ingest 与问答的另一个入口、wiki 的只读浏览器。
 - **读写分线**：唯一写作业 `ingest` 复用 P2 子进程 + 单写者门禁；所有问答（一次性单轮 + 多轮）走只读进程内嵌入 `Agentao`（默认只读、不过门禁、仅内存）。
 
 P3 三个零-LLM 维护工具（advisory）：
@@ -28,6 +28,14 @@ P3 三个零-LLM 维护工具（advisory）：
 **P3.1 别名解析（零-LLM 增强）** —— entity/concept 页可在 frontmatter 声明可选 `aliases`，让别名进入 `[[wikilink]]` 解析命名空间（与页名同口径、大小写不敏感）：`[[大模型]]` / `[[LLM]]` 都解析到声明它们的页，**消假断链**（check / lint / graph / Web 一致）、**补 CJK 同义召回**（别名纳入 query 2-gram 与 ingest 去重）。别名全局唯一由 `check` 确定性校验（撞页名 / 重复 → 阻断写门禁）。这不是新里程碑，P5 仍是多格式与自动化。细化见 [`docs/P3.1-别名解析.md`](docs/P3.1-别名解析.md)。
 
 Web 端写 `raw/`、`query --backfill`、可写多轮工作会话、会话落盘、多格式 ingest 留待 P4 之后（见 DESIGN §8 与 `docs/P4-Web宿主.md` §10）。别名自动物化建页（`heal`）、同义词表、向量检索按需驱动、另开方案。
+
+## 安装
+
+```bash
+pip install guanlan-wiki
+```
+
+> PyPI 发布名是 `guanlan-wiki`（裸名 `guanlan` 已被一个无关项目占用）；安装后命令行与导入名仍是 `guanlan`。需 Python 3.12+。`ingest` / `query` / Web 端问答需配置模型（经 Agentao 运行时）；`init` / `check` / `health` / `lint` / `graph` 零-LLM、可离线运行。
 
 ## 快速开始
 
@@ -55,10 +63,10 @@ guanlan -C my-wiki lint      # 孤儿页 / 断链 / 缺失实体
 guanlan -C my-wiki graph     # 写出 graph/graph.json + graph.html（--json-only 跳过 html）
 ```
 
-可选 Web 宿主（叠加层，需先装 `guanlan[web]`）：
+可选 Web 宿主（叠加层，需先装 `guanlan-wiki[web]`）：
 
 ```bash
-pip install 'guanlan[web]'          # 装可选依赖（fastapi / uvicorn / markdown）
+pip install 'guanlan-wiki[web]'     # 装可选依赖（fastapi / uvicorn / markdown）
 guanlan -C my-wiki web              # 起本地 Web 宿主，仅监听 127.0.0.1，默认开浏览器
 guanlan -C my-wiki web --port 9000 --no-browser   # 换端口 / 不开浏览器
 ```
