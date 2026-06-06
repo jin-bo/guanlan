@@ -1,12 +1,25 @@
+# 注：PyPI 发布名（distribution name）是 guanlan-wiki —— 裸名 `guanlan` 已被另一无关项目占用。
+# 导入名与 CLI 仍是 `guanlan`（见 [tool.hatch] packages 与 [project.scripts]），只有 pip 安装名不同。
 [project]
-name = "guanlan"
+name = "guanlan-wiki"
 version = "0.1.0"
 description = "观澜 — 增量构建并维护结构化、互链的 markdown 知识 wiki（Karpathy LLM Wiki 模式）"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-authors = [{ name = "jin-bo" }]
+authors = [{ name = "jin-bo", email = "jinbobo@gmail.com" }]
+keywords = ["wiki", "knowledge-base", "llm", "agent", "markdown", "karpathy", "rag", "agentao"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Text Processing :: Markup :: Markdown",
+    "Operating System :: OS Independent",
+    "Natural Language :: Chinese (Simplified)",
+]
 dependencies = [
     # [cli] extra 带 rich/prompt-toolkit/readchar/pygments —— `agentao run` 控制台脚本预检需要，
     # wrapper 经子进程调它（见 guanlan/runtime.py），缺 extra 则 ingest/query 立即失败。
@@ -26,6 +39,7 @@ web = [
 [project.urls]
 Homepage = "https://github.com/jin-bo/guanlan"
 Repository = "https://github.com/jin-bo/guanlan"
+Issues = "https://github.com/jin-bo/guanlan/issues"
 
 [project.scripts]
 guanlan = "guanlan.cli:main"
