@@ -1,0 +1,38 @@
+name: Release (PyPI)
+
+# 推 v* tag 时构建并发布到 PyPI。用 Trusted Publishing（OIDC）——仓库不存任何 token：
+# 需先在 PyPI 为项目 guanlan-wiki 配好 pending publisher（绑定本仓库 + 本 workflow +
+# environment 名 pypi），见 docs/发布到-PyPI.md。
+on:
+  push:
+    tags: ["v*"]
+
+# 默认不给任何权限；发布 job 单独申明 id-token: write 换取 OIDC 凭据。
+permissions: {}
+
+jobs:
+  pypi-publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/guanlan-wiki
+    permissions:
+      id-token: write # Trusted Publishing 必需
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: 构建 sdist + wheel
+        run: uv build
+
+      # 发布前再跑一遍 twine check，产物不合规就别上传。
+      - name: 校验产物
+        run: uvx twine check dist/*
+
+      - name: 发布到 PyPI（Trusted Publishing，免 token）
+        uses: pypa/gh-action-pypi-publish@release/v1
