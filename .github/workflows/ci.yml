@@ -1,0 +1,41 @@
+name: CI
+
+# 推到 main 或对 main 发 PR 时跑：lint + 全量测试。
+# 全程离线——测试用 fake runner / monkeypatch，不打真实 LLM，无需任何 API key。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同一分支/PR 的新推送取消旧的在跑任务，省额度。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 uv（带依赖缓存）
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: 装 Python 3.12
+        run: uv python install 3.12
+
+      # ruff 用 uvx 临时拉，不进 lock；与本地 `uvx ruff check` 一致。
+      - name: Lint（ruff）
+        run: uvx ruff check guanlan tests
+
+      # --extra web 装上 fastapi/uvicorn/markdown，否则 test_web.py / test_aliases.py
+      # 会被 importorskip 跳过；dev 组（pytest）uv sync 默认带上。
+      - name: 装依赖
+        run: uv sync --extra web
+
+      - name: 跑测试
+        run: uv run --extra web pytest -q
