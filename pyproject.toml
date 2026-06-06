@@ -2,7 +2,7 @@
 # 导入名与 CLI 仍是 `guanlan`（见 [tool.hatch] packages 与 [project.scripts]），只有 pip 安装名不同。
 [project]
 name = "guanlan-wiki"
-version = "0.1.0"
+version = "0.1.1.dev0"
 description = "观澜 — 增量构建并维护结构化、互链的 markdown 知识 wiki（Karpathy LLM Wiki 模式）"
 readme = "README.md"
 requires-python = ">=3.12"
