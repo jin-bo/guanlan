@@ -31,7 +31,9 @@ Repository = "https://github.com/jin-bo/guanlan"
 guanlan = "guanlan.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+# playwright 仅用于本地调试 Web 宿主前端（截图/交互验证，非测试套件依赖）；浏览器二进制另需
+# 跑一次 `uv run playwright install chromium`。
+dev = ["pytest>=8.0", "playwright>=1.60"]
 
 [build-system]
 requires = ["hatchling"]
