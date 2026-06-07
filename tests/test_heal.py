@@ -376,6 +376,203 @@ def test_heal_json_includes_changed_paths(kb: Path, capsys):
     assert "wiki/entities/大模型.md" in data["changed_paths"]
 
 
+# ── P3.3：收编既有页 + 安全别名收编窄缝（fake runner）────────────────────────
+
+
+def _write_alias_page(root: Path, relpath: str, title: str, aliases: list[str], body="定义") -> None:
+    """写一张带 aliases 的 entity/concept 页（标题/正文可控，供收编场景前置/动作复用）。"""
+    p = root / relpath
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(FM_ALIAS.format(title=title, aliases=repr(list(aliases)), body=body), encoding="utf-8")
+
+
+def test_heal_collect_into_existing_entity_resolved(kb: Path, capsys):
+    """C 模式：向已有 entity 页 aliases 末尾纯追加本批目标 → resolved、created_path=None、不计越界。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    _write_alias_page(kb, "wiki/entities/大语言模型.md", "大语言模型", [])
+
+    def action(root: Path):
+        _write_alias_page(root, "wiki/entities/大语言模型.md", "大语言模型", ["大模型"])
+
+    run_heal(root=kb, runner=make_runner(action), json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    r = data["receipts"][0]
+    assert r["status"] == "resolved"
+    assert r["resolved_to"] == "wiki/entities/大语言模型.md"
+    assert r["created_path"] is None  # 收编非新建
+    assert data["unexpected_writes"] == []
+
+
+def test_heal_collect_into_existing_concept_resolved(kb: Path, capsys):
+    """目录白名单含 concepts/：收编到 concept 页同样 resolved、不计越界（entity/concept 同构）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    _write_alias_page(kb, "wiki/concepts/LLM.md", "LLM", [])
+
+    def action(root: Path):
+        _write_alias_page(root, "wiki/concepts/LLM.md", "LLM", ["大模型"])
+
+    run_heal(root=kb, runner=make_runner(action), json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    r = data["receipts"][0]
+    assert r["status"] == "resolved"
+    assert r["resolved_to"] == "wiki/concepts/LLM.md"
+    assert data["unexpected_writes"] == []
+
+
+def test_heal_collect_body_change_is_unexpected(kb: Path, capsys):
+    """追加别名但同时改了正文 → 整处计 unexpected（条件 2：body 须逐字节不变）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    _write_alias_page(kb, "wiki/entities/大语言模型.md", "大语言模型", [])
+
+    def action(root: Path):
+        _write_alias_page(root, "wiki/entities/大语言模型.md", "大语言模型", ["大模型"], body="偷改了正文")
+
+    run_heal(root=kb, runner=make_runner(action), json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    assert "wiki/entities/大语言模型.md" in data["unexpected_writes"]
+
+
+def test_heal_collect_other_frontmatter_change_is_unexpected(kb: Path, capsys):
+    """追加别名、正文不变，但悄改 title → 计 unexpected（snapshot 须存非 aliases frontmatter 指纹，Finding 1）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    _write_alias_page(kb, "wiki/entities/大语言模型.md", "大语言模型", [])
+
+    def action(root: Path):
+        _write_alias_page(root, "wiki/entities/大语言模型.md", "偷改的标题", ["大模型"])
+
+    run_heal(root=kb, runner=make_runner(action), json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    assert "wiki/entities/大语言模型.md" in data["unexpected_writes"]
+
+
+def test_heal_collect_piggyback_unrelated_alias_is_unexpected(kb: Path, capsys):
+    """夹带无关别名（非本批目标）→ 计 unexpected（条件 3：新增键须全部 ∈ 本批 target，挡 piggyback）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    _write_alias_page(kb, "wiki/entities/大语言模型.md", "大语言模型", [])
+
+    def action(root: Path):
+        _write_alias_page(root, "wiki/entities/大语言模型.md", "大语言模型", ["大模型", "张三"])
+
+    run_heal(root=kb, runner=make_runner(action), json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    assert "wiki/entities/大语言模型.md" in data["unexpected_writes"]
+
+
+def test_heal_collect_reorder_then_append_is_unexpected(kb: Path, capsys):
+    """重排既有别名后再追加 → 集合 ⊇ 但非前缀 → 计 unexpected（Finding 1：按有序列表前缀判）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    _write_alias_page(kb, "wiki/entities/大语言模型.md", "大语言模型", ["LLM", "GPT"])
+
+    def action(root: Path):
+        _write_alias_page(root, "wiki/entities/大语言模型.md", "大语言模型", ["GPT", "LLM", "大模型"])
+
+    run_heal(root=kb, runner=make_runner(action), json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    assert "wiki/entities/大语言模型.md" in data["unexpected_writes"]
+
+
+def test_heal_collect_delete_original_alias_is_unexpected(kb: Path, capsys):
+    """删掉一个原值再加目标（['LLM','LLM']→['LLM','大模型']）→ 非前缀 → 计 unexpected（Finding 1）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    _write_alias_page(kb, "wiki/entities/大语言模型.md", "大语言模型", ["LLM", "LLM"])
+
+    def action(root: Path):
+        _write_alias_page(root, "wiki/entities/大语言模型.md", "大语言模型", ["LLM", "大模型"])
+
+    run_heal(root=kb, runner=make_runner(action), json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    assert "wiki/entities/大语言模型.md" in data["unexpected_writes"]
+
+
+def test_heal_collect_symlink_page_is_unexpected(kb: Path, capsys):
+    """被收编页 after 是 symlink（meta=None）→ 即便终态像别名增长也计 unexpected（Finding 3）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    _write_alias_page(kb, "wiki/entities/大语言模型.md", "大语言模型", [])
+
+    def action(root: Path):
+        external = root / "external_target.md"
+        external.write_text(
+            FM_ALIAS.format(title="大语言模型", aliases="['大模型']", body="定义"), encoding="utf-8"
+        )
+        big = root / "wiki" / "entities" / "大语言模型.md"
+        big.unlink()
+        big.symlink_to(external)  # 把真实页替换成 symlink，终态伪装成别名增长
+
+    run_heal(root=kb, runner=make_runner(action), json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    assert "wiki/entities/大语言模型.md" in data["unexpected_writes"]
+
+
+def test_heal_index_md_edit_is_allowed(kb: Path, capsys):
+    """index.md 纳入允许面：建新页并在 index.md 插行 → index.md 不计越界、仍进 changed_paths。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+
+    def action(root: Path):
+        write_page(root, "wiki/entities/大模型.md", type="entity")
+        idx = root / "wiki" / "index.md"
+        idx.write_text(
+            idx.read_text(encoding="utf-8") + "\n## Entities\n- [大模型](entities/大模型.md) — 定义\n",
+            encoding="utf-8",
+        )
+
+    run_heal(root=kb, runner=make_runner(action), json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    assert data["receipts"][0]["status"] == "resolved"
+    assert "wiki/index.md" not in data["unexpected_writes"]
+    assert "wiki/index.md" in data["changed_paths"]
+
+
+def test_heal_collect_not_exempt_when_gate_fails(kb: Path, capsys):
+    """门禁未过（无关新页坏 frontmatter）→ 本该安全的收编也不豁免（_writeset 仅 gate_ok 时移除）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    _write_alias_page(kb, "wiki/entities/大语言模型.md", "大语言模型", [])
+
+    def action(root: Path):
+        # 本身合规的安全收编：
+        _write_alias_page(root, "wiki/entities/大语言模型.md", "大语言模型", ["大模型"])
+        # 无关的新引入阻断违规（坏 type）→ 自愈耗尽 → CHECK_FAILED：
+        bad = root / "wiki" / "entities" / "坏页.md"
+        bad.write_text(
+            "---\ntitle: 'T'\ntype: bogus\ntags: []\nsources: []\nlast_updated: 2026-06-03\n---\n\n正文\n",
+            encoding="utf-8",
+        )
+
+    rc = run_heal(root=kb, runner=make_runner(action), json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    assert rc == EXIT_CHECK_FAILED
+    assert "wiki/entities/大语言模型.md" in data["unexpected_writes"]  # gate_ok=False → 不豁免
+
+
+def test_heal_tolerates_nonstring_frontmatter_keys(kb: Path):
+    """库内存在非字符串/混合类型 YAML frontmatter 键（合法 YAML、load_page 容错）→ snapshot 不崩。
+
+    回归：_fm_fingerprint 对混合类型键做 `json.dumps(sort_keys=True)` 会抛 TypeError，破坏
+    「审计不因坏数据中断」（决策P3-8）；键须先 str() 归一。
+    """
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    # 顶层整数键 + 布尔键：合法 YAML，load_page 原样返回（不报错）。
+    (kb / "wiki" / "entities").mkdir(parents=True, exist_ok=True)
+    (kb / "wiki" / "entities" / "怪页.md").write_text(
+        "---\ntitle: 怪页\ntype: entity\ntags: []\nsources: []\nlast_updated: 2026-06-03\n"
+        "2026: '年份备注'\ntrue: 开关\n---\n正文\n",
+        encoding="utf-8",
+    )
+    runner = make_runner(lambda root: write_page(root, "wiki/entities/大模型.md", type="entity"))
+    rc = run_heal(root=kb, runner=runner)  # 不抛 TypeError
+    assert rc == EXIT_OK
+
+
 def test_heal_idempotent_rerun_skips(kb: Path):
     """物化后重跑 → worklist 空、EXIT_OK、不调 runner、现页未被覆盖。"""
     _ref(kb, "a", "大模型")
