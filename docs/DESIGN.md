@@ -190,6 +190,15 @@ last_updated: YYYY-MM-DD
 
 > **wiki 数据不进观澜项目 git。** `raw/`、`wiki/`、`graph/` 以及开发期由 `examples/` 拷入仓库根的 sample `AGENTAO.md`/`SCHEMA.md`（可能含本机路径/开发者私有设置）都默认 `.gitignore`、仅本地；观澜项目仓库只版本化引擎源码（`skills/guanlan-wiki/`）、文档（`docs/`）与 init 模板（`examples/AGENTAO.md`、`examples/SCHEMA.md`）。用户如果想给自己的 wiki 建 git 仓库，可以自行开启，但这不是 MVP 的一致性机制。
 
+### 4.8 分发与发布（PyPI / CI）
+
+观澜以 wheel 形式发到 PyPI，安装即得 `guanlan` CLI 与随包携带的维护引擎 skill；细化操作手册见 [`发布到-PyPI.md`](发布到-PyPI.md)。
+
+- **发布名 ≠ 导入名。** PyPI **发布名是 `guanlan-wiki`**（裸名 `guanlan` 已被一个无关项目占用）；**导入名与 CLI 仍是 `guanlan`**（`pyproject.toml` 的 `packages = ["guanlan"]` 与 `[project.scripts] guanlan` 不变）。装：`pip install guanlan-wiki`；可选 Web 宿主：`pip install 'guanlan-wiki[web]'`（`web` extra 带 fastapi/uvicorn/markdown，核心安装不背，见 §5.2 / [`P4-Web宿主.md`](P4-Web宿主.md) 决策P4-2）。
+- **构建（hatchling）把模板与引擎一并打进 wheel。** `[tool.hatch.build.targets.wheel.force-include]` 在构建期把 `examples/{AGENTAO.md,SCHEMA.md,wiki}` 拷为 `guanlan/_templates/`、把 `skills/guanlan-wiki/` 拷为 `guanlan/_skill/guanlan-wiki/`——故 **`examples/` 是 init 模板的单一事实源**（开发期 `init` 直接读仓库根 `examples/`，安装态读包内 `_templates/`，见 `guanlan/init.py:_templates_dir`），维护引擎 skill 随 wheel 携带、运行时幂等装入 `~/.agentao/skills/`（与 §8「skill 分发」一致）。Web 前端静态资源（`guanlan/web/static/*`）随 `packages` 自动入包。
+- **发布走 GitHub Actions Trusted Publishing（OIDC，零 token）。** 推 `v*` tag 触发 `.github/workflows/release.yml`：`uv build` → `twine check` → `pypa/gh-action-pypi-publish` 经 OIDC 上传（仓库不存任何 API token，附 PyPI 数字签名）；gated 在 `pypi` environment，需先在 PyPI 配 pending publisher。另有 `.github/workflows/ci.yml`：push `main` / 对 `main` 发 PR 时跑 `ruff check` + 全量 `pytest`（全程离线、无需 API key——测试用 fake runner / monkeypatch 不打真实 LLM）。
+- **版本遵循 PEP 440。** 两次发布之间 `main` 的 `version` 保持 `X.Y.Z.devN`（标记非发布态、`pip install` 默认装不到）；发布时去掉 `.devN`、打 `vX.Y.Z` tag 触发上传。
+
 ---
 
 ## 5. Agentao 集成
@@ -252,7 +261,7 @@ P4 给同一文件库加一个**可选的本地 Web 图形入口**。**实现级
 
 - **LLM 调用归口**：脚本保持**零 LLM**；ingest/query 的 LLM 部分由 `guanlan-wiki` skill 驱动 Agentao 完成（不让脚本自带 litellm / 自管密钥，也不把 LLM 能力反向塞进 Tool 接口）。语义 lint 后续再加。
 - **wrapper 必要性**：MVP 需要真实的 `guanlan ingest/query`，但只做编排与确定性门禁；不做独立后端，不自管模型，不把 ingest/query 逻辑写成脱离 Agentao 的大脚本。
-- **skill 分发**：开发期用观澜仓库 `skills/guanlan-wiki/`（repo-root 自动发现，免安装，见 §5.1）；安装态下 skill 随 wheel 携带，wrapper 在 ingest/query 前**幂等装入全局 `~/.agentao/skills/`**（也可 `guanlan install-skill`），故 P2 既能在仓库内、也能在外部安装库跑通（落点 `guanlan/skill.py`）。更完善的分发渠道（pip 索引/一键安装器）属后续优化。
+- **skill 分发**：开发期用观澜仓库 `skills/guanlan-wiki/`（repo-root 自动发现，免安装，见 §5.1）；安装态下 skill 随 wheel 携带，wrapper 在 ingest/query 前**幂等装入全局 `~/.agentao/skills/`**（也可 `guanlan install-skill`），故 P2 既能在仓库内、也能在外部安装库跑通（落点 `guanlan/skill.py`）。分发渠道已落地：以 `guanlan-wiki` 发到 PyPI、skill 随 wheel 携带（见 §4.8）。
 - **个人版 → 企业版的数据迁移**：markdown 为事实来源的前提下，索引重建应可幂等、增量（SHA256 缓存）。
 - **CJK 检索质量（按需升级，不预先加机制）**：MVP 用 `index.md` + 2-gram 粗召回，召回不中时 Agent 扫目录或请用户补关键词兜底；后续仅在漏召回确有实证时再评估 aliases 或轻量检索，分词不优先（逐级增强备选见 `docs/backlog/notes/cjk-retrieval-enhancements.md`，具体规则待实现增强时再定）。
 - **语义 lint（P3 之后）**：矛盾、过期论断、资料缺口等需 LLM 的检查，在结构 lint 跑通后再加；成本较高，应可按需触发而非每次 lint 全量跑。
