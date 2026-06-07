@@ -19,6 +19,7 @@ from .ingest import run_ingest
 from .init import run_init
 from .lint import MISSING_ENTITY_MIN_REFS, lint_entrypoint
 from .query import run_query
+from .reindex import reindex_entrypoint
 from .skill import install_skill
 
 
@@ -77,6 +78,12 @@ def _cmd_heal(args: argparse.Namespace) -> int:
         model=args.model,
         dry_run=args.dry_run,
         json_output=args.json,
+    )
+
+
+def _cmd_reindex(args: argparse.Namespace) -> int:
+    return reindex_entrypoint(
+        args.dir, prune=args.prune, dry_run=args.dry_run, json_output=args.json
     )
 
 
@@ -217,6 +224,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_heal.add_argument("--model", default=None, help="覆盖 Agentao 模型")
     p_heal.add_argument("--json", action="store_true", help="输出 worklist/receipt 的结构化 JSON")
     p_heal.set_defaults(func=_cmd_heal)
+
+    p_reindex = sub.add_parser(
+        "reindex",
+        parents=[dir_parent],
+        help="索引回填：把磁盘已存在但未收录的内容页登记进 index.md（零 LLM，修 health.index_missing_page）",
+    )
+    p_reindex.add_argument(
+        "--dry-run", action="store_true", help="只打印 worklist，不写盘（纯读、零 LLM）"
+    )
+    p_reindex.add_argument(
+        "--prune", action="store_true", help="额外删除 index 里指向不存在文件的悬空行（index_dangling）"
+    )
+    p_reindex.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p_reindex.set_defaults(func=_cmd_reindex)
 
     p_web = sub.add_parser(
         "web",
