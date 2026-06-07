@@ -60,6 +60,15 @@ aliases: ['LLM', '大模型', 'large language model']
 - **全局唯一（`check` 校验，阻断）**：归一别名不得与任何页面 stem 同名（`aliases.collides_stem`）、不得在库内重复声明（`aliases.duplicate`）、须为非空字符串列表（`frontmatter.bad_type`）。撞名/重复**阻断写门禁**（与断链「警告非阻断」相反——它是解析歧义、确定性危害，须即时修）。
 - 键名对齐 Obsidian `aliases`，便于用户直接用 Obsidian 打开同一目录。实现细化见 `docs/P3.1-别名解析.md`。
 
+## heal 建页（`guanlan heal`）
+
+`heal` 把高频缺失实体（`lint.missing_entity`）物化成 `entities/` 页，纪律是 ingest 建页的子集，额外两条硬线：
+
+- **文件名 = 目标归一键**：wrapper 给的目标名已是 `link_stem` 归一键（剥 `|别名`/`#锚点`/`.md`、小写）。**直接用它作文件名** `entities/<目标>.md`，则原引用 `[[X]]` 经同一归一必然解析——这是 heal「真修好」的最稳路径。
+- **改名必收编别名**：若判断目标名口语化、想用更规范标题当 stem（`大模型` → `大语言模型.md`），**必须**在 frontmatter `aliases` 收编原目标名（`aliases: ['大模型']`），否则 `[[大模型]]` 仍断、wrapper 回执报 `still_broken`。这是可选优化，拿不准就直接用目标名当文件名。
+- **只新建、不臆造**：heal 只**新建** entity 页 + 追加 `log.md`，**绝不覆盖/删除已有页、不碰 `raw/`**（越界写会被标 `unexpected_write`）。正文只准从所列引用页合成，缺则跳过或写最小桩页（`health` 另行标记桩页），不得编造 `sources`。
+- **跳过无需格式**：上下文不足 / 目标更像概念页 / 疑似已有页别名时，跳过并口头说明即可——正确性由 wrapper 重算图判定，不读你的状态文本。
+
 ## index.md
 
 按固定分区组织，每行 `- [标题](相对路径) — 一句话`：
