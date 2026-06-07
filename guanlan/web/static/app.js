@@ -256,6 +256,99 @@ async function pollJob(jobId, target) {
   }
 }
 
+// ── 投喂：粘贴正文 + 命名 → POST /api/raw → 一键 ingest（P4.1）──────────────────
+//
+// 顶栏「投喂」→ 浮层（文件名输入 + 正文 textarea + 存盘）。存盘期间按钮置「保存中…」并禁用
+// （响应会等队列前序写作业，如在飞 ingest，可能数十秒——见 P4.1 §3.1）。409 就地给「改名/覆盖」；
+// 成功后提示 + 一颗「立即 ingest」复用既有 triggerIngest。
+
+$("#feed-btn").addEventListener("click", openFeed);
+
+function openFeed() {
+  showOverlay("投喂", "");
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  const nameInput = document.createElement("input");
+  nameInput.id = "feed-name";
+  nameInput.className = "feed-name";
+  nameInput.type = "text";
+  nameInput.placeholder = "文件名或标题（自动 slug 化 + 补 .md）";
+  nameInput.autocomplete = "off";
+  const textarea = document.createElement("textarea");
+  textarea.id = "feed-content";
+  textarea.className = "feed-content";
+  textarea.rows = 12;
+  textarea.placeholder = "粘贴素材正文（Markdown 文本，原样存进 raw/）…";
+  const saveBtn = document.createElement("button");
+  saveBtn.id = "feed-save";
+  saveBtn.className = "feed-save";
+  saveBtn.textContent = "存盘";
+  const status = document.createElement("div");
+  status.className = "feed-status";
+  box.append(nameInput, textarea, saveBtn, status);
+
+  saveBtn.addEventListener("click", () => submitFeed(false));
+  nameInput.focus();
+}
+
+async function submitFeed(overwrite) {
+  const name = $("#feed-name").value.trim();
+  const content = $("#feed-content").value;
+  const saveBtn = $("#feed-save");
+  const status = $(".feed-status");
+  // 复位存盘按钮（可再存下一篇）；所有出口（失败/409/成功）共用，杜绝某分支漏复位（曾因成功分支
+  // 不复位、按钮永久禁用，连存多篇要重开浮层）。
+  const resetSave = () => {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "存盘";
+  };
+  if (!name || !content.trim()) {
+    status.innerHTML = '<span class="report-bad">文件名与正文都不能为空。</span>';
+    return;
+  }
+  saveBtn.disabled = true;
+  saveBtn.textContent = "保存中…"; // 会等队列前序写作业（如在飞 ingest），不可让用户以为卡死
+  status.textContent = "";
+  let res, data;
+  try {
+    res = await fetch("/api/raw", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, content, overwrite }),
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (e) {
+    resetSave();
+    status.innerHTML = `<span class="report-bad">存盘失败：${escapeHtml(e.message)}</span>`;
+    return;
+  }
+  if (res.status === 409) {
+    // 已存在：就地给「改名 / 覆盖」二选项（覆盖 = 带 overwrite=true 重发）。
+    resetSave();
+    status.innerHTML = `<span class="report-bad">${escapeHtml(data.detail || "同名文件已存在。")}</span> `;
+    const ow = document.createElement("button");
+    ow.className = "feed-overwrite";
+    ow.textContent = "覆盖";
+    ow.addEventListener("click", () => submitFeed(true));
+    status.appendChild(ow);
+    return;
+  }
+  if (!res.ok) {
+    resetSave();
+    status.innerHTML = `<span class="report-bad">存盘失败：${escapeHtml(data.detail || `HTTP ${res.status}`)}</span>`;
+    return;
+  }
+  // 成功：复位按钮（可接着存下一篇）+ 提示 + 一键「立即 ingest」（复用既有 ingest 流）。存盘后
+  // raw/ 列表已更新，下次开 ingest 选单即见新文件（无常驻列表，无需显式刷新）。
+  resetSave();
+  status.innerHTML = `<span class="report-ok">✓ 已存 ${escapeHtml(data.saved)}</span> `;
+  const ingestBtn = document.createElement("button");
+  ingestBtn.className = "feed-ingest";
+  ingestBtn.textContent = "立即 ingest";
+  ingestBtn.addEventListener("click", () => triggerIngest(data.saved));
+  status.appendChild(ingestBtn);
+}
+
 // ── 问答 / 多轮会话（fetch 流式读 SSE）─────────────────────────────────────
 
 let conversationId = null;

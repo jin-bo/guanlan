@@ -159,6 +159,20 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .raw-pick { display: flex; align-items: center; justify-content: space-between; padding: .3rem .4rem; border-bottom: 1px solid var(--lan-mist); font-size: .9rem; }
 .raw-pick button { background: var(--lan-ripple); color: #fff; border: 0; border-radius: 4px; padding: .2rem .7rem; cursor: pointer; }
 
+/* 投喂浮层（P4.1）：文件名输入 + 正文 textarea + 存盘 + 状态行（成功/409/失败）。 */
+.feed-name { width: 100%; box-sizing: border-box; padding: .4rem .55rem; margin-bottom: .5rem;
+  border: 1px solid var(--lan-mist); border-radius: 5px; font-size: .9rem; }
+.feed-content { width: 100%; box-sizing: border-box; padding: .5rem .6rem; resize: vertical;
+  border: 1px solid var(--lan-mist); border-radius: 5px; font-size: .88rem; line-height: 1.5;
+  font-family: inherit; }
+.feed-save { margin-top: .6rem; background: var(--lan-ripple); color: #fff; border: 0;
+  border-radius: 5px; padding: .35rem 1.1rem; cursor: pointer; font-size: .9rem; }
+.feed-save:disabled { opacity: .6; cursor: progress; }
+.feed-status { margin-top: .6rem; font-size: .88rem; display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.feed-status button { background: var(--lan-ripple); color: #fff; border: 0; border-radius: 4px;
+  padding: .2rem .7rem; cursor: pointer; }
+.feed-status button.feed-overwrite { background: transparent; color: #8a1f1f; border: 1px solid #f3c4c4; }
+
 /* 历史会话行（P4.2）：标题 + live/落盘徽标 + 打开/删除。 */
 .conv-row { display: flex; align-items: center; gap: .5rem; padding: .35rem .4rem; border-bottom: 1px solid var(--lan-mist); font-size: .9rem; }
 .conv-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .1rem; }

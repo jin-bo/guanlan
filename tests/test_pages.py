@@ -179,3 +179,20 @@ def test_index_md_links_skips_external_and_pure_anchor():
 def test_index_md_links_does_not_eat_wikilinks():
     # [[wikilink]] 无 `](` 结构，不该被 markdown 链接解析误吃。
     assert index_md_links("正文里有 [[Foo]] 和 [[Bar|别名]]\n") == set()
+
+
+def test_index_md_links_supports_balanced_parentheses():
+    text = "- [示例页](entities/示例实体(分部).md) — 介绍\n"
+    assert index_md_links(text) == {"entities/示例实体(分部).md"}
+
+
+def test_index_md_links_malformed_unbalanced_paren_does_not_truncate():
+    # 畸形链接（目标内未配对 `(`）：宁可整体不匹配，也不截出半截错目标当悬挂链接误报。
+    # 旧惰性正则会截出 `a(b`；新正则要求 `(` 必起一对，未配对即整体不匹配。
+    assert index_md_links("- [x](dir/a(b.md\n") == set()
+
+
+def test_index_md_links_two_level_nesting_skips_rather_than_wrong_target():
+    # 双层嵌套括号（极罕见）：整体不匹配（跳过），而非截出错目标 `dir/A(B(C)` 造成假悬挂。
+    assert index_md_links("- [x](dir/A(B(C)).md)\n") == set()
+
