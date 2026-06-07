@@ -68,11 +68,15 @@ description: >
 把**高频缺失实体**（被 ≥2 页引用却无页的断链，即 `lint.missing_entity`）一次性物化成 entity 页。wrapper 已把本批**目标名 + 各自引用页清单**算好喂进 prompt（确定性事实，你不必自己找谁引用了它），你只需对每个目标：
 
 1. **只读所列引用页**与 `wiki/index.md` 建上下文（别读全库；目标名已是归一键，可直接作文件名）。
-2. 若上下文**足以确认其为实体**，在 `wiki/entities/<目标>.md` 合成一页 entity 定义（frontmatter 齐全、正文术语转 `[[wikilink]]`）。**文件名直接用目标名**——这样 `[[原引用]]` 自然解析；若想用更规范的标题当 stem（如把 `大模型` 建成 `大语言模型.md`），**必须**在 frontmatter `aliases` 收编原目标名，否则断链不消（见 conventions §heal 建页）。
-3. 向 `wiki/log.md` 追加一条 `## [YYYY-MM-DD] heal | <目标>`。
-4. **只准从引用上下文合成，不臆造引用页里没有的事实**；`sources` 列引用页有出处可顺延、否则留空（合法）。上下文不足、目标更像概念/主题页、或疑似已有页别名时，**跳过该目标**并用一句话说明（无需特定格式——wrapper 重算图判定成败，不解析你的状态文本）。
+2. 若上下文**足以确认其为实体**，**三选一物化（拿不准走 A）**：
+   - **A 直接用目标名**（默认最稳）：建 `wiki/entities/<目标>.md`，`[[原引用]]` 经同一归一天然解析。
+   - **B 规范标题 + 收编**：目标口语/缩写、且引用上下文给出更规范全称时，建 `wiki/entities/<规范名>.md`（如 `大语言模型.md`），并在 frontmatter `aliases` **收编原目标名**（`aliases: ['大模型']`），否则断链不消、回执 `still_broken`。
+   - **C 收编到既有页**：目标其实是某**已有** `entities/`/`concepts/` 页的变体（读 `index.md`/引用页可认出）时，**只向该页 `aliases` 末尾追加原目标名**，**不新建重复页、不改正文、不动其它 frontmatter**（这是消假断链，不是改内容；见 conventions §heal 建页）。
+3. 建页/收编后**在 `wiki/index.md` 对应分区登记一行**（新页加 `- [<标题>](entities/<stem>.md) — <一句话>`；B/C 在句末注记别名，如 `…（别名：大模型/LLM）`），让去重、2-gram 召回、health 同步都看得见它。
+4. 向 `wiki/log.md` 追加一条 `## [YYYY-MM-DD] heal | <目标>`。
+5. **只准从引用上下文合成，不臆造引用页里没有的事实**；`sources` 列引用页有出处可顺延、否则留空（合法）。上下文不足、目标更像主题页、或无法判定时，**跳过该目标**并用一句话说明（无需特定格式——wrapper 重算图判定成败，不解析你的状态文本）。
 
-> **永不覆盖或删除已有页、永不修改 `raw/`**：heal 只**新建** entity 页 + 追加 `log.md`。越界写（改/删现有页）会被 wrapper 的写集审计标为 `unexpected_write`。其余收尾同 ingest（不运行 shell / `guanlan check`，wrapper 强制门禁 + 有界自愈）。
+> **永不删除或覆盖重写已有页正文、永不修改 `raw/`**：heal 只**新建** entity 页、**向既有页纯追加别名收编本批目标**、编辑 `index.md`、追加 `log.md`。其余越界写（改正文 / 改非 aliases 字段 / 删页 / 在收编里夹带无关别名 / 把页换成符号链接）会被 wrapper 的写集审计标为 `unexpected_write`。其余收尾同 ingest（不运行 shell / `guanlan check`，wrapper 强制门禁 + 有界自愈）。
 
 ### 确定性脚本（零 LLM）
 
