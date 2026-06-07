@@ -34,6 +34,10 @@ web = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "markdown>=3",
+    # app.py 直接 import anyio（to_thread 卸阻塞调用）；显式声明而非靠 fastapi 传递。
+    # 须 >=4.1：投喂端点 `to_thread.run_sync(..., abandon_on_cancel=True)` 用的 kwarg 自 4.1.0
+    # 起才有（3.x 只有 `cancellable=`），不钉则可能传递解析到 anyio 3 → 每次 POST /api/raw 即 TypeError。
+    "anyio>=4.1",
 ]
 
 [project.urls]

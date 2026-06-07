@@ -16,7 +16,7 @@ import io
 import queue
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from ..errors import EXIT_AGENT_ERROR
@@ -26,13 +26,18 @@ JobState = Literal["queued", "running", "done"]
 
 @dataclass
 class Job:
-    """一个写作业的内存记录。`output` 是捕获的人读输出（决策P4-7）。"""
+    """一个写作业的内存记录。`output` 是捕获的人读输出（决策P4-7）。
+
+    `done_event` 在 worker 收尾时 `set()`，供 `submit_and_wait` 的同步等待者唤醒（P4.1
+    决策P4.1-2：投喂作业入队后**同步等完成**再返回，复用 ingest 同一条 FIFO worker）。
+    """
 
     id: str
     kind: str
     state: JobState = "queued"
     exit_code: int | None = None
     output: str = ""
+    done_event: threading.Event = field(default_factory=threading.Event)
 
 
 class JobQueue:
@@ -46,15 +51,33 @@ class JobQueue:
         self._worker = threading.Thread(target=self._run, name="guanlan-jobs", daemon=True)
         self._worker.start()
 
-    def enqueue(self, kind: str, fn: Callable[[], int]) -> str:
-        """登记一个作业并入队，立即返回 `job_id`（不阻塞）。`fn` 返回退出码。"""
+    def _register(self, kind: str, fn: Callable[[], int]) -> Job:
+        """建表 + 入队的内部归口，返回 Job 本体（enqueue / submit_and_wait 共用）。"""
         with self._lock:
             self._counter += 1
-            job_id = str(self._counter)
-            job = Job(id=job_id, kind=kind)
-            self._jobs[job_id] = job
+            job = Job(id=str(self._counter), kind=kind)
+            self._jobs[job.id] = job
         self._queue.put((job, fn))
-        return job_id
+        return job
+
+    def enqueue(self, kind: str, fn: Callable[[], int]) -> str:
+        """登记一个作业并入队，立即返回 `job_id`（不阻塞）。`fn` 返回退出码。
+
+        异步作业（ingest）用：入队即返回 job_id，前端轮询 `/api/jobs/{id}`。
+        """
+        return self._register(kind, fn).id
+
+    def submit_and_wait(self, kind: str, fn: Callable[[], int]) -> Job:
+        """入队一个作业并**阻塞到它完成**，返回 Job 本体（直接持 Job，无 Optional）。
+
+        同步作业（P4.1 投喂）用：作业自身极快（一次文件写），单独起轮询体验割裂；故入队后
+        在调用线程上 `done_event.wait()` 等其在**同一条 FIFO worker** 上轮到并跑完。端点经
+        `anyio.to_thread` 调用本方法，阻塞的是线程池线程、不堵事件循环（决策P4.1-2）。
+        ⚠️ 会**排在队列前序写作业之后**：若此刻有 ingest 在飞，会一直等到它跑完才轮到。
+        """
+        job = self._register(kind, fn)
+        job.done_event.wait()
+        return job
 
     def get_job(self, job_id: str) -> Job | None:
         """取作业快照；未知 id → None（端点据此 404）。"""
@@ -75,7 +98,10 @@ class JobQueue:
                 job.exit_code = EXIT_AGENT_ERROR
                 buf.write(f"\n作业执行异常：{type(exc).__name__}: {exc}")
             finally:
-                # 顺序要紧：先写 output 再翻 state="done"。读者只在见到 state=="done" 后读
-                # output，故同线程程序序 + GIL 原子赋值保证"见 done 必见完整 output"（无锁可行）。
+                # 顺序要紧：先写 output、再翻 state="done"，最后 set()。轮询读者只在见到
+                # state=="done" 后读 output（同线程程序序 + GIL 原子赋值保证"见 done 必见完整
+                # output"，无锁可行）；submit_and_wait 的等待者由 done_event 唤醒、醒来即见完整
+                # output/exit_code/state（决策P4.1-2）。
                 job.output = buf.getvalue()
                 job.state = "done"
+                job.done_event.set()
