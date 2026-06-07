@@ -11,7 +11,7 @@ from guanlan.errors import (
     EXIT_RAW_MUTATED,
 )
 from guanlan.heal import compute_worklist, run_heal
-from guanlan.lint import missing_entities, run_lint
+from guanlan.lint import run_lint
 from guanlan.runtime import AgentRunResult
 
 # 带 aliases 的 entity 页模板（用于"规范标题 + 别名收编"场景）。
