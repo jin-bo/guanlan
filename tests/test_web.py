@@ -1546,3 +1546,202 @@ def test_no_session_persist_equivalent_to_memory_only(chat_env, kb) -> None:
         assert _snapshots_for(kb, leftover)
         # 内存命中 DELETE：只删内存、不调 delete_session（无盘文件可删，本就没落）。
         assert client.delete(f"/api/conversations/{cid}").status_code == 200
+
+
+# ───────────────────────── Web-heal（P4.3）─────────────────────────
+#
+# 测试只聚焦 adapter（preview / 入队 / result 序列化 / 旧 job 兼容 / FIFO 烟测 / model 透传 /
+# 形态）；P2/P3 的门禁/自愈/写集行为已由 test_heal.py 的 core 用例证过，**不在 Web 层重复证明**。
+
+
+def _ref_missing(kb, name, *targets) -> None:
+    """写一页 wiki/concepts/<name>.md 引用给定 [[target]]（构造高频缺失实体）。"""
+    body = "见 " + "、".join(f"[[{t}]]" for t in targets)
+    write_page(kb, f"wiki/concepts/{name}.md", body=body)
+
+
+def test_heal_preview_matches_compute_worklist(kb) -> None:
+    """GET /api/heal/preview 与同库 compute_worklist 逐项一致；零 LLM、不入队、不触 runner。"""
+    from guanlan.heal import compute_worklist
+
+    _ref_missing(kb, "a", "大模型", "gpt")
+    _ref_missing(kb, "b", "大模型", "gpt")
+
+    runner = make_runner(lambda root: None)
+    with TestClient(create_app(kb, runner=runner)) as client:
+        resp = client.get("/api/heal/preview")
+        assert resp.status_code == 200
+        data = resp.json()
+
+    items = compute_worklist(kb / "wiki")
+    expected = {
+        "worklist": [
+            {"target": w.target, "ref_count": w.ref_count, "ref_pages": list(w.ref_pages)}
+            for w in items if not w.postponed
+        ],
+        "postponed": [
+            {"target": w.target, "ref_count": w.ref_count, "ref_pages": list(w.ref_pages)}
+            for w in items if w.postponed
+        ],
+    }
+    assert data == expected
+    assert {it["target"] for it in data["worklist"]} == {"大模型", "gpt"}
+    assert runner.calls == []  # 纯读：未触 Agentao
+
+
+def test_heal_preview_limit_and_min_refs(client, kb) -> None:
+    """limit 推迟项进 postponed；min_refs 上调缩小 worklist。"""
+    _ref_missing(kb, "a", "大模型", "gpt")
+    _ref_missing(kb, "b", "大模型", "gpt")
+
+    # limit=1：频次相同按 target 升序（ASCII "gpt" < CJK "大模型"）→ gpt 入批、大模型 推迟。
+    data = client.get("/api/heal/preview", params={"limit": 1}).json()
+    assert [w["target"] for w in data["worklist"]] == ["gpt"]
+    assert [w["target"] for w in data["postponed"]] == ["大模型"]
+
+    # min_refs=3：两者均 2 页引用 → 全数低于阈值 → 空。
+    data3 = client.get("/api/heal/preview", params={"min_refs": 3}).json()
+    assert data3["worklist"] == [] and data3["postponed"] == []
+
+
+@pytest.mark.parametrize("params", [{"limit": 0}, {"min_refs": 0}, {"limit": -1}])
+def test_heal_preview_out_of_range_is_422(client, params) -> None:
+    """limit/min_refs < 1 → 422（Query ge=1，对齐 CLI positive_int）。"""
+    assert client.get("/api/heal/preview", params=params).status_code == 422
+
+
+def test_heal_post_enqueues_and_serializes_result(kb) -> None:
+    """POST /api/heal 即时返回 job_id（非阻塞）→ 轮询至 done：exit_code==0、result 为六字段机器
+    回执（receipts 报 resolved）、**散文在 output 不在 result**（决策P4.3-1）。"""
+    from guanlan.heal import heal_result_dict, run_heal_result
+
+    _ref_missing(kb, "a", "大模型")
+    _ref_missing(kb, "b", "大模型")
+    runner = make_runner(
+        lambda root: write_page(root, "wiki/entities/大模型.md", type="entity"),
+        final_text="已建大模型页",
+    )
+    with TestClient(create_app(kb, runner=runner)) as client:
+        resp = client.post("/api/heal", json={})
+        assert resp.status_code == 200
+        job_id = resp.json()["job_id"]
+        data = _wait_job(client, job_id)
+
+    assert data["kind"] == "heal"
+    assert data["exit_code"] == 0
+    # result 是六字段机器回执，receipts 报 resolved。
+    result = data["result"]
+    assert set(result) == {
+        "worklist", "postponed", "receipts", "unexpected_writes", "changed_paths", "exit_code"
+    }
+    assert result["receipts"][0]["target"] == "大模型"
+    assert result["receipts"][0]["status"] == "resolved"
+    assert result["exit_code"] == 0
+    # 散文进 output、不掺 result。
+    assert "已建大模型页" in data["output"]
+    assert "已建大模型页" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_heal_post_recomputes_worklist_server_side(kb) -> None:
+    """客户端只传 limit/min_refs/model（无 target 列表，决策P4.3-3）：传 target 键被忽略、不报错。"""
+    _ref_missing(kb, "a", "大模型")
+    _ref_missing(kb, "b", "大模型")
+    runner = make_runner(lambda root: write_page(root, "wiki/entities/大模型.md", type="entity"))
+    with TestClient(create_app(kb, runner=runner)) as client:
+        # 多余的 target/targets 键被 pydantic 忽略（模型只声明 limit/min_refs/model）。
+        resp = client.post("/api/heal", json={"targets": ["伪造目标"], "target": "x"})
+        assert resp.status_code == 200
+        data = _wait_job(client, resp.json()["job_id"])
+    assert data["result"]["receipts"][0]["target"] == "大模型"  # 服务端重算，不受伪造目标影响
+
+
+def test_heal_empty_worklist_job(kb) -> None:
+    """无缺失实体 → heal 作业空批次：exit_code==0、result 六字段（空 receipts）、runner 零调用。"""
+    runner = make_runner(lambda root: None)
+    with TestClient(create_app(kb, runner=runner)) as client:
+        resp = client.post("/api/heal", json={})
+        data = _wait_job(client, resp.json()["job_id"])
+    assert data["exit_code"] == 0
+    assert data["result"]["receipts"] == []
+    assert runner.calls == []  # 空 worklist 短路、未触 Agentao
+
+
+def test_jobs_result_null_for_ingest(kb) -> None:
+    """旧作业兼容：ingest 作业 result 恒为 null（worker int 分支不变、零回归）。"""
+    target = _put_raw(kb)
+    runner = make_runner(lambda root: write_page(root, "wiki/concepts/New.md"))
+    data = _ingest_once(kb, runner, target)
+    assert data["kind"] == "ingest"
+    assert data["result"] is None
+
+
+def test_heal_model_passthrough(kb) -> None:
+    """省略 model → 用 app 级 model；给 model → 透传进 run_heal_result（含 None，走子进程无嵌入坑）。"""
+    _ref_missing(kb, "a", "大模型")
+    _ref_missing(kb, "b", "大模型")
+
+    # 给 model：透传到子进程 runner。
+    runner = make_runner(lambda root: write_page(root, "wiki/entities/大模型.md", type="entity"))
+    with TestClient(create_app(kb, model="app-model", runner=runner)) as client:
+        _wait_job(client, client.post("/api/heal", json={"model": "req-model"}).json()["job_id"])
+    assert runner.calls[0]["model"] == "req-model"
+
+    # 省略 model：回落 app 级 model（用新目标 新词，避开已 resolved 的 大模型）。
+    _ref_missing(kb, "c", "新词")
+    _ref_missing(kb, "d", "新词")
+    runner2 = make_runner(lambda root: write_page(root, "wiki/entities/新词.md", type="entity"))
+    with TestClient(create_app(kb, model="app-model", runner=runner2)) as client:
+        _wait_job(client, client.post("/api/heal", json={}).json()["job_id"])
+    assert runner2.calls[0]["model"] == "app-model"
+
+
+def test_heal_serial_behind_ingest(kb) -> None:
+    """单写者 FIFO 烟测：先入队卡住的 ingest，再 POST /api/heal → heal 在 ingest 之后完成，
+    两者皆 done、ingest 不被冤判 raw_mutated（同 worker 串行，决策P4.3-2）。"""
+    _put_raw(kb, "src.md")
+    _ref_missing(kb, "a", "大模型")
+    _ref_missing(kb, "b", "大模型")
+    gate = threading.Event()
+    order: list[str] = []
+
+    def runner(prompt, **kwargs):
+        # 第一个作业（ingest）卡住，张开 raw/ 快照窗口；heal 在其后才跑。
+        if "大模型" in prompt:  # heal prompt 含目标名
+            order.append("heal")
+            write_page(kwargs["working_directory"], "wiki/entities/大模型.md", type="entity")
+        else:
+            order.append("ingest")
+            gate.wait(timeout=3)
+            write_page(kwargs["working_directory"], "wiki/concepts/N.md")
+        return AgentRunResult(ok=True, final_text="done")
+
+    with TestClient(create_app(kb, runner=runner)) as client:
+        ing_id = client.post("/api/ingest", json={"target": "raw/src.md"}).json()["job_id"]
+        heal_id = client.post("/api/heal", json={}).json()["job_id"]
+        time.sleep(0.1)
+        assert order == ["ingest"]  # heal 被挡在在飞 ingest 之后（同 FIFO worker）
+        gate.set()
+        ing = _wait_job(client, ing_id)
+        heal = _wait_job(client, heal_id)
+
+    assert order == ["ingest", "heal"]  # FIFO：heal 在 ingest 之后才跑
+    assert ing["exit_code"] == 0  # ingest 没被 heal 的写冤判 EXIT_RAW_MUTATED
+    assert heal["exit_code"] == 0
+    assert heal["result"]["receipts"][0]["status"] == "resolved"
+
+
+def test_heal_frontend_wired(client) -> None:
+    """前端接线（C2）：顶栏有 heal 按钮，app.js 拉 preview/POST heal 并按 result 渲染回执。"""
+    index = client.get("/").text
+    assert 'id="heal-btn"' in index
+    js = client.get("/static/app.js").text
+    assert "/api/heal/preview" in js
+    assert '"/api/heal"' in js  # POST 物化
+    assert "renderHealDone" in js and "job.result" in js  # 按结构化 result 渲染
+
+
+def test_heal_no_sse_no_path_param(client) -> None:
+    """形态红线：无 heal SSE（/api/heal/{id}/events → 404/405）；端点无 path/name 入参（无穿越面）。"""
+    assert client.get("/api/heal/1/events").status_code in (404, 405)
+    # POST /api/heal 不接受 path/name（只 limit/min_refs/model）：传非法 limit 才 422，path 被忽略。
+    assert client.post("/api/heal", json={"limit": 0}).status_code == 422

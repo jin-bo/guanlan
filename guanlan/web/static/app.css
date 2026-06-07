@@ -173,6 +173,21 @@ body.col-resizing { user-select: none; cursor: col-resize; }
   padding: .2rem .7rem; cursor: pointer; }
 .feed-status button.feed-overwrite { background: transparent; color: #8a1f1f; border: 1px solid #f3c4c4; }
 
+/* heal 浮层（P4.3）：worklist 预览（控件 + 目标行 + 推迟）+ 物化回执（resolved/仍断/非预期写）。 */
+.heal-ctrl { display: flex; gap: .5rem; align-items: center; margin-bottom: .6rem; flex-wrap: wrap; }
+.heal-num { width: 6rem; padding: .3rem .45rem; border: 1px solid var(--lan-mist); border-radius: 5px; font-size: .85rem; }
+.heal-ctrl button { background: var(--lan-ripple); color: #fff; border: 0; border-radius: 4px; padding: .25rem .8rem; cursor: pointer; }
+.heal-item { padding: .3rem .45rem; border-left: 3px solid var(--lan-mist); margin: .25rem 0; font-size: .85rem; background: var(--lan-foam); display: flex; flex-direction: column; gap: .1rem; }
+.heal-item.postponed { border-left-color: transparent; background: transparent; color: var(--lan-ink-soft); }
+.heal-target { font-weight: 600; color: var(--lan-deep); }
+.heal-meta { color: var(--lan-ink-soft); font-size: .78rem; }
+.heal-go { margin-top: .7rem; background: var(--lan-ripple); color: #fff; border: 0; border-radius: 5px; padding: .4rem 1.1rem; cursor: pointer; font-size: .9rem; }
+.heal-receipt { padding: .25rem .45rem; margin: .2rem 0; font-size: .85rem; border-radius: 4px; }
+.heal-receipt.resolved { color: #1b6e3a; background: var(--lan-foam); }
+.heal-receipt.broken { color: var(--lan-ink-soft); }
+.heal-warn { color: #8a1f1f; font-weight: 600; margin-top: .5rem; font-size: .85rem; }
+.heal-warn-item { color: #8a1f1f; font-size: .82rem; padding-left: .6rem; }
+
 /* 历史会话行（P4.2）：标题 + live/落盘徽标 + 打开/删除。 */
 .conv-row { display: flex; align-items: center; gap: .5rem; padding: .35rem .4rem; border-bottom: 1px solid var(--lan-mist); font-size: .9rem; }
 .conv-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
