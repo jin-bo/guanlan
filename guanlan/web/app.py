@@ -25,7 +25,7 @@ import anyio
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..check import format_report as _format_check
 from ..check import run_check
@@ -33,7 +33,15 @@ from ..errors import EXIT_OK, EXIT_USAGE
 from ..graph import build_and_write_graph
 from ..health import format_report as _format_health
 from ..health import run_health
+from ..heal import (
+    DEFAULT_LIMIT,
+    HealRun,
+    compute_worklist,
+    heal_result_dict,
+    run_heal_result,
+)
 from ..ingest import run_ingest
+from ..lint import MISSING_ENTITY_MIN_REFS
 from ..lint import format_report as _format_lint
 from ..lint import run_lint
 from ..pages import iter_pages, load_page, page_title, page_type
@@ -64,6 +72,17 @@ class RawBody(BaseModel):
     name: str
     content: str
     overwrite: bool = False
+
+
+class HealBody(BaseModel):
+    """`POST /api/heal` 请求体（P4.3）。**只收 `limit`/`min_refs`/`model`，绝不收 target 列表**
+    （决策P4.3-3：worklist 由作业服务端重算）。默认值与 CLI 同源（直接 import 常量、不硬编码，
+    避免漂移）；`ge=1` 对齐 CLI `positive_int` 的「须 ≥ 1」，越界 → 422。`model` 含 `None`
+    直接透传子进程 runner（heal 非嵌入会话、无 P4-8 模型坑，决策P4.3-5）。"""
+
+    limit: int = Field(default=DEFAULT_LIMIT, ge=1)
+    min_refs: int = Field(default=MISSING_ENTITY_MIN_REFS, ge=1)
+    model: str | None = None
 
 
 def _sse(kind: str, data: object) -> str:
@@ -202,6 +221,25 @@ def _list_pages(root: Path) -> list[dict]:
             }
         )
     return pages
+
+
+def _heal_preview(root: Path, limit: int, min_refs: int) -> dict:
+    """零-LLM 算 heal worklist（== `heal --dry-run --json` 体），返回 `{worklist, postponed}`。
+
+    复用 `heal.compute_worklist`（纯读 `wiki/`、不取 `raw/` 快照、不触 Agentao、不入队，
+    决策P4.3-4）；按 `postponed` 标志分两组、各项序列化为 `{target, ref_count, ref_pages}`。
+    经 `anyio.to_thread.run_sync` 卸离事件循环调用（决策P4-2）。
+    """
+    items = compute_worklist(root / "wiki", min_refs=min_refs, limit=limit)
+    item = lambda w: {  # noqa: E731
+        "target": w.target,
+        "ref_count": w.ref_count,
+        "ref_pages": list(w.ref_pages),
+    }
+    return {
+        "worklist": [item(w) for w in items if not w.postponed],
+        "postponed": [item(w) for w in items if w.postponed],
+    }
 
 
 def _report_response(json_text: str) -> Response:
@@ -391,17 +429,52 @@ def create_app(
 
         return {"job_id": jobs.enqueue("ingest", _job)}
 
+    # heal 预览（零 LLM 读，决策P4.3-4）：只算 worklist（== heal --dry-run），不入队、不触 Agentao、
+    # 不取 raw/ 快照；阻塞跑 to_thread。limit/min_refs 默认与 CLI 同源，越界 422（Query ge=1）。
+    @app.get("/api/heal/preview")
+    async def heal_preview(
+        limit: int = Query(DEFAULT_LIMIT, ge=1),
+        min_refs: int = Query(MISSING_ENTITY_MIN_REFS, ge=1),
+    ) -> dict:
+        return await anyio.to_thread.run_sync(_heal_preview, root, limit, min_refs)
+
+    # heal 物化（写，决策P4.3-2）：入单写者 FIFO 队列、即时返回 job_id、前端轮询（与 ingest 同构）。
+    # worklist 由作业**服务端重算**（不收 target 列表，决策P4.3-3）；走子进程 runner、过 P2 写门禁。
+    @app.post("/api/heal")
+    async def heal(body: HealBody) -> dict:
+        def _job() -> HealRun:  # 返回结构化结果（非 int）→ worker 走鸭子分流存 job.result
+            run = run_heal_result(
+                root=root,
+                limit=body.limit,
+                min_refs=body.min_refs,
+                model=body.model or model,
+                runner=runner,
+            )
+            if run.final_text:  # agent 散文 → worker 的 redirect 捕获进 job.output（与 ingest 同口径）
+                print(run.final_text)
+            return run
+
+        return {"job_id": jobs.enqueue("heal", _job)}
+
     @app.get("/api/jobs/{job_id}")
     async def job_status(job_id: str) -> dict:
         job = jobs.get_job(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"未知作业：{job_id}")
+        # heal 作业多回一个 `result`（六字段机器回执，经既有序列化器）；ingest/投喂为 null、前端
+        # 忽略（决策P4.3-1）。agent 散文一律在 `output`，不进 `result`。
+        result = (
+            heal_result_dict(job.result.result, job.result.postponed)
+            if isinstance(job.result, HealRun)
+            else None
+        )
         return {
             "id": job.id,
             "kind": job.kind,
             "state": job.state,
             "exit_code": job.exit_code,
             "output": job.output,
+            "result": result,
         }
 
     # 问答 / 多轮会话（只读嵌入，决策P4-8）：POST 直接返回 text/event-stream，前端 fetch 读 body。

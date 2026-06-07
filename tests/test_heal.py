@@ -3,14 +3,22 @@
 import json
 from pathlib import Path
 
+import pytest
 from conftest import make_runner, write_page
 
 from guanlan.errors import (
+    EXIT_AGENT_ERROR,
     EXIT_CHECK_FAILED,
     EXIT_OK,
     EXIT_RAW_MUTATED,
 )
-from guanlan.heal import compute_worklist, run_heal
+from guanlan.heal import (
+    HealRun,
+    compute_worklist,
+    heal_result_dict,
+    run_heal,
+    run_heal_result,
+)
 from guanlan.lint import run_lint
 from guanlan.runtime import AgentRunResult
 
@@ -586,3 +594,88 @@ def test_heal_idempotent_rerun_skips(kb: Path):
     assert rc == EXIT_OK
     assert runner.calls == []  # 已解析、不再入选
     assert page.read_bytes() == before  # 未覆盖
+
+
+# ── P4.3：不打印 core run_heal_result -> HealRun（CLI/Web 共用，决策P4.3-1）──────
+
+
+def test_run_heal_result_structured_and_silent(kb: Path, capsys):
+    """core 返回干净 HealRun（result/postponed/had_batch/final_text）且 **stdout 干净**（不打印）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    runner = make_runner(
+        lambda root: write_page(root, "wiki/entities/大模型.md", type="entity"), final_text="建好了"
+    )
+    run = run_heal_result(root=kb, limit=10, min_refs=2, model=None, runner=runner)
+
+    assert capsys.readouterr().out == ""  # core 不碰 stdout（这正是抽 core 的目的）
+    assert isinstance(run, HealRun)
+    assert run.had_batch is True
+    assert run.exit_code == EXIT_OK
+    assert run.final_text == "建好了"  # 散文来自 GuardedWriteResult.final_text
+    assert run.postponed == ()
+    r = run.result.receipts[0]
+    assert r.target == "大模型" and r.status == "resolved"
+
+
+def test_run_heal_result_empty_worklist_short_circuits(kb: Path):
+    """空 worklist → had_batch=False、EXIT_OK、**未调 runner**（零 LLM 成本，决策P3.2-6）。"""
+    runner = make_runner(None)
+    run = run_heal_result(root=kb, limit=10, min_refs=2, model=None, runner=runner)
+    assert run.had_batch is False
+    assert run.exit_code == EXIT_OK
+    assert run.result.receipts == ()
+    assert runner.calls == []
+
+
+def test_run_heal_result_postponed_carried(kb: Path):
+    """因 --limit 推迟项进 HealRun.postponed（worklist 级，HealResult 本不含）。"""
+    _ref(kb, "a", "大模型", "gpt")
+    _ref(kb, "b", "大模型", "gpt")
+    runner = make_runner(lambda root: write_page(root, "wiki/entities/gpt.md", type="entity"))
+    run = run_heal_result(root=kb, limit=1, min_refs=2, model=None, runner=runner)
+    assert run.had_batch is True
+    # 频次相同按 target 升序：ASCII "gpt" < CJK "大模型"，故 gpt 入批、大模型 推迟。
+    assert [w.target for w in run.postponed] == ["大模型"]
+
+
+def _bad_frontmatter(root: Path):
+    p = root / "wiki" / "entities" / "大模型.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(  # 坏 type：阻断 + 自愈耗尽 → CHECK_FAILED
+        "---\ntitle: 'T'\ntype: bogus\ntags: []\nsources: []\nlast_updated: 2026-06-03\n---\n\n正文\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    "runner_factory, expected",
+    [
+        (lambda: make_runner(lambda r: write_page(r, "wiki/entities/大模型.md", type="entity")), EXIT_OK),
+        (lambda: make_runner(lambda r: (r / "raw" / "x.md").write_text("x", encoding="utf-8")), EXIT_RAW_MUTATED),
+        (lambda: make_runner(_bad_frontmatter), EXIT_CHECK_FAILED),
+        (lambda: make_runner(None, ok=False, final_text="boom", error_type="runtime_error"), EXIT_AGENT_ERROR),
+    ],
+    ids=["ok", "raw_mutated", "check_failed", "agent_error"],
+)
+def test_run_heal_result_gate_exit_codes_passthrough(kb: Path, runner_factory, expected):
+    """门禁四值（0/4/3/5）经 run_heal_result 透传到 HealRun.exit_code（gate 行为只在 core 测）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    run = run_heal_result(root=kb, limit=10, min_refs=2, model=None, runner=runner_factory())
+    assert run.had_batch is True
+    assert run.exit_code == expected
+
+
+def test_heal_result_dict_matches_cli_json(kb: Path, capsys):
+    """公开序列化器 heal_result_dict 与 CLI --json 体一致（同一 wire 契约，纯重命名）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    runner = make_runner(lambda root: write_page(root, "wiki/entities/大模型.md", type="entity"))
+    run = run_heal_result(root=kb, limit=10, min_refs=2, model=None, runner=runner)
+    wire = heal_result_dict(run.result, run.postponed)
+    assert set(wire) == {
+        "worklist", "postponed", "receipts", "unexpected_writes", "changed_paths", "exit_code",
+    }
+    assert wire["receipts"][0]["status"] == "resolved"
+    assert wire["exit_code"] == EXIT_OK
