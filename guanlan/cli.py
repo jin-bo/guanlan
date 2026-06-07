@@ -13,10 +13,11 @@ from . import __version__
 from .check import check_entrypoint
 from .errors import EXIT_USAGE, GuanlanError
 from .graph import graph_entrypoint
+from .heal import DEFAULT_LIMIT, heal_entrypoint, positive_int
 from .health import health_entrypoint
 from .ingest import run_ingest
 from .init import run_init
-from .lint import lint_entrypoint
+from .lint import MISSING_ENTITY_MIN_REFS, lint_entrypoint
 from .query import run_query
 from .skill import install_skill
 
@@ -66,6 +67,17 @@ def _cmd_lint(args: argparse.Namespace) -> int:
 
 def _cmd_graph(args: argparse.Namespace) -> int:
     return graph_entrypoint(args.dir, json_only=args.json_only)
+
+
+def _cmd_heal(args: argparse.Namespace) -> int:
+    return heal_entrypoint(
+        args.dir,
+        limit=args.limit,
+        min_refs=args.min_refs,
+        model=args.model,
+        dry_run=args.dry_run,
+        json_output=args.json,
+    )
 
 
 def _cmd_web(args: argparse.Namespace) -> int:
@@ -181,6 +193,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--json-only", action="store_true", help="只写 graph.json，跳过 graph.html"
     )
     p_graph.set_defaults(func=_cmd_graph)
+
+    p_heal = sub.add_parser(
+        "heal",
+        parents=[dir_parent],
+        help="缺失实体物化：把高频断链按需 LLM 建成 entity 页（走 P2 写门禁）",
+    )
+    p_heal.add_argument(
+        "--limit",
+        type=positive_int,
+        default=DEFAULT_LIMIT,
+        help=f"本批最多物化几个（默认 {DEFAULT_LIMIT}，按引用频次降序；须 ≥ 1）",
+    )
+    p_heal.add_argument(
+        "--min-refs",
+        type=positive_int,
+        default=MISSING_ENTITY_MIN_REFS,
+        help=f"入选阈值：被 ≥ 此数页引用才物化（默认 {MISSING_ENTITY_MIN_REFS}，对齐 lint；须 ≥ 1）",
+    )
+    p_heal.add_argument(
+        "--dry-run", action="store_true", help="仅打印 worklist（纯读、零 LLM、不触 Agentao）"
+    )
+    p_heal.add_argument("--model", default=None, help="覆盖 Agentao 模型")
+    p_heal.add_argument("--json", action="store_true", help="输出 worklist/receipt 的结构化 JSON")
+    p_heal.set_defaults(func=_cmd_heal)
 
     p_web = sub.add_parser(
         "web",

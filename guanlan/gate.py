@@ -282,26 +282,47 @@ def enforce_write_result(
     return enforce(root, snapshot_before, baseline=baseline)
 
 
-def run_guarded_write(
+@dataclass(frozen=True)
+class GuardedWriteResult:
+    """写门禁编排的结构化结果（决策P3.2-13）。
+
+    `gate` 是最终门禁结论、`run_result` 是**待展示**的那一轮（成功取首轮、失败/报错取末轮）。
+    `exit_code` / `final_text` 是便捷视图——让消费侧（heal）既能出干净 `--json`、又能自渲染人读
+    报告，而无需从 stdout 反解。`run_guarded_write` 仅在此基础上加一次 `report_outcome` 打印。
+    """
+
+    gate: GateResult
+    run_result: AgentRunResult
+
+    @property
+    def exit_code(self) -> int:
+        return self.gate.exit_code
+
+    @property
+    def final_text(self) -> str:
+        return self.run_result.final_text or ""
+
+
+def run_guarded_write_result(
     root: Path,
     prompt: str,
     *,
     model: str | None = None,
     runner: AgentRunner | None = None,
     max_repair: int = MAX_REPAIR_ATTEMPTS,
-) -> int:
-    """写入口（ingest、query --backfill）的统一编排：
+) -> GuardedWriteResult:
+    """写入口的统一编排核心，**不向 stdout 打印门禁报告**（决策P3.2-13）。
 
-    快照 `raw/` → Agentao(`workspace-write`) → `enforce_write_result` → 有界自愈 → 报告 → 退出码。
-    两个写入口仅 prompt 不同，故收尾逻辑收口在此，避免漂移（docs/P2 §7/§8 承诺一致）。
+    快照 `raw/` → Agentao(`workspace-write`) → `enforce_write_result` → 有界自愈 → 结构化结果。
+    门禁、自愈、退出码全在此收口；是否打印交给调用方（`run_guarded_write` 薄壳打印，heal 自渲染）。
+    自愈进度行 `↻ …` 仍走 **stderr**（属编排核心、不污染 `--json` 的 stdout）。
 
     **增量门禁（决策7/8）**：写操作**前**先取 `raw/` 快照与阻断性违规基线 `baseline`；门禁只追究
     **本次新引入**的阻断性违规（frontmatter/sources），历史断链/欠债不连累本次。断链全程作警告。
 
     **有界自愈（决策7）**：首轮门禁若 `check_failed`（即出现**新的阻断性**违规），把这些违规
-    回喂同一 agent 就地修，最多 `max_repair` 轮——把"ingest 后人工修 wiki"前移到 ingest 内。
-    `raw_mutated`/`agent_error` 不自愈（完整性/运行时问题该硬失败）。
-    成功后展示**首轮**的实质摘要（自愈轮只动元数据）；失败/报错展示最后一轮的结果。
+    回喂同一 agent 就地修，最多 `max_repair` 轮。`raw_mutated`/`agent_error` 不自愈（完整性/运行时
+    问题该硬失败）。成功后展示**首轮**的实质摘要（自愈轮只动元数据）；失败/报错展示最后一轮的结果。
     """
     before = snapshot_raw(root)
     baseline = check_baseline(root)  # 写前已存在的阻断性违规：增量门禁的基线
@@ -332,8 +353,26 @@ def run_guarded_write(
         gate = enforce_write_result(root, before, last_result, baseline=baseline)
 
     # 成功时优先展示首轮摘要（实质内容）；失败/报错时展示最后一轮（错误来源）。
-    report_outcome(gate, first_result if gate.ok else last_result)
-    return gate.exit_code
+    return GuardedWriteResult(gate=gate, run_result=first_result if gate.ok else last_result)
+
+
+def run_guarded_write(
+    root: Path,
+    prompt: str,
+    *,
+    model: str | None = None,
+    runner: AgentRunner | None = None,
+    max_repair: int = MAX_REPAIR_ATTEMPTS,
+) -> int:
+    """写入口（ingest、query --backfill）：调编排核心 → `report_outcome` 打印 → 退出码。
+
+    薄壳，行为/输出与重构前**逐字节一致**（ingest 路径不回归）；结构化消费走 `run_guarded_write_result`。
+    """
+    result = run_guarded_write_result(
+        root, prompt, model=model, runner=runner, max_repair=max_repair
+    )
+    report_outcome(result.gate, result.run_result)
+    return result.exit_code
 
 
 def report_agent_error(

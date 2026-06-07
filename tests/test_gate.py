@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from conftest import make_runner
+
 from guanlan.errors import EXIT_AGENT_ERROR, EXIT_CHECK_FAILED, EXIT_RAW_MUTATED
 from guanlan.gate import (
     GateResult,
@@ -281,3 +283,37 @@ def test_gateresult_exit_code_mapping():
     assert GateResult.raw_mutated([]).exit_code == EXIT_RAW_MUTATED
     assert GateResult.check_failed([]).exit_code == EXIT_CHECK_FAILED
     assert GateResult.agent_error(None).exit_code == EXIT_AGENT_ERROR
+
+
+# --- run_guarded_write_result（决策P3.2-13：结果版不向 stdout 打印门禁报告）---
+
+
+def _kb_writable(tmp_path: Path) -> Path:
+    """satisfy check_baseline / snapshot：含 raw/ 与 wiki/ 三 config 页。"""
+    _kb(tmp_path)
+    return tmp_path
+
+
+def test_guarded_write_result_returns_structured_no_stdout(tmp_path, capsys):
+    """结果版回传 exit_code/final_text/gate，且 stdout 无门禁报告（report_outcome 不触发）。"""
+    from guanlan.gate import run_guarded_write_result
+
+    _kb_writable(tmp_path)
+    runner = make_runner(lambda root: _good_page(root), final_text="建好了")
+    result = run_guarded_write_result(tmp_path, "PROMPT", runner=runner)
+
+    assert result.exit_code == 0
+    assert result.final_text == "建好了"
+    assert result.gate.ok
+    out = capsys.readouterr().out
+    assert out == ""  # 结果版绝不向 stdout 打印（heal 自渲染 / 出 --json 靠这点）
+
+
+def test_guarded_write_thin_shell_still_prints(tmp_path, capsys):
+    """薄壳 run_guarded_write 仍打印门禁报告（ingest 路径不回归）。"""
+    from guanlan.gate import run_guarded_write
+
+    _kb_writable(tmp_path)
+    rc = run_guarded_write(tmp_path, "PROMPT", runner=make_runner(_good_page))
+    assert rc == 0
+    assert "门禁通过" in capsys.readouterr().out
