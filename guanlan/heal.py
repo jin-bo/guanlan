@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -33,9 +34,12 @@ __all__ = [
     "HealWorkItem",
     "HealReceipt",
     "HealResult",
+    "HealRun",
     "compute_worklist",
+    "heal_result_dict",
     "positive_int",
     "run_heal",
+    "run_heal_result",
     "heal_entrypoint",
     "main",
 ]
@@ -100,6 +104,27 @@ class HealResult:
     unexpected_writes: tuple[str, ...] = ()  # 有害写路径（删/改现有页），批次级、非逐目标
     changed_paths: tuple[str, ...] = ()  # 本轮 wiki/ 写集 diff 全量（增/删/改）
     exit_code: int = EXIT_OK
+
+
+@dataclass(frozen=True)
+class HealRun:
+    """一轮真实 heal 的结构化产物（CLI 渲染 + Web 回执共用的**进程内**对象，决策P4.3-1）。
+
+    `result` 是 P3.2/P3.3 既有批次契约；`postponed` 是因 `--limit` 推迟项（worklist 级，
+    `HealResult` 本不含）；`had_batch=False` 表示空 worklist 短路（未触 Agentao，决策P3.2-6），
+    供 CLI 薄壳选空批次特判渲染；`final_text` 是 agent 散文（来自 `GuardedWriteResult.final_text`，
+    空批次短路时为 `""`）。`final_text`/`had_batch` 只是进程内字段，不进任何 wire 契约
+    （Web 的 `result` 由端点经 `heal_result_dict` 产出六字段机器回执，散文另走 `job.output`）。
+    """
+
+    result: HealResult
+    postponed: tuple[HealWorkItem, ...] = ()
+    had_batch: bool = False
+    final_text: str = ""
+
+    @property
+    def exit_code(self) -> int:
+        return self.result.exit_code
 
 
 # ── §2 worklist（确定性，零 LLM）────────────────────────────────────────────
@@ -350,44 +375,31 @@ def _build_receipts(
 # ── 编排 + 渲染 ─────────────────────────────────────────────────────────────
 
 
-def run_heal(
+def run_heal_result(
     *,
     root: str | Path = ".",
     limit: int = DEFAULT_LIMIT,
     min_refs: int = MISSING_ENTITY_MIN_REFS,
     model: str | None = None,
-    dry_run: bool = False,
-    json_output: bool = False,
     runner: AgentRunner | None = None,
-) -> int:
-    """物化缺失实体，返回退出码（见 errors.py）。"""
-    try:
-        kb = require_kb_root(root, writable=True)
-    except GuanlanError as exc:
-        print(exc, file=sys.stderr)
-        return exc.exit_code
+) -> HealRun:
+    """heal 真实写路径的**不打印**编排核心（仿 P3.2 决策P3.2-13 的 `run_guarded_write_result`）。
 
+    `require_kb_root` → `compute_worklist` → 空 batch 短路（`had_batch=False`、EXIT_OK，未触
+    Agentao）/（`snapshot` → `run_guarded_write_result` → `_writeset` → log 复查 → `_build_receipts`
+    → `HealResult`）。**不碰 stdout、不处理 dry_run/json_output**——渲染与短路特判全留给调用方
+    （CLI 薄壳 `run_heal` / Web 端点）。`require_kb_root` 的 `GuanlanError` 向上抛：CLI 薄壳
+    try/except 打印，作业 worker 归一为失败（决策P4.3-1/-5）。
+    """
+    kb = require_kb_root(root, writable=True)
     wiki = kb / "wiki"
     worklist = compute_worklist(wiki, min_refs=min_refs, limit=limit)
     batch = [w for w in worklist if not w.postponed]
-    postponed = [w for w in worklist if w.postponed]
+    postponed = tuple(w for w in worklist if w.postponed)
 
-    # dry-run / 空 worklist：纯读、零 LLM、不触 Agentao、必 EXIT_OK（决策P3.2-5/6）。
-    if dry_run:
-        _print_preview(batch, postponed, json_output=json_output)
-        return EXIT_OK
+    # 空 worklist：短路 EXIT_OK、不触 Agentao（决策P3.2-6）；had_batch=False 供薄壳特判渲染。
     if not batch:
-        if json_output:
-            print(_dumps({"worklist": [], "postponed": [_item_dict(w) for w in postponed]}))
-        elif postponed:
-            # 有缺失实体、却因 --limit 全数推迟：别误报"无可物化"（决策P3.2-1：有界即声明）。
-            print(
-                f"· --limit={limit} 下本批未物化任何目标；{len(postponed)} 个高频缺失实体全部推迟"
-                "（提高 --limit 续补，或 --dry-run 预览）。"
-            )
-        else:
-            print("✓ 无可物化的缺失实体（图已充分连通或均低于阈值）。")
-        return EXIT_OK
+        return HealRun(result=HealResult(), postponed=postponed, had_batch=False)
 
     # 写路径（§3）：wiki 写集基线 → 写门禁结果版（不打印）→ 重算 graph 回执。
     before = _snapshot_wiki(kb)
@@ -414,11 +426,68 @@ def run_heal(
         changed_paths=tuple(changed),
         exit_code=write.exit_code,
     )
+    return HealRun(
+        result=result, postponed=postponed, had_batch=True, final_text=write.final_text
+    )
+
+
+def run_heal(
+    *,
+    root: str | Path = ".",
+    limit: int = DEFAULT_LIMIT,
+    min_refs: int = MISSING_ENTITY_MIN_REFS,
+    model: str | None = None,
+    dry_run: bool = False,
+    json_output: bool = False,
+    runner: AgentRunner | None = None,
+) -> int:
+    """物化缺失实体，返回退出码（见 errors.py）。
+
+    薄壳（决策P4.3-1）：dry-run 纯读预览不进 core；真实写路径调 `run_heal_result`（不打印），
+    再据 `had_batch` 选**空批次特判**或**真实 heal** 渲染——CLI 行为/字节与重构前一致
+    （含 dry-run / 空 worklist 的 2 键 `--json` 与人读消息逐字节不变）。
+    """
+    # dry-run：纯读、零 LLM、不触 Agentao、必 EXIT_OK（决策P3.2-5）——不进 core（职责更清）。
+    if dry_run:
+        try:
+            kb = require_kb_root(root, writable=True)
+        except GuanlanError as exc:
+            print(exc, file=sys.stderr)
+            return exc.exit_code
+        worklist = compute_worklist(kb / "wiki", min_refs=min_refs, limit=limit)
+        batch = [w for w in worklist if not w.postponed]
+        postponed = [w for w in worklist if w.postponed]
+        _print_preview(batch, postponed, json_output=json_output)
+        return EXIT_OK
+
+    try:
+        run = run_heal_result(
+            root=root, limit=limit, min_refs=min_refs, model=model, runner=runner
+        )
+    except GuanlanError as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
+
+    postponed = list(run.postponed)
+    # 空 worklist：保留现有特判（**勿**走六字段渲染——会把 --json 从 2 键涨到 6 键，破坏字节不变）。
+    if not run.had_batch:
+        if json_output:
+            print(_dumps({"worklist": [], "postponed": [_item_dict(w) for w in postponed]}))
+        elif postponed:
+            # 有缺失实体、却因 --limit 全数推迟：别误报"无可物化"（决策P3.2-1：有界即声明）。
+            print(
+                f"· --limit={limit} 下本批未物化任何目标；{len(postponed)} 个高频缺失实体全部推迟"
+                "（提高 --limit 续补，或 --dry-run 预览）。"
+            )
+        else:
+            print("✓ 无可物化的缺失实体（图已充分连通或均低于阈值）。")
+        return run.exit_code
+
     if json_output:
-        print(_dumps(_result_dict(result, postponed)))
+        print(_dumps(heal_result_dict(run.result, postponed)))
     else:
-        _print_human(write, result, postponed)
-    return result.exit_code
+        _print_human(run.final_text, run.result, postponed)
+    return run.exit_code
 
 
 def heal_entrypoint(
@@ -453,7 +522,12 @@ def _item_dict(w: HealWorkItem) -> dict:
     return {"target": w.target, "ref_count": w.ref_count, "ref_pages": list(w.ref_pages)}
 
 
-def _result_dict(result: HealResult, postponed: list[HealWorkItem]) -> dict:
+def heal_result_dict(result: HealResult, postponed: Sequence[HealWorkItem]) -> dict:
+    """heal 批次回执的六字段 wire 契约（CLI `--json` 与 Web `/api/jobs` 的 `result` 共用，决策P4.3-1）。
+
+    纯重命名自原私有 `_result_dict`、不改结构/字段（六字段不增不减），只把既定契约显式化、
+    供 `web/app.py` 复用而无需跨模块调私有 helper。`postponed` 容忍 list / tuple（仅迭代）。
+    """
     return {
         "worklist": [{"target": r.target} for r in result.receipts],
         "postponed": [_item_dict(w) for w in postponed],
@@ -489,10 +563,10 @@ def _print_preview(
             print(f"    · {w.target}（{w.ref_count} 页引用）")
 
 
-def _print_human(write, result: HealResult, postponed: list[HealWorkItem]) -> None:
+def _print_human(final_text: str, result: HealResult, postponed: list[HealWorkItem]) -> None:
     """自渲染人读报告（不走 gate 的 report_outcome）。"""
-    if write.final_text:
-        print(write.final_text)
+    if final_text:
+        print(final_text)
     n = len(result.receipts)
     resolved = [r for r in result.receipts if r.status == "resolved"]
     still = [r for r in result.receipts if r.status == "still_broken"]

@@ -241,18 +241,188 @@ async function triggerIngest(target) {
   }
 }
 
-async function pollJob(jobId, target) {
+// 通用作业轮询骨架（ingest / heal 共用）。`renderDone(job)` 可选：heal 有结构化 result，传入
+// 自定义渲染；省略则走 ingest 默认（退出码徽标 + output 文本）。完成后统一 loadPages 刷新。
+async function pollJob(jobId, label, renderDone) {
   for (;;) {
     const job = await getJSON(`/api/jobs/${jobId}`);
     if (job.state === "done") {
-      const ok = job.exit_code === 0;
-      const badge = ok ? '<span class="report-ok">✓ 通过</span>' : `<span class="report-bad">✗ 退出码 ${job.exit_code}</span>`;
-      $("#overlay-body").innerHTML = `<p>${escapeHtml(target)} ${badge}</p><pre>${escapeHtml(job.output || "(无输出)")}</pre>`;
-      await loadPages(); // 写后刷新 wiki 搜索列表
+      if (renderDone) {
+        renderDone(job);
+      } else {
+        const ok = job.exit_code === 0;
+        const badge = ok ? '<span class="report-ok">✓ 通过</span>' : `<span class="report-bad">✗ 退出码 ${job.exit_code}</span>`;
+        $("#overlay-body").innerHTML = `<p>${escapeHtml(label)} ${badge}</p><pre>${escapeHtml(job.output || "(无输出)")}</pre>`;
+      }
+      await loadPages(); // 写后刷新 wiki 搜索列表（heal 新建了页）
       return;
     }
-    $("#overlay-body").innerHTML = `<p class="muted">${escapeHtml(target)} · ${job.state}…</p>`;
+    $("#overlay-body").innerHTML = `<p class="muted">${escapeHtml(label)} · ${job.state}…</p>`;
     await sleep(400);
+  }
+}
+
+// ── heal：缺失实体物化（预览 worklist → 一键物化 → 轮询结构化回执，P4.3）─────────────
+//
+// 顶栏「heal」→ 浮层先拉零-LLM 预览（可调 limit / min-refs），列本批将物化的高频缺页 + 推迟项；
+// 「物化」→ POST /api/heal（入单写者队列，与 ingest 同 worker 串行）→ 复用 pollJob 骨架，但因
+// heal 有结构化 result，完成分支按 job.result 渲染回执（resolved / 仍断 / 非预期写 / 推迟 /
+// 退出码徽标），agent 散文取自 job.output（同 ingest）。
+
+$("#heal-btn").addEventListener("click", () => openHealPreview());
+
+async function openHealPreview(limit, minRefs) {
+  showOverlay("heal", '<p class="muted">计算 worklist（零 LLM）…</p>');
+  const qs = new URLSearchParams();
+  if (limit) qs.set("limit", limit);
+  if (minRefs) qs.set("min_refs", minRefs);
+  const suffix = qs.toString() ? `?${qs}` : "";
+  let data;
+  try {
+    data = await getJSON(`/api/heal/preview${suffix}`);
+  } catch (e) {
+    $("#overlay-body").innerHTML = `<p class="report-bad">预览失败：${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  renderHealPreview(data, limit, minRefs);
+}
+
+function renderHealPreview(data, limit, minRefs) {
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+
+  // 微调控件：limit / min-refs + 重新预览（默认值即常量，留空表示用服务端默认）。
+  const ctrl = document.createElement("div");
+  ctrl.className = "heal-ctrl";
+  const limitIn = document.createElement("input");
+  limitIn.type = "number"; limitIn.min = "1"; limitIn.className = "heal-num";
+  limitIn.placeholder = "limit"; if (limit) limitIn.value = limit;
+  const minIn = document.createElement("input");
+  minIn.type = "number"; minIn.min = "1"; minIn.className = "heal-num";
+  minIn.placeholder = "min-refs"; if (minRefs) minIn.value = minRefs;
+  const refresh = document.createElement("button");
+  refresh.textContent = "预览";
+  refresh.addEventListener("click", () => openHealPreview(limitIn.value || "", minIn.value || ""));
+  ctrl.append(limitIn, minIn, refresh);
+  box.appendChild(ctrl);
+
+  const worklist = data.worklist || [];
+  const postponed = data.postponed || [];
+  if (!worklist.length) {
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = postponed.length
+      ? `本批无目标；${postponed.length} 个高频缺失实体因 limit 全部推迟（提高 limit 续补）。`
+      : "✓ 无可物化的缺失实体（图已充分连通或均低于阈值）。";
+    box.appendChild(note);
+    if (!postponed.length) return;
+  } else {
+    const head = document.createElement("p");
+    head.textContent = `本批将物化 ${worklist.length} 个高频缺失实体：`;
+    box.appendChild(head);
+    for (const w of worklist) {
+      const row = document.createElement("div");
+      row.className = "heal-item";
+      const t = document.createElement("span");
+      t.className = "heal-target";
+      t.textContent = `+ ${w.target}`; // textContent：目标名/文件名按字面显示，无注入
+      const meta = document.createElement("span");
+      meta.className = "heal-meta";
+      meta.textContent = `${w.ref_count} 页引用：${(w.ref_pages || []).join("、")}`;
+      row.append(t, meta);
+      box.appendChild(row);
+    }
+  }
+
+  if (postponed.length) {
+    const ph = document.createElement("p");
+    ph.className = "muted";
+    ph.textContent = `另有 ${postponed.length} 个因 limit 本次推迟：`;
+    box.appendChild(ph);
+    for (const w of postponed) {
+      const row = document.createElement("div");
+      row.className = "heal-item postponed";
+      row.textContent = `· ${w.target}（${w.ref_count} 页引用）`;
+      box.appendChild(row);
+    }
+  }
+
+  if (worklist.length) {
+    const go = document.createElement("button");
+    go.className = "heal-go";
+    go.textContent = `物化 ${worklist.length} 个目标`;
+    go.addEventListener("click", () => triggerHeal(limitIn.value || "", minIn.value || ""));
+    box.appendChild(go);
+  }
+}
+
+async function triggerHeal(limit, minRefs) {
+  showOverlay("heal", '<p class="muted">已提交，排队中（与 ingest/投喂同写者串行）…</p>');
+  const body = {};
+  if (limit) body.limit = Number(limit);
+  if (minRefs) body.min_refs = Number(minRefs);
+  try {
+    const { job_id } = await postJSON("/api/heal", body);
+    await pollJob(job_id, "heal", renderHealDone);
+  } catch (e) {
+    $("#overlay-body").innerHTML = `<p class="report-bad">提交失败：${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function renderHealDone(job) {
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  const ok = job.exit_code === 0;
+  const badge = document.createElement("p");
+  badge.innerHTML = ok
+    ? '<span class="report-ok">✓ 通过</span>'
+    : `<span class="report-bad">✗ 退出码 ${escapeHtml(String(job.exit_code))}</span>`;
+  box.appendChild(badge);
+
+  const result = job.result;
+  if (result) {
+    const receipts = result.receipts || [];
+    const resolved = receipts.filter((r) => r.status === "resolved");
+    const still = receipts.filter((r) => r.status === "still_broken");
+    const summary = document.createElement("p");
+    summary.textContent = `物化 ${receipts.length} 个目标：${resolved.length} 个已解析，${still.length} 个仍断。`;
+    box.appendChild(summary);
+    for (const r of resolved) {
+      const div = document.createElement("div");
+      div.className = "heal-receipt resolved";
+      div.textContent = `✓ ${r.target} → ${r.resolved_to}`; // textContent：路径无注入
+      box.appendChild(div);
+    }
+    for (const r of still) {
+      const div = document.createElement("div");
+      div.className = "heal-receipt broken";
+      div.textContent = `· ${r.target}（仍断：${r.reason}）`;
+      box.appendChild(div);
+    }
+    if ((result.unexpected_writes || []).length) {
+      const h = document.createElement("div");
+      h.className = "heal-warn";
+      h.textContent = "⚠ 非预期 wiki 写入（人工审计）：";
+      box.appendChild(h);
+      for (const p of result.unexpected_writes) {
+        const d = document.createElement("div");
+        d.className = "heal-warn-item";
+        d.textContent = `! ${p}`;
+        box.appendChild(d);
+      }
+    }
+    if ((result.postponed || []).length) {
+      const d = document.createElement("div");
+      d.className = "muted";
+      d.textContent = `另有 ${result.postponed.length} 个缺失实体因 limit 推迟，重跑续补。`;
+      box.appendChild(d);
+    }
+  }
+
+  if (job.output) {
+    const pre = document.createElement("pre");
+    pre.textContent = job.output; // agent 散文（同 ingest）
+    box.appendChild(pre);
   }
 }
 
