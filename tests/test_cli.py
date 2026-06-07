@@ -106,6 +106,22 @@ def test_graph_rejects_json_prefix_abbrev():
         _parse(["graph", "--json"])
 
 
+def test_heal_flags_default():
+    args = _parse(["heal"])
+    assert args.command == "heal"
+    assert args.limit == 10 and args.min_refs == 2
+    assert args.dry_run is False and args.json is False
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "abc"])
+def test_heal_rejects_non_positive_limit(bad):
+    """--limit 0/负数/非整数都报错，挡静默无操作（Codex 评审）。"""
+    with pytest.raises(SystemExit):
+        _parse(["heal", "--limit", bad])
+    with pytest.raises(SystemExit):
+        _parse(["heal", "--min-refs", bad])
+
+
 def test_p3_dispatch_end_to_end(tmp_path):
     """三命令经 main 真正分发到各 entrypoint：在 init 出的库上各自退 0。"""
     from guanlan.cli import main

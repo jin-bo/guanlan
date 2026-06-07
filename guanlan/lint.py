@@ -19,15 +19,62 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import EXIT_LINT_FINDINGS, EXIT_OK, GuanlanError
-from .graph import build_graph, compute_orphans
+from .graph import Graph, build_graph, compute_orphans
 from .pages import Finding, report_json
 from .paths import require_kb_root
 
-__all__ = ["LintReport", "run_lint", "format_report", "lint_entrypoint", "main"]
+__all__ = [
+    "LintReport",
+    "MissingEntity",
+    "missing_entities",
+    "run_lint",
+    "format_report",
+    "lint_entrypoint",
+    "main",
+]
 
 # 缺失实体阈值：同一未解析目标被 ≥ 此数张**不同**页引用时，从零散断链升格为"该建页"的建议。
 # 2 = "被复述过一次以上"，是术语反复出现的最低信号；低于它的单次断链留给 broken_link。
 MISSING_ENTITY_MIN_REFS = 2
+
+
+@dataclass(frozen=True)
+class MissingEntity:
+    """一个被 ≥ 阈值张**不同**页引用却无对应页的归一断链键（lint 与 heal 共用的单一聚合产物）。
+
+    `target` 是 `pages.link_stem` 归一后的键（== `graph.Edge.target`，决策P3.2-14）；`ref_pages`
+    是引用它的页面相对库根的 posix 路径，按字典序稳定排序（决策P3.2-2）。
+    """
+
+    target: str
+    ref_count: int
+    ref_pages: tuple[str, ...]
+
+
+def _aggregate_missing(g: Graph, *, min_refs: int) -> list[MissingEntity]:
+    """在**已建好的图**上聚合缺失实体：同一未解析目标被 ≥ `min_refs` 张不同页引用。
+
+    `lint` 与 `heal` 的**唯一**聚合点——同一份 `g.broken`、同一阈值口径，永不分叉（决策P3.2-1）。
+    返回按 `target` 升序的稳定列表；消费侧（heal）若需别的次序自行再排。
+    """
+    node_path = {n.id: n.path for n in g.nodes}
+    refs_by_target: dict[str, set[str]] = defaultdict(set)
+    for edge in g.broken:
+        refs_by_target[edge.target].add(edge.source)
+    out: list[MissingEntity] = []
+    for target in sorted(refs_by_target):
+        sources = refs_by_target[target]
+        if len(sources) >= min_refs:
+            ref_pages = tuple(sorted(node_path.get(s, s) for s in sources))
+            out.append(MissingEntity(target, len(sources), ref_pages))
+    return out
+
+
+def missing_entities(
+    wiki: Path, *, min_refs: int = MISSING_ENTITY_MIN_REFS
+) -> list[MissingEntity]:
+    """对 `wiki/` 建图后聚合缺失实体（结构化，零 LLM）。供 `heal` worklist 与 `lint` 共用。"""
+    return _aggregate_missing(build_graph(Path(wiki)), min_refs=min_refs)
 
 
 @dataclass
@@ -51,27 +98,23 @@ def run_lint(wiki: Path) -> LintReport:
             Finding(node.path, "lint.orphan", f"无任何入链（type={node.type}）")
         )
 
-    # 断链 + 缺失实体：都源自 graph.broken（与 check.wikilink.broken 同口径，决策P3-6）。
-    refs_by_target: dict[str, set[str]] = defaultdict(set)
+    # 断链：源自 graph.broken（与 check.wikilink.broken 同口径，决策P3-6）。
     for edge in sorted(g.broken, key=lambda e: (e.source, e.target)):
         source_page = node_path.get(edge.source, edge.source)
         findings.append(
             Finding(source_page, "lint.broken_link", f"[[{edge.target}]] 无对应页面")
         )
-        refs_by_target[edge.target].add(edge.source)
 
-    # 缺失实体（断链的高价值子集）：同一目标被 ≥ 阈值张**不同**页引用——跨页聚合、无单一归属页，
-    # page 留空串（消费侧据此识别全局 finding，§5.4）。
-    for target in sorted(refs_by_target):
-        ref_count = len(refs_by_target[target])
-        if ref_count >= MISSING_ENTITY_MIN_REFS:
-            findings.append(
-                Finding(
-                    "",
-                    "lint.missing_entity",
-                    f"[[{target}]] 被 {ref_count} 页引用却无页面，建议建 entities/{target}.md",
-                )
+    # 缺失实体（断链的高价值子集）：跨页聚合、无单一归属页，page 留空串（消费侧据此识别全局 finding，§5.4）。
+    # 走与 heal 共用的 `_aggregate_missing`（决策P3.2-1），target 升序输出不变。
+    for me in _aggregate_missing(g, min_refs=MISSING_ENTITY_MIN_REFS):
+        findings.append(
+            Finding(
+                "",
+                "lint.missing_entity",
+                f"[[{me.target}]] 被 {me.ref_count} 页引用却无页面，建议建 entities/{me.target}.md",
             )
+        )
 
     return LintReport(ok=not findings, pages_checked=len(g.nodes), findings=findings)
 
