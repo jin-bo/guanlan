@@ -25,7 +25,7 @@ from typing import Literal
 from .errors import EXIT_OK, GuanlanError
 from .gate import diff_raw, run_guarded_write_result
 from .lint import MISSING_ENTITY_MIN_REFS, missing_entities
-from .pages import link_resolution_index
+from .pages import link_resolution_index, link_stem, load_page_text
 from .paths import require_kb_root
 from .runtime import AgentRunner
 
@@ -54,17 +54,20 @@ def positive_int(value: str) -> int:
 # 默认每批物化上限（§10 风险：批越大上下文越杂、质量越降，故起步保守）。超额项报告为"本次推迟"。
 DEFAULT_LIMIT = 10
 
-# 薄 prompt：真正步骤在 skill。{targets} = 逐目标的"名 + 引用页清单"。
+# 薄 prompt：真正步骤（判据/收编纪律）在 skill。{targets} = 逐目标的"名 + 引用页清单"。
+# P3.3：从「一律直接作文件名」补三态引导（A 用目标名 / B 规范标题+收编 / C 收编既有页）+ index 登记。
 HEAL_PROMPT = (
-    "请按 `guanlan-wiki` skill 的 heal 工作流，为下列**缺失实体**各物化一页 entity 定义。"
-    "目标名已是归一键，**直接作文件名** `wiki/entities/<目标>.md`：\n{targets}\n"
-    "对每个目标：**只读所列引用页**与 `wiki/index.md` 建上下文；若上下文足以确认其为实体，"
-    "在 `wiki/entities/<目标>.md` 合成一页 entity 定义（frontmatter 齐全、正文术语转 `[[wikilink]]`）；"
-    "向 `log.md` 追加一条 `## [<日期>] heal | <目标>`。"
-    "若上下文不足、目标更像概念/主题页、或疑似已有页别名，**跳过该目标**并用一句话说明（无需特定格式）。"
+    "请按 `guanlan-wiki` skill 的 heal 工作流，为下列**缺失实体**收割断链（目标名已是归一键）：\n{targets}\n"
+    "**只读所列引用页**与 `wiki/index.md` 建上下文。每个目标三选一（判据见 skill，**拿不准走 A**）："
+    "A) 直接建 `wiki/entities/<目标>.md`（目标名作文件名，`[[原引用]]` 天然解析）；"
+    "B) 若引用上下文给出更规范全称，建 `wiki/entities/<规范名>.md` 并在 frontmatter `aliases` **收编原目标名**；"
+    "C) 若目标其实是某**已有** entity/concept 页的变体，**只向该页 `aliases` 末尾追加原目标名**"
+    "（不改正文、不动其它 frontmatter、不新建重复页）。"
+    "建页/收编后在 `wiki/index.md` 对应分区登记一行（B/C 句末注记别名），并向 `log.md` 追加 `## [<日期>] heal | <目标>`。"
     "只准从引用上下文合成，**不臆造引用页里没有的事实**；`sources` 列引用页有出处可顺延，否则留空。"
-    "**永不修改 `raw/`、不新建 `raw/` 资料、不覆盖或删除已有页、不运行 shell 命令或 `guanlan check`；"
-    "读写文件只用内置文件工具。** 完成后用一两句说明建了哪些页、跳过了哪些。"
+    "上下文不足、目标更像主题页、或无法判定时，**跳过该目标**并用一句话说明（无需特定格式）。"
+    "**永不修改 `raw/`、不新建 `raw/` 资料、不删除或覆盖重写已有页正文、不运行 shell 命令或 `guanlan check`；"
+    "读写文件只用内置文件工具。** 完成后用一两句说明建了/收编了哪些页、跳过了哪些。"
 )
 
 
@@ -130,22 +133,91 @@ def _format_targets(batch: list[HealWorkItem]) -> str:
 # ── §3/§5 写集审计 + 写后回执（零 LLM）──────────────────────────────────────
 
 
-def _snapshot_wiki(root: Path) -> dict[str, str]:
-    """{wiki/... posix 路径: 指纹}，用于写集 before/after diff（决策P3.2-11）。
+@dataclass(frozen=True)
+class _PageMeta:
+    """普通内容页的**解析字段**，仅供 `_is_safe_alias_collection` 判「安全别名收编」（P3.3 §3）。
 
-    指纹：普通文件取内容 sha256；**符号链接按链接目标指纹、不跟随到内容**——否则把一张真实页
-    换成指向同字节文件的符号链接会被漏判（与 `gate.snapshot_raw` 同口径的防绕过）。
+    不参与 `diff_raw` / `changed_paths`（那只看 `_PageSnapshot.raw` 原始指纹，口径不退化）。
+    `aliases` 存**有序原始字符串**（非集合、非归一集）以做前缀校验；`aliases_valid` 标记形态合法
+    （缺失或字符串列表 → True；非列表/含非字符串项 → False）。
     """
-    out: dict[str, str] = {}
+
+    body_fp: str  # 正文 sha256
+    fm_fp: str  # frontmatter 除 {aliases,last_updated} 的规范化指纹
+    aliases_valid: bool  # aliases 形态合法（缺失/字符串列表）
+    aliases: tuple[str, ...]  # 有序原始别名字符串（aliases_valid 时有意义；非法则为空）
+
+
+@dataclass(frozen=True)
+class _PageSnapshot:
+    """每页写集快照的**双层**值（P3.3 §3）：`raw` 驱动 diff/changed_paths，`meta` 仅供豁免判定。"""
+
+    raw: str  # 原始指纹：普通文件 sha256 / 符号链接目标（同 gate.snapshot_raw 防绕过口径）
+    meta: _PageMeta | None  # 仅 entities/concepts 普通文件解析；symlink/其它 → None（不豁免，Finding 3）
+
+
+def _fm_fingerprint(meta: dict | None) -> str:
+    """frontmatter 除 `aliases`/`last_updated` 外字段的规范化指纹（title/type/tags/sources/… 任一变即变）。
+
+    键一律 `str()` 归一后再 `sort_keys`：YAML 容许非字符串/混合类型键（`2026: x`、`true: x`、`null: x`——
+    `load_page` 容错档原样返回），不归一会让 `json.dumps(sort_keys=True)` 抛 `TypeError`、破坏「审计不因
+    坏数据中断」（决策P3-8）。归一只用于本指纹比对，不回写页面。
+    """
+    if not isinstance(meta, dict):
+        return "<no-meta>"
+    subset = {str(k): v for k, v in meta.items() if k not in ("aliases", "last_updated")}
+    payload = json.dumps(subset, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _aliases_info(meta: dict | None) -> tuple[bool, tuple[str, ...]]:
+    """读 `aliases`：返回 `(形态合法, 有序原始字符串)`。缺失=合法空；字符串列表=合法；其余=非法。"""
+    if not isinstance(meta, dict) or "aliases" not in meta:
+        return True, ()
+    raw = meta["aliases"]
+    if isinstance(raw, list) and all(isinstance(x, str) for x in raw):
+        return True, tuple(raw)
+    return False, ()
+
+
+def _page_meta_from_text(text: str) -> _PageMeta:
+    """从**已读入文本**解析 `_PageMeta`（容错档 `load_page_text`，绝不抛；避免二次 I/O）。"""
+    meta, body = load_page_text(text)
+    valid, aliases = _aliases_info(meta)
+    return _PageMeta(
+        body_fp=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        fm_fp=_fm_fingerprint(meta),
+        aliases_valid=valid,
+        aliases=aliases,
+    )
+
+
+def _snapshot_wiki(root: Path) -> dict[str, _PageSnapshot]:
+    """{wiki/... posix 路径: `_PageSnapshot`(原始指纹 + 解析字段)}，用于写集 before/after diff。
+
+    - **原始指纹**（`.raw`）：普通文件内容 sha256；**符号链接按链接目标指纹、不跟随到内容**——否则把
+      一张真实页换成指向同字节文件的符号链接会被漏判（与 `gate.snapshot_raw` 同口径的防绕过）。
+    - **解析字段**（`.meta`）：**仅 `entities/`/`concepts/` 下的普通文件**才算——`_writeset` 只对这些路径查
+      豁免（§3），故 config 页 / 其它目录 / symlink 一律 `meta=None`，省去全库无谓解析。每个普通文件**只读
+      一次字节**：sha256 取原始指纹，再从同一份字节解析 meta（不二次 I/O）。
+    """
+    out: dict[str, _PageSnapshot] = {}
     for p in sorted((Path(root) / "wiki").rglob("*.md")):
         rel = p.relative_to(root).as_posix()
         if p.is_symlink():
             try:  # readlink 可能在并发删除 / 权限下抛 OSError——容错不崩（同 gate._special_fingerprint）。
-                out[rel] = f"<symlink:{os.readlink(p)}>"
+                raw = f"<symlink:{os.readlink(p)}>"
             except OSError:
-                out[rel] = "<symlink:?>"
+                raw = "<symlink:?>"
+            out[rel] = _PageSnapshot(raw=raw, meta=None)
         elif p.is_file():
-            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+            data = p.read_bytes()
+            meta = (
+                _page_meta_from_text(data.decode("utf-8", errors="replace"))
+                if rel.startswith(_CONTENT_PREFIXES)
+                else None  # 只有内容页参与安全收编豁免；其余无需解析
+            )
+            out[rel] = _PageSnapshot(raw=hashlib.sha256(data).hexdigest(), meta=meta)
     return out
 
 
@@ -155,26 +227,80 @@ def _read_log(root: Path) -> str:
     return log.read_text(encoding="utf-8") if log.is_file() else ""
 
 
-# heal 的允许写入面：仅新建 `wiki/entities/` 下的页 + 追加 `wiki/log.md`（决策P3.2-11）。
+# heal 的允许写入面（决策P3.2-11 / P3.3-4/5）：
+# - **新建** `wiki/entities/` 下的页（物化，A/B 模式）；
+# - **追加** `wiki/log.md`（严格 append-only，另由 run_heal 复查）；
+# - **编辑** `wiki/index.md`（config catalog，分区插行，不套 append-only）；
+# - **向已有 `entities/`/`concepts/` 页纯追加别名收编本批目标**（C 模式，§3 安全收编窄缝）。
 _ENTITIES_PREFIX = "wiki/entities/"
+_CONTENT_PREFIXES = ("wiki/entities/", "wiki/concepts/")
 _LOG_PATH = "wiki/log.md"
+_INDEX_PATH = "wiki/index.md"
 
 
-def _writeset(before: dict[str, str], after: dict[str, str]) -> tuple[list[str], list[str]]:
-    """返回 `(changed_paths, unexpected_writes)`，复用 `gate.diff_raw` 的增/删/改分类。
+def _is_safe_alias_collection(
+    before: _PageMeta | None, after: _PageMeta | None, work_targets: set[str]
+) -> bool:
+    """对一处「修改已有内容页」判是否为**安全别名收编**（P3.3 §3 决策P3.3-5，纯 final-state、零 LLM）。
 
-    `changed_paths` = 增/删/改全量；`unexpected_writes` 收**越界写**（决策P3.2-11）：
-    - **删除**任何页；
-    - **修改/覆盖已有**页（`wiki/log.md` 在此豁免，其追加的合法性另由 append-only 校验把关）；
-    - **新建**到 `wiki/entities/` 之外的页（heal 只该建 entity 页，建错目录即越界）。
+    当且仅当全部成立才豁免（条件 4「过门禁」由 `_writeset` 的 `gate_ok` 把关，不在此判）：
+    - 两侧均**普通文件**（任一侧 symlink/special → meta=None → 不豁免，Finding 3）；
+    - 正文 body 与其余 frontmatter（除 aliases/last_updated）**不变**；
+    - before/after 的 aliases 形态均合法（缺失或字符串列表）；
+    - before 原始别名列表是 after 的**前缀**（原序原次保留、只尾部追加，挡删值/重排，Finding 1/2）；
+    - 新增别名**非空**且其归一键**全部** ∈ 本批 `work_targets`（挡 piggyback，Finding 2）。
     """
+    if before is None or after is None:
+        return False
+    if before.body_fp != after.body_fp or before.fm_fp != after.fm_fp:
+        return False
+    if not (before.aliases_valid and after.aliases_valid):
+        return False
+    n = len(before.aliases)
+    if after.aliases[:n] != before.aliases:  # 必须是前缀：不删、不重排
+        return False
+    new = after.aliases[n:]
+    if not new:  # 无新增 → 非收编
+        return False
+    new_keys = [link_stem(a) for a in new]
+    if not all(new_keys):  # 归一后空键不算有效收编
+        return False
+    return all(k in work_targets for k in new_keys)
+
+
+def _writeset(
+    before: dict[str, _PageSnapshot],
+    after: dict[str, _PageSnapshot],
+    work_targets: set[str],
+    *,
+    gate_ok: bool,
+) -> tuple[list[str], list[str]]:
+    """返回 `(changed_paths, unexpected_writes)`，复用 `gate.diff_raw`（只比 `.raw` 原始指纹）。
+
+    `changed_paths` = 增/删/改全量（任何字节变化都进，含别名重排，口径不退化）；
+    `unexpected_writes` 收**越界写**：
+    - **删除**任何页；
+    - **修改**已有页——`wiki/log.md`/`wiki/index.md`（config catalog）豁免；`entities/`/`concepts/` 页
+      若为**安全别名收编**（`_is_safe_alias_collection`）且 `gate_ok` 也豁免（§3）；其余皆越界；
+    - **新建**到 `wiki/entities/` 之外的页（heal 物化只该建 entity 页，建错目录即越界）。
+    """
+    raw_before = {k: v.raw for k, v in before.items()}
+    raw_after = {k: v.raw for k, v in after.items()}
     changed: list[str] = []
     unexpected: list[str] = []
-    for c in diff_raw(before, after):
+    for c in diff_raw(raw_before, raw_after):
         changed.append(c.path)
         if c.kind == "removed":
             unexpected.append(c.path)
-        elif c.kind == "modified" and c.path != _LOG_PATH:
+        elif c.kind == "modified":
+            if c.path in (_LOG_PATH, _INDEX_PATH):
+                continue  # config catalog：log.md 另由 append-only 复查；index.md 自由编辑
+            if (
+                gate_ok
+                and c.path.startswith(_CONTENT_PREFIXES)
+                and _is_safe_alias_collection(before[c.path].meta, after[c.path].meta, work_targets)
+            ):
+                continue  # 安全别名收编（§3），豁免
             unexpected.append(c.path)
         elif c.kind == "added" and not c.path.startswith(_ENTITIES_PREFIX):
             unexpected.append(c.path)
@@ -270,11 +396,13 @@ def run_heal(
         kb, HEAL_PROMPT.format(targets=_format_targets(batch)), model=model, runner=runner
     )
     after = _snapshot_wiki(kb)
-    changed, unexpected = _writeset(before, after)
+    work_targets = {w.target for w in batch}
+    changed, unexpected = _writeset(before, after, work_targets, gate_ok=write.gate.ok)
     # log.md 唯一合法写 = **仍是普通文件且 append-only 追加**；任何别的改动（截断/改写历史、或被换成
     # 符号链接）都算有害（决策P3.2-11）。注意 append-only 检查会读穿符号链接，故先排除符号链接替换。
     if _LOG_PATH in changed:
-        still_plain_file = not after.get(_LOG_PATH, "").startswith("<symlink:")
+        after_log = after.get(_LOG_PATH)
+        still_plain_file = after_log is not None and not after_log.raw.startswith("<symlink:")
         if not (still_plain_file and _read_log(kb).startswith(before_log)):
             unexpected = sorted(set(unexpected) | {_LOG_PATH})
     added = set(after.keys() - before.keys())
