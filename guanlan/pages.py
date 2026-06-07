@@ -18,6 +18,7 @@ frontmatter 读取**分两档、不可混用**：
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
@@ -42,6 +43,7 @@ __all__ = [
     "link_target_stems",
     "link_resolution_index",
     "index_md_links",
+    "index_sync_state",
     "report_json",
 ]
 
@@ -297,3 +299,48 @@ def index_md_links(text: str) -> set[str]:
             target = target[2:]
         targets.add(target)
     return targets
+
+
+def _target_within_wiki(target: str) -> bool:
+    """index 链接目标是否安全落在 `wiki/` 内（拒绝绝对路径与 `..` 越界）。
+
+    与 `check` 的 sources 防越界一致：否则 `../outside.md` / `/tmp/x.md` 会让 `(wiki/target)`
+    解析到库外、若该文件恰好存在则误判 index 链接"有对应文件"、漏报悬空。
+    """
+    if target.startswith("/"):
+        return False
+    norm = posixpath.normpath(target)
+    return norm != ".." and not norm.startswith("../")
+
+
+def index_sync_state(
+    wiki: Path, pages: list[Path] | None = None
+) -> tuple[list[Path], list[str]]:
+    """index ↔ 磁盘双向存在性同步的**单一归口**（P3 §4.2 / P3.4 §2，决策P3.4-4）。**零 LLM。**
+
+    `health`（包成 `Finding` 报告）与 `reindex`（拿来登记/剪枝）共用此判定，杜绝"检测与修复
+    口径漂移"。**只做存在性，不校验分区/type 匹配。**返回 `(missing, dangling)`：
+
+    - `missing`：`pages` 里 rel 路径不在 `index_md_links` 的内容页（绝对 `Path`，输入序）；
+    - `dangling`：`index.md` 链接里**越界**或**磁盘无对应文件**的目标（相对 `wiki/` 字符串，`sorted`）。
+
+    `pages` 可传入调用方**已遍历**的内容页列表（`iter_pages` 结果），避免重复 walk，且让 `health`
+    的 missing 判定与其桩页检查用**同一份**快照（消 TOCTOU 漂移）；缺省则内部 `iter_pages` 一次。
+    """
+    wiki = Path(wiki)
+    if pages is None:
+        pages = list(iter_pages(wiki))
+    index_path = wiki / "index.md"
+    index_text = index_path.read_text(encoding="utf-8") if index_path.is_file() else ""
+    linked = index_md_links(index_text)  # index 收录的目标集合（相对 wiki/）。
+
+    missing = [
+        path for path in pages if path.relative_to(wiki).as_posix() not in linked
+    ]
+    dangling = [
+        target
+        for target in sorted(linked)
+        # 越界/绝对路径目标视作悬空（不让 is_file 跟随 .. 命中库外文件而漏报）。
+        if not _target_within_wiki(target) or not (wiki / target).is_file()
+    ]
+    return missing, dangling

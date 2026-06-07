@@ -12,14 +12,13 @@ frontmatter 走容错档（`pages.load_page`），坏数据不中断体检——
 from __future__ import annotations
 
 import argparse
-import posixpath
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import EXIT_LINT_FINDINGS, EXIT_OK, GuanlanError
-from .pages import Finding, index_md_links, iter_pages, load_page, report_json
+from .pages import Finding, index_sync_state, iter_pages, load_page, report_json
 from .paths import require_kb_root
 
 __all__ = ["HealthReport", "run_health", "format_report", "health_entrypoint", "main"]
@@ -30,18 +29,6 @@ STUB_MIN_CHARS = 30
 
 # ATX 标题行：1–6 个 # 后接空白或行尾（CommonMark）。`#无空格` 这类不是标题、算正文。
 _ATX_HEADING_RE = re.compile(r"#{1,6}(\s|$)")
-
-
-def _target_within_wiki(target: str) -> bool:
-    """index 链接目标是否安全落在 `wiki/` 内（拒绝绝对路径与 `..` 越界）。
-
-    与 `check` 的 sources 防越界一致：否则 `../outside.md` / `/tmp/x.md` 会让 `(wiki/target)`
-    解析到库外、若该文件恰好存在则误判 index 链接"有对应文件"、漏报 `index_dangling`。
-    """
-    if target.startswith("/"):
-        return False
-    norm = posixpath.normpath(target)
-    return norm != ".." and not norm.startswith("../")
 
 
 @dataclass
@@ -76,34 +63,30 @@ def _check_stub(page: str, body: str) -> Finding | None:
 
 
 def _check_index_sync(wiki: Path, root: Path, content_pages: list[Path]) -> list[Finding]:
-    """index 与磁盘双向存在性同步（§4.2）。**只做存在性，不校验分区/type 匹配。**
+    """index 与磁盘双向存在性同步（§4.2），把 `pages.index_sync_state` 的结果包成 `Finding`。
 
-    解析 `index.md` 的 markdown 链接目标（相对 `wiki/` 的 posix 路径）：
+    判定下沉到 `pages.index_sync_state` 单一归口（决策P3.4-4），与 `reindex` 共用、不分叉：
     - 磁盘有、index 无 → `health.index_missing_page`（记在该磁盘页上）；
     - index 有、磁盘无 → `health.index_dangling`（记在 `index.md` 上）。
-    """
-    index_path = wiki / "index.md"
-    index_text = index_path.read_text(encoding="utf-8") if index_path.is_file() else ""
-    linked = index_md_links(index_text)  # index 收录的目标集合（相对 wiki/）。
 
-    findings: list[Finding] = []
-    for path in content_pages:
-        rel = path.relative_to(wiki).as_posix()
-        if rel not in linked:
-            findings.append(
-                Finding(
-                    path.relative_to(root).as_posix(),
-                    "health.index_missing_page",
-                    "磁盘存在但未收录进 index.md",
-                )
-            )
-    index_page = index_path.relative_to(root).as_posix()
-    for target in sorted(linked):
-        # 越界/绝对路径目标视作悬空（不让 is_file 跟随 .. 命中库外文件而漏报）。
-        if not _target_within_wiki(target) or not (wiki / target).is_file():
-            findings.append(
-                Finding(index_page, "health.index_dangling", f"index 链接 {target} 无对应文件")
-            )
+    复用 `run_health` 已遍历的 `content_pages`（桩页检查同一份快照）：免二次 walk，且 missing
+    判定与桩页检查用同一页集——不因两次 walk 之间的磁盘变动而内部不一致。
+    """
+    missing, dangling = index_sync_state(wiki, content_pages)
+
+    findings: list[Finding] = [
+        Finding(
+            path.relative_to(root).as_posix(),
+            "health.index_missing_page",
+            "磁盘存在但未收录进 index.md",
+        )
+        for path in missing
+    ]
+    index_page = (wiki / "index.md").relative_to(root).as_posix()
+    findings.extend(
+        Finding(index_page, "health.index_dangling", f"index 链接 {target} 无对应文件")
+        for target in dangling
+    )
     return findings
 
 
