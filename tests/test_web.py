@@ -1613,8 +1613,6 @@ def test_heal_preview_out_of_range_is_422(client, params) -> None:
 def test_heal_post_enqueues_and_serializes_result(kb) -> None:
     """POST /api/heal 即时返回 job_id（非阻塞）→ 轮询至 done：exit_code==0、result 为六字段机器
     回执（receipts 报 resolved）、**散文在 output 不在 result**（决策P4.3-1）。"""
-    from guanlan.heal import heal_result_dict, run_heal_result
-
     _ref_missing(kb, "a", "大模型")
     _ref_missing(kb, "b", "大模型")
     runner = make_runner(
