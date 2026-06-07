@@ -8,6 +8,7 @@ import asyncio
 import json
 import socket
 import sys
+import threading
 import time
 import uuid
 
@@ -558,6 +559,215 @@ def test_unknown_job_is_404(client) -> None:
     assert client.get("/api/jobs/999999").status_code == 404
 
 
+# ───────────────────────── 投喂 POST /api/raw（P4.1 C1） ─────────────────────────
+
+
+def test_raw_write_happy_path(client, kb) -> None:
+    """投喂正常路：返回 saved/bytes（同步、无需轮询）；盘上字节 == content；GET /api/raw 列出。"""
+    content = "# 新素材\n一些**正文**与 [[页]] 链接。\n"
+    resp = client.post("/api/raw", json={"name": "我的笔记", "content": content})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"saved": "raw/我的笔记.md", "bytes": len(content.encode("utf-8"))}
+    # 盘上字节与 content **逐字节相等**（UTF-8 原样，不渲染、不重写 wikilink）。
+    assert (kb / "raw" / "我的笔记.md").read_bytes() == content.encode("utf-8")
+    names = {f["name"] for f in client.get("/api/raw").json()["files"]}
+    assert "我的笔记.md" in names
+
+
+def test_raw_write_strips_path_traversal(client, kb) -> None:
+    """`name` 含目录/穿越成分 → 剥成 basename 落 raw/ 内，绝不越界。"""
+    resp = client.post("/api/raw", json={"name": "../../etc/passwd", "content": "x\n"})
+    assert resp.status_code == 200
+    saved = resp.json()["saved"]
+    assert saved == "raw/passwd.md"
+    target = (kb / saved).resolve()
+    target.relative_to((kb / "raw").resolve())  # 断言落点在 raw/ 内（越界会抛）
+    assert not (kb / "etc").exists()  # 没写到库外
+
+
+@pytest.mark.parametrize("body", [{"name": "", "content": "x"}, {"name": "n", "content": ""}, {"name": "n", "content": "   \n  "}])
+def test_raw_write_empty_is_400(client, body) -> None:
+    assert client.post("/api/raw", json=body).status_code == 400
+
+
+def test_raw_write_too_large_is_400(client, kb) -> None:
+    from guanlan.web.app import MAX_RAW_BYTES
+
+    resp = client.post("/api/raw", json={"name": "big", "content": "a" * (MAX_RAW_BYTES + 1)})
+    assert resp.status_code == 400
+    assert not (kb / "raw" / "big.md").exists()  # 超限不落盘
+
+
+def test_raw_confusable_normalization(client, kb) -> None:
+    """文件名混淆字符规范化：弯引号删除、中文破折号→单 `-`、空格→`-`、全角折叠；正文原样保真。"""
+    # 弯引号 + 中文破折号 + 空格：落点 raw/深度学习-导论.md。正文含同类字符必须逐字节保真。
+    content = "正文里的“弯引号”与 —— 破折号 全保留。\n"
+    resp = client.post("/api/raw", json={"name": "“深度学习” —— 导论", "content": content})
+    assert resp.status_code == 200
+    assert resp.json()["saved"] == "raw/深度学习-导论.md"
+    assert (kb / "raw" / "深度学习-导论.md").read_bytes() == content.encode("utf-8")
+
+    # 全角字母 + 空格 → NFKC + 空格转 `-`。
+    r2 = client.post("/api/raw", json={"name": "ＡＩ 学习 笔记", "content": "x\n"})
+    assert r2.json()["saved"] == "raw/AI-学习-笔记.md"
+
+    # NBSP / 全角空格同样收敛为 `-`（不留空白、不留 `-` 串）。
+    r3 = client.post("/api/raw", json={"name": "甲 乙　丙", "content": "x\n"})
+    assert r3.json()["saved"] == "raw/甲-乙-丙.md"
+
+
+@pytest.mark.parametrize("bad", ["a\x00b", "ctrl\x07here", "vt\x0bx"])
+def test_raw_text_admission_rejects_binary(client, kb, bad) -> None:
+    """含 NUL / C0 控制字符（非 \\t\\n\\r）→ 400 且盘上不留文件。"""
+    resp = client.post("/api/raw", json={"name": "bin", "content": bad})
+    assert resp.status_code == 400
+    assert not (kb / "raw" / "bin.md").exists()
+
+
+def test_raw_text_admission_allows_tab_newline(client, kb) -> None:
+    content = "第一行\t带制表\r\n第二行\n"
+    resp = client.post("/api/raw", json={"name": "ok", "content": content})
+    assert resp.status_code == 200
+    assert (kb / "raw" / "ok.md").read_bytes() == content.encode("utf-8")
+
+
+def test_raw_reject_extensions(client, kb) -> None:
+    """带点标题补 `.md`、不误杀；已知非-md 扩展 → 400（大小写不敏感 + 全角点不漏）。"""
+    # 带点标题视作普通标题，补 .md（不被 suffix 误判 400）。
+    assert client.post("/api/raw", json={"name": "GPT-4.5 笔记", "content": "x\n"}).json()["saved"] == "raw/GPT-4.5-笔记.md"
+    assert client.post("/api/raw", json={"name": "v1.2", "content": "x\n"}).json()["saved"] == "raw/v1.2.md"
+    # X.MD：视作已带后缀，归一小写、不叠补。
+    assert client.post("/api/raw", json={"name": "X.MD", "content": "x\n"}).json()["saved"] == "raw/X.md"
+    # 拒绝列表内（大小写不敏感）→ 400。
+    for bad in ("x.txt", "y.pdf", "X.PDF", "foo.Docx"):
+        assert client.post("/api/raw", json={"name": bad, "content": "x\n"}).status_code == 400
+    # 全角点不漏：x．PDF → NFKC → x.PDF → suffix .pdf → 400（不漏成 x.PDF.md）。
+    assert client.post("/api/raw", json={"name": "x．PDF", "content": "x\n"}).status_code == 400
+
+
+def test_raw_suffix_trailing_space_and_leading_dot(client, kb) -> None:
+    """尾随空白不破坏 `.md` 归一；首尾 `.` 剥净，杜绝隐藏文件 / 双后缀。"""
+    # 尾随空白：'foo.MD ' 须归一为 'foo.md'（剥空白前 suffix 是 '.MD '、逃过 `.md` 归一，会落 foo.MD.md）。
+    assert client.post("/api/raw", json={"name": "foo.MD ", "content": "x\n"}).json()["saved"] == "raw/foo.md"
+    # 尾随空白 + 带点标题：'GPT-4.5 笔记 ' 仍补 .md、不残留空白。
+    assert client.post("/api/raw", json={"name": "GPT-4.5 笔记 ", "content": "x\n"}).json()["saved"] == "raw/GPT-4.5-笔记.md"
+    # 纯扩展名 / 首点：'.md' 不落隐藏双后缀 '.md.md'；落点 basename 不以 `.` 开头。
+    saved = client.post("/api/raw", json={"name": ".md", "content": "x\n"}).json()["saved"]
+    assert saved == "raw/md.md"
+    assert not saved.split("/")[-1].startswith(".")
+
+
+def test_raw_overwrite_semantics(client, kb) -> None:
+    """已存在无 overwrite → 409 且原内容不变；overwrite=true → 覆盖成功。"""
+    (kb / "raw" / "dup.md").write_text("旧内容\n", encoding="utf-8")
+    r1 = client.post("/api/raw", json={"name": "dup", "content": "新内容\n"})
+    assert r1.status_code == 409
+    assert (kb / "raw" / "dup.md").read_text(encoding="utf-8") == "旧内容\n"  # 未被改
+
+    r2 = client.post("/api/raw", json={"name": "dup", "content": "新内容\n", "overwrite": True})
+    assert r2.status_code == 200
+    assert (kb / "raw" / "dup.md").read_text(encoding="utf-8") == "新内容\n"
+
+
+def test_atomic_write_raw_worker_recheck(kb) -> None:
+    """worker turn 内复检：已存在 + 无 overwrite → EXIT_USAGE（端点据此转 409），不覆盖。"""
+    from guanlan.errors import EXIT_OK, EXIT_USAGE
+    from guanlan.web.app import _atomic_write_raw
+
+    target = kb / "raw" / "x.md"
+    target.write_text("原\n", encoding="utf-8")
+    assert _atomic_write_raw(target, "新\n", overwrite=False) == EXIT_USAGE
+    assert target.read_text(encoding="utf-8") == "原\n"  # 没动
+    assert _atomic_write_raw(target, "新\n", overwrite=True) == EXIT_OK
+    assert target.read_text(encoding="utf-8") == "新\n"
+
+
+def test_raw_exit_code_http_split(kb, monkeypatch) -> None:
+    """退出码→HTTP 分流（对齐 §2）：worker EXIT_USAGE→409、落盘抛错→500（非 409）。"""
+    from guanlan.errors import EXIT_USAGE
+    from guanlan.web import app as app_mod
+
+    # ① worker 返回 EXIT_USAGE（撞同名复检）→ 409。
+    monkeypatch.setattr(app_mod, "_atomic_write_raw", lambda *a, **k: EXIT_USAGE)
+    with TestClient(create_app(kb)) as client:
+        assert client.post("/api/raw", json={"name": "a", "content": "x\n"}).status_code == 409
+
+    # ② worker 落盘抛 OSError（被 _run 归一为 EXIT_AGENT_ERROR）→ 500，且带原因。
+    def boom(*a, **k):
+        raise OSError("磁盘满")
+
+    monkeypatch.setattr(app_mod, "_atomic_write_raw", boom)
+    with TestClient(create_app(kb)) as client:
+        resp = client.post("/api/raw", json={"name": "b", "content": "x\n"})
+    assert resp.status_code == 500
+    assert "磁盘满" in resp.json()["detail"]
+
+
+def test_jobqueue_submit_and_wait_is_fifo_behind_prior(kb) -> None:
+    """JobQueue：submit_and_wait 排在前序作业之后（FIFO），完成后 done_event 唤醒、Job 字段完整。"""
+    from guanlan.web.jobs import JobQueue
+
+    jq = JobQueue()
+    order: list[str] = []
+    gate = threading.Event()
+
+    def slow() -> int:
+        order.append("ingest-start")
+        gate.wait(timeout=3)
+        order.append("ingest-end")
+        return 0
+
+    prior_id = jq.enqueue("ingest", slow)  # 占住 worker
+    result: dict = {}
+
+    def submit() -> None:
+        result["job"] = jq.submit_and_wait("raw_write", lambda: order.append("raw") or 0)
+
+    t = threading.Thread(target=submit)
+    t.start()
+    time.sleep(0.1)
+    assert order == ["ingest-start"]  # 投喂被挡在在飞 ingest 之后（同一 FIFO worker）
+    gate.set()
+    t.join(timeout=3)
+    assert order == ["ingest-start", "ingest-end", "raw"]  # FIFO：投喂在 ingest 之后才落盘
+    assert result["job"].exit_code == 0
+    assert jq.get_job(prior_id).exit_code == 0
+
+
+def test_raw_write_serial_does_not_collide_with_ingest(kb) -> None:
+    """端点级：投喂排在在飞 ingest 之后落盘，该 ingest **不被冤判** EXIT_RAW_MUTATED。"""
+    _put_raw(kb, "src.md")
+    gate = threading.Event()
+    order: list[str] = []
+
+    def runner(prompt, **kwargs):
+        order.append("ingest")
+        gate.wait(timeout=3)  # 卡住，模拟在飞 ingest（其 raw/ 快照窗口张开）
+        write_page(kwargs["working_directory"], "wiki/concepts/N.md")
+        return AgentRunResult(ok=True, final_text="done")
+
+    with TestClient(create_app(kb, runner=runner)) as client:
+        ing_id = client.post("/api/ingest", json={"target": "raw/src.md"}).json()["job_id"]
+        result: dict = {}
+
+        def feed() -> None:
+            result["resp"] = client.post("/api/raw", json={"name": "投喂源", "content": "新源\n"})
+
+        t = threading.Thread(target=feed)
+        t.start()
+        time.sleep(0.1)
+        assert not (kb / "raw" / "投喂源.md").exists()  # 投喂尚未落盘（被 ingest 挡住）
+        assert order == ["ingest"]
+        gate.set()  # 放行 ingest
+        t.join(timeout=3)
+        ing_job = _wait_job(client, ing_id)
+
+    assert result["resp"].status_code == 200
+    assert (kb / "raw" / "投喂源.md").exists()  # 投喂在 ingest 之后落盘
+    assert ing_job["exit_code"] == 0  # 投喂没落进 ingest 快照窗口（否则会是 4=EXIT_RAW_MUTATED）
+
+
 # ───────────────────────── 只读多轮 chat（C5） ─────────────────────────
 
 
@@ -858,10 +1068,13 @@ def test_delete_conversation(chat_client) -> None:
 
 
 def test_absent_endpoints(client) -> None:
-    """范围红线：无 /api/query、无 POST /api/raw、无写作业 SSE 订阅端点（§10）。"""
+    """范围红线：无 /api/query、无写作业 SSE 订阅端点（§10）。
+
+    P4.1 起 `POST /api/raw` 是真实端点（投喂）；但删/改 raw 仍不在范围（无 DELETE /api/raw）。
+    """
     assert client.get("/api/query").status_code == 404
     assert client.post("/api/query", json={"question": "x"}).status_code in (404, 405)
-    assert client.post("/api/raw", json={}).status_code in (404, 405)
+    assert client.delete("/api/raw").status_code in (404, 405)  # 仍无删源端点（P4.1 只新增）
     assert client.get("/api/jobs/1/events").status_code == 404
 
 
