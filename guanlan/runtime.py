@@ -44,7 +44,7 @@ def run_agent_task(
     permission_mode: str = "workspace-write",
     skills: tuple[str, ...] = ("guanlan-wiki",),
     model: str | None = None,
-    max_iterations: int = 100,
+    max_iterations: int = 200,
     runner: AgentRunner | None = None,
 ) -> AgentRunResult:
     """跑一段 prompt、拿结构化结果。`runner is None` 时用默认子进程 runner。"""
