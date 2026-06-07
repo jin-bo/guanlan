@@ -32,6 +32,7 @@ __all__ = [
     "split_frontmatter",
     "parse_frontmatter",
     "load_page",
+    "load_page_text",
     "page_title",
     "page_type",
     "link_stem",
@@ -124,6 +125,19 @@ def parse_frontmatter(block: str | None) -> tuple[dict | None, Violation | None]
     return meta, None
 
 
+def load_page_text(text: str) -> tuple[dict | None, str]:
+    """**容错档**：从**已读入的页面文本**解析 `(meta, body)`，**绝不抛**（决策P3-8）。
+
+    与 `load_page` 同口径，但不读盘——供已持有文本/字节的调用方（如 heal 的写集快照，避免对
+    同一文件二次 I/O）复用同一套解析，杜绝口径分叉。
+    """
+    block, body = split_frontmatter(text)
+    if block is None:
+        return None, body
+    meta, _error = _load_yaml_mapping(block)  # 坏 meta → None，错误消息丢弃（不报错）。
+    return meta, body
+
+
 def load_page(path: Path) -> tuple[dict | None, str]:
     """**容错档**读取一张页面（`health`/`lint`/`graph` 专用）。
 
@@ -134,11 +148,7 @@ def load_page(path: Path) -> tuple[dict | None, str]:
     GBK/Latin-1 页面会让 health/lint/graph 乃至 Web 浏览整体崩在 `UnicodeDecodeError`。
     严格档 `check` 自有读取（不走本函数），编码硬错仍可由其暴露。
     """
-    block, body = split_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
-    if block is None:
-        return None, body
-    meta, _error = _load_yaml_mapping(block)  # 坏 meta → None，错误消息丢弃（不报错）。
-    return meta, body
+    return load_page_text(path.read_text(encoding="utf-8", errors="replace"))
 
 
 def page_title(meta: dict | None, stem: str) -> str:
