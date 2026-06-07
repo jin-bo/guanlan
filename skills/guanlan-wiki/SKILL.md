@@ -63,6 +63,17 @@ description: >
 2. 读相关页，**综合出带 `[[页]]` 引用的答案**；无可靠来源时明说，不编造。
 3. **默认只读**。仅当显式 `--backfill` 时把好答案回填 `wiki/syntheses/<slug>.md`（`type: synthesis`），并走与 ingest 同一套门禁。
 
+### heal（P3.2）— `guanlan heal`
+
+把**高频缺失实体**（被 ≥2 页引用却无页的断链，即 `lint.missing_entity`）一次性物化成 entity 页。wrapper 已把本批**目标名 + 各自引用页清单**算好喂进 prompt（确定性事实，你不必自己找谁引用了它），你只需对每个目标：
+
+1. **只读所列引用页**与 `wiki/index.md` 建上下文（别读全库；目标名已是归一键，可直接作文件名）。
+2. 若上下文**足以确认其为实体**，在 `wiki/entities/<目标>.md` 合成一页 entity 定义（frontmatter 齐全、正文术语转 `[[wikilink]]`）。**文件名直接用目标名**——这样 `[[原引用]]` 自然解析；若想用更规范的标题当 stem（如把 `大模型` 建成 `大语言模型.md`），**必须**在 frontmatter `aliases` 收编原目标名，否则断链不消（见 conventions §heal 建页）。
+3. 向 `wiki/log.md` 追加一条 `## [YYYY-MM-DD] heal | <目标>`。
+4. **只准从引用上下文合成，不臆造引用页里没有的事实**；`sources` 列引用页有出处可顺延、否则留空（合法）。上下文不足、目标更像概念/主题页、或疑似已有页别名时，**跳过该目标**并用一句话说明（无需特定格式——wrapper 重算图判定成败，不解析你的状态文本）。
+
+> **永不覆盖或删除已有页、永不修改 `raw/`**：heal 只**新建** entity 页 + 追加 `log.md`。越界写（改/删现有页）会被 wrapper 的写集审计标为 `unexpected_write`。其余收尾同 ingest（不运行 shell / `guanlan check`，wrapper 强制门禁 + 有界自愈）。
+
 ### 确定性脚本（零 LLM）
 
 - `guanlan check`（P2）— 基础校验：frontmatter 合规 + wikilink 断链 + `sources` 解析。ingest / `--backfill` 收尾**强制**运行；亦可独立 shell 调用。实现在 `guanlan` 包内（`guanlan/check.py`），无 `scripts/`。
