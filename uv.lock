@@ -321,6 +321,7 @@ dependencies = [
 
 [package.optional-dependencies]
 web = [
+    { name = "anyio" },
     { name = "fastapi" },
     { name = "markdown" },
     { name = "uvicorn" },
@@ -335,6 +336,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agentao", extras = ["cli"], specifier = ">=0.4.8" },
+    { name = "anyio", marker = "extra == 'web'", specifier = ">=4.1" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },
     { name = "markdown", marker = "extra == 'web'", specifier = ">=3" },
     { name = "pyyaml", specifier = ">=6" },
