@@ -92,6 +92,14 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .msg.bot { align-self: flex-start; background: var(--lan-paper); border: 1px solid var(--lan-mist); border-bottom-left-radius: 2px; max-width: 88%; }
 .msg.err { align-self: stretch; background: #fdecec; color: #8a1f1f; border: 1px solid #f3c4c4; }
 
+/* 斜杠命令（P4.4）：cmd = 用户键入的命令回显（右对齐、淡色）；note = 命令的只读输出（左对齐、
+   细边框、不开浮层、落对话流）。两者均不是 LLM 消息（决策P4.4-1/2）。 */
+.msg.cmd { align-self: flex-end; background: transparent; color: var(--lan-ink-soft); border: 1px dashed var(--lan-mist); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; max-width: 80%; }
+.msg.note { align-self: stretch; background: var(--lan-foam); border: 1px solid var(--lan-mist); color: var(--lan-ink); font-size: .88rem; }
+.msg.note > div { padding: .05rem 0; }
+.msg.note .slash-skill.active { color: var(--lan-deep); font-weight: 600; }
+.msg.note .slash-tool.blocked { color: var(--lan-ink-soft); }
+
 /* 渲染后的 Agent 回答（markdown→HTML）：切回正常空白模型并给块级元素排版 */
 .msg.bot.rendered { white-space: normal; }
 .msg.bot.rendered > :first-child { margin-top: 0; }
@@ -142,6 +150,10 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .chat-form button { background: var(--lan-deep); color: #fff; border: 0; border-radius: 6px; padding: 0 1.4rem; cursor: pointer; transition: background .15s; }
 .chat-form button:hover { background: var(--lan-ripple); }
 .chat-form button:disabled { opacity: .5; cursor: default; }
+/* 流式中按钮转「停止」：暖红区分，点击即中断当前轮。 */
+.chat-form button.stopping { background: #8a1f1f; }
+.chat-form button.stopping:hover { background: #6f1818; }
+.msg .stop-note { color: var(--lan-ink-soft); font-size: .85em; margin-left: .35rem; }
 
 /* ── 浮层（报告 / 作业 / ingest 选择） ── */
 .overlay { position: fixed; inset: 0; background: rgba(6,48,59,.4); display: flex; align-items: center; justify-content: center; }
@@ -174,14 +186,19 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .feed-status button.feed-overwrite { background: transparent; color: #8a1f1f; border: 1px solid #f3c4c4; }
 
 /* heal 浮层（P4.3）：worklist 预览（控件 + 目标行 + 推迟）+ 物化回执（resolved/仍断/非预期写）。 */
-.heal-ctrl { display: flex; gap: .5rem; align-items: center; margin-bottom: .6rem; flex-wrap: wrap; }
+/* 顶部一行：左「物化 N 个目标」按钮，右 limit/min-refs/预览 微调控件。 */
+.heal-top { display: flex; justify-content: space-between; align-items: center; gap: .5rem; margin-bottom: .6rem; flex-wrap: wrap; }
+.heal-ctrl { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
 .heal-num { width: 6rem; padding: .3rem .45rem; border: 1px solid var(--lan-mist); border-radius: 5px; font-size: .85rem; }
 .heal-ctrl button { background: var(--lan-ripple); color: #fff; border: 0; border-radius: 4px; padding: .25rem .8rem; cursor: pointer; }
-.heal-item { padding: .3rem .45rem; border-left: 3px solid var(--lan-mist); margin: .25rem 0; font-size: .85rem; background: var(--lan-foam); display: flex; flex-direction: column; gap: .1rem; }
-.heal-item.postponed { border-left-color: transparent; background: transparent; color: var(--lan-ink-soft); }
+.heal-item { padding: .3rem .45rem; border-left: 3px solid var(--lan-mist); margin: .25rem 0; font-size: .85rem; background: var(--lan-foam); display: flex; flex-direction: row; align-items: flex-start; gap: .5rem; cursor: pointer; }
+.heal-check { margin: .15rem 0 0; flex: none; cursor: pointer; }
+.heal-item-body { display: flex; flex-direction: column; gap: .1rem; }
+.heal-item.postponed { border-left-color: transparent; background: transparent; color: var(--lan-ink-soft); cursor: default; }
 .heal-target { font-weight: 600; color: var(--lan-deep); }
 .heal-meta { color: var(--lan-ink-soft); font-size: .78rem; }
-.heal-go { margin-top: .7rem; background: var(--lan-ripple); color: #fff; border: 0; border-radius: 5px; padding: .4rem 1.1rem; cursor: pointer; font-size: .9rem; }
+.heal-go { margin: 0; background: var(--lan-ripple); color: #fff; border: 0; border-radius: 5px; padding: .4rem 1.1rem; cursor: pointer; font-size: .9rem; }
+.heal-go:disabled { opacity: .5; cursor: default; }
 .heal-receipt { padding: .25rem .45rem; margin: .2rem 0; font-size: .85rem; border-radius: 4px; }
 .heal-receipt.resolved { color: #1b6e3a; background: var(--lan-foam); }
 .heal-receipt.broken { color: var(--lan-ink-soft); }

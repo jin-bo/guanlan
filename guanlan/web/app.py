@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import anyio
+from agentao.cancellation import AgentCancelledError
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -45,7 +46,7 @@ from ..lint import format_report as _format_lint
 from ..lint import run_lint
 from ..pages import iter_pages, load_page, page_title, page_type
 from ..runtime import AgentRunner
-from .chat import ConversationStore
+from .chat import MAX_CONVERSATIONS, ConversationStore
 from .jobs import JobQueue
 from .render import render_markdown, render_page
 
@@ -323,6 +324,19 @@ def create_app(
     async def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
+    # 只读自省（P4.4，决策P4.4-2）：app 级 `GET /api/info` 无会话也能答（喂 /status /mode），
+    # 零 LLM、不建 agent；仅读 app.state 配置 + 内存会话计数（in-memory，零盘读）。恒 200。
+    @app.get("/api/info")
+    async def api_info() -> dict:
+        return {
+            "kb_name": root.name,
+            "model": model,  # --model 覆盖（可能 None：未覆盖时由各会话构造期环境发现）
+            "mode": "read-only",  # Web 恒只读（决策P4.4-6）
+            "persist": session_persist,
+            "conversations": conversations.live_count(),
+            "max_conversations": MAX_CONVERSATIONS,
+        }
+
     # 浏览（读）：阻塞的文件扫描/渲染一律经 anyio.to_thread 卸离事件循环（决策P4-2）。
     @app.get("/api/pages")
     async def api_pages() -> dict:
@@ -520,12 +534,20 @@ def create_app(
             queue.put_nowait((kind, data))
 
         async def _run_turn() -> None:
+            # 标记在飞**再**发 start（决策P4-8 / codex 评审）：start 带 conversation_id 让前端尽早拿到
+            # id，停止按钮才能在首轮就 POST /api/chat/{id}/stop。begin_turn 必须**先于** emit("start")——
+            # 否则前端一收到 start 就 POST /stop 时，turn 可能还没进到装令牌的临界区，request_stop 把它
+            # 当 idle 丢弃、前端不重试，首轮停止被静默吞掉。标记在飞后，该窗口内的停止被记为待停、turn
+            # 进锁即兑现；令牌仍在锁内安装，故并发同会话时 stop 只打活跃轮、不误伤排队轮。
+            conv.begin_turn()
+            emit("start", {"conversation_id": conv.id})
             try:
-                # shield：客户端断开会取消本任务，但**不可**中途打断 arun——agentao 的 arun 在
-                # 取消时只转发 token.cancel() 便立刻 re-raise，不等线程收尾，于是 lock 会在后台
-                # executor 线程仍在跑时被释放，下一轮就可能与残线程并发改 agent.messages / 串错
-                # token。shield 让 turn 始终跑到自然结束（lock 全程持有），杜绝该竞态；代价是断开
-                # 后该轮仍跑完（本地单用户、轮次有界，可接受）。
+                # shield：客户端断开会取消本任务，但**不可**靠 asyncio 取消打断 arun——那只转发
+                # token.cancel() 便立刻 re-raise、不等线程收尾，于是 lock 会在后台 executor 线程仍
+                # 在跑时被释放，下一轮就可能与残线程并发改 agent.messages / 串错 token。shield 让
+                # turn 跑到自然结束（lock 全程持有），杜绝该竞态；代价是断开后该轮仍跑完（本地单
+                # 用户、轮次有界，可接受）。**主动停止**走另一条干净路径：停止端点经 conv 上的取消
+                # 令牌打断，arun 持锁等线程真正收尾才抛 AgentCancelledError（见下 except）。
                 answer = await asyncio.shield(conv.turn(body.message, emit))
                 # 答案已完整流出；再渲染安全 markdown HTML（[[页]] → 站内链接）作收尾。渲染失败
                 # **不能**丢掉这条成功答案：省略 answer_html，前端回退用纯文本 answer 上屏。
@@ -537,12 +559,16 @@ def create_app(
                 except Exception:  # noqa: BLE001 — 渲染失败仅降级排版，不毁答案、不转 error
                     pass
                 emit("done", payload)
+            except AgentCancelledError:
+                # 用户按停止：已流出的 token 已在前端气泡，发 stopped 收尾（这不是错误，不转 error）。
+                emit("stopped", {"conversation_id": conv.id})
             except asyncio.CancelledError:
                 raise  # 客户端已断开，流没了，不再 emit
             except Exception as exc:  # noqa: BLE001 — 任何失败都转 error 事件，不泄 traceback 到流
                 # 带上 conversation_id：首轮失败时前端据此记住已建会话，避免下次另起新会话堆积。
                 emit("error", {"message": f"{type(exc).__name__}: {exc}", "conversation_id": conv.id})
             finally:
+                conv.end_turn()  # 与 begin_turn 配对：本轮收尾，清在飞标记/未兑现待停（codex 竞态修复）
                 queue.put_nowait(None)  # 哨兵：通知流结束
 
         async def event_stream() -> AsyncIterator[str]:
@@ -560,6 +586,29 @@ def create_app(
                 await asyncio.gather(task, return_exceptions=True)
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    # 会话级只读自省（P4.4，喂 /status /context /skills /tools /mode）：内存命中 → conv.info()
+    # 全量；冷会话 → cold_info（不建 agent、出部分信息，决策P4.4-7）；否则 404。零 LLM、无副作用、
+    # 不切姿态、不入队、不建作业；阻塞（token 估算 / catalog 读盘）经 to_thread 卸离事件循环（决策P4-2）。
+    @app.get("/api/chat/{conversation_id}/info")
+    async def chat_info(conversation_id: str) -> dict:
+        conv = conversations.get(conversation_id)
+        if conv is not None:
+            return await anyio.to_thread.run_sync(conv.info)  # 内存态全量自省（off-loop）
+        info = await anyio.to_thread.run_sync(conversations.cold_info, conversation_id)
+        if info is None:  # 非规范 / 盘上无此 Web 会话 / 持久化关 → 404（同 chat / messages 口径）
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        return info
+
+    # 停止在飞的一轮（停止按钮）：经会话上的取消令牌打断当前 arun。幂等、零写、无新退出码。
+    @app.post("/api/chat/{conversation_id}/stop")
+    async def chat_stop(conversation_id: str) -> dict:
+        conv = conversations.get(conversation_id)
+        if conv is None:
+            # 内存无此会话 = 没有在飞 turn 可停（冷会话尚未懒恢复）。404 让前端别误以为停成了。
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        # request_stop 仅置位令牌（线程安全、不阻塞），无在飞 turn 时返回 False。
+        return {"stopped": conv.request_stop()}
 
     @app.get("/api/conversations")
     async def list_conversations() -> dict:
