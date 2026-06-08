@@ -1,7 +1,8 @@
 """缺失实体物化 heal（P3.2，见 docs/P3.2-缺失实体物化.md）。
 
 `guanlan heal`：把 `lint.missing_entity`（被 ≥ 阈值张不同页引用却无页的高价值断链）按需用 LLM
-物化成 `wiki/entities/` 页。**检测确定性、生成有门禁、默认非自动、按需且有界。**
+物化成内容页——按目标的实体/概念属性落 `wiki/entities/`（人物/组织/模型/系统）或 `wiki/concepts/`
+（方法/理论/术语/算法等）。**检测确定性、生成有门禁、默认非自动、按需且有界。**
 
 - **worklist**（§2，零 LLM）：复用 `lint.missing_entities` 的结构化聚合——与 `guanlan lint` 同源同阈值。
 - **写路径**（§3）：复用 P2 写门禁的结果版 `gate.run_guarded_write_result`，与 ingest 同一条编排核心；
@@ -60,11 +61,14 @@ DEFAULT_LIMIT = 10
 
 # 薄 prompt：真正步骤（判据/收编纪律）在 skill。{targets} = 逐目标的"名 + 引用页清单"。
 # P3.3：从「一律直接作文件名」补三态引导（A 用目标名 / B 规范标题+收编 / C 收编既有页）+ index 登记。
+# 概念分类：每目标先判实体/概念，A/B 落到对应目录 `entities/` 或 `concepts/`（算法等方法类是概念）。
 HEAL_PROMPT = (
     "请按 `guanlan-wiki` skill 的 heal 工作流，为下列**缺失实体**收割断链（目标名已是归一键）：\n{targets}\n"
-    "**只读所列引用页**与 `wiki/index.md` 建上下文。每个目标三选一（判据见 skill，**拿不准走 A**）："
-    "A) 直接建 `wiki/entities/<目标>.md`（目标名作文件名，`[[原引用]]` 天然解析）；"
-    "B) 若引用上下文给出更规范全称，建 `wiki/entities/<规范名>.md` 并在 frontmatter `aliases` **收编原目标名**；"
+    "**只读所列引用页**与 `wiki/index.md` 建上下文。每个目标先判**实体还是概念**"
+    "（实体=人物/组织/模型/系统，落 `wiki/entities/`；概念=方法/理论/术语/算法等，落 `wiki/concepts/`；"
+    "拿不准当实体），记其目录为 `<dir>`，再三选一（判据见 skill，**拿不准走 A**）："
+    "A) 直接建 `wiki/<dir>/<目标>.md`（目标名作文件名，`[[原引用]]` 天然解析）；"
+    "B) 若引用上下文给出更规范全称，建 `wiki/<dir>/<规范名>.md` 并在 frontmatter `aliases` **收编原目标名**；"
     "C) 若目标其实是某**已有** entity/concept 页的变体，**只向该页 `aliases` 末尾追加原目标名**"
     "（不改正文、不动其它 frontmatter、不新建重复页）。"
     "建页/收编后在 `wiki/index.md` 对应分区登记一行（B/C 句末注记别名），并向 `log.md` 追加 `## [<日期>] heal | <目标>`。"
@@ -253,11 +257,10 @@ def _read_log(root: Path) -> str:
 
 
 # heal 的允许写入面（决策P3.2-11 / P3.3-4/5）：
-# - **新建** `wiki/entities/` 下的页（物化，A/B 模式）；
+# - **新建** `wiki/entities/` 或 `wiki/concepts/` 下的页（物化，A/B 模式；按实体/概念分类落目录）；
 # - **追加** `wiki/log.md`（严格 append-only，另由 run_heal 复查）；
 # - **编辑** `wiki/index.md`（config catalog，分区插行，不套 append-only）；
 # - **向已有 `entities/`/`concepts/` 页纯追加别名收编本批目标**（C 模式，§3 安全收编窄缝）。
-_ENTITIES_PREFIX = "wiki/entities/"
 _CONTENT_PREFIXES = ("wiki/entities/", "wiki/concepts/")
 _LOG_PATH = "wiki/log.md"
 _INDEX_PATH = "wiki/index.md"
@@ -307,7 +310,7 @@ def _writeset(
     - **删除**任何页；
     - **修改**已有页——`wiki/log.md`/`wiki/index.md`（config catalog）豁免；`entities/`/`concepts/` 页
       若为**安全别名收编**（`_is_safe_alias_collection`）且 `gate_ok` 也豁免（§3）；其余皆越界；
-    - **新建**到 `wiki/entities/` 之外的页（heal 物化只该建 entity 页，建错目录即越界）。
+    - **新建**到 `wiki/entities/`∪`wiki/concepts/` 之外的页（heal 只该建实体/概念页，建错目录即越界）。
     """
     raw_before = {k: v.raw for k, v in before.items()}
     raw_after = {k: v.raw for k, v in after.items()}
@@ -327,7 +330,7 @@ def _writeset(
             ):
                 continue  # 安全别名收编（§3），豁免
             unexpected.append(c.path)
-        elif c.kind == "added" and not c.path.startswith(_ENTITIES_PREFIX):
+        elif c.kind == "added" and not c.path.startswith(_CONTENT_PREFIXES):
             unexpected.append(c.path)
     return sorted(changed), sorted(unexpected)
 
@@ -380,6 +383,7 @@ def run_heal_result(
     root: str | Path = ".",
     limit: int = DEFAULT_LIMIT,
     min_refs: int = MISSING_ENTITY_MIN_REFS,
+    targets: Sequence[str] | None = None,
     model: str | None = None,
     runner: AgentRunner | None = None,
 ) -> HealRun:
@@ -390,11 +394,19 @@ def run_heal_result(
     → `HealResult`）。**不碰 stdout、不处理 dry_run/json_output**——渲染与短路特判全留给调用方
     （CLI 薄壳 `run_heal` / Web 端点）。`require_kb_root` 的 `GuanlanError` 向上抛：CLI 薄壳
     try/except 打印，作业 worker 归一为失败（决策P4.3-1/-5）。
+
+    `targets`（可选，Web 勾选子集用，决策P4.3-3 修订）：**仅作过滤器**——worklist 仍服务端
+    `compute_worklist` 确定性重算，再**取交集**只物化其中 `target` 命中者；故绝不物化服务端没独立
+    推出的目标（防 TOCTOU），客户端发来的陈旧/越界目标自然被交集丢弃。`None` = 不过滤（CLI 常路、
+    与旧行为逐字节一致）；交集为空 → 同空 batch 短路。`limit` 仍先界定可选范围（推迟项无勾选框）。
     """
     kb = require_kb_root(root, writable=True)
     wiki = kb / "wiki"
     worklist = compute_worklist(wiki, min_refs=min_refs, limit=limit)
     batch = [w for w in worklist if not w.postponed]
+    if targets is not None:  # 勾选子集：与服务端重算的本批取交集（保留确定性重算这一安全属性）
+        selected = set(targets)
+        batch = [w for w in batch if w.target in selected]
     postponed = tuple(w for w in worklist if w.postponed)
 
     # 空 worklist：短路 EXIT_OK、不触 Agentao（决策P3.2-6）；had_batch=False 供薄壳特判渲染。
@@ -592,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
     """`python -m guanlan.heal` 入口（与 `guanlan heal` 共享 heal_entrypoint）。"""
     parser = argparse.ArgumentParser(
         prog="python -m guanlan.heal",
-        description="缺失实体物化：把高频断链按需 LLM 建成 entity 页（走 P2 写门禁）。",
+        description="缺失实体物化：把高频断链按需 LLM 建成实体/概念页（走 P2 写门禁）。",
     )
     parser.add_argument("-C", "--dir", default=".", help="知识库根目录（默认当前目录）")
     parser.add_argument(
