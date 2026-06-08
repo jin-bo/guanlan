@@ -291,6 +291,33 @@ function renderHealPreview(data, limit, minRefs) {
   const box = $("#overlay-body");
   box.innerHTML = "";
 
+  const worklist = data.worklist || [];
+  const postponed = data.postponed || [];
+
+  // 勾选集：默认全选（== 旧「整批物化」行为）。顶部物化按钮的文案/禁用随勾选实时更新。
+  const selected = new Set(worklist.map((w) => w.target));
+  let go = null;
+  const updateGo = () => {
+    if (!go) return;
+    go.textContent = selected.size ? `物化 ${selected.size} 个目标` : "未选择目标";
+    go.disabled = selected.size === 0;
+  };
+
+  // 顶部一行：左「物化 N 个目标」（仅 worklist 非空），右「limit / min-refs / 预览」微调控件。
+  const top = document.createElement("div");
+  top.className = "heal-top";
+  if (worklist.length) {
+    go = document.createElement("button");
+    go.className = "heal-go";
+    go.addEventListener("click", () => {
+      // 用**本次预览所用的** limit/min-refs（renderHealPreview 入参），而非输入框现值：勾选项是
+      // 按这份 worklist 算出来的，若改了输入框却没点「预览」，用现值会让服务端按不同参数重算出
+      // 另一批，交集把勾选项悄悄漏掉（决策P4.3-3）。「预览」按钮才用输入框现值重拉。
+      if (selected.size) triggerHeal(limit || "", minRefs || "", [...selected]);
+    });
+    top.appendChild(go);
+    updateGo();
+  }
   // 微调控件：limit / min-refs + 重新预览（默认值即常量，留空表示用服务端默认）。
   const ctrl = document.createElement("div");
   ctrl.className = "heal-ctrl";
@@ -304,10 +331,9 @@ function renderHealPreview(data, limit, minRefs) {
   refresh.textContent = "预览";
   refresh.addEventListener("click", () => openHealPreview(limitIn.value || "", minIn.value || ""));
   ctrl.append(limitIn, minIn, refresh);
-  box.appendChild(ctrl);
+  top.appendChild(ctrl);
+  box.appendChild(top);
 
-  const worklist = data.worklist || [];
-  const postponed = data.postponed || [];
   if (!worklist.length) {
     const note = document.createElement("p");
     note.className = "muted";
@@ -318,18 +344,31 @@ function renderHealPreview(data, limit, minRefs) {
     if (!postponed.length) return;
   } else {
     const head = document.createElement("p");
-    head.textContent = `本批将物化 ${worklist.length} 个高频缺失实体：`;
+    head.textContent = `勾选要物化的高频缺失实体（默认全选，共 ${worklist.length} 个）：`;
     box.appendChild(head);
     for (const w of worklist) {
-      const row = document.createElement("div");
+      // <label> 包 checkbox：整行可点切换。默认勾选，change 同步 selected + 刷新按钮。
+      const row = document.createElement("label");
       row.className = "heal-item";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.className = "heal-check";
+      cb.checked = true;
+      cb.addEventListener("change", () => {
+        if (cb.checked) selected.add(w.target);
+        else selected.delete(w.target);
+        updateGo();
+      });
+      const bodyEl = document.createElement("span");
+      bodyEl.className = "heal-item-body";
       const t = document.createElement("span");
       t.className = "heal-target";
       t.textContent = `+ ${w.target}`; // textContent：目标名/文件名按字面显示，无注入
       const meta = document.createElement("span");
       meta.className = "heal-meta";
       meta.textContent = `${w.ref_count} 页引用：${(w.ref_pages || []).join("、")}`;
-      row.append(t, meta);
+      bodyEl.append(t, meta);
+      row.append(cb, bodyEl);
       box.appendChild(row);
     }
   }
@@ -337,7 +376,7 @@ function renderHealPreview(data, limit, minRefs) {
   if (postponed.length) {
     const ph = document.createElement("p");
     ph.className = "muted";
-    ph.textContent = `另有 ${postponed.length} 个因 limit 本次推迟：`;
+    ph.textContent = `另有 ${postponed.length} 个因 limit 本次推迟（不可勾选，提高 limit 续补）：`;
     box.appendChild(ph);
     for (const w of postponed) {
       const row = document.createElement("div");
@@ -346,21 +385,15 @@ function renderHealPreview(data, limit, minRefs) {
       box.appendChild(row);
     }
   }
-
-  if (worklist.length) {
-    const go = document.createElement("button");
-    go.className = "heal-go";
-    go.textContent = `物化 ${worklist.length} 个目标`;
-    go.addEventListener("click", () => triggerHeal(limitIn.value || "", minIn.value || ""));
-    box.appendChild(go);
-  }
 }
 
-async function triggerHeal(limit, minRefs) {
+async function triggerHeal(limit, minRefs, targets) {
   showOverlay("heal", '<p class="muted">已提交，排队中（与 ingest/投喂同写者串行）…</p>');
   const body = {};
   if (limit) body.limit = Number(limit);
   if (minRefs) body.min_refs = Number(minRefs);
+  // 勾选子集随请求发出；服务端仍重算 worklist 再取交集（陈旧/越界目标被丢弃，决策P4.3-3 修订）。
+  if (targets && targets.length) body.targets = targets;
   try {
     const { job_id } = await postJSON("/api/heal", body);
     await pollJob(job_id, "heal", renderHealDone);
