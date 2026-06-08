@@ -302,16 +302,27 @@ def test_heal_gate_failure_no_false_resolved(kb: Path, capsys):
     assert data["receipts"][0]["status"] == "still_broken"  # 不因留盘的非法页误报 resolved
 
 
-def test_heal_new_page_outside_entities_is_unexpected(kb: Path, capsys):
-    """heal 只该建 entities/ 页；建到别的目录（即便解析了目标）也算越界写。"""
-    _ref(kb, "a", "大模型")
-    _ref(kb, "b", "大模型")
-    # 写到 concepts/ 而非 entities/——[[大模型]] 仍解析（按 stem），但目录越界。
-    runner = make_runner(lambda root: write_page(root, "wiki/concepts/大模型.md", type="concept"))
+def test_heal_new_concept_page_allowed(kb: Path, capsys):
+    """概念分类增强：heal 现可按实体/概念落目录，新建 concepts/ 页（战法等）解析且**不**判越界。"""
+    _ref(kb, "a", "某某战法")
+    _ref(kb, "b", "某某战法")
+    # 战法是概念 → 建到 concepts/；[[某某战法]] 按 stem 解析，且 concepts/ 是允许写入面。
+    runner = make_runner(lambda root: write_page(root, "wiki/concepts/某某战法.md", type="concept"))
     run_heal(root=kb, runner=runner, json_output=True)
     data = json.loads(capsys.readouterr().out)
-    assert data["receipts"][0]["status"] == "resolved"  # 链接确实解析了
-    assert "wiki/concepts/大模型.md" in data["unexpected_writes"]  # 但建错目录 → 越界
+    assert data["receipts"][0]["status"] == "resolved"  # 链接解析
+    assert data["unexpected_writes"] == []  # concepts/ 新页不再越界
+
+
+def test_heal_new_page_outside_content_dirs_is_unexpected(kb: Path, capsys):
+    """heal 新建只允许落 entities/∪concepts/；建到 syntheses/ 等其它目录仍算越界写。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    # 写到 syntheses/（内容目录之外）——即便目标名作 stem，新建在允许面外 → 越界。
+    runner = make_runner(lambda root: write_page(root, "wiki/syntheses/大模型.md", type="synthesis"))
+    run_heal(root=kb, runner=runner, json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    assert "wiki/syntheses/大模型.md" in data["unexpected_writes"]
 
 
 def test_heal_destructive_log_rewrite_is_unexpected(kb: Path, capsys):
@@ -637,6 +648,38 @@ def test_run_heal_result_postponed_carried(kb: Path):
     assert run.had_batch is True
     # 频次相同按 target 升序：ASCII "gpt" < CJK "大模型"，故 gpt 入批、大模型 推迟。
     assert [w.target for w in run.postponed] == ["大模型"]
+
+
+def test_run_heal_result_targets_filters_batch(kb: Path):
+    """targets 子集（决策P4.3-3 修订）：worklist 仍重算，只物化命中者；未选目标不入 batch/回执/prompt。"""
+    _ref(kb, "a", "大模型", "gpt")
+    _ref(kb, "b", "大模型", "gpt")
+    runner = make_runner(lambda root: write_page(root, "wiki/entities/gpt.md", type="entity"))
+    run = run_heal_result(root=kb, limit=10, min_refs=2, targets=["gpt"], model=None, runner=runner)
+    assert run.had_batch is True
+    assert [r.target for r in run.result.receipts] == ["gpt"]  # 只物化勾选的
+    prompt = runner.calls[0]["prompt"]
+    assert "gpt" in prompt and "大模型" not in prompt  # 未选目标连 prompt 都不进
+
+
+def test_run_heal_result_targets_none_heals_all(kb: Path):
+    """targets=None（CLI 常路）== 旧行为：整批物化，与不传逐字节一致。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    runner = make_runner(lambda root: write_page(root, "wiki/entities/大模型.md", type="entity"))
+    run = run_heal_result(root=kb, limit=10, min_refs=2, targets=None, model=None, runner=runner)
+    assert [r.target for r in run.result.receipts] == ["大模型"]
+
+
+def test_run_heal_result_targets_empty_intersection_short_circuits(kb: Path):
+    """勾选全不在重算 worklist 内（陈旧/越界）→ 交集空 → 同空 batch 短路、未调 runner（防 TOCTOU）。"""
+    _ref(kb, "a", "大模型")
+    _ref(kb, "b", "大模型")
+    runner = make_runner(None)
+    run = run_heal_result(root=kb, limit=10, min_refs=2, targets=["不存在"], model=None, runner=runner)
+    assert run.had_batch is False
+    assert run.result.receipts == ()
+    assert runner.calls == []
 
 
 def _bad_frontmatter(root: Path):

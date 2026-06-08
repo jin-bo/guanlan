@@ -63,13 +63,14 @@ aliases: ['LLM', '大模型', 'large language model']
 
 ## heal 建页（`guanlan heal`）
 
-`heal` 把高频缺失实体（`lint.missing_entity`）物化成页，纪律是 ingest 建页的子集，额外几条硬线（A/B 见命名、C 见收编）：
+`heal` 把高频缺失实体（`lint.missing_entity`）物化成页，纪律是 ingest 建页的子集，额外几条硬线（先分类定目录、A/B 见命名、C 见收编）：
 
-- **A 文件名 = 目标归一键**（默认最稳）：wrapper 给的目标名已是 `link_stem` 归一键（剥 `|别名`/`#锚点`/`.md`、小写）。**直接用它作文件名** `entities/<目标>.md`，则原引用 `[[X]]` 经同一归一必然解析。
+- **先分类定目录 `<dir>`**：判目标是**实体**（人物/组织/产品/系统 → `entities/`）还是**概念**（方法/理论/术语、**战法/办案手法**等 → `concepts/`），A/B 即建到 `wiki/<dir>/`；拿不准当实体。heal 新建只允许落 `entities/`∪`concepts/`，越界目录会被写集审计标 `unexpected_write`（库定义的自定义目录请走 ingest，不走 heal）。
+- **A 文件名 = 目标归一键**（默认最稳）：wrapper 给的目标名已是 `link_stem` 归一键（剥 `|别名`/`#锚点`/`.md`、小写）。**直接用它作文件名** `<dir>/<目标>.md`，则原引用 `[[X]]` 经同一归一必然解析。
 - **B 改名必收编别名**：若判断目标名口语化、想用更规范标题当 stem（`大模型` → `大语言模型.md`），**必须**在 frontmatter `aliases` 收编原目标名（`aliases: ['大模型']`），否则 `[[大模型]]` 仍断、wrapper 回执报 `still_broken`。拿不准就走 A。
 - **C 收编到既有页**：目标其实是某**已有** `entities/`/`concepts/` 页的变体时，**只向该页 `aliases` 末尾追加原目标名**，**不新建重复页**。这是 wrapper 唯一容许 heal「碰已有页」的窄缝，必须满足全部：**只在 aliases 末尾追加**（原有别名原序原次保留、一个不删不重排）、**正文与其它 frontmatter（title/type/tags/sources）一字不动**（`last_updated` 可改）、**新增别名只收编本批目标**（不夹带无关别名）。任一不满足都会被写集审计标 `unexpected_write`。
 - **登记 index.md**：建页/收编后在 `index.md` 对应分区登记一行（B/C 句末注记别名），让去重 / 2-gram 召回 / health 同步看得见——遗漏不当轮失败，但 `health` 会报 `index_missing_page`。
-- **只新建/纯追加、不臆造**：heal 只**新建** entity 页、**向既有页纯追加别名**、编辑 `index.md`、追加 `log.md`，**绝不删除/覆盖重写已有页正文、不碰 `raw/`**。正文只准从所列引用页合成，缺则跳过或写最小桩页（`health` 另行标记桩页），不得编造 `sources`。
+- **只新建/纯追加、不臆造**：heal 只**新建** `entities/`/`concepts/` 页、**向既有页纯追加别名**、编辑 `index.md`、追加 `log.md`，**绝不删除/覆盖重写已有页正文、不碰 `raw/`**。正文只准从所列引用页合成，缺则跳过或写最小桩页（`health` 另行标记桩页），不得编造 `sources`。
 - **跳过无需格式**：上下文不足 / 目标更像主题页 / 无法判定时，跳过并口头说明即可——正确性由 wrapper 重算图判定，不读你的状态文本。
 
 ## index.md

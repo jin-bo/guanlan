@@ -1604,6 +1604,17 @@ def test_heal_preview_limit_and_min_refs(client, kb) -> None:
     assert data3["worklist"] == [] and data3["postponed"] == []
 
 
+def test_heal_preview_default_limit_is_5(kb) -> None:
+    """Web 端 heal 缺省 limit=5（刻意小于 CLI 的 10）：6 个等频缺失实体 → 5 入批、1 推迟。"""
+    for i in range(6):
+        _ref_missing(kb, f"a{i}", f"t{i}")
+        _ref_missing(kb, f"b{i}", f"t{i}")
+    with TestClient(create_app(kb)) as client:
+        data = client.get("/api/heal/preview").json()  # 不带 limit → 用服务端缺省
+    assert len(data["worklist"]) == 5
+    assert len(data["postponed"]) == 1
+
+
 @pytest.mark.parametrize("params", [{"limit": 0}, {"min_refs": 0}, {"limit": -1}])
 def test_heal_preview_out_of_range_is_422(client, params) -> None:
     """limit/min_refs < 1 → 422（Query ge=1，对齐 CLI positive_int）。"""
@@ -1640,17 +1651,41 @@ def test_heal_post_enqueues_and_serializes_result(kb) -> None:
     assert "已建大模型页" not in json.dumps(result, ensure_ascii=False)
 
 
-def test_heal_post_recomputes_worklist_server_side(kb) -> None:
-    """客户端只传 limit/min_refs/model（无 target 列表，决策P4.3-3）：传 target 键被忽略、不报错。"""
+def test_heal_post_targets_filters_over_server_recompute(kb) -> None:
+    """targets（决策P4.3-3 修订）= 服务端重算 worklist 的**过滤器**：勾选子集只物化命中者，
+    陈旧/伪造目标被交集丢弃（绝不物化服务端没独立推出的目标，防 TOCTOU）。"""
+    _ref_missing(kb, "a", "大模型", "gpt")
+    _ref_missing(kb, "b", "大模型", "gpt")
+    runner = make_runner(lambda root: write_page(root, "wiki/entities/gpt.md", type="entity"))
+    with TestClient(create_app(kb, runner=runner)) as client:
+        # 勾选 gpt（真在 worklist）+ 伪造目标（不在）→ 只物化 gpt，伪造目标被交集丢弃。
+        resp = client.post("/api/heal", json={"targets": ["gpt", "伪造目标"]})
+        assert resp.status_code == 200
+        data = _wait_job(client, resp.json()["job_id"])
+    assert [r["target"] for r in data["result"]["receipts"]] == ["gpt"]
+
+
+def test_heal_post_forged_targets_heal_nothing(kb) -> None:
+    """只勾选服务端 worklist 外的伪造目标 → 交集空 → 空批次短路、runner 零调用（TOCTOU 安全）。"""
     _ref_missing(kb, "a", "大模型")
     _ref_missing(kb, "b", "大模型")
     runner = make_runner(lambda root: write_page(root, "wiki/entities/大模型.md", type="entity"))
     with TestClient(create_app(kb, runner=runner)) as client:
-        # 多余的 target/targets 键被 pydantic 忽略（模型只声明 limit/min_refs/model）。
-        resp = client.post("/api/heal", json={"targets": ["伪造目标"], "target": "x"})
-        assert resp.status_code == 200
+        resp = client.post("/api/heal", json={"targets": ["伪造目标"]})
         data = _wait_job(client, resp.json()["job_id"])
-    assert data["result"]["receipts"][0]["target"] == "大模型"  # 服务端重算，不受伪造目标影响
+    assert data["result"]["receipts"] == []
+    assert runner.calls == []
+
+
+def test_heal_post_no_targets_heals_all(kb) -> None:
+    """省略 targets（旧行为）：服务端重算整批全物化。"""
+    _ref_missing(kb, "a", "大模型")
+    _ref_missing(kb, "b", "大模型")
+    runner = make_runner(lambda root: write_page(root, "wiki/entities/大模型.md", type="entity"))
+    with TestClient(create_app(kb, runner=runner)) as client:
+        resp = client.post("/api/heal", json={})
+        data = _wait_job(client, resp.json()["job_id"])
+    assert data["result"]["receipts"][0]["target"] == "大模型"
 
 
 def test_heal_empty_worklist_job(kb) -> None:
