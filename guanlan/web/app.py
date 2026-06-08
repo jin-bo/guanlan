@@ -34,7 +34,6 @@ from ..graph import build_and_write_graph
 from ..health import format_report as _format_health
 from ..health import run_health
 from ..heal import (
-    DEFAULT_LIMIT,
     HealRun,
     compute_worklist,
     heal_result_dict,
@@ -74,14 +73,23 @@ class RawBody(BaseModel):
     overwrite: bool = False
 
 
-class HealBody(BaseModel):
-    """`POST /api/heal` 请求体（P4.3）。**只收 `limit`/`min_refs`/`model`，绝不收 target 列表**
-    （决策P4.3-3：worklist 由作业服务端重算）。默认值与 CLI 同源（直接 import 常量、不硬编码，
-    避免漂移）；`ge=1` 对齐 CLI `positive_int` 的「须 ≥ 1」，越界 → 422。`model` 含 `None`
-    直接透传子进程 runner（heal 非嵌入会话、无 P4-8 模型坑，决策P4.3-5）。"""
+# Web 端 heal 默认本批上限：刻意小于 CLI 的 DEFAULT_LIMIT（=10）——浏览器里一次少物化几个、
+# 看清回执再续批更顺手；`min_refs` 仍与 CLI 同源（只 limit 这一项 Web 单独取值）。
+WEB_HEAL_DEFAULT_LIMIT = 5
 
-    limit: int = Field(default=DEFAULT_LIMIT, ge=1)
+
+class HealBody(BaseModel):
+    """`POST /api/heal` 请求体（P4.3）。`limit` 默认用 Web 专属 `WEB_HEAL_DEFAULT_LIMIT`（=5，
+    小于 CLI 的 10）、`min_refs` 仍与 CLI 同源；`ge=1` 对齐 CLI `positive_int` 的「须 ≥ 1」，
+    越界 → 422。`model` 含 `None` 直接透传子进程 runner（heal 非嵌入会话、无 P4-8 模型坑，决策P4.3-5）。
+
+    `targets`（可选，决策P4.3-3 修订）：UI 勾选的子集，**只作过滤器**——作业仍服务端
+    `compute_worklist` 确定性重算 worklist，再取交集只物化命中者（陈旧/越界目标被交集丢弃，
+    防 TOCTOU）。省略/`null` = 物化整批（旧行为）。"""
+
+    limit: int = Field(default=WEB_HEAL_DEFAULT_LIMIT, ge=1)
     min_refs: int = Field(default=MISSING_ENTITY_MIN_REFS, ge=1)
+    targets: list[str] | None = None
     model: str | None = None
 
 
@@ -430,10 +438,11 @@ def create_app(
         return {"job_id": jobs.enqueue("ingest", _job)}
 
     # heal 预览（零 LLM 读，决策P4.3-4）：只算 worklist（== heal --dry-run），不入队、不触 Agentao、
-    # 不取 raw/ 快照；阻塞跑 to_thread。limit/min_refs 默认与 CLI 同源，越界 422（Query ge=1）。
+    # 不取 raw/ 快照；阻塞跑 to_thread。limit 默认用 Web 专属值（=5）、min_refs 与 CLI 同源，
+    # 与 POST /api/heal 一致；越界 422（Query ge=1）。
     @app.get("/api/heal/preview")
     async def heal_preview(
-        limit: int = Query(DEFAULT_LIMIT, ge=1),
+        limit: int = Query(WEB_HEAL_DEFAULT_LIMIT, ge=1),
         min_refs: int = Query(MISSING_ENTITY_MIN_REFS, ge=1),
     ) -> dict:
         return await anyio.to_thread.run_sync(_heal_preview, root, limit, min_refs)
@@ -447,6 +456,7 @@ def create_app(
                 root=root,
                 limit=body.limit,
                 min_refs=body.min_refs,
+                targets=body.targets,
                 model=body.model or model,
                 runner=runner,
             )
