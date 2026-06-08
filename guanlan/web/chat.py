@@ -29,6 +29,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import anyio
+from agentao.cancellation import CancellationToken
 from agentao.embedding import (
     build_from_environment,
     delete_session,
@@ -54,6 +55,71 @@ _agent_log_paths: set[str] = set()
 
 # 内存会话数硬上限：超出拒新建（决策P4-8：v1 不上 LRU，仅一个保守上界给内存设界）。
 MAX_CONVERSATIONS = 100
+
+# 只读姿态下某工具是否被 `tool_runner` 拦（喂 `/tools` 的 `blocked` 列，决策P4.4-2/§3）。
+# 判定**纯静态、绝不试调工具**：① 优先读 agentao 工具元数据 `is_read_only`——这正是 agentao
+# 自己在只读下的拦截基准（`runtime/tool_planning._decide`：`readonly_mode and not tool.is_read_only
+# → DENY`），故 `blocked = not is_read_only` 与真实拦截逐项同口径；② 无该元数据（鸭子桩/异形工具）
+# 时退回**已知工具名**静态映射；③ 两者都不命中 → `"unknown"`（如实示弱，不为求一个 bool 去跑工具）。
+# P4.4 姿态恒只读，故此判定不随请求变；列表只为展示「哪些工具在只读 Web 下被禁」。
+_WRITE_TOOL_NAMES = frozenset(
+    {
+        "write_file", "replace", "edit_file",
+        "run_shell_command", "shell", "bash",
+        "save_memory", "todo_write", "plan_save", "plan_finalize",
+    }
+)
+_READ_TOOL_NAMES = frozenset(
+    {
+        "read_file", "list_directory", "list_files", "ls",
+        "glob", "search_file_content", "grep",
+    }
+)
+
+
+def _blocked_in_readonly(tool: object) -> bool | str:
+    """只读姿态下该工具是否被拦：`True`/`False`/`"unknown"`（纯静态，绝不试调工具）。
+
+    优先 agentao 元数据 `is_read_only`（与 `tool_planning._decide` 同基准）；无元数据退回
+    已知工具名静态映射；都不命中返回 `"unknown"`（决策P4.4-2，§3）。
+    """
+    is_read_only = getattr(tool, "is_read_only", None)
+    if isinstance(is_read_only, bool):
+        return not is_read_only  # 只读工具放行；其余在只读下被 DENY（镜像 agentao 真实拦截）
+    name = getattr(tool, "name", "")
+    if name in _WRITE_TOOL_NAMES:
+        return True
+    if name in _READ_TOOL_NAMES:
+        return False
+    return "unknown"
+
+
+def _context_stats(agent: object, msgs: list) -> dict:
+    """会话上下文用量（喂 `/status` `/context`），口径**完全对齐** agentao `get_conversation_summary`。
+
+    headline（`estimated_tokens`/`usage_percent`）走 `get_usage_stats(messages)`——messages-only 的本地
+    估算（或 Tier-1 API 真值），刻意不含 system/tools，使新会话显示 0、API 计数时已涵盖全部开销，与
+    agentao 一致、**不动**。但 `token_breakdown` 另用含 **system prompt + tools schema** 的输入重算：
+    系统提示不在 `agent.messages` 里、`get_usage_stats` 不传 `tools` 时 tools 分项恒 0，否则 `/context`
+    的 system/tools 分项被低报（codex 评审）。私有面（`_build_system_prompt`/`_plan_mode`/`to_openai_format`）
+    取不到或抛错时降级为 messages-only breakdown，绝不让自省崩。
+    """
+    cm = agent.context_manager
+    stats = cm.get_usage_stats(msgs)  # headline 与 agentao 同口径（messages-only / api），保持不动
+    if not msgs:
+        return stats  # 空会话：三分项皆 0（镜像 get_conversation_summary 的 /new 复位）
+    try:
+        tools_schema = agent.tools.to_openai_format(plan_mode=getattr(agent, "_plan_mode", False))
+        messages_with_system = [
+            {"role": "system", "content": agent._build_system_prompt()}
+        ] + msgs
+        # 仅重算 breakdown（含 system + tools），headline 不动——逐行镜像 agent.py 的取法。
+        stats["token_breakdown"] = cm.estimate_tokens_breakdown(
+            messages_with_system, tools=tools_schema
+        )
+    except Exception:  # noqa: BLE001 — 私有面缺失/变更则降级 messages-only breakdown，不崩自省
+        _logger.debug("精确 context breakdown 取数失败，降级 messages-only", exc_info=True)
+    return stats
 
 
 def _is_canonical_uuid(s: object) -> bool:
@@ -142,6 +208,11 @@ class Conversation:
         self.turns = 0
         self.closed = False  # 删除后置位（锁内读写）；拦下"已接受但尚未起跑"的排队 turn
         self._emit: Emit | None = None  # 当前 turn 的线程安全 emit；transport 固定回调转发到它
+        self._cancel_token: CancellationToken | None = None  # 当前在飞 turn 的取消令牌；停止按钮经它打断
+        self._inflight = 0  # 在飞轮计数（端点 begin_turn/end_turn 维护）：>0 时 start→装令牌窗口内
+        # 到达的停止记为待停、而非当 idle 丢弃（codex 竞态修复）。
+        self._stop_requested = False  # 待停标志：有轮起跑但令牌尚未装上时由 request_stop 置位，
+        # turn 进锁装令牌后立即兑现。
 
         ensure_skill_available(kb)  # 嵌入式同样需保证 skill 可发现（坑②前置）
 
@@ -170,36 +241,91 @@ class Conversation:
         if self._emit is not None:
             self._emit("token", chunk)
 
+    def begin_turn(self) -> None:
+        """端点在 emit('start') **之前**调：标记本会话有一轮正在起跑（codex 竞态修复）。
+
+        关掉「start 帧已发、`turn` 还没进到装令牌的临界区」那段停止竞态：前端一收到 start 就可能
+        POST /stop，那一刻 `_cancel_token` 仍是 None。有了在飞标记，`request_stop` 会把这次停止记为
+        待停（而非当 idle 丢弃），待 `turn` 进锁装上令牌即兑现。令牌**仍在锁内**创建/安装，故并发同
+        会话时 `_cancel_token` 始终指向持锁的活跃轮、stop 不会误打排队轮（不同于把令牌装在锁外）。"""
+        self._inflight += 1
+
+    def end_turn(self) -> None:
+        """端点在该轮彻底收尾（含 stopped/error）后调，与 `begin_turn` 配对。"""
+        self._inflight -= 1
+        if self._inflight <= 0:
+            self._inflight = 0
+            self._stop_requested = False  # 无在飞轮了：清掉未兑现的待停，绝不泄漏到下一轮
+
     async def turn(self, msg: str, emit: Emit) -> str:
         """跑一轮：把 token 经 emit 推前端，返回完整答案；`asyncio.Lock` 串行同会话各轮。"""
         async with self.lock:
             # StreamingResponse 在路由返回**后**才起跑 turn；其间并发 DELETE 可能已拿锁删本会话、
             # close 了 agent。锁内复检 closed，拒绝在已关闭 agent 上跑（端点据异常发 error 事件）。
-            if self.closed:
-                raise RuntimeError("会话已删除")
-            loop = asyncio.get_running_loop()
-
-            def thread_safe_emit(kind: str, data: object) -> None:
-                # _on_token 落在线程池线程，碰 asyncio.Queue 必须 call_soon_threadsafe 桥回 loop
-                # （直接跨线程 put_nowait 会丢 token / 卡流 / 偶发崩）。
-                loop.call_soon_threadsafe(emit, kind, data)
-
-            self._emit = thread_safe_emit
-            self.turns += 1
-            if self.title is None:
-                self.title = msg.strip()[:50] or "（空）"
             try:
-                answer = await self.agent.arun(msg)  # arun = chat 的 async 包装（内部 run_in_executor）
+                if self.closed:
+                    raise RuntimeError("会话已删除")
+                loop = asyncio.get_running_loop()
+
+                def thread_safe_emit(kind: str, data: object) -> None:
+                    # _on_token 落在线程池线程，碰 asyncio.Queue 必须 call_soon_threadsafe 桥回 loop
+                    # （直接跨线程 put_nowait 会丢 token / 卡流 / 偶发崩）。
+                    loop.call_soon_threadsafe(emit, kind, data)
+
+                self._emit = thread_safe_emit
+                # 每轮一枚取消令牌，**锁内**创建/安装：故 _cancel_token 恒指向持锁的活跃轮，并发同会话
+                # 时 stop 只打活跃轮、不误伤排队轮（codex 评审）。停止按钮经 request_stop() 置位它，arun
+                # 的 executor 线程读到后自然收尾、把 AgentCancelledError 经 future 抛回——await arun 直到
+                # 线程真正结束才返回，故 lock 全程持有、绝无"残线程并发改 agent.messages"的竞态（不同于
+                # asyncio 取消）。
+                token = CancellationToken()
+                self._cancel_token = token
+                # 兑现 start→装令牌窗口内到达的待停（begin_turn 已标记在飞、request_stop 记了待停）：
+                # 装好令牌后立即 cancel，arun 起步即收到 → 首轮停止不再被静默吞掉（codex 竞态修复）。
+                if self._stop_requested:
+                    self._stop_requested = False
+                    token.cancel("user-stop")
+                self.turns += 1
+                if self.title is None:
+                    self.title = msg.strip()[:50] or "（空）"
+                # arun = chat 的 async 包装（内部 run_in_executor）；传入令牌让停止可控。
+                answer = await self.agent.arun(msg, cancellation_token=token)
+                if self._persist:
+                    # 仅成功轮落盘、off-loop 不堵事件循环；任何异常（prune / save_session）只记日志，
+                    # **绝不**让它冒泡把已成功的 arun 答案翻成 error（失败不毁答案，同 §4.4 降级精神）。
+                    try:
+                        await anyio.to_thread.run_sync(self._save)
+                    except Exception:  # noqa: BLE001 — 落盘失败仅记日志，本轮答案照常返回
+                        _logger.warning("会话 %s 落盘失败，本轮未持久化", self.id, exc_info=True)
+                return answer
             finally:
+                # 任何退出路径（closed 早退 / arun 抛 / 正常返回）都清掉 emit 与令牌（一处归口）。
                 self._emit = None
-            if self._persist:
-                # 仅成功轮落盘、off-loop 不堵事件循环；任何异常（prune / save_session）只记日志，
-                # **绝不**让它冒泡把已成功的 arun 答案翻成 error（失败不毁答案，同 §4.4 降级精神）。
-                try:
-                    await anyio.to_thread.run_sync(self._save)
-                except Exception:  # noqa: BLE001 — 落盘失败仅记日志，本轮答案照常返回
-                    _logger.warning("会话 %s 落盘失败，本轮未持久化", self.id, exc_info=True)
-            return answer
+                self._cancel_token = None
+
+    def request_stop(self) -> bool:
+        """请求打断当前在飞的 turn（停止按钮调）。无在飞 turn → 返回 False。
+
+        `CancellationToken.cancel()` 自身线程安全、幂等，可在事件循环线程直接调；executor 线程随后在
+        下个检查点抛 `AgentCancelledError`，arun 经 future 把它抛回 turn（已流出的 token 留在前端气泡）。
+        **不** await 收尾——`turn` 内的 `await arun` 会持锁等到线程真正结束。
+
+        三态：① **有**活跃令牌（持锁轮）→ 幂等打断它：未取消则 cancel，已取消则直接返回 True，
+        **绝不**落到待停分支（否则重复 stop 会被排队轮误兑现、把下一轮也停掉，codex 评审）；并发时
+        活跃令牌即正在流式的持锁轮、非排队轮。② **无**活跃令牌但有轮正在起跑（`begin_turn` 已标记、
+        令牌尚未装上）→ 记待停，turn 进锁即兑现（关首轮 start→装令牌窗口的竞态）。③ 无在飞轮（idle）
+        → False。待停只在「无任何活跃令牌」时设，故绝不殃及已装令牌的排队/活跃轮。
+        """
+        token = self._cancel_token
+        if token is not None:
+            # 持锁活跃轮：幂等打断（已 cancel 则什么都不做），不设待停——重复 stop 不外溢到排队轮。
+            if not token.is_cancelled:
+                token.cancel("user-stop")
+            return True
+        if self._inflight > 0 and not self.closed:
+            self._stop_requested = True  # 令牌尚未装上：记待停，turn 进锁后立即兑现
+            return True
+        return False
 
     def _save(self) -> None:
         """把本会话当前 `messages` 落 `<kb>/.agentao/sessions/`（每轮新建一份快照，决策P4.2-1/2）。
@@ -219,6 +345,48 @@ class Conversation:
             session_id=self.id,
             project_root=self._kb,
         )
+
+    def info(self) -> dict:
+        """会话级只读自省（喂 `/status /context /skills /tools /mode`，决策P4.4-2）。
+
+        只读 agentao 文档化自省面（`get_current_model`/`context_manager.get_usage_stats`/
+        `skill_manager`/`tools.list_tools`），**不改任何 agent 状态、不试调工具、零 LLM**。
+        先把 `messages` 拍成快照（`list(...)`）再用：避免与并发在飞 turn 追加消息时
+        `get_usage_stats` 边迭代边被改大小。端点经 `to_thread` 卸载调用（token 估算非廉价）。
+        """
+        msgs = list(self.agent.messages)  # 快照：隔离并发 turn 对 agent.messages 的追加
+        sm = self.agent.skill_manager
+        active = sm.get_active_skills()  # name -> {...}
+        skills = {
+            "active": list(active.keys()),
+            "available": [
+                {"name": n, "description": sm.get_skill_description(n), "active": n in active}
+                for n in sm.list_available_skills()
+            ],
+        }
+        tools = [
+            {
+                "name": t.name,
+                "description": t.description,
+                "requires_confirmation": bool(getattr(t, "requires_confirmation", False)),
+                "blocked": _blocked_in_readonly(t),
+            }
+            for t in sorted(self.agent.tools.list_tools(), key=lambda t: t.name)
+        ]
+        return {
+            "id": self.id,
+            "title": self.title,
+            "turns": self.turns,
+            "live": True,
+            "model": self.agent.get_current_model(),
+            "mode": "read-only",  # P4.4 Web 恒只读（决策P4.4-6）
+            "messages": len(msgs),
+            # context：headline（messages-only / api）+ 含 system prompt & tools schema 的精确 breakdown，
+            # 完全对齐 agentao get_conversation_summary（否则 system/tools 分项被低报，codex 评审）。
+            "context": _context_stats(self.agent, msgs),
+            "skills": skills,
+            "tools": tools,
+        }
 
     def close(self) -> None:
         """释放 agent 资源；进程内会话被丢弃 / 删除时调用（删除端点持本会话锁时调，故 closed
@@ -271,6 +439,39 @@ class ConversationStore:
     def get(self, cid: str) -> Conversation | None:
         with self._lock:
             return self._convs.get(cid)
+
+    def live_count(self) -> int:
+        """内存现存会话数（喂 `GET /api/info` 的 `conversations` 计数，零盘读）。"""
+        with self._lock:
+            return len(self._convs)
+
+    def cold_info(self, cid: str) -> dict | None:
+        """盘上-only 会话的部分自省（决策P4.4-7）：title/model/messages 取自即时 catalog，
+        `context`/`skills`/`tools` 置 `null`、`live:false`，**不建 agent**（纯自省不值当一次重恢复）。
+
+        过 P4.2 §2.2 两道精确闸（规范全 UUID + `_disk_session` 作用域）——非 Web / 未知 / 非规范 /
+        持久化关下盘上 id → `None`（端点据此 404）。catalog 条目已含 `model`/`message_count`/`title`，
+        故连消息体都不必再读，`turns` 不可廉价得到则留 `null`（续聊转 live 后即有真实轮次）。
+        """
+        if not self._persist:  # 持久化关时等价纯内存：盘上 id 一律视未知
+            return None
+        if not _is_canonical_uuid(cid):  # 闸①：非规范 id 绝不喂前缀匹配
+            return None
+        entry = self._disk_session(cid)  # 闸②：盘上须有此精确 session_id 的 Web 会话
+        if entry is None:
+            return None
+        return {
+            "id": cid,
+            "title": entry.get("title") or "（空）",
+            "turns": None,  # 不建 agent / 不载消息：轮次留空，续聊转 live 后即有
+            "live": False,
+            "model": entry.get("model"),
+            "mode": "read-only",  # 冷会话恢复亦只读（决策P4.2-4 / P4.4-6）
+            "messages": entry.get("message_count", 0),
+            "context": None,
+            "skills": None,
+            "tools": None,
+        }
 
     def messages_for(self, cid: str) -> list[dict] | None:
         """返回某会话的原始 `messages` 供 UI 回放气泡：内存命中读内存，否则**读盘但不建 agent**。

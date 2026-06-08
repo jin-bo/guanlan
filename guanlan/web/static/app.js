@@ -556,15 +556,18 @@ async function submitFeed(overwrite) {
 
 let conversationId = null;
 let chatLoadToken = 0; // 每次切换/新建自增；历史气泡异步回放回来若 token 已变则丢弃（防迟到覆盖）
+let chatStreaming = false; // 一轮在飞时为 true：发送按钮切「停止」、回车不再发新轮
+let pendingStop = false; // 首轮 id 未回时点了「停止」：标记待停，start 帧回填 id 后立即补发
 
-$("#chat-new").addEventListener("click", () => {
+function startNewConversation() {
   // 仅清本地视图、开启新会话——**绝不** DELETE 旧会话：P4.2 起 DELETE 会级联删盘，删的是
   // 持久历史，普通"切换/新建"不该销毁记录。旧会话持久化开时已落盘、可从"历史会话"再开；
   // 持久化关时它仍是 live、列在历史里（进程退出即清）。要永久删除走历史列表的"删除"。
   chatLoadToken++; // 作废任何在飞的历史气泡回放（用户已开新会话）
   conversationId = null;
   $("#chat-log").innerHTML = "";
-});
+}
+$("#chat-new").addEventListener("click", startNewConversation);
 
 // ── 历史会话（P4.2）：列出内存 ∪ 盘上会话，点开续聊、删除级联删盘 ────────────────
 $("#history-btn").addEventListener("click", openHistory);
@@ -667,17 +670,237 @@ async function deleteConversation(id, row) {
 }
 
 function submitChat() {
-  // 一轮在飞时（流式中 #chat-send 被禁用）不重复发送：回车与按钮共用此守卫，避免在同一会话
-  // 上叠起并发轮次（服务端 conv.lock 会把第二轮挂住、前端则堆出空 bot 气泡）。输入保留不清。
-  if ($("#chat-send").disabled) return;
+  // 一轮在飞时不重复发送：回车与「发送」共用此守卫，避免在同一会话上叠起并发轮次（服务端
+  // conv.lock 会把第二轮挂住、前端则堆出空 bot 气泡）。停止只由按钮点击触发（见下），回车
+  // 流式中一律按空操作处理——不让回车误把当前轮停掉。输入保留不清。
+  if (chatStreaming) return;
   const input = $("#chat-input");
   const msg = input.value.trim();
-  if (msg) { input.value = ""; sendChat(msg); }
+  if (!msg) return;
+  input.value = "";
+  // 斜杠命令前置解析（决策P4.4-1）：以 `/` 开头一律本地处理、**绝不进 /api/chat**——不打 LLM、
+  // 不占对话轮次、不入历史。展示/自省/生命周期分流见 handleSlash。
+  if (msg.startsWith("/")) { handleSlash(msg); return; }
+  sendChat(msg);
+}
+
+// ── 斜杠命令（P4.4）：镜像 agentao 交互 CLI 的 8 条只读命令，全部本地解析、不进 /api/chat ──
+//
+// 展示类（/help）纯客户端；生命周期类（/new /clear）复用既有逻辑；自省类（/status /context
+// /skills /tools /mode）调只读端点（有会话 GET /api/chat/{id}/info，否则 app 级 GET /api/info），
+// 按命令取字段渲染成 note 气泡。/compact 与未知命令一律本地「未知命令」提示（决策P4.4-5）。
+
+const SLASH_HELP = [  // /help 列这 8 条（**无** /compact，决策P4.4-5）
+  "/help — 显示本命令列表",
+  "/new — 开启新会话（保留盘上历史）",
+  "/clear — 删除当前会话并开新会话",
+  "/status — 模型 / 姿态 / 上下文用量",
+  "/context — 上下文 token 用量明细",
+  "/skills — 列技能（可用 / 已激活）",
+  "/tools — 列工具（只读下被禁的标注）",
+  "/mode — 当前姿态（只读；可写见 P4.5）",
+];
+
+// 命令输出气泡：buildFn 用 textContent 填充各行/项（杜绝注入），落对话流、不开浮层（决策P4.4-2）。
+function addNote(buildFn) {
+  const div = document.createElement("div");
+  div.className = "msg note";
+  buildFn(div);
+  const log = $("#chat-log");
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+// 多行纯文本 note：每行一个 <div>（textContent，安全）。
+function noteLines(lines) {
+  return addNote((div) => {
+    for (const ln of lines) {
+      const p = document.createElement("div");
+      p.textContent = ln;
+      div.appendChild(p);
+    }
+  });
+}
+
+async function handleSlash(raw) {
+  const body = raw.trim();
+  const cmd = (body.slice(1).split(/\s+/)[0] || "").toLowerCase();
+  addMsg("cmd", body); // 回显键入的命令（cmd 样式），与其只读输出 note 区分
+  switch (cmd) {
+    case "help":
+      return noteLines(SLASH_HELP);
+    case "new":
+      startNewConversation();
+      return noteLines(["已开启新会话（旧会话保留在「历史会话」）。"]);
+    case "clear":
+      return slashClear();
+    case "status":
+    case "context":
+    case "skills":
+    case "tools":
+    case "mode":
+      return slashInfo(cmd);
+    default:  // 含 /compact（决策P4.4-5）与一切未知命令
+      return noteLines([`未知命令：${body}。输入 /help 看支持的命令。`]);
+  }
+}
+
+// /clear：有活动会话 → DELETE 级联删盘（== 删当前 + 新建）；无活动会话退化为 /new（决策P4.4-4）。
+// **不**触 memory_manager（Web 无记忆 UI、越权，与 CLI /clear 清记忆刻意不对齐）。
+async function slashClear() {
+  if (!conversationId) {
+    startNewConversation();
+    return noteLines(["无活动会话，已开启新会话。"]);
+  }
+  const id = conversationId;
+  try {
+    const res = await fetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
+  } catch (e) {
+    return noteLines([`清除失败：${e.message}`]);
+  }
+  startNewConversation(); // 先清屏 + 置 conversationId=null，再把确认 note 落进新会话视图
+  noteLines(["已删除当前会话并开启新会话。"]);
+}
+
+// 自省类：有会话取会话级 info、否则取 app 级 info，按命令渲染。冷会话（live:false）的
+// context/skills/tools 为 null → 提示「续聊一轮以恢复」（决策P4.4-7）。
+async function slashInfo(cmd) {
+  const url = conversationId
+    ? `/api/chat/${encodeURIComponent(conversationId)}/info`
+    : "/api/info";
+  let info;
+  try {
+    info = await getJSON(url);
+  } catch (e) {
+    return noteLines([`/${cmd} 获取失败：${e.message}`]);
+  }
+  renderSlashInfo(cmd, info);
+}
+
+function renderSlashInfo(cmd, info) {
+  const appLevel = info.live === undefined; // /api/info 无 live 字段（无会话/无 agent）
+  const cold = info.live === false;         // 盘上-only 冷会话（部分信息）
+
+  if (cmd === "mode") {
+    return noteLines([`姿态：${info.mode || "read-only"}（Web 问答只读；可写会话见 P4.5）`]);
+  }
+  if (cmd === "status") {
+    const lines = [];
+    if (appLevel) {
+      lines.push(`知识库：${info.kb_name}`);
+      lines.push(`模型：${info.model || "（未指定，由会话构造期发现）"}`);
+      lines.push(`姿态：${info.mode}（只读）`);
+      lines.push(`会话：${info.conversations} / ${info.max_conversations}`);
+      lines.push("（尚无活动会话：提一个问题以查看上下文用量 / 技能 / 工具。）");
+    } else {
+      lines.push(`模型：${info.model || "未知"}`);
+      lines.push(`姿态：${info.mode}（只读）`);
+      lines.push(`轮次：${info.turns ?? "—"}　消息：${info.messages ?? "—"}`);
+      if (info.context) {
+        const c = info.context;
+        lines.push(`上下文：${c.estimated_tokens} / ${c.max_tokens} tokens（${c.usage_percent}%）`);
+      } else if (cold) {
+        lines.push("（冷会话：续聊一轮以恢复完整上下文 / 技能 / 工具。）");
+      }
+    }
+    return noteLines(lines);
+  }
+  // context / skills / tools 是 agent 级事实：无会话 → 提示开会话；冷会话 → 提示续聊恢复。
+  if (appLevel) {
+    return noteLines([`/${cmd} 需要活动会话：先提一个问题以开启会话。`]);
+  }
+  if (cold) {
+    return noteLines([`/${cmd}：冷会话尚未恢复——续聊一轮以恢复完整上下文 / 技能 / 工具。`]);
+  }
+  if (cmd === "context") return renderSlashContext(info.context);
+  if (cmd === "skills") return renderSlashSkills(info.skills);
+  if (cmd === "tools") return renderSlashTools(info.tools);
+}
+
+function renderSlashContext(c) {
+  if (!c) return noteLines(["无上下文用量数据。"]);
+  const bd = c.token_breakdown || {};
+  return noteLines([
+    `估算 tokens：${c.estimated_tokens} / ${c.max_tokens}（${c.usage_percent}%）`,
+    `分项：system ${bd.system ?? 0} · messages ${bd.messages ?? 0} · tools ${bd.tools ?? 0} · 合计 ${bd.total ?? 0}`,
+  ]);
+}
+
+function renderSlashSkills(skills) {
+  if (!skills) return noteLines(["无技能信息。"]);
+  return addNote((div) => {
+    const head = document.createElement("div");
+    head.textContent = `技能（已激活 ${skills.active.length} / 可用 ${skills.available.length}）：`;
+    div.appendChild(head);
+    for (const s of skills.available) {
+      const row = document.createElement("div");
+      row.className = "slash-skill" + (s.active ? " active" : "");
+      row.textContent = `${s.active ? "● " : "○ "}${s.name}${s.description ? " — " + s.description : ""}`;
+      div.appendChild(row);
+    }
+  });
+}
+
+function renderSlashTools(tools) {
+  if (!tools) return noteLines(["无工具信息。"]);
+  return addNote((div) => {
+    const head = document.createElement("div");
+    head.textContent = `工具（${tools.length}，只读下被禁者灰显）：`;
+    div.appendChild(head);
+    for (const t of tools) {
+      const row = document.createElement("div");
+      // blocked ∈ {true,false,"unknown"}：true=只读禁（灰显）、unknown=无法判定（标注）、false=可用。
+      row.className = "slash-tool" + (t.blocked === true ? " blocked" : "");
+      let tag = "";
+      if (t.blocked === true) tag = "（只读禁）";
+      else if (t.blocked === "unknown") tag = "（未知）";
+      row.textContent = `${t.name}${tag ? " " + tag : ""}${t.description ? " — " + t.description : ""}`;
+      div.appendChild(row);
+    }
+  });
+}
+
+// 发送/停止双态切换：流式中把 #chat-send 文案切「停止」、加 .stopping 样式；data-mode 供点击
+// 处理分流。复位时清禁用，让按钮重新可点。
+function setChatSending(sending) {
+  const btn = $("#chat-send");
+  chatStreaming = sending;
+  if (!sending) pendingStop = false; // 流结束：清掉未消费的待停标志（防跨轮残留）
+  btn.dataset.mode = sending ? "stop" : "send";
+  btn.textContent = sending ? "停止" : "发送";
+  btn.classList.toggle("stopping", sending);
+  btn.disabled = false;
+}
+
+// 停止：POST /api/chat/{id}/stop 置位服务端取消令牌。不在此复位按钮——等流尾的 stopped/done
+// 帧由 sendChat 的 finally 统一复位（避免与在飞流抢状态）。停止请求飞行中先禁用防重复点。
+async function stopChat() {
+  const btn = $("#chat-send");
+  btn.disabled = true;
+  btn.textContent = "停止中…";
+  // 首轮 id 由 start 帧回填，可能尚未到：标记待停，start 处理处一拿到 id 就补发本请求，
+  // 而不是静默放弃（否则用户点了停止却毫无反应）。按钮已显示「停止中…」给出反馈。
+  if (!conversationId) { pendingStop = true; return; }
+  try {
+    await fetch(`/api/chat/${encodeURIComponent(conversationId)}/stop`, { method: "POST" });
+  } catch (_e) {
+    // 停止请求本身失败不致命：当前轮仍会自然跑完，按钮由流尾复位。
+  }
 }
 
 $("#chat-form").addEventListener("submit", (e) => {
   e.preventDefault();
   submitChat();
+});
+
+// 「停止」态下点按钮 = 中断当前轮（而非发新轮）：拦掉默认 submit、直接 stopChat。
+$("#chat-send").addEventListener("click", (e) => {
+  if ($("#chat-send").dataset.mode === "stop") {
+    e.preventDefault();
+    stopChat();
+  }
 });
 
 // 回车直接发送；Option(Alt)-Enter / Shift-Enter 插入换行。直接调 submitChat()，不走
@@ -718,8 +941,7 @@ $("#chat-log").addEventListener("click", (e) => {
 async function sendChat(message) {
   addMsg("user", message);
   const botEl = addMsg("bot", "");
-  const sendBtn = $("#chat-send");
-  sendBtn.disabled = true;
+  setChatSending(true); // 按钮切「停止」、置 chatStreaming，整轮可中断
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
@@ -745,7 +967,7 @@ async function sendChat(message) {
     botEl.classList.replace("bot", "err");
     botEl.textContent = `对话失败：${e.message}`;
   } finally {
-    sendBtn.disabled = false;
+    setChatSending(false); // 复位：按钮切回「发送」、清 chatStreaming/禁用
   }
 }
 
@@ -765,8 +987,20 @@ function handleSSE(frame, botEl) {
     return; // 跳过坏帧，绝不让单帧解析失败中断整条流、抹掉已上屏的答案
   }
   const log = $("#chat-log");
-  if (event === "token") {
+  if (event === "start") {
+    // 服务端尽早回填会话 id：首轮请求里 id 为 null，拿到它「停止」按钮才能在首轮就生效。
+    if (payload.conversation_id) conversationId = payload.conversation_id;
+    if (pendingStop) { pendingStop = false; stopChat(); } // 首轮 id 未回时点过停止 → 现在补发
+  } else if (event === "token") {
     botEl.textContent += payload;
+    log.scrollTop = log.scrollHeight;
+  } else if (event === "stopped") {
+    // 用户主动停止：保留已流出的纯文本（不再渲染 markdown），加一行轻提示。
+    if (payload.conversation_id) conversationId = payload.conversation_id;
+    const note = document.createElement("span");
+    note.className = "stop-note";
+    note.textContent = "（已停止）";
+    botEl.appendChild(note);
     log.scrollTop = log.scrollHeight;
   } else if (event === "done") {
     conversationId = payload.conversation_id;
