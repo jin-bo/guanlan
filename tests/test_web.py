@@ -21,6 +21,7 @@ from conftest import make_runner, write_page
 
 pytest.importorskip("fastapi")
 
+from agentao.cancellation import AgentCancelledError  # noqa: E402
 from agentao.permissions import PermissionMode  # noqa: E402
 from agentao.transport.events import AgentEvent, EventType  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -799,6 +800,82 @@ class _FakeSkillManager:
     def get_active_skills(self) -> dict:
         return dict(self._active)
 
+    def list_available_skills(self) -> list[str]:
+        # guanlan-wiki（构造期被激活）+ 一个未激活技能：让 /skills 的 available/active 区分可断言。
+        return ["guanlan-wiki", "other-skill"]
+
+    def get_skill_description(self, name: str) -> str:
+        return f"desc:{name}"
+
+
+_UNSET = object()  # 哨兵：区分「未定义 is_read_only 属性」（走静态/unknown 路）与「定义为 False」。
+
+
+class _FakeTool:
+    """打桩工具（喂 `/tools` 自省）：`is_read_only` 缺省**不设属性**（`_UNSET`）以触发
+    `_blocked_in_readonly` 的静态名/unknown 分支；显式 True/False 则走 agentao 元数据分支。"""
+
+    def __init__(self, name, *, description="d", requires_confirmation=False, is_read_only=_UNSET):
+        self.name = name
+        self.description = description
+        self.requires_confirmation = requires_confirmation
+        if is_read_only is not _UNSET:
+            self.is_read_only = is_read_only
+
+
+# 覆盖 _blocked_in_readonly 三条路：元数据（read_file=只读→False / write_file=非只读→True）、
+# 已知名静态（replace→True / search_file_content→False，**无** is_read_only 属性）、未知（→ "unknown"）。
+def _default_tools() -> list[_FakeTool]:
+    return [
+        _FakeTool("write_file", is_read_only=False),  # 元数据：只读下被拦
+        _FakeTool("read_file", is_read_only=True),  # 元数据：只读放行
+        _FakeTool("replace"),  # 无元数据 + 已知写名 → 静态 True
+        _FakeTool("search_file_content"),  # 无元数据 + 已知读名 → 静态 False
+        _FakeTool("mystery_tool"),  # 无元数据 + 未知名 → "unknown"
+    ]
+
+
+class _FakeToolRegistry:
+    def __init__(self, tools) -> None:
+        self._tools = tools
+
+    def list_tools(self) -> list:
+        return list(self._tools)
+
+    def to_openai_format(self, plan_mode=False) -> list:
+        # 非空 schema：让 _context_stats 的 tools 分项被计入（验 tools 传进了 breakdown）。
+        return [{"type": "function", "function": {"name": t.name}} for t in self._tools]
+
+
+class _FakeContextManager:
+    """打桩 context_manager：估算口径镜像真 agentao——breakdown 区分 system/tools 是否计入，
+    headline（get_usage_stats）走 messages-only。逼出「context 取数须含 system+tools」的修复。"""
+
+    def __init__(self) -> None:
+        self.stats_calls: list[list] = []
+
+    def estimate_tokens_breakdown(self, messages, tools=None) -> dict:
+        has_system = any(m.get("role") == "system" for m in messages)
+        system = 50 if has_system else 0  # 系统提示计入与否：差 50（验 _build_system_prompt 被前置）
+        tool_tok = 30 if tools else 0  # tools schema 计入与否：差 30（验 to_openai_format 被传入）
+        msg_tok = 10 * len([m for m in messages if m.get("role") != "system"])
+        return {
+            "system": system, "messages": msg_tok,
+            "tools": tool_tok, "total": system + msg_tok + tool_tok,
+        }
+
+    def get_usage_stats(self, messages, tools=None) -> dict:
+        self.stats_calls.append(list(messages))
+        bd = self.estimate_tokens_breakdown(messages, tools=tools)  # headline: messages-only
+        return {
+            "estimated_tokens": bd["total"],
+            "token_count_source": "local",
+            "max_tokens": 1000,
+            "usage_percent": round(bd["total"] / 1000 * 100, 1),
+            "message_count": len(messages),
+            "token_breakdown": bd,
+        }
+
 
 class _FakeAgent:
     """打桩 agent：arun 把 user/assistant 入 messages（**dict 形态，镜像真 agent.messages**），
@@ -812,7 +889,17 @@ class _FakeAgent:
         self.permission_engine = _Recorder()
         self.tool_runner = _Recorder()
         self.skill_manager = _FakeSkillManager()
+        self.context_manager = _FakeContextManager()  # /context /status 自省（P4.4）
+        self.tools = _FakeToolRegistry(_default_tools())  # /tools 自省（P4.4）
+        self._model = kwargs.get("model")  # 省略 --model 时无 model 键 → None → get_current_model 兜底
+        self._plan_mode = False  # _context_stats 读它传给 to_openai_format（镜像真 agent）
         self.closed = False
+
+    def get_current_model(self) -> str:
+        return self._model or "fake-model"
+
+    def _build_system_prompt(self) -> str:
+        return "SYS"  # _context_stats 前置它入 messages_with_system（验 system 分项被计入）
 
     async def arun(self, msg: str, **_kw) -> str:
         self.messages.append({"role": "user", "content": msg})
@@ -944,6 +1031,128 @@ def test_chat_unknown_conversation_404(chat_client) -> None:
     assert resp.status_code == 404
 
 
+# ───────────────────────── 只读自省 /api/info（P4.4 C1） ─────────────────────────
+
+
+def test_app_info_no_conversation(chat_client) -> None:
+    """`GET /api/info`（app 级）：无会话也答，含约定字段、mode 恒 read-only、恒 200、零 LLM。"""
+    client, captured = chat_client
+    resp = client.get("/api/info")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {
+        "kb_name", "model", "mode", "persist", "conversations", "max_conversations"
+    }
+    assert body["mode"] == "read-only"
+    assert body["persist"] is True
+    assert body["conversations"] == 0  # 尚无会话
+    assert body["max_conversations"] == 100
+    assert captured["agents"] == []  # app 级 info 不建 agent
+
+
+def test_app_info_counts_live_conversations(chat_client) -> None:
+    """建一个会话后 `conversations` 计数 +1（in-memory，不依赖盘读）。"""
+    client, _ = chat_client
+    _chat(client, "问")
+    assert client.get("/api/info").json()["conversations"] == 1
+
+
+def test_chat_info_live_full(chat_client) -> None:
+    """热（内存）会话 info 全量：model/turns/messages/mode/context{…}/skills{active,available}/tools[…]。"""
+    client, captured = chat_client
+    _, done, _ = _chat(client, "第一问")
+    cid = done["conversation_id"]
+
+    info = client.get(f"/api/chat/{cid}/info")
+    assert info.status_code == 200
+    body = info.json()
+    assert body["id"] == cid and body["live"] is True
+    assert body["mode"] == "read-only"
+    assert body["model"] == "fake-model"  # 省略 --model → get_current_model 兜底
+    assert body["turns"] == 1
+    assert body["messages"] == 2  # 1 user + 1 assistant
+    # context breakdown 含 system prompt + tools schema（codex P2 修复）：fake 下 system=50（_build_
+    # system_prompt 被前置）、tools=30（to_openai_format 被传入）、messages=2×10=20 → total=100；
+    # 而 headline（estimated_tokens/usage_percent）仍 messages-only（system/tools 不计、镜像 agentao）。
+    bd = body["context"]["token_breakdown"]
+    assert bd["system"] == 50 and bd["tools"] == 30  # 关键：非 0（messages-only 取法会是 0）
+    assert bd["messages"] == 20 and bd["total"] == 100
+    assert body["context"]["estimated_tokens"] == 20  # headline 仍 messages-only（system/tools 不计）
+    assert body["context"]["usage_percent"] == 2.0
+    # skills：active 含 guanlan-wiki；available 标 other-skill 未激活。
+    assert body["skills"]["active"] == ["guanlan-wiki"]
+    avail = {s["name"]: s for s in body["skills"]["available"]}
+    assert avail["guanlan-wiki"]["active"] is True
+    assert avail["other-skill"]["active"] is False
+    assert avail["other-skill"]["description"] == "desc:other-skill"
+    # info 无副作用：agent.messages 未被 info 改动（仍恰 2 条：1 user + 1 assistant，
+    # 而非 `== self[:2]` 那种恒真比较）；get_usage_stats 也是拿快照、不回写 agent.messages。
+    agent = captured["agents"][0]
+    assert len(agent.messages) == 2
+    assert [m["role"] for m in agent.messages] == ["user", "assistant"]
+
+
+def test_chat_info_tools_blocked_static(chat_client) -> None:
+    """/tools 的 blocked：元数据（read_file=False/write_file=True）+ 已知名静态（replace=True/
+    search_file_content=False）+ 未知名（mystery_tool="unknown"）；按名排序、不试调工具、不随请求变。"""
+    client, _ = chat_client
+    _, done, _ = _chat(client, "问")
+    tools = client.get(f"/api/chat/{done['conversation_id']}/info").json()["tools"]
+    assert [t["name"] for t in tools] == [  # 按工具名排序
+        "mystery_tool", "read_file", "replace", "search_file_content", "write_file"
+    ]
+    blocked = {t["name"]: t["blocked"] for t in tools}
+    assert blocked["read_file"] is False and blocked["write_file"] is True  # 元数据路
+    assert blocked["replace"] is True and blocked["search_file_content"] is False  # 静态名路
+    assert blocked["mystery_tool"] == "unknown"  # 未识别 → unknown（非 True/False）
+
+
+def test_chat_info_unknown_404(chat_client) -> None:
+    """未知且非盘上 Web 会话 id → 404（非规范 id 同样走 404）。"""
+    client, _ = chat_client
+    assert client.get("/api/chat/not-a-uuid/info").status_code == 404
+    assert client.get(f"/api/chat/{uuid.uuid4()}/info").status_code == 404
+
+
+def test_chat_info_cold_partial_no_agent(chat_env, kb) -> None:
+    """冷（盘上-only）会话 info：live:false、有 title/model/messages、context/skills/tools==null，
+    **不建 agent**（决策P4.4-7：纯自省不值当一次重恢复）。"""
+    kb, captured = chat_env
+    cold = str(uuid.uuid4())
+    _write_foreign_session(kb, cold, active_skills=[SKILL_NAME])  # 盘上 Web 会话、内存无
+    with TestClient(create_app(kb)) as client:
+        resp = client.get(f"/api/chat/{cold}/info")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["live"] is False
+    assert body["id"] == cold
+    assert body["title"] == "外部会话"  # 取自 catalog
+    assert body["model"] == "m"  # _write_foreign_session 落的 model
+    assert body["messages"] == 2  # message_count（非轮次）
+    assert body["mode"] == "read-only"
+    assert body["context"] is None and body["skills"] is None and body["tools"] is None
+    assert captured["agents"] == []  # 关键：冷自省全程不建 agent
+
+
+def test_chat_info_cold_foreign_404(chat_env, kb) -> None:
+    """盘上但非 Web 会话（active_skills 不含 SKILL_NAME）→ cold_info None → 404（作用域闸）。"""
+    kb, _ = chat_env
+    foreign = str(uuid.uuid4())
+    _write_foreign_session(kb, foreign, active_skills=["other-skill"])
+    with TestClient(create_app(kb)) as client:
+        assert client.get(f"/api/chat/{foreign}/info").status_code == 404
+
+
+def test_chat_info_cold_404_when_persist_off(chat_env, kb) -> None:
+    """持久化关：盘上 Web 会话的 info 一律 404（等价纯内存，不读盘）。"""
+    kb, _ = chat_env
+    leftover = str(uuid.uuid4())
+    _write_foreign_session(kb, leftover, active_skills=[SKILL_NAME])
+    with TestClient(create_app(kb, session_persist=False)) as client:
+        assert client.get(f"/api/chat/{leftover}/info").status_code == 404
+        assert client.get("/api/info").json()["persist"] is False
+
+
 def test_chat_error_event_on_failure(kb, monkeypatch) -> None:
     import guanlan.web.chat as chat_mod
 
@@ -994,6 +1203,179 @@ def test_same_conversation_turns_serialized(kb, monkeypatch) -> None:
     # 串行 → 一轮的 end 必在下一轮 start 之前。
     assert events[0].startswith("start") and events[1].startswith("end")
     assert events[2].startswith("start") and events[3].startswith("end")
+
+
+# ───────────────────────── 停止按钮（中断在飞轮） ─────────────────────────
+
+
+class _CancelAgent(_FakeAgent):
+    """打桩 agent：先流出一个 token，再**在 executor 线程里阻塞等取消令牌**，被置位后抛
+    AgentCancelledError——镜像真 arun「读同一 token、被 cancel 后抛、await 直到线程收尾」的契约。"""
+
+    async def arun(self, msg, cancellation_token=None, **_kw):
+        self.messages.append({"role": "user", "content": msg})
+        loop = asyncio.get_running_loop()
+
+        def work() -> None:
+            self.transport.emit(AgentEvent(EventType.LLM_TEXT, {"chunk": "部分答案"}))
+            while cancellation_token is None or not cancellation_token.is_cancelled:
+                time.sleep(0.005)
+            raise AgentCancelledError(cancellation_token.reason)
+
+        await loop.run_in_executor(None, work)  # 线程收尾（抛出）后 await 才返回
+        return "不可达"
+
+
+def test_conversation_request_stop_cancels_turn(kb, monkeypatch) -> None:
+    """request_stop 置位令牌 → arun 收尾抛 AgentCancelledError；已流出的 token 仍到达。"""
+    import guanlan.web.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+    monkeypatch.setattr(chat_mod, "build_from_environment", lambda **kw: _CancelAgent(kw))
+
+    async def main() -> None:
+        store = chat_mod.ConversationStore(kb, None)
+        conv = store.create()
+        emitted: list[tuple[str, object]] = []
+
+        async def run() -> str:
+            try:
+                await conv.turn("问", lambda k, d: emitted.append((k, d)))
+            except AgentCancelledError:
+                return "cancelled"
+            return "done"
+
+        task = asyncio.create_task(run())
+        # 等 turn 进入在飞态（令牌就位）再停。
+        while conv._cancel_token is None:
+            await asyncio.sleep(0.005)
+        assert conv.request_stop() is True
+        assert await task == "cancelled"
+        # 停止前已流出的 token 不丢。
+        assert any(k == "token" for k, _ in emitted)
+        # 轮结束后令牌已清，再停 = False（无在飞轮）。
+        assert conv.request_stop() is False
+
+    asyncio.run(main())
+
+
+def test_request_stop_during_start_window_is_honored(kb, monkeypatch) -> None:
+    """codex 竞态修复（首轮）：begin_turn 后、turn 装令牌前到达的停止被兑现，不再被吞。
+
+    端点在 emit('start') 前调 begin_turn；前端一收 start 就 POST /stop。这里模拟该顺序：
+    begin_turn → request_stop（令牌未装上 → 记待停、返回 True）→ turn 进锁装令牌即兑现待停 →
+    _CancelAgent 立即见 cancelled → 抛 AgentCancelledError。（修复前 _cancel_token 为 None、
+    request_stop 当 idle 返回 False、停止静默失败。）"""
+    import guanlan.web.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+    monkeypatch.setattr(chat_mod, "build_from_environment", lambda **kw: _CancelAgent(kw))
+
+    async def main() -> None:
+        store = chat_mod.ConversationStore(kb, None)
+        conv = store.create()
+        conv.begin_turn()  # 端点在 emit('start') 前调
+        assert conv.request_stop() is True  # 令牌未装上但有轮在飞 → 记待停（不当 idle 丢）
+        with pytest.raises(AgentCancelledError):  # turn 进锁兑现待停 → 立即抛
+            await conv.turn("问", lambda k, d: None)
+        conv.end_turn()
+        assert conv._cancel_token is None  # finally 归口清理
+        assert conv.request_stop() is False  # end_turn 后无在飞轮 → idle → False
+
+    asyncio.run(main())
+
+
+def test_stop_targets_active_turn_not_queued(kb, monkeypatch) -> None:
+    """codex 竞态修复（并发）：第二轮起跑（begin_turn）不改 _cancel_token——stop 仍打断持锁的活跃轮，
+    不误伤排队轮。即「令牌锁内安装」的不变量：_cancel_token 恒指向持锁者，而非最后一个起跑的轮。"""
+    import guanlan.web.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+    monkeypatch.setattr(chat_mod, "build_from_environment", lambda **kw: _CancelAgent(kw))
+
+    async def main() -> None:
+        store = chat_mod.ConversationStore(kb, None)
+        conv = store.create()
+        conv.begin_turn()
+        t1 = asyncio.create_task(conv.turn("活跃轮", lambda k, d: None))
+        while conv._cancel_token is None:  # 等活跃轮进锁装上令牌
+            await asyncio.sleep(0.005)
+        token1 = conv._cancel_token
+        conv.begin_turn()  # 模拟并发第二轮起跑（端点在 emit('start') 前调）——绝不能覆盖活跃轮令牌
+        assert conv._cancel_token is token1  # 关键不变量：未被排队轮覆盖
+        assert conv.request_stop() is True
+        assert token1.is_cancelled  # 打断的是活跃轮 token1（而非排队轮）
+        with pytest.raises(AgentCancelledError):
+            await t1
+        conv.end_turn()  # 收掉活跃轮
+        conv.end_turn()  # 收掉那个未真正跑的排队标记
+
+    asyncio.run(main())
+
+
+def test_duplicate_stop_does_not_cancel_queued_turn(kb, monkeypatch) -> None:
+    """codex 评审（幂等）：活跃轮令牌已 cancel 后，重复 /stop 不得经待停误杀排队轮。
+
+    活跃轮 token1 已 cancel、排队轮在飞（_inflight=2）时再 stop：应幂等返回 True，但**不**置
+    `_stop_requested`（否则排队轮进锁会把它当待停兑现、把下一轮也停掉）。"""
+    import guanlan.web.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+    monkeypatch.setattr(chat_mod, "build_from_environment", lambda **kw: _CancelAgent(kw))
+
+    async def main() -> None:
+        store = chat_mod.ConversationStore(kb, None)
+        conv = store.create()
+        conv.begin_turn()
+        t1 = asyncio.create_task(conv.turn("活跃轮", lambda k, d: None))
+        while conv._cancel_token is None:
+            await asyncio.sleep(0.005)
+        conv.begin_turn()  # 排队轮起跑标记（_inflight=2）
+        assert conv.request_stop() is True  # 停活跃轮 → cancel token1
+        assert conv._cancel_token.is_cancelled
+        # 重复 stop（活跃轮令牌已 cancel、排队轮在飞）：幂等 True，但绝不设待停。
+        assert conv.request_stop() is True
+        assert conv._stop_requested is False  # 关键：排队轮不会被误兑现
+        with pytest.raises(AgentCancelledError):
+            await t1
+        conv.end_turn()
+        conv.end_turn()
+
+    asyncio.run(main())
+
+
+def test_chat_stop_unknown_conversation_404(chat_client) -> None:
+    client, _ = chat_client
+    resp = client.post("/api/chat/does-not-exist/stop")
+    assert resp.status_code == 404
+
+
+def test_chat_stop_idle_conversation_returns_false(chat_client) -> None:
+    """对已存在但无在飞轮的会话停止 → 200 {"stopped": false}（幂等、不报错）。"""
+    client, _ = chat_client
+    _, done, _ = _chat(client, "问")
+    cid = done["conversation_id"]
+    resp = client.post(f"/api/chat/{cid}/stop")
+    assert resp.status_code == 200
+    assert resp.json() == {"stopped": False}
+
+
+def test_chat_emits_start_event_with_id(chat_client) -> None:
+    """流首帧 start 即带 conversation_id（首轮停止按钮所需）。"""
+    client, _ = chat_client
+    first_event = first_data = None
+    with client.stream("POST", "/api/chat", json={"message": "问"}) as resp:
+        event = None
+        for line in resp.iter_lines():
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+                if first_event is None:
+                    first_event = event
+            elif line.startswith("data:") and first_data is None:
+                first_data = json.loads(line.split(":", 1)[1].strip())
+                break
+    assert first_event == "start"
+    assert first_data and first_data["conversation_id"]
 
 
 def test_conversation_store_concurrent_create_no_collision(kb, monkeypatch) -> None:
