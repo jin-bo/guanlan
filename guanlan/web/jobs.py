@@ -28,6 +28,69 @@ from ..errors import EXIT_AGENT_ERROR
 JobState = Literal["queued", "running", "done"]
 
 
+class WriteGate:
+    """进程级单写者协调（P4.5 §5 决策P4.5-6/10）：一把 `write_lock` + `active_writable_turns` 计数。
+
+    **两者刻意分离、互不混用**（评审 P4.5 #2）：
+
+    - `write_lock`（进程级 `threading.Lock`）：**只包真正的写执行**——JobQueue worker 跑 `fn()`
+      前后、可写 chat turn 起跑/收尾、撤销本轮写回放、`GET /graph` 的 `build_and_write_graph`
+      前后都 acquire/release，互斥 → 任意时刻至多一个写者，`raw/`/`wiki/`/`workspace/`/`graph/`
+      四树写永不交错、`raw/` 快照窗口不被并发写互踩。跨「JobQueue 后台线程写者」与「async chat
+      写者」共享，故是 `threading.Lock`（非 `asyncio.Lock`）；async 侧须**异步获取**
+      （`anyio.to_thread.run_sync(write_lock.acquire)`），绝不在事件循环线程直接阻塞 acquire。
+    - `active_writable_turns`（独立计数 + 自有锁）：层③ 时序互斥——可写 turn 活跃期间宿主写端点
+      （`/api/raw`/`ingest`/`heal`）一律 `423`，兜「shell `curl http://127.0.0.1/api/raw` 让宿主
+      替 agent 写 `raw/`」的旁路（决策P4.5-10）。**独立于 `write_lock`/`JobQueue._lock`**：它表
+      「有可写会话在跑」、不是「有人持写锁」，两者语义不同。
+    """
+
+    def __init__(self) -> None:
+        self.write_lock = threading.Lock()
+        self._turns = 0
+        self._turns_lock = threading.Lock()  # 独立于 write_lock：只护计数器
+
+    def enter_writable(self) -> None:
+        with self._turns_lock:
+            self._turns += 1
+
+    def exit_writable(self) -> None:
+        with self._turns_lock:
+            self._turns -= 1
+            if self._turns < 0:
+                self._turns = 0
+
+    @property
+    def active_writable_turns(self) -> int:
+        with self._turns_lock:
+            return self._turns
+
+    def acquire_thunk(self, held: list[bool]) -> Callable[[], None]:
+        """返回一个在**调用线程内** acquire `write_lock` 并置 `held[0]=True` 的 thunk（评审 P1）。
+
+        async 侧统一这样取写锁，杜绝取消窗口泄漏：
+        ```
+        held = [False]
+        try:
+            await anyio.to_thread.run_sync(write_gate.acquire_thunk(held))
+            ...  # 临界区
+        finally:
+            if held[0]:
+                write_gate.write_lock.release()
+        ```
+        `anyio.to_thread.run_sync` 默认 `abandon_on_cancel=False`——被取消时仍等 `acquire()` 返回
+        （锁已到手）、再在 await 处抛 `CancelledError`，使「await 之后」的赋值永不执行。把置位放进
+        thunk、且 `held` 在 `try` **之前**声明，则不论 `CancelledError` 落在哪、`finally` 读到的都是
+        真实持有态，绝不泄漏进程级写锁（否则后续 ingest/heal/graph/可写 turn 全永久卡死）。
+        """
+
+        def _acq() -> None:
+            self.write_lock.acquire()
+            held[0] = True
+
+        return _acq
+
+
 @dataclass
 class Job:
     """一个写作业的内存记录。`output` 是捕获的人读输出（决策P4-7）。
@@ -48,11 +111,15 @@ class Job:
 class JobQueue:
     """单 worker 线程 + FIFO 队列 + 内存作业表。线程随进程退出（daemon）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, write_lock: threading.Lock | None = None) -> None:
         self._queue: queue.Queue[tuple[Job, Callable[[], object]]] = queue.Queue()
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()  # 仅护 _jobs / _counter；worker 改 job 字段无并发读写竞态点
         self._counter = 0
+        # 单写者写锁（P4.5 决策P4.5-6）：worker 跑 `fn()`（真正的写执行）时持有，与可写 chat
+        # turn / 撤销回放 / GET /graph 串行。None = 未注入（旧测试 / 纯读场景）→ 不串行（沿用 P4
+        # 行为：唯一写者就是本 worker，自带 FIFO 串行）。绝不与 `_lock`（只护作业表）混用。
+        self._write_lock = write_lock
         self._worker = threading.Thread(target=self._run, name="guanlan-jobs", daemon=True)
         self._worker.start()
 
@@ -96,6 +163,10 @@ class JobQueue:
             job, fn = self._queue.get()
             job.state = "running"
             buf = io.StringIO()
+            # 单写者写锁（P4.5）：包住真正的写执行 `fn()`，与可写 chat turn / 撤销 / GET /graph
+            # 串行。在 worker 线程上阻塞 acquire 无碍（非事件循环线程）；None 时退回无锁（P4 行为）。
+            if self._write_lock is not None:
+                self._write_lock.acquire()
             try:
                 # 进程级 redirect：捕获 run_ingest 的人读 stdout/stderr。只在此单 worker 串行
                 # 发生，故无跨线程竞态（读/问答路径都不打印，见模块 docstring 红线）。
@@ -114,6 +185,8 @@ class JobQueue:
                 job.exit_code = EXIT_AGENT_ERROR
                 buf.write(f"\n作业执行异常：{type(exc).__name__}: {exc}")
             finally:
+                if self._write_lock is not None:
+                    self._write_lock.release()  # 写执行收尾即释放，早于状态翻转/唤醒
                 # 顺序要紧：先写 output、再翻 state="done"，最后 set()。轮询读者只在见到
                 # state=="done" 后读 output（同线程程序序 + GIL 原子赋值保证"见 done 必见完整
                 # output"，无锁可行）；submit_and_wait 的等待者由 done_event 唤醒、醒来即见完整

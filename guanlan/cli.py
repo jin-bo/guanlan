@@ -106,6 +106,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             model=args.model,
             agent_log=not args.no_agent_log,
             session_persist=not args.no_session_persist,
+            mode=args.mode,
         )
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
@@ -258,6 +259,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-session-persist",
         action="store_true",
         help="不把只读问答会话落盘 <库>/.agentao/sessions/（默认落盘+跨重启恢复；关时等价纯内存，隐私/临时场景用）",
+    )
+    p_web.add_argument(
+        "--mode",
+        choices=["read-only", "workspace-write"],
+        default="read-only",
+        help="新会话开局姿态（默认 read-only；workspace-write 起即可让 Agent 写 wiki/workspace，浏览器内可 /mode 切换）",
     )
     p_web.set_defaults(func=_cmd_web)
 

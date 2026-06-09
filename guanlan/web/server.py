@@ -75,6 +75,7 @@ def serve(
     runner: AgentRunner | None = None,
     agent_log: bool = True,
     session_persist: bool = True,
+    mode: str = "read-only",
 ) -> int:
     """起本地 Web 宿主，长驻直到 Ctrl-C；正常停服返回 `EXIT_OK`。
 
@@ -83,13 +84,16 @@ def serve(
     `agent_log`（默认开）把会话 agent 日志像 CLI 那样落 `<kb>/agentao.log`；`--no-agent-log` 关。
     `session_persist`（默认开，P4.2）把只读问答会话落 `<kb>/.agentao/sessions/` 并跨重启恢复；
     `--no-session-persist` 关，退回 P4 纯内存。
+    `mode`（默认 `read-only`，P4.5）定新会话开局姿态；`--mode workspace-write` 起即可写。
     """
     kb = require_kb_root(root, writable=True)
     _ensure_port_free(HOST, port)
     if agent_log:
         configure_agent_log(kb)  # chat 会话日志落 <kb>/agentao.log（像 CLI；已 gitignore/不扫描）
 
-    app = create_app(kb, model=model, runner=runner, session_persist=session_persist)
+    app = create_app(
+        kb, model=model, runner=runner, session_persist=session_persist, mode=mode
+    )
     if open_browser:
         _open_browser_when_ready(HOST, port)
 
