@@ -558,6 +558,20 @@ let conversationId = null;
 let chatLoadToken = 0; // 每次切换/新建自增；历史气泡异步回放回来若 token 已变则丢弃（防迟到覆盖）
 let chatStreaming = false; // 一轮在飞时为 true：发送按钮切「停止」、回车不再发新轮
 let pendingStop = false; // 首轮 id 未回时点了「停止」：标记待停，start 帧回填 id 后立即补发
+let currentMode = "read-only"; // 当前会话姿态（P4.5）：徽标显示、/mode 切换更新
+let defaultMode = "read-only"; // 进程 --mode 默认（启动 /api/info 拉取）：新会话开局姿态
+
+// 姿态徽标（P4.5）：随 /mode 翻转更新；workspace-write 用醒目色提示「Agent 可写」。
+function setModeBadge(mode) {
+  currentMode = mode || "read-only";
+  const el = $("#mode-badge");
+  if (!el) return;
+  el.textContent = currentMode;
+  el.classList.toggle("writable", currentMode === "workspace-write");
+  el.title = currentMode === "workspace-write"
+    ? "可写会话：Agent 可写 wiki/workspace（raw/ 与 AGENTAO.md 仍只读）。/mode read-only 切回"
+    : "只读会话：Agent 仅问答。/mode workspace-write 切到可写";
+}
 
 function startNewConversation() {
   // 仅清本地视图、开启新会话——**绝不** DELETE 旧会话：P4.2 起 DELETE 会级联删盘，删的是
@@ -566,6 +580,7 @@ function startNewConversation() {
   chatLoadToken++; // 作废任何在飞的历史气泡回放（用户已开新会话）
   conversationId = null;
   $("#chat-log").innerHTML = "";
+  setModeBadge(defaultMode); // 新会话开局 = 进程默认姿态（决策P4.5-8）
 }
 $("#chat-new").addEventListener("click", startNewConversation);
 
@@ -627,6 +642,14 @@ async function openConversation(c) {
   const log = $("#chat-log");
   log.innerHTML = "";
   $("#chat-input").focus();
+  // 切会话即刷新姿态徽标（评审 P2）：否则徽标停留在上一个会话的姿态——一个 workspace-write 的 live
+  // 会话切过去仍显 read-only（或反之），正是徽标该指示写能力时误导。先乐观置进程默认（冷会话恢复即
+  // 此姿态），再据 /info 校正：live 会话报真实 _mode、冷会话报 default_mode（均含 mode 字段）。
+  // 失败/已切走不阻断回放，徽标退回默认。
+  setModeBadge(defaultMode);
+  getJSON(`/api/chat/${encodeURIComponent(c.id)}/info`)
+    .then((info) => { if (tok === chatLoadToken && info && info.mode) setModeBadge(info.mode); })
+    .catch(() => {});
   // 回放历史气泡（user/assistant）：拉该会话的消息，逐条上屏。失败仅降级为一条提示、不阻断续聊。
   try {
     const { messages } = await getJSON(`/api/conversations/${encodeURIComponent(c.id)}/messages`);
@@ -669,11 +692,13 @@ async function deleteConversation(id, row) {
   }
 }
 
-function submitChat() {
+function submitChat(override) {
   // 一轮在飞时不重复发送：回车与「发送」共用此守卫，避免在同一会话上叠起并发轮次（服务端
   // conv.lock 会把第二轮挂住、前端则堆出空 bot 气泡）。停止只由按钮点击触发（见下），回车
   // 流式中一律按空操作处理——不让回车误把当前轮停掉。输入保留不清。
   if (chatStreaming) return;
+  // override（如「让 Agent 修复」发的 REPAIR_PROMPT）直接作消息发，不读输入框、不走斜杠解析。
+  if (typeof override === "string" && override) { sendChat(override); return; }
   const input = $("#chat-input");
   const msg = input.value.trim();
   if (!msg) return;
@@ -698,7 +723,7 @@ const SLASH_HELP = [  // /help 列这 8 条（**无** /compact，决策P4.4-5）
   "/context — 上下文 token 用量明细",
   "/skills — 列技能（可用 / 已激活）",
   "/tools — 列工具（只读下被禁的标注）",
-  "/mode — 当前姿态（只读；可写见 P4.5）",
+  "/mode [read-only|workspace-write] — 查看 / 切换姿态",
 ];
 
 // 命令输出气泡：buildFn 用 textContent 填充各行/项（杜绝注入），落对话流、不开浮层（决策P4.4-2）。
@@ -735,11 +760,16 @@ async function handleSlash(raw) {
       return noteLines(["已开启新会话（旧会话保留在「历史会话」）。"]);
     case "clear":
       return slashClear();
+    case "mode": {
+      // 带参 → 切换姿态（POST /api/chat/{id}/mode）；不带参 → 报当前姿态（只读自省）。
+      const arg = (body.slice(1).split(/\s+/)[1] || "").toLowerCase();
+      if (arg) return slashSetMode(arg);
+      return slashInfo(cmd);
+    }
     case "status":
     case "context":
     case "skills":
     case "tools":
-    case "mode":
       return slashInfo(cmd);
     default:  // 含 /compact（决策P4.4-5）与一切未知命令
       return noteLines([`未知命令：${body}。输入 /help 看支持的命令。`]);
@@ -764,6 +794,37 @@ async function slashClear() {
   noteLines(["已删除当前会话并开启新会话。"]);
 }
 
+// /mode <值>：运行时翻姿态（P4.5 决策P4.5-5）。仅 read-only / workspace-write 合法；无活动会话
+// 或冷会话先提示续聊（端点 404/409）。成功后更新徽标 + note 回报新姿态。
+async function slashSetMode(arg) {
+  if (arg !== "read-only" && arg !== "workspace-write") {
+    return noteLines([`仅支持 read-only / workspace-write，收到：${arg}`]);
+  }
+  if (!conversationId) {
+    return noteLines(["无活动会话：先提一个问题开启会话，再切换姿态。"]);
+  }
+  let res;
+  try {
+    res = await fetch(`/api/chat/${encodeURIComponent(conversationId)}/mode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: arg }),
+    });
+  } catch (e) {
+    return noteLines([`切换姿态失败：${e.message}`]);
+  }
+  if (res.status === 409) return noteLines(["会话未激活，先续聊一轮恢复再切。"]);
+  if (res.status === 422) return noteLines(["非法姿态：仅支持 read-only / workspace-write。"]);
+  if (!res.ok) return noteLines([`切换姿态失败：HTTP ${res.status}`]);
+  const { mode } = await res.json();
+  setModeBadge(mode);
+  return noteLines([
+    mode === "workspace-write"
+      ? "已切到 workspace-write：Agent 可写 wiki/workspace、跑 shell（raw/ 与 AGENTAO.md 仍只读）。"
+      : "已切回 read-only：Agent 仅问答。",
+  ]);
+}
+
 // 自省类：有会话取会话级 info、否则取 app 级 info，按命令渲染。冷会话（live:false）的
 // context/skills/tools 为 null → 提示「续聊一轮以恢复」（决策P4.4-7）。
 async function slashInfo(cmd) {
@@ -784,19 +845,24 @@ function renderSlashInfo(cmd, info) {
   const cold = info.live === false;         // 盘上-only 冷会话（部分信息）
 
   if (cmd === "mode") {
-    return noteLines([`姿态：${info.mode || "read-only"}（Web 问答只读；可写会话见 P4.5）`]);
+    if (!appLevel && info.mode) setModeBadge(info.mode); // 会话级 info 同步徽标
+    const hint = info.mode === "workspace-write"
+      ? "（Agent 可写 wiki/workspace；raw/ 与 AGENTAO.md 仍只读）"
+      : "（Agent 仅问答；/mode workspace-write 切到可写）";
+    return noteLines([`姿态：${info.mode || "read-only"}${hint}`]);
   }
   if (cmd === "status") {
     const lines = [];
     if (appLevel) {
       lines.push(`知识库：${info.kb_name}`);
       lines.push(`模型：${info.model || "（未指定，由会话构造期发现）"}`);
-      lines.push(`姿态：${info.mode}（只读）`);
+      lines.push(`姿态：${info.mode}`);
       lines.push(`会话：${info.conversations} / ${info.max_conversations}`);
       lines.push("（尚无活动会话：提一个问题以查看上下文用量 / 技能 / 工具。）");
     } else {
+      if (info.mode) setModeBadge(info.mode);
       lines.push(`模型：${info.model || "未知"}`);
-      lines.push(`姿态：${info.mode}（只读）`);
+      lines.push(`姿态：${info.mode}`);
       lines.push(`轮次：${info.turns ?? "—"}　消息：${info.messages ?? "—"}`);
       if (info.context) {
         const c = info.context;
@@ -1001,6 +1067,7 @@ function handleSSE(frame, botEl) {
     note.className = "stop-note";
     note.textContent = "（已停止）";
     botEl.appendChild(note);
+    renderWritableReceipts(payload); // 可写 turn 被停也可能已写盘：照常出 check/撤销/告警
     log.scrollTop = log.scrollHeight;
   } else if (event === "done") {
     conversationId = payload.conversation_id;
@@ -1011,13 +1078,119 @@ function handleSSE(frame, botEl) {
     } else if (payload.answer) {
       botEl.textContent = payload.answer;
     }
+    renderWritableReceipts(payload); // 可写 turn 收尾：check 回执 / 撤销 / immutable 告警
     log.scrollTop = log.scrollHeight;
   } else if (event === "error") {
     // 记下服务端已建会话（即便本轮失败）：否则首轮失败时下次又以 null 另起新会话，堆到 503。
     if (payload.conversation_id) conversationId = payload.conversation_id;
     botEl.classList.replace("bot", "err");
     botEl.textContent = `错误：${payload.message}`;
+    renderWritableReceipts(payload); // 可写 turn 抛错前的写已被服务端收尾捕获
   }
+}
+
+// 可写 turn 收尾的三类回执，**各看各的字段、相互独立**（P4.5 §8 评审 Medium）：
+//   · 撤销键看 undo.available（写日志非空，独立于 check）——SCHEMA-only / check 通过的 wiki 改都能撤销
+//   · 修复键看 check.violations
+//   · 告警看 immutable_mutated（AGENTAO.md 被旁路改、已自动还原）
+function renderWritableReceipts(payload) {
+  const { check, undo, immutable_mutated: mutated } = payload || {};
+  if (!check && !undo && !mutated) return; // read-only turn：无这些字段
+  let refreshed = false;
+  // ① immutable 告警（最严重，置顶）：AGENTAO.md 被旁路改、已自动还原。
+  if (Array.isArray(mutated) && mutated.length) {
+    addNote((div) => {
+      div.classList.add("receipt-alert");
+      const p = document.createElement("div");
+      p.textContent = `⚠️ 检测到 ${mutated.join("、")} 被旁路改写，已自动还原（请人工核查 shell 来源）。`;
+      div.appendChild(p);
+    });
+  }
+  // ② check 回执 + 「让 Agent 修复」。
+  if (check) {
+    if (check.ok) {
+      addNote((div) => {
+        const p = document.createElement("div");
+        p.innerHTML = '<span class="report-ok">✓ check 通过</span> 已写 wiki。';
+        div.appendChild(p);
+      });
+      loadPages(); refreshed = true; // 写后刷新右栏 wiki 列表
+    } else {
+      addNote((div) => {
+        div.classList.add("receipt-bad");
+        const head = document.createElement("div");
+        head.innerHTML = `<span class="report-bad">✗ check 发现 ${check.violations.length} 条问题</span>`;
+        div.appendChild(head);
+        for (const v of check.violations.slice(0, 20)) {
+          const li = document.createElement("div");
+          li.className = "violation";
+          li.textContent = `· [${v.kind}] ${v.page}: ${v.detail}`;
+          div.appendChild(li);
+        }
+        if (check.repair_prompt) {
+          const btn = document.createElement("button");
+          btn.className = "receipt-btn";
+          btn.textContent = "让 Agent 修复";
+          btn.addEventListener("click", () => {
+            btn.disabled = true;
+            submitChat(check.repair_prompt); // 以 REPAIR_PROMPT 作下一轮消息驱动修复
+          });
+          div.appendChild(btn);
+        }
+      });
+    }
+  }
+  // ③ 撤销键（看 undo.available、不挂 check.violations 分支，评审 Medium）。
+  if (undo && undo.available) {
+    addNote((div) => {
+      const p = document.createElement("div");
+      p.textContent = `本轮写了 ${undo.paths.length} 个文件（${undo.paths.join("、")}）。`;
+      div.appendChild(p);
+      const btn = document.createElement("button");
+      btn.className = "receipt-btn";
+      btn.textContent = "撤销本轮写";
+      btn.addEventListener("click", () => undoTurn(undo.token, btn, div));
+      div.appendChild(btn);
+    });
+  }
+  if (refreshed === false && undo && undo.available) loadPages(); // 撤销可用＝有写，刷新列表
+}
+
+// 撤销本轮写（P4.5 决策P4.5-13）：POST /api/chat/{id}/undo。409＝某文件已被后续写改动（标红）。
+async function undoTurn(token, btn, box) {
+  btn.disabled = true;
+  if (!conversationId) { box.classList.add("receipt-bad"); return; }
+  let res;
+  try {
+    res = await fetch(`/api/chat/${encodeURIComponent(conversationId)}/undo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+  } catch (e) {
+    box.classList.add("receipt-bad");
+    const p = document.createElement("div");
+    p.textContent = `撤销失败：${e.message}`;
+    box.appendChild(p);
+    return;
+  }
+  let data = {};
+  try { data = await res.json(); } catch { /* 空体 */ }
+  const note = document.createElement("div");
+  if (res.status === 409 && data.conflicts) {
+    box.classList.add("receipt-bad");
+    note.textContent = `部分未撤销：${(data.conflicts || []).join("、")} 已被后续写改动，请人工核查；其余 ${(data.undone || []).join("、") || "（无）"} 已还原。`;
+  } else if (res.status === 409) {
+    box.classList.add("receipt-bad");
+    note.textContent = "撤销已失效（无本轮写日志或已有后续写）。";
+  } else if (res.ok) {
+    note.textContent = `已撤销本轮写：${(data.undone || []).join("、") || "（无）"}。`;
+  } else {
+    box.classList.add("receipt-bad");
+    note.textContent = `撤销失败：HTTP ${res.status}`;
+  }
+  box.appendChild(note);
+  loadPages(); // 撤销后刷新右栏 wiki 列表
 }
 
 // ── 左右两栏可拖动分隔 ───────────────────────────────────────────────────────
@@ -1075,3 +1248,8 @@ function handleSSE(frame, botEl) {
 // 仅当用户尚未导航时才进首页：否则页面慢加载期间用户已输入的搜索会被这次空首页覆盖
 // （loadPages 解析后会就地重渲染当前 index 条目，故用户的搜索结果照常出现）。
 loadPages().then(() => { if (histPos < 0) navigate({ kind: "index", query: "" }); });
+
+// 拉进程默认姿态设初始徽标（P4.5）：失败则保留 CSS/HTML 默认 read-only。
+getJSON("/api/info").then((info) => {
+  if (info && info.mode) { defaultMode = info.mode; setModeBadge(info.mode); }
+}).catch(() => {});

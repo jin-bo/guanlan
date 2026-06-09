@@ -34,4 +34,6 @@ agentao.log.*
 # Repo-root sample config copied from examples/ (may carry machine paths / private dev settings).
 # Anchored to root so examples/AGENTAO.md and examples/SCHEMA.md stay tracked.
 /AGENTAO.md
+/AGENTAO.readonly.md
+/AGENTAO.full.md
 /SCHEMA.md
