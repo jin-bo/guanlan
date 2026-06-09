@@ -40,7 +40,21 @@ from agentao.embedding import (
 from agentao.embedding.compat import build_compat_transport
 from agentao.permissions import PermissionMode
 
+from ..check import run_check
+from ..gate import REPAIR_PROMPT, _render_violations
 from ..skill import SKILL_NAME, ensure_skill_available
+from .jobs import WriteGate
+from .policy_fs import (
+    AgentaoSnapshot,
+    make_policy_fs,
+    restore_agentao,
+    restore_path,
+    snapshot_agentao,
+)
+
+# Web 双姿态（决策P4.5-1）：仅对齐 agentao 枚举的 read-only / workspace-write 两值。
+# full-access（绕全部 preset 规则）/ plan（内部态）永不在 Web 出现 → set_mode 抛 ValueError → 端点 422。
+_WEB_MODES = ("read-only", "workspace-write")
 
 # 嵌入会话共享的 logger（坑③：注入它 = 我们自管日志栈）。默认由 configure_agent_log 给它挂
 # 一个落 <wd>/agentao.log 的 file handler；不挂时无 handler、不写文件（如测试 / --no-agent-log）。
@@ -61,7 +75,8 @@ MAX_CONVERSATIONS = 100
 # 自己在只读下的拦截基准（`runtime/tool_planning._decide`：`readonly_mode and not tool.is_read_only
 # → DENY`），故 `blocked = not is_read_only` 与真实拦截逐项同口径；② 无该元数据（鸭子桩/异形工具）
 # 时退回**已知工具名**静态映射；③ 两者都不命中 → `"unknown"`（如实示弱，不为求一个 bool 去跑工具）。
-# P4.4 姿态恒只读，故此判定不随请求变；列表只为展示「哪些工具在只读 Web 下被禁」。
+# P4.5 起姿态可翻（read-only / workspace-write），故 `blocked` 须随当前姿态变（见 `_blocked_in_mode`）：
+# 可写姿态下 `tool_runner.readonly_mode=False`、`_decide` 的只读 DENY 分支根本不触发，无工具被分类拦截。
 _WRITE_TOOL_NAMES = frozenset(
     {
         "write_file", "replace", "edit_file",
@@ -92,6 +107,19 @@ def _blocked_in_readonly(tool: object) -> bool | str:
     if name in _READ_TOOL_NAMES:
         return False
     return "unknown"
+
+
+def _blocked_in_mode(tool: object, mode: str) -> bool | str:
+    """当前姿态下该工具是否被拦（喂 `/tools` 的 `blocked` 列，P4.5 评审 P2）。
+
+    `workspace-write` 下 `tool_runner.readonly_mode=False`——`tool_planning._decide` 的只读 DENY
+    分支不触发，无工具被**分类**拦截（写/shell 都放行；raw//AGENTAO.md 的拦截是层① 路径级、非
+    工具级），故一律 `False`。`read-only` 退回 `_blocked_in_readonly` 的逐项判定。否则 `/tools` 会
+    在可写会话里仍把写/shell 工具标灰，正是徽标/自省该如实指示写能力时误导（评审 P2）。
+    """
+    if mode == "workspace-write":
+        return False
+    return _blocked_in_readonly(tool)
 
 
 def _context_stats(agent: object, msgs: list) -> dict:
@@ -198,11 +226,26 @@ class Conversation:
     只读两点置位 + 激活 `SKILL_NAME`——恢复零漂移、绝不恢复出可写会话（决策P4.2-4）。
     """
 
-    def __init__(self, cid: str, kb: Path, model: str | None, *, persist: bool) -> None:
+    def __init__(
+        self,
+        cid: str,
+        kb: Path,
+        model: str | None,
+        *,
+        persist: bool,
+        mode: str = "read-only",
+        write_gate: WriteGate | None = None,
+    ) -> None:
         self.id = cid
         self._kb = kb
+        # 撤销/写日志的路径都来自 policy_fs 的 `resolve(strict=False)`（同 kb.resolve() 坐标系）；
+        # 对外算相对路径须用**同一 resolved kb**，否则 macOS `/var`→`/private/var` 等 symlink 下
+        # `relative_to(未 resolve 的 kb)` 抛 ValueError（写日志键是 resolved、kb 不是）。
+        self._kb_resolved = kb.resolve()
         self._model = model  # _save 用（save_session 的 model 参数）；恢复时 = load 出的 model
         self._persist = persist
+        self._mode = mode  # 当前会话姿态（P4.5：read-only / workspace-write），/mode 翻转
+        self._write_gate = write_gate  # 进程级单写者协调（write_lock + 层③ 计数）；None=纯读测试
         self.lock = asyncio.Lock()  # 同一会话两轮不并发跑同一 agent 对象
         self.title: str | None = None
         self.turns = 0
@@ -213,12 +256,21 @@ class Conversation:
         # 到达的停止记为待停、而非当 idle 丢弃（codex 竞态修复）。
         self._stop_requested = False  # 待停标志：有轮起跑但令牌尚未装上时由 request_stop 置位，
         # turn 进锁装令牌后立即兑现。
+        # 撤销本轮写（决策P4.5-4/13）：最近一个可写 turn 的写日志 + 一次性 token。
+        self._undo_token: str | None = None
+        self._undo_journal: dict[Path, tuple[bytes | None, str]] = {}
 
         ensure_skill_available(kb)  # 嵌入式同样需保证 skill 可发现（坑②前置）
+
+        # 层①（决策P4.5-2）：构造期注入 PolicyFileSystem wrapper（姿态无关、装一次），包住
+        # agent.filesystem，对经该 capability 的结构化写守 immutable 集（raw/ + AGENTAO.md）。
+        # 它还在可写 turn 内记 per-turn 写日志（wiki/ + SCHEMA.md），供撤销本轮写（§3）。
+        self._policy_fs = make_policy_fs(kb)
 
         opts: dict = dict(
             working_directory=kb,
             logger=_logger,
+            filesystem=self._policy_fs,  # 层①：透传到 agent.filesystem → 绑定每个写工具（C0 已验）
             # token 流式的**唯一活线**：transport 在构造期冻结（EventType.LLM_TEXT→chunk）。
             # 事后改 self.agent.llm_text_callback 是死代码（只读存档，运行时不重读）。
             transport=build_compat_transport(llm_text_callback=self._on_token),
@@ -229,12 +281,40 @@ class Conversation:
             opts["model"] = model
 
         self.agent = build_from_environment(**opts)
-        # 只读姿态两点同步置位（缺第二步 = 没真正只读，照搬 cli/run.py）：
-        self.agent.permission_engine.set_mode(PermissionMode.READ_ONLY)
-        self.agent.tool_runner.set_readonly_mode(True)
+        # 姿态两点同步置位（缺第二步 = 没真正切换，照搬 cli/run.py）：开局用构造姿态。
+        self._apply_mode(mode)
         self.agent.skill_manager.activate_skill(
-            SKILL_NAME, task_description="观澜 Web 只读问答"
+            SKILL_NAME, task_description="观澜 Web 工作会话"
         )
+
+    def _apply_mode(self, mode: str) -> None:
+        """把姿态落到 agent 的两点置位（engine Mode + tool_runner.readonly）——镜像 cli/run.py。
+
+        只翻「能不能写」，**不动层① wrapper**（wrapper 姿态无关、守「写到哪」，决策P4.5-2/5）。
+        绝不接受 full-access/plan（决策P4.5-1）：非 _WEB_MODES → ValueError，端点转 422。
+        """
+        if mode == "read-only":
+            self.agent.permission_engine.set_mode(PermissionMode.READ_ONLY)
+            self.agent.tool_runner.set_readonly_mode(True)
+        elif mode == "workspace-write":
+            self.agent.permission_engine.set_mode(PermissionMode.WORKSPACE_WRITE)
+            self.agent.tool_runner.set_readonly_mode(False)
+        else:
+            raise ValueError(f"未知姿态：{mode}")  # 端点转 422；绝不接受 full-access/plan
+        self._mode = mode
+
+    @property
+    def mode(self) -> str:
+        """当前会话姿态（read-only / workspace-write）。供端点判「本 turn 是否会写」（评审 P2）。"""
+        return self._mode
+
+    def set_mode(self, mode: str) -> str:
+        """`/mode` 运行时真切换（只翻两点置位、不重建 agent、不动 wrapper，决策P4.5-5）。
+
+        调用方须持 `self.lock`（与在飞 turn 串行）。返回翻转后的姿态。
+        """
+        self._apply_mode(mode)
+        return self._mode
 
     def _on_token(self, chunk: str) -> None:
         """transport 固定回调，**在 arun 的 executor 线程里跑**；lock 串行化同会话各 turn，单槽无竞态。"""
@@ -257,11 +337,27 @@ class Conversation:
             self._inflight = 0
             self._stop_requested = False  # 无在飞轮了：清掉未兑现的待停，绝不泄漏到下一轮
 
-    async def turn(self, msg: str, emit: Emit) -> str:
-        """跑一轮：把 token 经 emit 推前端，返回完整答案；`asyncio.Lock` 串行同会话各轮。"""
+    async def turn(self, msg: str, emit: Emit, meta_out: dict | None = None) -> str:
+        """跑一轮：把 token 经 emit 推前端，返回完整答案；`asyncio.Lock` 串行同会话各轮。
+
+        可写姿态（workspace-write）下还在收尾把**层②还原 / 写后 check / 撤销可用性**写进 `meta_out`
+        （由端点装进 done/error/stopped 帧的可选字段，§7）。`meta_out` 由端点持有 → 无论本轮返回
+        还是抛错，端点都读到自己这只 dict，杜绝跨轮读串（决策P4.5-9）。read-only 姿态零开销、
+        `meta_out` 保持空。
+
+        **锁序（决策P4.5-6/13，评审 High）**：先持 `self.lock`（本方法 `async with`）、再异步取进程
+        `write_lock`——所有会话态写操作（可写 turn 与撤销端点）同序，绝不反序。
+        """
         async with self.lock:
             # StreamingResponse 在路由返回**后**才起跑 turn；其间并发 DELETE 可能已拿锁删本会话、
             # close 了 agent。锁内复检 closed，拒绝在已关闭 agent 上跑（端点据异常发 error 事件）。
+            guarded = self._mode == "workspace-write" and not self.closed
+            before_agentao: AgentaoSnapshot | None = None
+            # 写锁持有标志用**可变容器**、且在 acquire 的线程函数内置位：`run_sync(acquire)` 默认
+            # abandon_on_cancel=False——被取消时仍等 acquire 返回（锁已到手）、再在 await 处抛
+            # CancelledError，使「await 之后」的赋值永不执行。把置位放进线程函数则不论 CancelledError
+            # 落在哪、finally 读到的都是真实持有态，杜绝锁泄漏（评审 BUG 1；当前虽被 shield 兜住、仍兜底）。
+            lock_held = [False]
             try:
                 if self.closed:
                     raise RuntimeError("会话已删除")
@@ -273,6 +369,21 @@ class Conversation:
                     loop.call_soon_threadsafe(emit, kind, data)
 
                 self._emit = thread_safe_emit
+                if guarded:
+                    # 层③（决策P4.5-10）：进可写区，宿主写端点这段内一律 423（兜 shell curl 旁路）。
+                    if self._write_gate is not None:
+                        self._write_gate.enter_writable()
+                        # 单写者写锁（决策P4.5-6）：**异步**取阻塞锁，绝不在事件循环线程直接 acquire
+                        # 阻塞（否则 read-only turn / job 轮询 / UI 全卡死）。锁序：已持 self.lock。
+                        # 持有标志经 acquire_thunk 在线程函数内置位（见 lock_held 注释），不依赖 await
+                        # 之后的赋值——与 /graph、/undo 同一抗取消守法（评审 P1）。
+                        await anyio.to_thread.run_sync(
+                            self._write_gate.acquire_thunk(lock_held)
+                        )
+                    # 层②（决策P4.5-3/c）：只拍 AGENTAO.md 一个文件（近免费）；raw/ 树不扫。
+                    before_agentao = snapshot_agentao(self._kb)
+                    self._policy_fs.begin_journal()  # 开本轮写日志（wiki/ + SCHEMA.md）
+
                 # 每轮一枚取消令牌，**锁内**创建/安装：故 _cancel_token 恒指向持锁的活跃轮，并发同会话
                 # 时 stop 只打活跃轮、不误伤排队轮（codex 评审）。停止按钮经 request_stop() 置位它，arun
                 # 的 executor 线程读到后自然收尾、把 AgentCancelledError 经 future 抛回——await arun 直到
@@ -299,9 +410,116 @@ class Conversation:
                         _logger.warning("会话 %s 落盘失败，本轮未持久化", self.id, exc_info=True)
                 return answer
             finally:
+                # ── 可写 turn 收尾（决策P4.5-3/4，评审 High：还原须早于 error SSE / 计数-- / 释锁）──
+                if guarded:
+                    try:
+                        await self._finalize_writable(before_agentao, meta_out)
+                    finally:
+                        # 计数-- 与释锁须发生在 finally 内、且在 meta 落定之后（评审 High）。
+                        if lock_held[0] and self._write_gate is not None:
+                            self._write_gate.write_lock.release()
+                        if self._write_gate is not None:
+                            self._write_gate.exit_writable()
                 # 任何退出路径（closed 早退 / arun 抛 / 正常返回）都清掉 emit 与令牌（一处归口）。
                 self._emit = None
                 self._cancel_token = None
+
+    async def _finalize_writable(
+        self, before_agentao: AgentaoSnapshot | None, meta_out: dict | None
+    ) -> None:
+        """可写 turn 收尾：层②还原 + 无条件写后 check + 撤销可用性，写进 `meta_out`（决策P4.5-3/4）。
+
+        在 `write_lock` 内跑（权威 `wiki/` 门禁，§5）：① 先把被旁路改的 `AGENTAO.md` 还原（早于
+        error SSE）；② 取本轮写日志、登记撤销 token（写日志非空即可用，**独立于 check**）；③ 无条件
+        跑 `run_check(wiki)`——既不靠写日志、也不用 mtime/size 指纹（评审 High/Medium），覆盖 shell
+        直写。任何一步抛错只记日志，绝不连累已成功的答案（同 §4.4 降级精神）。
+        """
+        # ① 层②：AGENTAO.md 被旁路改/删/换形态 → 还原原字节（先清替身、不顺 symlink 写穿）。
+        try:
+            mutated = await anyio.to_thread.run_sync(
+                restore_agentao, self._kb, before_agentao
+            )
+        except Exception:  # noqa: BLE001 — 还原失败仅记日志，不毁答案
+            _logger.warning("会话 %s AGENTAO.md 还原失败", self.id, exc_info=True)
+            mutated = None
+
+        # ② 取本轮写日志 → 撤销可用性（写日志非空驱动、独立于 check，评审 Medium）。
+        journal = self._policy_fs.end_journal()
+        undo: dict | None = None
+        if journal:
+            self._undo_journal = journal
+            self._undo_token = str(uuid.uuid4())
+            undo = {
+                "available": True,
+                "token": self._undo_token,
+                "paths": [p.relative_to(self._kb_resolved).as_posix() for p in journal],
+            }
+        else:
+            self._undo_journal = {}
+            self._undo_token = None
+
+        # ③ 无条件写后 check（零 LLM、锁内一致状态；覆盖 shell 直写 wiki/）。
+        check: dict | None = None
+        try:
+            result = await anyio.to_thread.run_sync(run_check, self._kb / "wiki")
+            check = {
+                "ok": result.ok,
+                "violations": [
+                    {"page": v.page, "kind": v.kind, "detail": v.detail}
+                    for v in result.violations
+                ],
+            }
+            if not result.ok:
+                # 「让 Agent 修复」用的下一轮消息：服务端用 gate.REPAIR_PROMPT 格式化（复用 ingest
+                # 自愈同一薄 prompt，§3 决策P4.5-4）。前端把它当下一轮 user 消息发出即驱动修复。
+                check["repair_prompt"] = REPAIR_PROMPT.format(
+                    violations=_render_violations(result.violations)
+                )
+        except Exception:  # noqa: BLE001 — check 失败仅记日志，不毁答案
+            _logger.warning("会话 %s 写后 check 失败", self.id, exc_info=True)
+
+        if meta_out is not None:
+            if check is not None:
+                meta_out["check"] = check
+            if mutated:
+                meta_out["immutable_mutated"] = [mutated]
+            if undo is not None:
+                meta_out["undo"] = undo
+
+    def can_undo(self, token: str) -> bool:
+        """本轮写日志是否可被此 token 撤销（廉价、纯读；端点据此在取 write_lock **前**短路）。
+
+        让陈旧/空 token 不必白白排队取进程级 write_lock（可能卡在在飞 ingest 之后数十秒）再回 409
+        （评审 BUG 4）。调用方须持 `self.lock`，使「可撤」判定与随后的 `apply_undo` 之间状态稳定
+        （token 仅由同会话另一轮 turn 或 apply_undo 改、二者都要 `self.lock`）。
+        """
+        return bool(token) and token == self._undo_token and bool(self._undo_journal)
+
+    def apply_undo(self, token: str) -> dict | None:
+        """撤销本轮写（决策P4.5-13）：乐观回放最近一个可写 turn 的写日志，返回 `{undone, conflicts}`。
+
+        **假设调用方已持 `self.lock` 与进程 `write_lock`**（端点按 `conversation.lock → write_lock`
+        统一锁序取，§5/§7，评审 High——绝不反序）。token 不匹配 / 无可撤销 → `None`（端点转 409）。
+        逐文件**乐观校验**当前内容哈希 == 本 turn 写后哈希：相等才还原（写前字节，None=删新建页）、
+        否则跳过并计入 `conflicts`（该文件已被后续写改动，决策P4.5-13）。撤销一次性、回放后失效。
+        """
+        if not self.can_undo(token):
+            return None
+        from .policy_fs import hash_file  # 局部引入，避免顶部循环面
+
+        undone: list[str] = []
+        conflicts: list[str] = []
+        for path, (before, after_hash) in self._undo_journal.items():
+            rel = path.relative_to(self._kb_resolved).as_posix()
+            if hash_file(path) != after_hash:  # 已被后续写改动 → 跳过、记冲突
+                conflicts.append(rel)
+                continue
+            restore_path(path, before)
+            undone.append(rel)
+        # 一次性：回放后令本 token 失效（不做全局时间旅行，决策P4.5-13）。
+        self._undo_token = None
+        self._undo_journal = {}
+        return {"undone": undone, "conflicts": conflicts}
 
     def request_stop(self) -> bool:
         """请求打断当前在飞的 turn（停止按钮调）。无在飞 turn → 返回 False。
@@ -369,7 +587,7 @@ class Conversation:
                 "name": t.name,
                 "description": t.description,
                 "requires_confirmation": bool(getattr(t, "requires_confirmation", False)),
-                "blocked": _blocked_in_readonly(t),
+                "blocked": _blocked_in_mode(t, self._mode),
             }
             for t in sorted(self.agent.tools.list_tools(), key=lambda t: t.name)
         ]
@@ -379,7 +597,7 @@ class Conversation:
             "turns": self.turns,
             "live": True,
             "model": self.agent.get_current_model(),
-            "mode": "read-only",  # P4.4 Web 恒只读（决策P4.4-6）
+            "mode": self._mode,  # P4.5：报当前会话真实姿态（read-only / workspace-write）
             "messages": len(msgs),
             # context：headline（messages-only / api）+ 含 system prompt & tools schema 的精确 breakdown，
             # 完全对齐 agentao get_conversation_summary（否则 system/tools 分项被低报，codex 评审）。
@@ -407,14 +625,30 @@ class ConversationStore:
     （懒恢复，off-loop）。`persist` 关（`--no-session-persist`）时退回 P4 纯内存：不落盘、不读盘。
     """
 
-    def __init__(self, kb: Path, default_model: str | None, *, persist: bool = True) -> None:
+    def __init__(
+        self,
+        kb: Path,
+        default_model: str | None,
+        *,
+        persist: bool = True,
+        default_mode: str = "read-only",
+        write_gate: WriteGate | None = None,
+    ) -> None:
         self._kb = kb
         self._default_model = default_model
         self._persist = persist
+        # 新会话开局姿态 = 进程 --mode 默认（决策P4.5-8：恢复不回放盘上姿态、用进程默认）。
+        self._default_mode = default_mode
+        self._write_gate = write_gate  # 进程级单写者协调，注入每个会话
         self._convs: dict[str, Conversation] = {}
         # create/restore 经 anyio.to_thread 卸载（构造慢），故跑在**线程池线程**——字典写必须用
         # threading.Lock 护住，否则两个并发新建/恢复会撞 id、互相覆盖会话。
         self._lock = threading.Lock()
+
+    @property
+    def default_mode(self) -> str:
+        """新会话/恢复的开局姿态。供端点在 create **前**判「新 turn 是否会写」（评审 P2）。"""
+        return self._default_mode
 
     def create(self, model: str | None = None) -> Conversation:
         """新建会话（含一次性问答=单轮）。超出**硬**上限抛 RuntimeError，由端点转 503。
@@ -432,7 +666,14 @@ class ConversationStore:
             # id 改用 agentao 的稳定 UUID（写进每份快照的 session_id）：进程内自增计数器重启归零、
             # 与盘上对不上无法续；UUID 跨重启稳定、读/删/续全归口同一 id（决策P4.2-2）。
             cid = str(uuid.uuid4())
-            conv = Conversation(cid, self._kb, conv_model, persist=self._persist)
+            conv = Conversation(
+                cid,
+                self._kb,
+                conv_model,
+                persist=self._persist,
+                mode=self._default_mode,
+                write_gate=self._write_gate,
+            )
             self._convs[cid] = conv
             return conv
 
@@ -466,7 +707,7 @@ class ConversationStore:
             "turns": None,  # 不建 agent / 不载消息：轮次留空，续聊转 live 后即有
             "live": False,
             "model": entry.get("model"),
-            "mode": "read-only",  # 冷会话恢复亦只读（决策P4.2-4 / P4.4-6）
+            "mode": self._default_mode,  # 冷会话恢复用进程默认姿态（决策P4.5-8）
             "messages": entry.get("message_count", 0),
             "context": None,
             "skills": None,
@@ -539,7 +780,15 @@ class ConversationStore:
             # 在 provider A 存的模型在当前 provider B 上根本不存在，只在下次 LLM 调用时才炸。故恢复
             # 一律用与新建**同一**的当前进程模型（self._default_model，= --model / 环境发现），保持已
             # 一致的 (provider, model)；盘上的 _model 仅留作参考、不回绑。
-            conv = Conversation(cid, self._kb, self._default_model, persist=self._persist)
+            # 恢复用**当前进程默认姿态**、不回放盘上姿态（盘上不存运行时姿态，决策P4.5-8）。
+            conv = Conversation(
+                cid,
+                self._kb,
+                self._default_model,
+                persist=self._persist,
+                mode=self._default_mode,
+                write_gate=self._write_gate,
+            )
             conv.agent.messages = messages  # 镜像 agentao cli/commands/sessions.py 的 resume
             # 只认构造已激活的 SKILL_NAME，**不**回放盘上任意 active_skills（扩大姿态，决策P4.2-4/6）
             conv.turns = len([m for m in messages if m.get("role") == "user"])  # 还原轮次

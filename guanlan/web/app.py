@@ -24,7 +24,13 @@ from pathlib import Path
 import anyio
 from agentao.cancellation import AgentCancelledError
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -47,7 +53,7 @@ from ..lint import run_lint
 from ..pages import iter_pages, load_page, page_title, page_type
 from ..runtime import AgentRunner
 from .chat import MAX_CONVERSATIONS, ConversationStore
-from .jobs import JobQueue
+from .jobs import JobQueue, WriteGate
 from .render import render_markdown, render_page
 
 
@@ -72,6 +78,19 @@ class RawBody(BaseModel):
     name: str
     content: str
     overwrite: bool = False
+
+
+class ModeBody(BaseModel):
+    """`POST /api/chat/{id}/mode` 请求体（P4.5）。`mode` 仅接受 read-only / workspace-write；
+    full-access / plan / full 等 → set_mode 抛 ValueError → 端点 422（决策P4.5-1）。"""
+
+    mode: str
+
+
+class UndoBody(BaseModel):
+    """`POST /api/chat/{id}/undo` 请求体（P4.5）。`token` = done.undo.token（最近可写 turn 写日志）。"""
+
+    token: str
 
 
 # Web 端 heal 默认本批上限：刻意小于 CLI 的 DEFAULT_LIMIT（=10）——浏览器里一次少物化几个、
@@ -296,6 +315,7 @@ def create_app(
     model: str | None = None,
     runner: AgentRunner | None = None,
     session_persist: bool = True,
+    mode: str = "read-only",
 ) -> FastAPI:
     """构造绑定到知识库 `root` 的 FastAPI app。
 
@@ -304,6 +324,7 @@ def create_app(
         model: `--model` 透传给写作业（C4）与会话嵌入（C5）；None 表示不覆盖、由环境发现。
         runner: 可注入的 `AgentRunner`（测试用 fake，不打真实 LLM）；None 走默认子进程 runner。
         session_persist: 会话落盘开关（P4.2，默认开）；关时退回 P4 纯内存（`--no-session-persist`）。
+        mode: 新会话开局姿态（P4.5，默认 `read-only`）；`--mode workspace-write` 起即可写。
     """
     app = FastAPI(title="观澜 Web 宿主", docs_url=None, redoc_url=None)
     # 配置挂在 app.state：后续提交的端点（报告/写作业/会话）从这里读 root/model/runner，
@@ -311,11 +332,20 @@ def create_app(
     app.state.root = root
     app.state.model = model
     app.state.runner = runner
-    # 单写者作业队列（唯一写作业 ingest 走它，FIFO 串行；决策P4-5）。
-    jobs = JobQueue()
+    app.state.mode = mode
+    # 进程级单写者协调（P4.5 决策P4.5-6/10）：write_lock（包真正写执行）+ active_writable_turns
+    # （层③ 423 时序互斥）。注入 JobQueue（worker 跑 fn() 时持 write_lock）与 ConversationStore
+    # （可写 turn 异步取 write_lock + 计数）；写端点经 app.state.write_gate 查计数。
+    write_gate = WriteGate()
+    app.state.write_gate = write_gate
+    # 单写者作业队列（ingest/heal/投喂走它，FIFO 串行；决策P4-5）：worker 跑 fn() 包 write_lock。
+    jobs = JobQueue(write_lock=write_gate.write_lock)
     app.state.jobs = jobs
-    # 会话表（所有问答走只读嵌入）：persist 开时每轮落 .agentao/sessions/ + 懒恢复（P4.2 决策P4.2-1）。
-    conversations = ConversationStore(root, model, persist=session_persist)
+    # 会话表（问答走嵌入会话）：persist 开时每轮落 .agentao/sessions/ + 懒恢复（P4.2 决策P4.2-1）；
+    # default_mode/write_gate 透传到每个会话（P4.5）。
+    conversations = ConversationStore(
+        root, model, persist=session_persist, default_mode=mode, write_gate=write_gate
+    )
     app.state.conversations = conversations
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -331,11 +361,23 @@ def create_app(
         return {
             "kb_name": root.name,
             "model": model,  # --model 覆盖（可能 None：未覆盖时由各会话构造期环境发现）
-            "mode": "read-only",  # Web 恒只读（决策P4.4-6）
+            "mode": mode,  # 进程默认开局姿态（P4.5：read-only / workspace-write）
             "persist": session_persist,
             "conversations": conversations.live_count(),
             "max_conversations": MAX_CONVERSATIONS,
         }
+
+    def _reject_if_writable_active() -> None:
+        """层③ 时序互斥（决策P4.5-10）：可写 turn 活跃期间宿主写端点一律 `423 Locked`。
+
+        兜「shell `curl http://127.0.0.1/api/raw` 让宿主替 agent 写 `raw/`」的旁路——curl 在可写
+        turn 内到达即被拒、根本不入队。用 `423`（非 `409`）以与 `/api/raw` 既有「不覆盖冲突」`409`
+        区分。read-only turn 不计数、不触发。
+        """
+        if write_gate.active_writable_turns > 0:
+            raise HTTPException(
+                status_code=423, detail="可写会话进行中，请稍后重试。"
+            )
 
     # 浏览（读）：阻塞的文件扫描/渲染一律经 anyio.to_thread 卸离事件循环（决策P4-2）。
     @app.get("/api/pages")
@@ -356,6 +398,7 @@ def create_app(
     # 投喂自身极快，但会**排在队列前序写作业之后**（如在飞 ingest），故响应可能等数十秒。
     @app.post("/api/raw")
     async def write_raw(body: RawBody) -> dict:
+        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
         if not body.content.strip():  # 空正文
             raise HTTPException(status_code=400, detail="正文不能为空。")
         payload = body.content.encode("utf-8")
@@ -414,12 +457,29 @@ def create_app(
     async def graph(json_only: bool = False) -> RedirectResponse:
         # 用无打印的 build_and_write_graph（非 graph_entrypoint）：worker 的进程级 redirect_stdout
         # 期间不引入并发打印者（决策P4-5 红线）。写失败 → 500，别 302 到缺失文件让用户撞 404。
+        #
+        # /graph 是同步写 graph/ 的宿主写者（决策P4.5-6）：纳入 write_lock 与 ingest/heal/可写 turn
+        # 串行（防并发写 graph/ 互踩/截断、防读到撕裂的 wiki/ 出残图）；**异步**取阻塞锁、绝不在
+        # 事件循环线程直接 acquire。
+        # 同样受层③ 423（评审 P1，自死锁修复）：可写 turn 全程持 write_lock，若 agent 在 turn 内
+        # `curl http://127.0.0.1/graph`，本端点会去抢**同一把不可重入** write_lock —— 而 turn 又
+        # 在等这条 HTTP 响应，互相空等、write_lock 永不释放、后续一切写永久卡死。故进锁**前**先按
+        # 层③ 拒（与 /api/raw·ingest·heal 同口径）：可写 turn 活跃 → 423、根本不抢锁，从源头断死锁。
+        _reject_if_writable_active()
+        # held 在 try **之前**声明、acquire 在 try **之内**：客户端断开取消落在 acquire 的 await 处
+        # 时（run_sync 默认 abandon_on_cancel=False、锁已到手），finally 仍据 held[0] 释放，绝不泄漏
+        # 进程级写锁（评审 P1，与 Conversation.turn 同一守法）。
+        held = [False]
         try:
+            await anyio.to_thread.run_sync(write_gate.acquire_thunk(held))
             await anyio.to_thread.run_sync(
                 functools.partial(build_and_write_graph, root, json_only=json_only)
             )
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"graph 构建失败：{exc}") from exc
+        finally:
+            if held[0]:
+                write_gate.write_lock.release()
         target = "/graph/graph.json" if json_only else "/graph/graph.html"
         return RedirectResponse(url=target, status_code=302)
 
@@ -439,6 +499,7 @@ def create_app(
     # 写（唯一写入口 = ingest）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
     @app.post("/api/ingest")
     async def ingest(body: IngestBody) -> dict:
+        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
         # target 不在此预校验：run_ingest 内部 _resolve_raw_target 是单一归口（须在 raw/、是 .md、
         # 存在），Web 不旁路 P2 入口校验；非法 target → 作业以 EXIT_USAGE 完成，轮询可见。
         def _job() -> int:
@@ -465,6 +526,8 @@ def create_app(
     # worklist 由作业**服务端重算**（不收 target 列表，决策P4.3-3）；走子进程 runner、过 P2 写门禁。
     @app.post("/api/heal")
     async def heal(body: HealBody) -> dict:
+        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
+
         def _job() -> HealRun:  # 返回结构化结果（非 int）→ worker 走鸭子分流存 job.result
             run = run_heal_result(
                 root=root,
@@ -504,7 +567,17 @@ def create_app(
     # 问答 / 多轮会话（只读嵌入，决策P4-8）：POST 直接返回 text/event-stream，前端 fetch 读 body。
     @app.post("/api/chat")
     async def chat(body: ChatBody) -> StreamingResponse:
+        # 层③ 自死锁修复（评审 P1，与 /graph·/mode·/undo 同口径）：--mode workspace-write 下可写 turn
+        # 全程持 write_lock + 自身 conv.lock，若 agent 在 turn 内 `curl POST /api/chat` 起**嵌套可写**
+        # turn，新 turn 会等同一把 write_lock —— 外层又在等这条 HTTP 响应，互相空等、锁永不释放、后续
+        # 写全卡死。故起 turn 前先按层③ 拒。
+        # **仅拦「会写的」turn**（评审 P2）：只读 turn 不取 write_lock、跑在各自 conv.lock 上，与活跃写者
+        # 无锁交集、不会死锁 —— 故纯只读 Web / 默认只读姿态 / 切到别的只读会话续聊一律放行，不误伤。
+        # 判定基 = 本 turn 将以何姿态跑：新会话用进程默认姿态（在 create **前**判，免建一个随即被拒的
+        # 空会话白占 MAX_CONVERSATIONS）；已存在会话用其当前姿态（决策P4.5-10）。
         if body.conversation_id is None:
+            if conversations.default_mode == "workspace-write":
+                _reject_if_writable_active()
             try:
                 conv = await anyio.to_thread.run_sync(
                     functools.partial(conversations.create, body.model)
@@ -527,6 +600,10 @@ def create_app(
                     raise HTTPException(
                         status_code=404, detail=f"未知会话：{body.conversation_id}"
                     )
+            # 已知会话：仅当它会跑可写 turn（取 write_lock / 自锁 conv.lock）才按层③ 拒（评审 P1/P2）。
+            # 恢复的冷会话开局 = 进程默认姿态，故 conv.mode 已反映本 turn 将以何姿态跑。
+            if conv.mode == "workspace-write":
+                _reject_if_writable_active()
 
         queue: asyncio.Queue[tuple[str, object] | None] = asyncio.Queue()
 
@@ -541,6 +618,10 @@ def create_app(
             # 进锁即兑现；令牌仍在锁内安装，故并发同会话时 stop 只打活跃轮、不误伤排队轮。
             conv.begin_turn()
             emit("start", {"conversation_id": conv.id})
+            # 可写 turn 收尾元数据归口（P4.5 §7）：turn 在 finally 填本 dict（check / immutable_mutated
+            # / undo），由本协程独占——无论 turn 返回还是抛错都读自己这只 dict，杜绝跨轮读串。
+            # read-only turn 保持空，done/error 帧不带这些字段。
+            meta: dict = {}
             try:
                 # shield：客户端断开会取消本任务，但**不可**靠 asyncio 取消打断 arun——那只转发
                 # token.cancel() 便立刻 re-raise、不等线程收尾，于是 lock 会在后台 executor 线程仍
@@ -548,10 +629,10 @@ def create_app(
                 # turn 跑到自然结束（lock 全程持有），杜绝该竞态；代价是断开后该轮仍跑完（本地单
                 # 用户、轮次有界，可接受）。**主动停止**走另一条干净路径：停止端点经 conv 上的取消
                 # 令牌打断，arun 持锁等线程真正收尾才抛 AgentCancelledError（见下 except）。
-                answer = await asyncio.shield(conv.turn(body.message, emit))
+                answer = await asyncio.shield(conv.turn(body.message, emit, meta))
                 # 答案已完整流出；再渲染安全 markdown HTML（[[页]] → 站内链接）作收尾。渲染失败
                 # **不能**丢掉这条成功答案：省略 answer_html，前端回退用纯文本 answer 上屏。
-                payload: dict = {"answer": answer, "conversation_id": conv.id}
+                payload: dict = {"answer": answer, "conversation_id": conv.id, **meta}
                 try:
                     payload["answer_html"] = await anyio.to_thread.run_sync(
                         render_markdown, answer, root / "wiki"
@@ -561,12 +642,14 @@ def create_app(
                 emit("done", payload)
             except AgentCancelledError:
                 # 用户按停止：已流出的 token 已在前端气泡，发 stopped 收尾（这不是错误，不转 error）。
-                emit("stopped", {"conversation_id": conv.id})
+                # 可写 turn 即便被停，写已发生、层②已还原、check/undo 已落 meta，照样带上（§7）。
+                emit("stopped", {"conversation_id": conv.id, **meta})
             except asyncio.CancelledError:
                 raise  # 客户端已断开，流没了，不再 emit
             except Exception as exc:  # noqa: BLE001 — 任何失败都转 error 事件，不泄 traceback 到流
                 # 带上 conversation_id：首轮失败时前端据此记住已建会话，避免下次另起新会话堆积。
-                emit("error", {"message": f"{type(exc).__name__}: {exc}", "conversation_id": conv.id})
+                # error 帧同样带 meta（可写 turn 抛错前的写已被 §3 收尾捕获，§7）。
+                emit("error", {"message": f"{type(exc).__name__}: {exc}", "conversation_id": conv.id, **meta})
             finally:
                 conv.end_turn()  # 与 begin_turn 配对：本轮收尾，清在飞标记/未兑现待停（codex 竞态修复）
                 queue.put_nowait(None)  # 哨兵：通知流结束
@@ -609,6 +692,70 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
         # request_stop 仅置位令牌（线程安全、不阻塞），无在飞 turn 时返回 False。
         return {"stopped": conv.request_stop()}
+
+    # 运行时翻姿态（P4.5 决策P4.5-5）：read-only ↔ workspace-write 真切换（只翻两点置位、不重建
+    # agent、不动层① wrapper）。持会话锁与在飞 turn 串行。404 未知 id；409 冷会话（未激活、无 live
+    # agent 可翻）；422 非法 mode（含 full-access/plan/full）。逻辑落 chat.py，本端点只分流（决策P4.5-9）。
+    @app.post("/api/chat/{conversation_id}/mode")
+    async def chat_mode(conversation_id: str, body: ModeBody) -> dict:
+        conv = conversations.get(conversation_id)
+        if conv is None:
+            # 冷会话（盘上有、内存无 live agent）→ 409「先续聊一轮恢复再切」；纯未知 → 404。
+            cold = await anyio.to_thread.run_sync(conversations.cold_info, conversation_id)
+            if cold is not None:
+                raise HTTPException(
+                    status_code=409, detail="会话未激活，先续聊一轮恢复再切姿态。"
+                )
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        # 层③ 自死锁修复（评审 P2，与 /graph 同口径）：可写 turn 全程持 conv.lock，若 agent 在
+        # turn 内 `curl /api/chat/{id}/mode`，本端点会等同一把 conv.lock —— 而 turn 又在等这条 HTTP
+        # 响应，互相空等、turn 永不收尾、计数/写锁永不释放。故取 conv.lock **前**先按层③ 拒。
+        _reject_if_writable_active()
+        try:
+            async with conv.lock:  # 与在飞 turn 串行（持锁翻两点置位）
+                new_mode = conv.set_mode(body.mode)
+        except ValueError as exc:  # 非法 mode（full-access/plan/未知）→ 422
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"mode": new_mode}
+
+    # 撤销本轮写（P4.5 决策P4.5-4/13）：乐观回放最近可写 turn 的写日志（wiki/ + SCHEMA.md）。
+    # 统一锁序 conversation.lock → write_lock（与可写 turn 同序、绝不反序，否则交叉死锁，评审 High）；
+    # 逐文件乐观校验当前哈希 == 本 turn 写后哈希，相等才还原、否则跳过并计入 conflicts。某文件冲突 →
+    # 整体 409（前端标红、其余仍还原）；全清 → 200。token 失效 / 无可撤销 → 409。404 未知/冷会话。
+    @app.post("/api/chat/{conversation_id}/undo")
+    async def chat_undo(conversation_id: str, body: UndoBody) -> dict:
+        conv = conversations.get(conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        # 层③ 自死锁修复（评审 P2，与 /graph·/mode 同口径）：可写 turn 全程持 conv.lock（同会话）
+        # 并持 write_lock（任意会话），若 agent 在 turn 内 `curl /undo`（即便 token 瞎填），本端点会
+        # 等这两把锁 —— 而 turn 又在等这条 HTTP 响应，互相空等、turn 永不收尾、锁永不释放。故取锁
+        # **前**先按层③ 拒。合法撤销发生在 turn 收尾后（计数归 0），不受影响。
+        _reject_if_writable_active()
+        async with conv.lock:  # 锁序①：会话锁（与同会话在飞 turn 串行，护 undo 日志不竞态）
+            # 取 write_lock **前**先廉价判可撤：陈旧/空 token 不必白排在在飞 ingest 之后再回 409
+            # （评审 BUG 4）。判定与 apply_undo 间持 conv.lock，token 状态稳定。
+            if not conv.can_undo(body.token):
+                raise HTTPException(
+                    status_code=409, detail="撤销已失效（无本轮写日志或已有后续写）。"
+                )
+            # 锁序②：进程 write_lock（撤销是写、须单写者串行）。异步取阻塞锁、不堵事件循环。
+            # held 在 try 前声明、acquire 在 try 内：取消落在 acquire 的 await 处也据 held[0] 释放，
+            # 不泄漏进程级写锁（评审 P1，与 /graph、Conversation.turn 同一守法）。
+            held = [False]
+            try:
+                await anyio.to_thread.run_sync(write_gate.acquire_thunk(held))
+                result = await anyio.to_thread.run_sync(conv.apply_undo, body.token)
+            finally:
+                if held[0]:
+                    write_gate.write_lock.release()
+        if result is None:  # token 失效 / 无可撤销 → 409（理论上已被上面短路，留作纵深防御）
+            raise HTTPException(
+                status_code=409, detail="撤销已失效（无本轮写日志或已有后续写）。"
+            )
+        if result["conflicts"]:  # 部分文件已被后续写改动 → 409（前端标红，其余仍还原）
+            return JSONResponse(status_code=409, content=result)
+        return result
 
     @app.get("/api/conversations")
     async def list_conversations() -> dict:
