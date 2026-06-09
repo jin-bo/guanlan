@@ -51,6 +51,28 @@ body {
 }
 .actions button:hover { background: var(--lan-ripple); border-color: var(--lan-ripple); }
 
+/* 姿态徽标（P4.5）：只读=低调；可写=醒目橙提示 Agent 可写。 */
+.mode-badge {
+  display: inline-block; padding: .25rem .6rem; margin-right: .5rem;
+  border-radius: 999px; font-size: .78rem; font-weight: 600; letter-spacing: .02em;
+  background: rgba(255,255,255,.12); color: var(--lan-foam);
+  border: 1px solid rgba(255,255,255,.3);
+}
+.mode-badge.writable {
+  background: #b35900; color: #fff; border-color: #d98a3a;
+}
+
+/* 可写 turn 收尾的三类回执（P4.5 §8）：复用 note 气泡底，加按钮 / 告警 / 违规样式。 */
+.msg.note.receipt-alert { border-color: #e0a800; background: #fff8e1; color: #6b4e00; }
+.msg.note.receipt-bad { border-color: #f3c4c4; }
+.msg.note .violation { color: var(--lan-ink-soft); font-size: .82rem; padding-left: .4rem; }
+.msg.note .receipt-btn {
+  margin-top: .4rem; background: var(--lan-ripple); color: #fff; border: 0;
+  border-radius: 4px; padding: .25rem .8rem; cursor: pointer; font-size: .82rem;
+}
+.msg.note .receipt-btn:hover { background: var(--lan-deep); }
+.msg.note .receipt-btn:disabled { opacity: .5; cursor: default; }
+
 /* ── 主体：grid（chat │split│ wiki / input 满宽） ──
    右栏宽度由 --wiki-w 驱动（默认 26rem），中间一条可拖动的分隔条改写它；JS 持久化到 localStorage。 */
 .layout {

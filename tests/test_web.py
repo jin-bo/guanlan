@@ -894,6 +894,9 @@ class _FakeAgent:
         self._model = kwargs.get("model")  # 省略 --model 时无 model 键 → None → get_current_model 兜底
         self._plan_mode = False  # _context_stats 读它传给 to_openai_format（镜像真 agent）
         self.closed = False
+        # P4.5：可写 turn 测试用——arun 内（executor 线程，镜像真 turn 写盘时机）跑此回调，
+        # 经注入的 PolicyFileSystem（kwargs["filesystem"]）做结构化写、或直接写盘模拟 shell 旁路。
+        self.action = None
 
     def get_current_model(self) -> str:
         return self._model or "fake-model"
@@ -911,6 +914,8 @@ class _FakeAgent:
         def work() -> None:  # 在线程池线程发事件（镜像真 arun）
             for ch in answer:
                 self.transport.emit(AgentEvent(EventType.LLM_TEXT, {"chunk": ch}))
+            if self.action is not None:  # P4.5：可写 turn 在写盘时机执行注入的写动作
+                self.action(self)
 
         await loop.run_in_executor(None, work)
         self.messages.append({"role": "assistant", "content": answer})
@@ -1105,6 +1110,26 @@ def test_chat_info_tools_blocked_static(chat_client) -> None:
     assert blocked["read_file"] is False and blocked["write_file"] is True  # 元数据路
     assert blocked["replace"] is True and blocked["search_file_content"] is False  # 静态名路
     assert blocked["mystery_tool"] == "unknown"  # 未识别 → unknown（非 True/False）
+
+
+def test_chat_info_tools_unblocked_in_workspace_write(chat_client) -> None:
+    """切到 workspace-write 后 /tools 的 blocked 一律 False（评审 P2）：可写姿态下
+    tool_runner.readonly_mode=False、无工具被分类拦截，自省须如实指示写能力、不再标灰写/shell。"""
+    client, _ = chat_client
+    _, done, _ = _chat(client, "问")
+    cid = done["conversation_id"]
+    # read-only（默认）下写工具仍被拦
+    assert {t["name"]: t["blocked"] for t in
+            client.get(f"/api/chat/{cid}/info").json()["tools"]}["write_file"] is True
+    # 翻到 workspace-write → 全部 False（含 write/replace/未知）
+    assert client.post(f"/api/chat/{cid}/mode", json={"mode": "workspace-write"}).status_code == 200
+    blocked = {t["name"]: t["blocked"] for t in
+               client.get(f"/api/chat/{cid}/info").json()["tools"]}
+    assert all(v is False for v in blocked.values()), blocked
+    # 翻回 read-only → 恢复逐项判定
+    assert client.post(f"/api/chat/{cid}/mode", json={"mode": "read-only"}).status_code == 200
+    assert {t["name"]: t["blocked"] for t in
+            client.get(f"/api/chat/{cid}/info").json()["tools"]}["write_file"] is True
 
 
 def test_chat_info_unknown_404(chat_client) -> None:
@@ -2160,3 +2185,672 @@ def test_heal_no_sse_no_path_param(client) -> None:
     assert client.get("/api/heal/1/events").status_code in (404, 405)
     # POST /api/heal 不接受 path/name（只 limit/min_refs/model）：传非法 limit 才 422，path 被忽略。
     assert client.post("/api/heal", json={"limit": 0}).status_code == 422
+
+
+# ═══════════════════════ P4.5 可写 Web 工作会话（C0 + a/b/c）═══════════════════════
+#
+# 见 docs/P4.5-可写Web工作会话.md §10。可写/守卫/翻姿态用注入 fake/轻量 agent，不打真实 LLM；
+# P2 的 gate/check 行为已由 test_gate/test_check 证过，这里只验「可写 turn 正确复用这些原语」。
+
+from pathlib import Path  # noqa: E402
+
+from agentao.capabilities.filesystem import LocalFileSystem  # noqa: E402
+
+from guanlan.web.jobs import JobQueue, WriteGate  # noqa: E402
+from guanlan.web.policy_fs import (  # noqa: E402
+    PolicyFileSystem,
+    _Rule,
+    hash_file,
+    make_policy_fs,
+    restore_agentao,
+    snapshot_agentao,
+)
+
+
+# ───────────────────────── 层①：PolicyFileSystem wrapper（决策P4.5-2/12）─────────────
+
+def test_policy_fs_rejects_immutable_allows_writable(kb) -> None:
+    fs = make_policy_fs(kb)
+    for rel in ["raw/x.md", "raw/sub/y.md", "AGENTAO.md"]:
+        with pytest.raises(PermissionError):
+            fs.write_text(kb / rel, "x")
+    # SCHEMA.md **不在** immutable 集（决策P4.5-12）+ wiki/ + workspace/ → 放行（真落盘）。
+    fs.write_text(kb / "SCHEMA.md", "# new schema\n")
+    assert (kb / "SCHEMA.md").read_text() == "# new schema\n"
+    fs.write_text(kb / "wiki" / "entities" / "Foo.md", "foo")
+    assert (kb / "wiki" / "entities" / "Foo.md").read_text() == "foo"
+    fs.write_text(kb / "workspace" / "u" / "a.md", "a")
+    assert (kb / "workspace" / "u" / "a.md").read_text() == "a"
+
+
+def test_policy_fs_rejects_out_of_kb(kb) -> None:
+    fs = make_policy_fs(kb)
+    with pytest.raises(PermissionError):
+        fs.write_text("/tmp/evil.md", "x")
+    with pytest.raises(PermissionError):  # kb 根之外的兄弟路径（防御性 kb 包含，不委托上游）
+        fs.write_text(kb.parent / "outside.md", "x")
+
+
+def test_policy_fs_blocks_softlink_clobber(kb) -> None:
+    """wiki/link → raw/secret 软链 clobber：叶解引用后命中 immutable，拒（不 fail-open）。"""
+    secret = kb / "raw" / "secret.md"
+    secret.write_text("s")
+    link = kb / "wiki" / "link.md"
+    link.symlink_to(secret)
+    fs = make_policy_fs(kb)
+    with pytest.raises(PermissionError):
+        fs.write_text(str(link), "clobber")
+    assert secret.read_text() == "s"  # 未被写穿
+
+
+def test_policy_fs_coord_consistency_relative_kb(kb, monkeypatch) -> None:
+    """kb 传相对路径：immutable 集须 __init__ resolve 到同坐标系，否则 fail-open（评审 Medium）。"""
+    monkeypatch.chdir(kb.parent)
+    rel_kb = Path(kb.name)
+    fs = PolicyFileSystem(
+        LocalFileSystem(), rel_kb, _Rule(immutable=(rel_kb / "raw", rel_kb / "AGENTAO.md"))
+    )
+    with pytest.raises(PermissionError):  # 绝对目标 vs（已规范化的）相对 immutable → 仍拒
+        fs.write_text(kb / "raw" / "x.md", "x")
+
+
+def test_policy_fs_coord_consistency_symlink_kb(kb) -> None:
+    link_kb = kb.parent / "linked_kb"
+    link_kb.symlink_to(kb)
+    fs = make_policy_fs(link_kb)
+    with pytest.raises(PermissionError):
+        fs.write_text(str(link_kb / "raw" / "x.md"), "x")
+
+
+def test_policy_fs_coord_consistency_symlink_raw(kb) -> None:
+    real_raw = kb.parent / "real_raw"
+    real_raw.mkdir()
+    (kb / "raw").rmdir()
+    (kb / "raw").symlink_to(real_raw)
+    fs = make_policy_fs(kb)
+    with pytest.raises(PermissionError):
+        fs.write_text(kb / "raw" / "x.md", "x")
+
+
+def test_policy_fs_passthrough_reads(kb) -> None:
+    fs = make_policy_fs(kb)
+    assert fs.exists(kb / "AGENTAO.md") is True
+    assert fs.read_bytes(kb / "AGENTAO.md") == (kb / "AGENTAO.md").read_bytes()
+
+
+def test_policy_fs_journal_wiki_and_schema_only(kb) -> None:
+    """写日志只记 wiki/ + SCHEMA.md（撤销范围）；workspace/ 不入；同 path 多写保首条写前字节。"""
+    fs = make_policy_fs(kb)
+    fs.begin_journal()
+    fs.write_text(kb / "wiki" / "entities" / "A.md", "a1")
+    fs.write_text(kb / "wiki" / "entities" / "A.md", "a2")  # 二次写同 path
+    fs.write_text(kb / "SCHEMA.md", "newschema")
+    fs.write_text(kb / "workspace" / "w.md", "w")  # 不在撤销范围
+    journal = fs.end_journal()
+    assert {p.name for p in journal} == {"A.md", "SCHEMA.md"}
+    a_path = (kb / "wiki" / "entities" / "A.md").resolve()
+    before, after = journal[a_path]
+    assert before is None  # 首次写时文件不存在
+    assert after == hash_file(a_path)  # 写后哈希 = 末次内容（a2）
+    s_path = (kb / "SCHEMA.md").resolve()
+    s_before, _ = journal[s_path]
+    assert s_before == b"# SCHEMA\n"  # SCHEMA 写前原字节
+
+
+# ───────────────────────── 层②：AGENTAO.md 快照 + 自动还原（决策P4.5-3/c）─────────────
+
+def test_snapshot_restore_agentao_content(kb) -> None:
+    before = snapshot_agentao(kb)
+    assert before.existed and before.data is not None  # present 三态
+    (kb / "AGENTAO.md").write_text("HACKED")  # shell 直写旁路
+    assert restore_agentao(kb, before) == "AGENTAO.md"
+    assert (kb / "AGENTAO.md").read_bytes() == before.data
+    assert restore_agentao(kb, snapshot_agentao(kb)) is None  # 干净 → 无误判
+
+
+def test_restore_agentao_recreates_deleted(kb) -> None:
+    before = snapshot_agentao(kb)
+    (kb / "AGENTAO.md").unlink()
+    assert restore_agentao(kb, before) == "AGENTAO.md"
+    assert (kb / "AGENTAO.md").read_bytes() == before.data
+
+
+def test_restore_agentao_removes_when_snapshot_absent(kb) -> None:
+    (kb / "AGENTAO.md").unlink()
+    before = snapshot_agentao(kb)  # absent：existed=False
+    assert not before.existed
+    (kb / "AGENTAO.md").write_text("appeared")
+    assert restore_agentao(kb, before) == "AGENTAO.md"
+    assert not (kb / "AGENTAO.md").exists()
+
+
+def test_restore_agentao_symlink_replacement_no_writethrough(kb) -> None:
+    """被换成 symlink → 先清替身再原子写回普通文件，**绝不顺 symlink 写穿**（评审 High）。"""
+    before = snapshot_agentao(kb)
+    target = kb.parent / "evil_target.md"
+    target.write_text("ORIG")
+    (kb / "AGENTAO.md").unlink()
+    (kb / "AGENTAO.md").symlink_to(target)
+    assert restore_agentao(kb, before) == "AGENTAO.md"
+    assert not (kb / "AGENTAO.md").is_symlink()
+    assert (kb / "AGENTAO.md").read_bytes() == before.data
+    assert target.read_text() == "ORIG"  # symlink 目标未被写穿
+
+
+def test_restore_agentao_dir_replacement(kb) -> None:
+    before = snapshot_agentao(kb)
+    (kb / "AGENTAO.md").unlink()
+    (kb / "AGENTAO.md").mkdir()
+    (kb / "AGENTAO.md" / "junk").write_text("j")
+    assert restore_agentao(kb, before) == "AGENTAO.md"
+    assert (kb / "AGENTAO.md").is_file()
+    assert (kb / "AGENTAO.md").read_bytes() == before.data
+
+
+def test_snapshot_agentao_unreadable_distinct_from_absent(kb) -> None:
+    """存在但不可读 → existed=True/data=None（区别于 absent 的 existed=False，评审 P2）。"""
+    path = kb / "AGENTAO.md"
+    path.chmod(0o000)  # 收读权限，模拟起服后被 chmod
+    try:
+        snap = snapshot_agentao(path.parent)
+    finally:
+        path.chmod(0o644)  # 还权限，免污染后续/清理
+    assert snap.existed and snap.data is None  # unreadable，不是 absent
+
+
+def test_restore_agentao_unreadable_preserves_file(kb, monkeypatch) -> None:
+    """快照不可读时收尾**绝不删**现存普通文件，且上抛 AgentaoRestoreError（修复 P2 数据丢失）。"""
+    import guanlan.web.policy_fs as pfs
+
+    path = kb / "AGENTAO.md"
+    original = path.read_bytes()
+    # 构造 unreadable 快照（不真改文件权限——直接造三态值，跨平台稳）。
+    snap = pfs.AgentaoSnapshot(existed=True, data=None)
+    with pytest.raises(pfs.AgentaoRestoreError):
+        restore_agentao(kb, snap)
+    assert path.is_file()  # 未被误删
+    assert path.read_bytes() == original  # 内容原样保留
+
+
+def test_restore_agentao_unreadable_cleans_symlink_replacement(kb) -> None:
+    """快照不可读但被换成 symlink → 仍清替身（安全），再抛 AgentaoRestoreError（不顺 symlink 写穿）。"""
+    import guanlan.web.policy_fs as pfs
+
+    target = kb.parent / "evil_unreadable_target.md"
+    target.write_text("ORIG")
+    (kb / "AGENTAO.md").unlink()
+    (kb / "AGENTAO.md").symlink_to(target)
+    snap = pfs.AgentaoSnapshot(existed=True, data=None)
+    with pytest.raises(pfs.AgentaoRestoreError):
+        restore_agentao(kb, snap)
+    assert not (kb / "AGENTAO.md").exists()  # symlink 替身已清
+    assert target.read_text() == "ORIG"  # 目标未被写穿/删
+
+
+# ───────────────────────── C0：层①地基（门槛闸，决策P4.5-2）──────────────────────────
+
+def test_c0_builtin_write_routes_through_policy_fs(kb) -> None:
+    """内建 write_file 终经 self.filesystem.write_text → PolicyFileSystem 真被命中（C0 ②）。"""
+    from agentao.tools.file_ops import WriteFileTool
+
+    fs = make_policy_fs(kb)
+    tool = WriteFileTool()
+    tool.working_directory = kb
+    tool.filesystem = fs
+    out = tool.execute(file_path=str(kb / "wiki" / "entities" / "X.md"), content="hi")
+    assert "Successfully" in out
+    assert (kb / "wiki" / "entities" / "X.md").read_text() == "hi"  # 经 wrapper 落盘
+    # immutable：wrapper 拒 → 工具回错误串、文件未建。
+    assert "Error" in tool.execute(file_path=str(kb / "raw" / "x.md"), content="bad")
+    assert not (kb / "raw" / "x.md").exists()
+    assert "Error" in tool.execute(file_path=str(kb / "AGENTAO.md"), content="bad")
+    assert (kb / "AGENTAO.md").read_text() == "# AGENTAO\n"
+
+
+def test_c0_filesystem_injected_into_agent(chat_client) -> None:
+    """build_from_environment 收到 filesystem= 且为 PolicyFileSystem（C0 ①透传）。"""
+    client, captured = chat_client
+    _chat(client, "问")
+    fs = captured["agents"][0].kwargs["filesystem"]
+    assert isinstance(fs, PolicyFileSystem)
+
+
+# ───────────────────────── /mode 翻姿态（决策P4.5-1/5）────────────────────────────────
+
+def test_mode_switch_flips_two_points_no_rebuild(chat_client) -> None:
+    client, captured = chat_client
+    _, done, _ = _chat(client, "问")
+    cid = done["conversation_id"]
+    agent = captured["agents"][0]
+    r = client.post(f"/api/chat/{cid}/mode", json={"mode": "workspace-write"})
+    assert r.status_code == 200 and r.json()["mode"] == "workspace-write"
+    assert any(
+        c[0] == "set_mode" and c[1] == (PermissionMode.WORKSPACE_WRITE,)
+        for c in agent.permission_engine.calls
+    )
+    assert any(
+        c[0] == "set_readonly_mode" and c[1] == (False,) for c in agent.tool_runner.calls
+    )
+    assert client.get(f"/api/chat/{cid}/info").json()["mode"] == "workspace-write"
+    assert len(captured["agents"]) == 1  # 同一 agent 对象、未重建
+    assert client.post(f"/api/chat/{cid}/mode", json={"mode": "read-only"}).json()["mode"] == "read-only"
+
+
+@pytest.mark.parametrize("bad", ["full-access", "plan", "full", "FULL", "nonsense", ""])
+def test_mode_illegal_rejected_422(chat_client, bad) -> None:
+    client, captured = chat_client
+    _, done, _ = _chat(client, "问")
+    cid = done["conversation_id"]
+    assert client.post(f"/api/chat/{cid}/mode", json={"mode": bad}).status_code == 422
+    agent = captured["agents"][0]
+    assert not any(
+        c[0] == "set_mode" and c[1] and c[1][0] in (PermissionMode.FULL_ACCESS, PermissionMode.PLAN)
+        for c in agent.permission_engine.calls
+    )
+
+
+def test_mode_unknown_404(chat_client) -> None:
+    client, _ = chat_client
+    assert client.post(f"/api/chat/{uuid.uuid4()}/mode", json={"mode": "read-only"}).status_code == 404
+    assert client.post("/api/chat/not-a-uuid/mode", json={"mode": "read-only"}).status_code == 404
+
+
+def test_mode_cold_session_409(chat_env, kb) -> None:
+    kb, _ = chat_env
+    cold = str(uuid.uuid4())
+    _write_foreign_session(kb, cold, active_skills=[SKILL_NAME])
+    with TestClient(create_app(kb)) as client:
+        assert client.post(f"/api/chat/{cold}/mode", json={"mode": "workspace-write"}).status_code == 409
+
+
+def test_mode_subject_to_423_during_writable_turn(chat_client) -> None:
+    """可写 turn 活跃时 /mode 必 423（评审 P2 自死锁修复）：agent 在持 conv.lock 的 turn 内
+    `curl /mode` 不能去等同一把 conv.lock，否则互相空等、turn 永不收尾、锁永不释放。"""
+    client, _ = chat_client
+    _, done, _ = _chat(client, "问")
+    cid = done["conversation_id"]
+    client.app.state.write_gate.enter_writable()
+    try:
+        r = client.post(f"/api/chat/{cid}/mode", json={"mode": "workspace-write"})
+        assert r.status_code == 423  # 可写 turn 活跃 → 拒、不取锁、断死锁
+    finally:
+        client.app.state.write_gate.exit_writable()
+    # turn 收尾后恢复
+    assert client.post(f"/api/chat/{cid}/mode", json={"mode": "read-only"}).status_code == 200
+
+
+def test_info_reports_process_default_mode(chat_env, kb) -> None:
+    kb, _ = chat_env
+    with TestClient(create_app(kb, mode="workspace-write")) as client:
+        assert client.get("/api/info").json()["mode"] == "workspace-write"
+
+
+# ───────────────────────── 层③：宿主写端点时序互斥（决策P4.5-10）────────────────────
+
+def test_layer3_423_when_writable_active(kb) -> None:
+    app = create_app(kb)
+    with TestClient(app) as client:
+        app.state.write_gate.enter_writable()
+        try:
+            assert client.post("/api/raw", json={"name": "a", "content": "x\n"}).status_code == 423
+            assert client.post("/api/ingest", json={"target": "raw/foo.md"}).status_code == 423
+            assert client.post("/api/heal", json={}).status_code == 423
+        finally:
+            app.state.write_gate.exit_writable()
+        # 计数归 0 → 端点恢复（投喂 200）。
+        assert client.post("/api/raw", json={"name": "a", "content": "x\n"}).status_code == 200
+
+
+def test_layer3_423_distinct_from_409_exists(kb) -> None:
+    """423(锁定) 优先于 409(不覆盖)，二者可区分（决策P4.5-10）。"""
+    app = create_app(kb)
+    with TestClient(app) as client:
+        (kb / "raw" / "a.md").write_text("existing")
+        app.state.write_gate.enter_writable()
+        try:
+            assert client.post("/api/raw", json={"name": "a", "content": "x\n"}).status_code == 423
+        finally:
+            app.state.write_gate.exit_writable()
+        assert client.post("/api/raw", json={"name": "a", "content": "x\n"}).status_code == 409
+
+
+def test_graph_subject_to_423_during_writable_turn(kb) -> None:
+    """可写 turn 活跃时 /graph 必 423（评审 P1 自死锁修复）：agent 在持 write_lock 的 turn 内
+    `curl /graph` 不能去抢同一把不可重入锁，否则互相空等、write_lock 永不释放、后续写全卡死。"""
+    app = create_app(kb)
+    with TestClient(app) as client:
+        assert client.get("/graph", follow_redirects=False).status_code == 302  # 无活跃可写 → 照常
+        app.state.write_gate.enter_writable()
+        try:
+            r = client.get("/graph", follow_redirects=False)
+            assert r.status_code == 423  # 可写 turn 活跃 → 拒、不抢锁、断死锁
+        finally:
+            app.state.write_gate.exit_writable()
+        # turn 收尾后恢复
+        assert client.get("/graph", follow_redirects=False).status_code == 302
+
+
+# ───────────────────────── 单写者并发：两锁 + 报告 best-effort（决策P4.5-6）──────────
+
+def test_write_gate_counter() -> None:
+    g = WriteGate()
+    assert g.active_writable_turns == 0
+    g.enter_writable()
+    g.enter_writable()
+    assert g.active_writable_turns == 2
+    g.exit_writable()
+    assert g.active_writable_turns == 1
+    g.exit_writable()
+    g.exit_writable()  # 永不低于 0
+    assert g.active_writable_turns == 0
+
+
+def test_jobqueue_serializes_under_write_lock() -> None:
+    """worker 跑 fn() 须持 write_lock：锁被外部持有时作业不完成，释放后才完成。"""
+    lock = threading.Lock()
+    jq = JobQueue(write_lock=lock)
+    lock.acquire()
+    done: list[int] = []
+    jid = jq.enqueue("t", lambda: (done.append(1), 0)[1])
+    job = jq.get_job(jid)
+    assert not job.done_event.wait(0.3)  # 锁被持 → 卡住
+    assert done == []
+    lock.release()
+    assert job.done_event.wait(2.0)  # 释放后完成
+    assert done == [1]
+
+
+def test_jobqueue_lock_separate_from_job_table() -> None:
+    """write_lock 被持时 _lock 仍即时——enqueue/get_job 不被长写卡死（两锁分离）。"""
+    lock = threading.Lock()
+    jq = JobQueue(write_lock=lock)
+    lock.acquire()
+    try:
+        jid = jq.enqueue("t", lambda: 0)  # 入队即返回（不被 write_lock 卡）
+        assert jq.get_job(jid) is not None  # 查表即时返回
+    finally:
+        lock.release()
+
+
+def test_report_endpoints_not_blocked_by_write_lock(kb) -> None:
+    """报告端点 best-effort 读、不取 write_lock：长写持锁时仍即时 200（决策P4.5-6，评审 Medium）。"""
+    app = create_app(kb)
+    with TestClient(app) as client:
+        app.state.write_gate.write_lock.acquire()
+        try:
+            for name in ("check", "health", "lint"):
+                assert client.get(f"/api/report/{name}").status_code == 200
+        finally:
+            app.state.write_gate.write_lock.release()
+
+
+def test_report_check_tolerates_bad_frontmatter(client, kb) -> None:
+    """报告对坏 frontmatter 的瞬态页不崩、整体仍 200（非原子写中间态，filesystem.py:117）。"""
+    (kb / "wiki" / "entities").mkdir(parents=True, exist_ok=True)
+    (kb / "wiki" / "entities" / "Bad.md").write_text("not valid frontmatter at all\n")
+    assert client.get("/api/report/check").status_code == 200
+
+
+# ───────────────────────── 可写 turn 收尾：check / undo / 层②（决策P4.5-3/4/13）──────
+
+def _writable_app(chat_env):
+    """build 一个 workspace-write 默认姿态的 app（注入 fake agent，不打 LLM）。"""
+    kb, captured = chat_env
+    return create_app(kb, mode="workspace-write"), kb, captured
+
+
+def test_chat_writable_turn_subject_to_423(chat_env) -> None:
+    """可写 turn 活跃时**会写的** /api/chat 必 423（评审 P1 嵌套可写 chat 自死锁修复）：
+    新会话（默认 workspace-write）与已存在的 workspace-write 会话都拦——它们会取同一把 write_lock。"""
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done, _ = _chat(client, "建会话")  # 先建一个 workspace-write 会话
+        cid = done["conversation_id"]
+        app.state.write_gate.enter_writable()
+        try:
+            # 新会话（默认 workspace-write）→ create 前即拒
+            assert client.post("/api/chat", json={"message": "hi"}).status_code == 423
+            # 已存在的 workspace-write 会话 → 解析后按姿态拒
+            assert client.post(
+                "/api/chat", json={"message": "hi", "conversation_id": cid}
+            ).status_code == 423
+        finally:
+            app.state.write_gate.exit_writable()
+
+
+def test_chat_readonly_turn_not_rejected_during_writable(chat_env) -> None:
+    """**只读** turn 不受层③（评审 P2）：只读 turn 不取 write_lock、跑各自 conv.lock，与活跃写者
+    无锁交集、不死锁，故活跃可写期间仍放行——不误伤并发只读 chat / 默认只读姿态。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="read-only")  # 进程默认只读
+    with TestClient(app) as client:
+        _, done, _ = _chat(client, "建只读会话")
+        cid = done["conversation_id"]
+        app.state.write_gate.enter_writable()  # 模拟别处有可写 turn 在飞
+        try:
+            # 新只读会话照常完成（非 423）
+            _, d1, e1 = _chat(client, "新只读问")
+            assert e1 is None and d1 is not None
+            # 已存在只读会话续聊照常完成（非 423）
+            _, d2, e2 = _chat(client, "续聊", conversation_id=cid)
+            assert e2 is None and d2 is not None
+        finally:
+            app.state.write_gate.exit_writable()
+
+
+def test_writable_turn_runs_check_unconditionally(chat_env) -> None:
+    """每条可写 turn 收尾无条件跑 check：干净 wiki → ok；agent 写坏页 → violations surface。"""
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done1, _ = _chat(client, "建会话")  # 本轮无写
+        assert done1["check"]["ok"] is True  # check 仍无条件跑（干净）
+        assert "undo" not in done1  # 无写 → 无撤销
+        cid = done1["conversation_id"]
+        agent = captured["agents"][0]
+
+        def write_bad(a):  # 经 wrapper 写一个坏 frontmatter 的 wiki 页
+            a.kwargs["filesystem"].write_text(
+                kb / "wiki" / "entities" / "Bad.md", "garbage no frontmatter\n"
+            )
+
+        agent.action = write_bad
+        _, done2, _ = _chat(client, "写页", conversation_id=cid)
+        assert done2["check"]["ok"] is False
+        assert any("Bad.md" in v["page"] for v in done2["check"]["violations"])
+        assert "repair_prompt" in done2["check"]  # 「让 Agent 修复」用的下一轮消息
+        assert done2["undo"]["available"] is True
+        assert any("Bad.md" in p for p in done2["undo"]["paths"])
+        assert (kb / "wiki" / "entities" / "Bad.md").exists()  # 不硬阻断：页照常写盘
+
+
+def test_writable_turn_undo_restores_wiki_and_schema(chat_env) -> None:
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done1, _ = _chat(client, "建会话")
+        cid = done1["conversation_id"]
+        agent = captured["agents"][0]
+        orig_schema = (kb / "SCHEMA.md").read_bytes()
+
+        def write_two(a):
+            fs = a.kwargs["filesystem"]
+            fs.write_text(kb / "wiki" / "entities" / "New.md", "x")  # 新建页
+            fs.write_text(kb / "SCHEMA.md", "changed schema\n")  # 改 SCHEMA
+
+        agent.action = write_two
+        _, done2, _ = _chat(client, "写", conversation_id=cid)
+        token = done2["undo"]["token"]
+        assert (kb / "wiki" / "entities" / "New.md").exists()
+        r = client.post(f"/api/chat/{cid}/undo", json={"token": token})
+        assert r.status_code == 200
+        body = r.json()
+        assert set(body["undone"]) == {"wiki/entities/New.md", "SCHEMA.md"}
+        assert body["conflicts"] == []
+        assert not (kb / "wiki" / "entities" / "New.md").exists()  # 新页被删
+        assert (kb / "SCHEMA.md").read_bytes() == orig_schema  # SCHEMA 复原
+        # 一次性：同 token 再撤 → 409
+        assert client.post(f"/api/chat/{cid}/undo", json={"token": token}).status_code == 409
+
+
+def test_writable_turn_undo_optimistic_conflict(chat_env) -> None:
+    """撤销前文件被后续写改动（当前哈希 ≠ 本 turn 写后）→ 跳过 + 409，不覆盖后续写（评审 High）。"""
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done1, _ = _chat(client, "建会话")
+        cid = done1["conversation_id"]
+        agent = captured["agents"][0]
+
+        def write_one(a):
+            a.kwargs["filesystem"].write_text(kb / "wiki" / "entities" / "C.md", "v1")
+
+        agent.action = write_one
+        _, done2, _ = _chat(client, "写", conversation_id=cid)
+        token = done2["undo"]["token"]
+        (kb / "wiki" / "entities" / "C.md").write_text("v2-later")  # 模拟后续写
+        r = client.post(f"/api/chat/{cid}/undo", json={"token": token})
+        assert r.status_code == 409
+        assert "wiki/entities/C.md" in r.json()["conflicts"]
+        assert (kb / "wiki" / "entities" / "C.md").read_text() == "v2-later"  # 未被覆盖
+
+
+def test_writable_turn_undo_available_independent_of_check(chat_env) -> None:
+    """SCHEMA-only 改：check 通过（无 wiki violations）但撤销键仍可用（评审 Medium）。"""
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done1, _ = _chat(client, "建会话")
+        cid = done1["conversation_id"]
+        agent = captured["agents"][0]
+
+        def write_schema(a):
+            a.kwargs["filesystem"].write_text(kb / "SCHEMA.md", "newschema\n")
+
+        agent.action = write_schema
+        _, done2, _ = _chat(client, "改 schema", conversation_id=cid)
+        assert done2["check"]["ok"] is True  # SCHEMA 不被 check 消费
+        assert done2["undo"]["available"] is True
+        assert done2["undo"]["paths"] == ["SCHEMA.md"]
+
+
+def test_writable_turn_restores_agentao_md(chat_env) -> None:
+    """层②：shell 直写 AGENTAO.md → turn 收尾自动还原 + done.immutable_mutated（决策P4.5-3）。"""
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done1, _ = _chat(client, "建会话")
+        cid = done1["conversation_id"]
+        agent = captured["agents"][0]
+        orig = (kb / "AGENTAO.md").read_bytes()
+
+        def shell_hack(a):  # 直接写盘（不经 wrapper）模拟 shell 旁路
+            (kb / "AGENTAO.md").write_text("HACKED constitution")
+
+        agent.action = shell_hack
+        _, done2, _ = _chat(client, "改宪法", conversation_id=cid)
+        assert done2["immutable_mutated"] == ["AGENTAO.md"]
+        assert (kb / "AGENTAO.md").read_bytes() == orig  # 已自动还原
+        assert "undo" not in done2  # 直写不经 wrapper → 不入写日志
+
+
+def test_writable_turn_raw_shell_write_is_residual(chat_env) -> None:
+    """raw/ 的 shell 直写是残留：层②不扫树、不还原、不入写日志（决策P4.5-3/11）。"""
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done1, _ = _chat(client, "建会话")
+        cid = done1["conversation_id"]
+        agent = captured["agents"][0]
+
+        def raw_hack(a):
+            (kb / "raw" / "injected.md").write_text("shell wrote this")
+
+        agent.action = raw_hack
+        _, done2, _ = _chat(client, "x", conversation_id=cid)
+        assert "immutable_mutated" not in done2  # raw/ 不被层②扫
+        assert "undo" not in done2  # raw/ 不入写日志
+        assert (kb / "raw" / "injected.md").exists()  # 残留：未回滚
+
+
+def test_read_only_turn_no_writable_meta(chat_env) -> None:
+    """read-only turn 零开销：done 不带 check/undo/immutable_mutated。"""
+    app, kb, captured = _writable_app(chat_env)
+    # 进程默认 workspace-write，但本会话切回 read-only 后应无可写元数据。
+    with TestClient(app) as client:
+        _, done1, _ = _chat(client, "建会话")
+        cid = done1["conversation_id"]
+        client.post(f"/api/chat/{cid}/mode", json={"mode": "read-only"})
+        _, done2, _ = _chat(client, "只读问", conversation_id=cid)
+        assert "check" not in done2
+        assert "undo" not in done2
+        assert "immutable_mutated" not in done2
+
+
+def test_undo_bogus_token_409_no_serialize(chat_env) -> None:
+    """陈旧/空 token → 409（端点取 write_lock 前廉价短路，评审 BUG 4）。"""
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done1, _ = _chat(client, "建会话")  # 本轮无写 → 无 undo
+        cid = done1["conversation_id"]
+        # 无任何写日志：任意 token 都 409。
+        assert client.post(f"/api/chat/{cid}/undo", json={"token": "nope"}).status_code == 409
+        # 端点未取 write_lock（短路）：write_lock 仍可被立刻拿到。
+        assert app.state.write_gate.write_lock.acquire(blocking=False) is True
+        app.state.write_gate.write_lock.release()
+
+
+def test_undo_unknown_session_404(chat_client) -> None:
+    client, _ = chat_client
+    assert client.post(f"/api/chat/{uuid.uuid4()}/undo", json={"token": "x"}).status_code == 404
+
+
+def test_undo_subject_to_423_during_writable_turn(chat_env) -> None:
+    """可写 turn 活跃时 /undo 必 423（评审 P2 自死锁修复）：agent 在持 conv.lock+write_lock 的
+    turn 内 `curl /undo`（即便 token 瞎填）不能去等同一批锁，否则互相空等、turn 永不收尾。
+    优先于 BUG4 的 409 短路：取任何锁前先按层③ 拒。"""
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done, _ = _chat(client, "建会话")
+        cid = done["conversation_id"]
+        app.state.write_gate.enter_writable()
+        try:
+            r = client.post(f"/api/chat/{cid}/undo", json={"token": "nope"})
+            assert r.status_code == 423  # 层③ 先于 409 短路、不取锁、断死锁
+        finally:
+            app.state.write_gate.exit_writable()
+        # turn 收尾后恢复到 BUG4 的 409（无写日志 → 陈旧 token）
+        assert client.post(f"/api/chat/{cid}/undo", json={"token": "nope"}).status_code == 409
+
+
+def test_graph_error_releases_write_lock(kb, monkeypatch) -> None:
+    """/graph 写失败（OSError→500）后 write_lock 仍被释放（评审 P1：acquire 移入 try、finally 据 held 释放）。"""
+    import guanlan.web.app as app_mod
+
+    app = create_app(kb)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(app_mod, "build_and_write_graph", boom)
+    with TestClient(app) as client:
+        assert client.get("/graph", follow_redirects=False).status_code == 500
+        assert app.state.write_gate.write_lock.acquire(blocking=False) is True  # 未泄漏
+        app.state.write_gate.write_lock.release()
+
+
+def test_graph_success_releases_write_lock(kb) -> None:
+    app = create_app(kb)
+    with TestClient(app) as client:
+        assert client.get("/graph", follow_redirects=False).status_code == 302
+        assert app.state.write_gate.write_lock.acquire(blocking=False) is True
+        app.state.write_gate.write_lock.release()
+
+
+def test_undo_success_releases_write_lock(chat_env) -> None:
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done1, _ = _chat(client, "建会话")
+        cid = done1["conversation_id"]
+        agent = captured["agents"][0]
+        agent.action = lambda a: a.kwargs["filesystem"].write_text(
+            kb / "wiki" / "entities" / "Z.md", "z"
+        )
+        _, done2, _ = _chat(client, "写", conversation_id=cid)
+        client.post(f"/api/chat/{cid}/undo", json={"token": done2["undo"]["token"]})
+        assert app.state.write_gate.write_lock.acquire(blocking=False) is True  # 撤销后未泄漏
+        app.state.write_gate.write_lock.release()
