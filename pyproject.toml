@@ -2,7 +2,9 @@
 # 导入名与 CLI 仍是 `guanlan`（见 [tool.hatch] packages 与 [project.scripts]），只有 pip 安装名不同。
 [project]
 name = "guanlan-wiki"
-version = "0.1.1.dev0"
+# 版本号单一来源：`guanlan/__init__.py:__version__`（见下方 [tool.hatch.version]）。
+# 故此处用 dynamic、不写死，避免 pyproject 与 __init__ 漂移（曾 0.1.1.dev0 vs 0.1.0 不一致）。
+dynamic = ["version"]
 description = "观澜 — 增量构建并维护结构化、互链的 markdown 知识 wiki（Karpathy LLM Wiki 模式）"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,7 +25,7 @@ classifiers = [
 dependencies = [
     # [cli] extra 带 rich/prompt-toolkit/readchar/pygments —— `agentao run` 控制台脚本预检需要，
     # wrapper 经子进程调它（见 guanlan/runtime.py），缺 extra 则 ingest/query 立即失败。
-    "agentao[cli]>=0.4.8",
+    "agentao[cli]>=0.4.9",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
 ]
 
@@ -34,6 +36,9 @@ web = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "markdown>=3",
+    # multipart 文件上传（P4.6 `POST /api/upload`）：FastAPI 的 UploadFile/File 解析 multipart
+    # 须装 `python-multipart`，否则定义该端点时 FastAPI 启动即 RuntimeError（不靠 fastapi 传递）。
+    "python-multipart>=0.0.9",
     # app.py 直接 import anyio（to_thread 卸阻塞调用）；显式声明而非靠 fastapi 传递。
     # 须 >=4.1：投喂端点 `to_thread.run_sync(..., abandon_on_cancel=True)` 用的 kwarg 自 4.1.0
     # 起才有（3.x 只有 `cancellable=`），不钉则可能传递解析到 anyio 3 → 每次 POST /api/raw 即 TypeError。
@@ -57,6 +62,10 @@ dev = ["pytest>=8.0", "playwright>=1.60"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# 版本号从 `guanlan/__init__.py:__version__` 读取（单一来源，配合 [project] dynamic）。
+[tool.hatch.version]
+path = "guanlan/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["guanlan"]
 # 注：Web 宿主前端静态资源（guanlan/web/static/*）随 `packages = ["guanlan"]` 自动入 wheel
@@ -70,3 +79,6 @@ packages = ["guanlan"]
 "examples/wiki" = "guanlan/_templates/wiki"
 # 维护引擎 skill 随包携带；安装态下由 wrapper 幂等装入 ~/.agentao/skills/（见 guanlan/skill.py）。
 "skills/guanlan-wiki" = "guanlan/_skill/guanlan-wiki"
+# 辅助 skill pdf-to-markdown（P4.6）：供可写会话 Agent 把上传的 PDF/DOCX/… 解析成 Markdown
+# 暂存物（再经人审晋级为 raw/ 源）。同样随包携带、由 skill.py 幂等装入全局供 Agent 发现。
+"skills/pdf-to-markdown" = "guanlan/_skill/pdf-to-markdown"

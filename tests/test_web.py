@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import base64
 import json
 import socket
 import sys
@@ -60,6 +61,15 @@ def test_static_assets_served(client) -> None:
     css = client.get("/static/app.css")
     assert js.status_code == 200 and "fetch" in js.text
     assert css.status_code == 200 and "--lan-ripple" in css.text  # 观澜配色变量
+
+
+def test_static_and_index_no_cache(client) -> None:
+    """入口页与静态资源带 `Cache-Control: no-cache`（仍可 ETag 304 协商）。
+
+    否则升级观澜后浏览器拿启发式缓存的旧 app.js 渲染新接口会出怪症（图像徽章落「文本」等）。
+    """
+    assert client.get("/").headers.get("cache-control") == "no-cache"
+    assert client.get("/static/app.js").headers.get("cache-control") == "no-cache"
 
 
 def test_static_assets_bundled() -> None:
@@ -705,6 +715,179 @@ def test_raw_exit_code_http_split(kb, monkeypatch) -> None:
     assert "磁盘满" in resp.json()["detail"]
 
 
+# ──────────────── 文件上传 POST /api/upload + 对话附件（P4.6 Web 文件上传） ────────────────
+
+
+def test_upload_text_file_lands_in_workspace_uploads(client, kb) -> None:
+    """上传文本文件 → workspace/uploads/<安全名>（保留扩展名）；返回 saved/name/bytes/kind=text。"""
+    data = b"# \xe7\xac\x94\xe8\xae\xb0\nhello\n"  # UTF-8「# 笔记\nhello\n」
+    resp = client.post("/api/upload", files={"file": ("我的 资料.md", data, "text/markdown")})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"saved": "workspace/uploads/我的-资料.md", "name": "我的-资料.md",
+                    "bytes": len(data), "kind": "text"}
+    assert (kb / "workspace" / "uploads" / "我的-资料.md").read_bytes() == data
+
+
+def test_upload_binary_keeps_extension_and_kind_binary(client, kb) -> None:
+    """上传二进制（多格式、保留原扩展名）→ kind=binary；不限 .md。"""
+    data = b"%PDF-1.4\n\x00\x01\x02 binary blob"
+    resp = client.post("/api/upload", files={"file": ("report.PDF", data, "application/pdf")})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["saved"] == "workspace/uploads/report.pdf"  # 扩展名小写归一、保留
+    assert body["kind"] == "binary"
+    assert (kb / "workspace" / "uploads" / "report.pdf").read_bytes() == data
+
+
+def test_upload_empty_and_oversize_are_400(client, kb) -> None:
+    from guanlan.web.app import MAX_UPLOAD_BYTES
+
+    assert client.post("/api/upload", files={"file": ("e.txt", b"", "text/plain")}).status_code == 400
+    big = b"a" * (MAX_UPLOAD_BYTES + 1)
+    assert client.post("/api/upload", files={"file": ("big.bin", big, "application/octet-stream")}).status_code == 400
+    assert not (kb / "workspace" / "uploads" / "big.bin").exists()  # 超限不落盘
+
+
+def test_upload_strips_path_traversal(client, kb) -> None:
+    """文件名含穿越成分 → 剥成 basename 落 workspace/uploads/ 内，绝不越界。"""
+    resp = client.post("/api/upload", files={"file": ("../../etc/evil.txt", b"x", "text/plain")})
+    assert resp.status_code == 200
+    saved = resp.json()["saved"]
+    assert saved == "workspace/uploads/evil.txt"
+    (kb / saved).resolve().relative_to((kb / "workspace" / "uploads").resolve())  # 在界内（越界会抛）
+    assert not (kb / "etc").exists()
+
+
+def test_upload_image_kind(client, kb) -> None:
+    """上传图像扩展名 → kind=image（白名单与视觉通道同口径；前端据此显示缩略图）。"""
+    resp = client.post(
+        "/api/upload", files={"file": ("Shot 1.PNG", b"\x89PNG\r\n\x1a\nxx", "image/png")}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["saved"] == "workspace/uploads/Shot-1.png"  # slug stem + 扩展名小写归一
+    assert body["kind"] == "image"
+
+
+def test_upload_overwrites_same_name(client, kb) -> None:
+    """暂存区语义：同名重传直接替换（非源、不 409）。"""
+    assert client.post("/api/upload", files={"file": ("a.txt", b"v1", "text/plain")}).status_code == 200
+    assert client.post("/api/upload", files={"file": ("a.txt", b"v2", "text/plain")}).status_code == 200
+    assert (kb / "workspace" / "uploads" / "a.txt").read_bytes() == b"v2"
+
+
+def _text_of(content) -> str:
+    """把 fake agent 记下的 user content 归一为文本（str 原样；多模态列表取 text part）。"""
+    if isinstance(content, str):
+        return content
+    return "\n".join(b["text"] for b in content if b.get("type") == "text")
+
+
+def test_chat_attachment_appends_attachment_tags(chat_client, kb) -> None:
+    """附件按 agentao 约定以 `<attachment uri=…/>` 标签追加进发给 agent 的消息；正文不内嵌。
+
+    非图附件不带 mimetype、不走视觉通道（agent 凭只读工具自己读文件）。
+    """
+    client, captured = chat_client
+    (kb / "workspace" / "uploads").mkdir(parents=True)
+    (kb / "workspace" / "uploads" / "note.md").write_text("机密内容 X\n", encoding="utf-8")
+
+    _tokens, done, error = _chat_with(client, "总结这个文件", ["workspace/uploads/note.md"])
+    assert error is None and done is not None
+    agent_msg = captured["agents"][0].messages[0]["content"]
+    assert agent_msg.startswith("总结这个文件")  # 用户原文在前，标签以空行附后
+    assert '<attachment uri="workspace/uploads/note.md"/>' in agent_msg
+    assert "机密内容 X" not in agent_msg  # 正文不内嵌（标签引用，agent 自己读）
+    assert captured["agents"][0].images_seen == [None]  # 非图：不走 arun(images=)
+
+
+def test_chat_image_attachment_goes_through_images_param(chat_client, kb) -> None:
+    """图像附件：消息追加带 mimetype 的标签 + base64 经 `arun(images=)` 走视觉通道。
+
+    `_source` == 标签 uri（逐字一致）：模型拒图时 agentao 用同格式标签降级重试，prompt
+    前后引用不漂。
+    """
+    client, captured = chat_client
+    up = kb / "workspace" / "uploads"
+    up.mkdir(parents=True)
+    png = b"\x89PNG\r\n\x1a\n" + b"fakepixels"
+    (up / "shot.png").write_bytes(png)
+
+    _tokens, done, error = _chat_with(client, "看这张图", ["workspace/uploads/shot.png"])
+    assert error is None and done is not None
+    agent = captured["agents"][0]
+    [images] = agent.images_seen
+    assert images == [
+        {
+            "data": base64.b64encode(png).decode("ascii"),
+            "mimeType": "image/png",
+            "_source": "workspace/uploads/shot.png",
+        }
+    ]
+    text = _text_of(agent.messages[0]["content"])
+    assert '<attachment uri="workspace/uploads/shot.png" mimetype="image/png"/>' in text
+
+
+def test_chat_image_oversize_or_excess_keeps_tag_only(chat_client, kb, monkeypatch) -> None:
+    """超视觉单图上限 / 超单轮张数的图像不入 images（标签仍在 = 文本引用，与降级同形）。"""
+    import guanlan.web.app as app_mod
+
+    client, captured = chat_client
+    up = kb / "workspace" / "uploads"
+    up.mkdir(parents=True)
+    (up / "big.png").write_bytes(b"\x89PNG" + b"x" * 64)
+    (up / "a.png").write_bytes(b"\x89PNGa")
+    (up / "b.png").write_bytes(b"\x89PNGb")
+    monkeypatch.setattr(app_mod, "MAX_IMAGE_BYTES", 16)  # big.png 超视觉单图上限
+    monkeypatch.setattr(app_mod, "MAX_IMAGES_PER_TURN", 1)  # b.png 超单轮张数
+
+    _t, done, error = _chat_with(
+        client,
+        "看图",
+        ["workspace/uploads/big.png", "workspace/uploads/a.png", "workspace/uploads/b.png"],
+    )
+    assert error is None and done is not None
+    agent = captured["agents"][0]
+    [images] = agent.images_seen
+    assert [im["_source"] for im in images] == ["workspace/uploads/a.png"]  # 仅合规首图
+    text = _text_of(agent.messages[0]["content"])
+    for name in ("big.png", "a.png", "b.png"):
+        assert f'uri="workspace/uploads/{name}"' in text  # 三张标签都在
+
+
+def test_session_snapshot_drops_image_base64(chat_client, kb) -> None:
+    """会话快照不落图像 base64（`_lean_messages` 压平多模态 content，标签文本引用保留）。"""
+    client, captured = chat_client
+    up = kb / "workspace" / "uploads"
+    up.mkdir(parents=True)
+    png = b"\x89PNG\r\n\x1a\n" + b"pixels-pixels"
+    (up / "p.png").write_bytes(png)
+
+    _t, done, error = _chat_with(client, "看图", ["workspace/uploads/p.png"])
+    assert error is None and done is not None
+    files = list((kb / ".agentao" / "sessions").glob("*.json"))
+    assert files
+    blob = "\n".join(f.read_text(encoding="utf-8") for f in files)
+    assert base64.b64encode(png).decode("ascii") not in blob  # base64 绝不入快照
+    assert "workspace/uploads/p.png" in blob  # <attachment> 标签文本引用仍在
+    # live 会话内存里的多模态 content 未被改（_lean_messages 不可变处理，视觉上下文保留）。
+    assert isinstance(captured["agents"][0].messages[0]["content"], list)
+
+
+def test_chat_attachment_path_traversal_is_400(chat_client, kb) -> None:
+    """附件路径越出 workspace/uploads/ → 400（路径穿越防御）。"""
+    client, _ = chat_client
+    resp = client.post("/api/chat", json={"message": "x", "attachments": ["wiki/index.md"]})
+    assert resp.status_code == 400
+
+
+def test_chat_attachment_missing_is_404(chat_client) -> None:
+    client, _ = chat_client
+    resp = client.post("/api/chat", json={"message": "x", "attachments": ["workspace/uploads/nope.md"]})
+    assert resp.status_code == 404
+
+
 def test_jobqueue_submit_and_wait_is_fifo_behind_prior(kb) -> None:
     """JobQueue：submit_and_wait 排在前序作业之后（FIFO），完成后 done_event 唤醒、Job 字段完整。"""
     from guanlan.web.jobs import JobQueue
@@ -734,6 +917,446 @@ def test_jobqueue_submit_and_wait_is_fifo_behind_prior(kb) -> None:
     assert order == ["ingest-start", "ingest-end", "raw"]  # FIFO：投喂在 ingest 之后才落盘
     assert result["job"].exit_code == 0
     assert jq.get_job(prior_id).exit_code == 0
+
+
+# ──────────────── 晋级 POST /api/raw {source} + workspace 浏览/删除（P4.6 C2） ────────────────
+
+
+def _put_workspace(kb, subdir, name, content="正文一致的派生物。\n"):
+    """在 workspace/<subdir>/ 落一个文件，返回其相对根路径（晋级 source / 预览 path 实参）。"""
+    d = kb / "workspace" / subdir
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(content, encoding="utf-8")
+    return f"workspace/{subdir}/{name}"
+
+
+def _split_fm(text):
+    """切出 (frontmatter 文本, body)；与 pages.split_frontmatter 同口径，供断言正文一致。"""
+    from guanlan.pages import split_frontmatter
+
+    return split_frontmatter(text)
+
+
+def test_promote_source_body_preserved_frontmatter_normalized(client, kb) -> None:
+    """晋级 workspace .md → raw/：正文逐字一致、frontmatter 注入 origin（非字节相等）。"""
+    src = _put_workspace(kb, "parsed", "报告.md", "# 标题\n正文段落。\n")
+    resp = client.post(
+        "/api/raw",
+        json={"name": "报告", "source": src, "origin": "workspace/uploads/报告.pdf"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["saved"] == "raw/报告.md"
+    written = (kb / "raw" / "报告.md").read_text(encoding="utf-8")
+    block, body = _split_fm(written)
+    import yaml
+
+    assert yaml.safe_load(block)["origin"] == "workspace/uploads/报告.pdf"
+    assert body == "# 标题\n正文段落。\n"  # 正文（frontmatter 后 body）逐字一致
+
+
+def test_promote_default_no_overwrite_409(client, kb) -> None:
+    """端点默认 409（不自助改名/覆盖），与投喂一致。"""
+    src = _put_workspace(kb, "parsed", "dup.md")
+    assert client.post("/api/raw", json={"name": "dup", "source": src}).status_code == 200
+    r = client.post("/api/raw", json={"name": "dup", "source": src})
+    assert r.status_code == 409
+
+
+def test_promote_overwrite_rewrites(client, kb) -> None:
+    """overwrite:true 才改写已有源（端点不自助改名，决策P4.6-10）。"""
+    src = _put_workspace(kb, "parsed", "ow.md", "旧\n")
+    assert client.post("/api/raw", json={"name": "ow", "source": src}).status_code == 200
+    src2 = _put_workspace(kb, "parsed", "ow.md", "新内容\n")
+    r = client.post("/api/raw", json={"name": "ow", "source": src2, "overwrite": True})
+    assert r.status_code == 200
+    _, body = _split_fm((kb / "raw" / "ow.md").read_text(encoding="utf-8"))
+    assert body == "新内容\n"
+
+
+def test_promote_source_must_be_md(client, kb) -> None:
+    """source 非 .md → 400（raw/ 是 .md 单格式源）。"""
+    src = _put_workspace(kb, "uploads", "report.pdf", "x\n")
+    r = client.post("/api/raw", json={"name": "report", "source": src})
+    assert r.status_code == 400
+
+
+def test_promote_source_out_of_workspace_400(client, kb) -> None:
+    """source 越出 workspace/ → 400。"""
+    (kb / "raw" / "evil.md").write_text("x\n", encoding="utf-8")
+    r = client.post("/api/raw", json={"name": "evil", "source": "raw/evil.md"})
+    assert r.status_code == 400
+    r2 = client.post("/api/raw", json={"name": "p", "source": "workspace/../raw/evil.md"})
+    assert r2.status_code == 400
+
+
+def test_promote_source_missing_404(client, kb) -> None:
+    r = client.post("/api/raw", json={"name": "x", "source": "workspace/parsed/nope.md"})
+    assert r.status_code == 404
+
+
+def test_promote_content_xor_source(client, kb) -> None:
+    """content 与 source 同给 / 都不给 → 400（判别式 body 互斥且必选其一）。"""
+    src = _put_workspace(kb, "parsed", "x.md")
+    assert client.post("/api/raw", json={"name": "x", "content": "a\n", "source": src}).status_code == 400
+    assert client.post("/api/raw", json={"name": "x"}).status_code == 400
+
+
+def test_promote_degenerate_uploads_md(client, kb) -> None:
+    """退化路径：uploads/*.md 也合格（直接晋级）；uploads/*.pdf 仍 400（§6 / §7.2 ①）。"""
+    src = _put_workspace(kb, "uploads", "note.md", "# 笔记\n内容。\n")
+    assert client.post("/api/raw", json={"name": "note", "source": src}).status_code == 200
+    pdf = _put_workspace(kb, "uploads", "doc.pdf", "x\n")
+    assert client.post("/api/raw", json={"name": "doc", "source": pdf}).status_code == 400
+
+
+def test_promote_text_admission_non_utf8_is_400(client, kb) -> None:
+    """source 非 UTF-8（二进制 .md）→ 400（非 500）。"""
+    d = kb / "workspace" / "parsed"
+    d.mkdir(parents=True)
+    (d / "bin.md").write_bytes(b"\xff\xfe\x00\x01 binary")
+    r = client.post("/api/raw", json={"name": "bin", "source": "workspace/parsed/bin.md"})
+    assert r.status_code == 400
+    assert not (kb / "raw" / "bin.md").exists()
+
+
+def test_promote_text_admission_oversize_is_400(client, kb) -> None:
+    from guanlan.web.app import MAX_RAW_BYTES
+
+    src = _put_workspace(kb, "parsed", "big.md", "a" * (MAX_RAW_BYTES + 1))
+    r = client.post("/api/raw", json={"name": "big", "source": src})
+    assert r.status_code == 400
+    assert not (kb / "raw" / "big.md").exists()
+
+
+def test_promote_text_admission_control_char_is_400(client, kb) -> None:
+    src = _put_workspace(kb, "parsed", "ctl.md", "正常\x07响铃\n")
+    r = client.post("/api/raw", json={"name": "ctl", "source": src})
+    assert r.status_code == 400
+
+
+def test_promote_provenance_no_block_creates_frontmatter(client, kb) -> None:
+    """① 无块 → 新建 ---origin--- 块、原文逐字作 body。"""
+    import yaml
+
+    src = _put_workspace(kb, "parsed", "a.md", "无 frontmatter 的正文。\n")
+    client.post("/api/raw", json={"name": "a", "source": src, "origin": "出处 X"})
+    block, body = _split_fm((kb / "raw" / "a.md").read_text(encoding="utf-8"))
+    assert yaml.safe_load(block) == {"origin": "出处 X"}
+    assert body == "无 frontmatter 的正文。\n"
+
+
+def test_promote_provenance_inserts_into_existing_mapping(client, kb) -> None:
+    """② 有闭合块得 mapping 缺 origin → 插入键、body 逐字保留。"""
+    import yaml
+
+    src = _put_workspace(kb, "parsed", "b.md", "---\ntitle: T\n---\n正文。\n")
+    client.post("/api/raw", json={"name": "b", "source": src, "origin": "src://x"})
+    block, body = _split_fm((kb / "raw" / "b.md").read_text(encoding="utf-8"))
+    meta = yaml.safe_load(block)
+    assert meta == {"title": "T", "origin": "src://x"}
+    assert body == "正文。\n"
+
+
+def test_promote_provenance_keeps_existing_origin(client, kb) -> None:
+    """③ 已有 origin → 永久保留 parsed 自带值、忽略传入 origin（不受 overwrite 影响）。"""
+    import yaml
+
+    src = _put_workspace(kb, "parsed", "c.md", "---\norigin: 原始出处\n---\n正文。\n")
+    client.post("/api/raw", json={"name": "c", "source": src, "origin": "覆盖企图"})
+    block, _ = _split_fm((kb / "raw" / "c.md").read_text(encoding="utf-8"))
+    assert yaml.safe_load(block)["origin"] == "原始出处"
+
+
+@pytest.mark.parametrize("empty", ["---\n---\n正文。\n", "---\n   \n---\n正文。\n"])
+def test_promote_provenance_empty_block_inserts_origin(client, kb, empty) -> None:
+    """空 / 纯空白 frontmatter 块（合法 .md）→ 视作空映射、插入 origin（非坏块 400）。"""
+    import yaml
+
+    src = _put_workspace(kb, "parsed", "ee.md", empty)
+    r = client.post("/api/raw", json={"name": "ee", "source": src, "origin": "出处"})
+    assert r.status_code == 200
+    block, body = _split_fm((kb / "raw" / "ee.md").read_text(encoding="utf-8"))
+    assert yaml.safe_load(block) == {"origin": "出处"}
+    assert body == "正文。\n"
+
+
+@pytest.mark.parametrize("bad", ["---\n- 列表项\n---\n正文\n", "---\n标量\n---\n正文\n", "---\nkey: [\n---\nx\n"])
+def test_promote_provenance_bad_block_is_400(client, kb, bad) -> None:
+    """④ 有闭合块但非 mapping / 不可解析 → 400（不静默当 body、不插坏块）。"""
+    src = _put_workspace(kb, "parsed", "d.md", bad)
+    r = client.post("/api/raw", json={"name": "d", "source": src})
+    assert r.status_code == 400
+    assert not (kb / "raw" / "d.md").exists()
+
+
+@pytest.mark.parametrize("origin", [None, "", "   "])
+def test_promote_provenance_blank_origin_falls_back_to_source(client, kb, origin) -> None:
+    """origin 省略 / strip 后为空 → 回退 source 路径（绝不写空 provenance）。"""
+    import yaml
+
+    src = _put_workspace(kb, "parsed", "e.md", "正文。\n")
+    payload = {"name": "e", "source": src}
+    if origin is not None:
+        payload["origin"] = origin
+    client.post("/api/raw", json=payload)
+    block, _ = _split_fm((kb / "raw" / "e.md").read_text(encoding="utf-8"))
+    assert yaml.safe_load(block)["origin"] == src
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["https://a.com/x?y=1", "A: B", '带"引号"的书目', "多行\n第二行", "# 注释样", "  前后空白被 strip  "],
+)
+def test_promote_provenance_yaml_safe_serialization(client, kb, origin) -> None:
+    """origin 经 yaml.safe_dump 写入：含 :/引号/换行/# 都生成合法可重解析 frontmatter（绝不裸拼）。"""
+    import yaml
+
+    src = _put_workspace(kb, "parsed", "f.md", "正文。\n")
+    r = client.post("/api/raw", json={"name": "f", "source": src, "origin": origin})
+    assert r.status_code == 200
+    block, body = _split_fm((kb / "raw" / "f.md").read_text(encoding="utf-8"))
+    assert yaml.safe_load(block)["origin"] == origin.strip()  # 可重解析、值（strip 后）一致
+    assert body == "正文。\n"
+
+
+def test_promote_lists_in_raw_after(client, kb) -> None:
+    """晋级复用 P4.1 落盘：晋级后 GET /api/raw 列出新源。"""
+    src = _put_workspace(kb, "parsed", "g.md", "正文。\n")
+    client.post("/api/raw", json={"name": "g", "source": src})
+    names = {f["name"] for f in client.get("/api/raw").json()["files"]}
+    assert "g.md" in names
+
+
+def test_promote_never_writes_wiki(client, kb) -> None:
+    """形态：晋级只写 raw/、绝不写 wiki/（wiki 内容不变）。"""
+    before = {p.name for p in (kb / "wiki").iterdir()}
+    src = _put_workspace(kb, "parsed", "h.md", "正文。\n")
+    client.post("/api/raw", json={"name": "h", "source": src})
+    after = {p.name for p in (kb / "wiki").iterdir()}
+    assert before == after
+
+
+def test_promote_423_during_writable_turn(kb) -> None:
+    """契约回归：可写 turn 活跃期 agent shell curl POST /api/raw {source} 被层③ 423 拒
+    （决策P4.5-10 / P4.6-1：源由人背书、不靠工具不可达单点）。"""
+    src = _put_workspace(kb, "parsed", "x.md", "正文。\n")
+    with TestClient(create_app(kb)) as client:
+        client.app.state.write_gate.enter_writable()
+        try:
+            r = client.post("/api/raw", json={"name": "x", "source": src})
+            assert r.status_code == 423
+        finally:
+            client.app.state.write_gate.exit_writable()
+        assert not (kb / "raw" / "x.md").exists()
+
+
+# ── workspace 浏览/预览/删除 ──
+
+
+def test_workspace_lists_uploads_and_parsed(client, kb) -> None:
+    """GET /api/workspace 列 uploads/ + parsed/，含 path/name/bytes/kind/mtime。"""
+    _put_workspace(kb, "uploads", "报告.pdf", "x\n")
+    _put_workspace(kb, "parsed", "报告.md", "# 标题\n正文。\n")
+    data = client.get("/api/workspace").json()
+    up = {it["name"]: it for it in data["uploads"]}
+    pa = {it["name"]: it for it in data["parsed"]}
+    assert up["报告.pdf"]["path"] == "workspace/uploads/报告.pdf"
+    assert pa["报告.md"]["path"] == "workspace/parsed/报告.md"
+    assert pa["报告.md"]["kind"] == "text"
+    assert "mtime" in pa["报告.md"] and pa["报告.md"]["bytes"] > 0
+
+
+def test_workspace_hides_dotfiles(client, kb) -> None:
+    """点文件（.DS_Store / .gitkeep 等）不进 workspace 列表（非用户素材）。"""
+    _put_workspace(kb, "uploads", ".DS_Store", "junk")
+    _put_workspace(kb, "uploads", "real.pdf", "x\n")
+    _put_workspace(kb, "parsed", ".hidden.md", "x\n")
+    data = client.get("/api/workspace").json()
+    assert [it["name"] for it in data["uploads"]] == ["real.pdf"]
+    assert data["parsed"] == []
+
+
+def test_workspace_lists_directories_one_level(client, kb) -> None:
+    """根视图不展平：uploads/ 下子目录作目录项（is_dir=True），文件作文件项；点目录跳过。"""
+    (kb / "workspace" / "uploads" / "chapter1").mkdir(parents=True)
+    (kb / "workspace" / "uploads" / "chapter1" / "报告.pdf").write_text("x\n", encoding="utf-8")
+    (kb / "workspace" / "uploads" / "top.csv").write_text("a,b\n", encoding="utf-8")
+    (kb / "workspace" / "uploads" / ".git").mkdir()  # 点目录 → 不列
+    data = client.get("/api/workspace").json()
+    assert data["root"] is True
+    items = {it["name"]: it for it in data["uploads"]}
+    assert set(items) == {"chapter1", "top.csv"}  # 不递归、点目录跳过
+    assert items["chapter1"]["is_dir"] is True
+    assert items["chapter1"]["path"] == "workspace/uploads/chapter1"
+    assert items["top.csv"]["is_dir"] is False and items["top.csv"]["kind"] == "text"
+
+
+def test_workspace_browse_into_subdir(client, kb) -> None:
+    """目录视图（?path=）：列该目录直接子项 + base + path；子目录可继续点入。"""
+    (kb / "workspace" / "uploads" / "ch" / "deep").mkdir(parents=True)
+    (kb / "workspace" / "uploads" / "ch" / "a.pdf").write_text("x\n", encoding="utf-8")
+    data = client.get("/api/workspace?path=workspace/uploads/ch").json()
+    assert data["root"] is False and data["base"] == "uploads"
+    assert data["path"] == "workspace/uploads/ch"
+    assert {it["name"]: it["is_dir"] for it in data["items"]} == {"deep": True, "a.pdf": False}
+
+
+def test_workspace_browse_out_of_bounds(client, kb) -> None:
+    """?path 越出 scratch 白名单 → 400；不存在的目录 → 404。"""
+    assert client.get("/api/workspace?path=wiki").status_code == 400
+    assert client.get("/api/workspace?path=workspace/uploads/nope").status_code == 404
+
+
+def test_workspace_nested_promote_and_delete(client, kb) -> None:
+    """嵌套路径同样可晋级（source）/ 预览 / 删除（path-contained 容器校验本就允许后代）。"""
+    sub = kb / "workspace" / "parsed" / "sec"
+    sub.mkdir(parents=True)
+    (sub / "a.md").write_text("# A\n正文。\n", encoding="utf-8")
+    rel = "workspace/parsed/sec/a.md"
+    assert client.get(f"/api/workspace/file?path={rel}").status_code == 200  # 预览不报错
+    assert client.post("/api/raw", json={"name": "a", "source": rel}).status_code == 200
+    assert client.delete(f"/api/workspace/file?path={rel}").status_code == 200
+    assert not (sub / "a.md").exists()
+
+
+def test_workspace_delete_dir_recursive(client, kb) -> None:
+    """整目录删除：递归删 uploads/ 内子目录及其全部内容 → {deleted}。"""
+    d = kb / "workspace" / "uploads" / "ch"
+    (d / "sub").mkdir(parents=True)
+    (d / "a.pdf").write_text("x\n", encoding="utf-8")
+    (d / "sub" / "b.md").write_text("y\n", encoding="utf-8")
+    assert client.delete("/api/workspace/dir?path=workspace/uploads/ch").json() == {
+        "deleted": "workspace/uploads/ch"
+    }
+    assert not d.exists()
+
+
+def test_workspace_delete_dir_refuses_scratch_root_400(client, kb) -> None:
+    """不可整删 scratch 根目录（workspace/uploads|parsed）→ 400。"""
+    (kb / "workspace" / "uploads").mkdir(parents=True)
+    assert client.delete("/api/workspace/dir?path=workspace/uploads").status_code == 400
+    assert (kb / "workspace" / "uploads").exists()
+
+
+@pytest.mark.parametrize("path", ["wiki", "raw", "workspace", "../etc"])
+def test_workspace_delete_dir_whitelist_400(client, kb, path) -> None:
+    """白名单外目录（wiki/raw/workspace 根/越界）→ 400，绝不碰。"""
+    assert client.delete(f"/api/workspace/dir?path={path}").status_code == 400
+    assert (kb / "wiki").exists()
+
+
+def test_workspace_delete_dir_423_during_writable_turn(kb) -> None:
+    """整目录删除是宿主写：可写 turn 活跃期被层③ 423 拒。"""
+    (kb / "workspace" / "uploads" / "ch").mkdir(parents=True)
+    with TestClient(create_app(kb)) as client:
+        client.app.state.write_gate.enter_writable()
+        try:
+            assert client.delete("/api/workspace/dir?path=workspace/uploads/ch").status_code == 423
+        finally:
+            client.app.state.write_gate.exit_writable()
+        assert (kb / "workspace" / "uploads" / "ch").exists()
+
+
+def test_workspace_empty_dirs_ok(client, kb) -> None:
+    """子目录不存在 → 根视图两段皆空（不报错）。"""
+    assert client.get("/api/workspace").json() == {"root": True, "uploads": [], "parsed": []}
+
+
+def test_workspace_file_preview_renders_md(client, kb) -> None:
+    """GET /api/workspace/file 预览 .md（复用 render_page，含 meta/html）。"""
+    src = _put_workspace(kb, "parsed", "p.md", "---\ntitle: T\n---\n正文段落。\n")
+    data = client.get(f"/api/workspace/file?path={src}").json()
+    assert data["meta"]["title"] == "T"
+    assert "正文段落" in data["html"]
+
+
+def test_workspace_file_preview_out_of_bounds_409(client, kb) -> None:
+    assert client.get("/api/workspace/file?path=wiki/index.md").status_code == 409
+
+
+def test_workspace_file_preview_non_scratch_subdir_409(client, kb) -> None:
+    """预览白名单同浏览/删除：workspace/ 下非 uploads|parsed 子目录的 .md 不可预览 → 409。"""
+    other = kb / "workspace" / "other"
+    other.mkdir(parents=True)
+    (other / "x.md").write_text("# x\n", encoding="utf-8")
+    assert client.get("/api/workspace/file?path=workspace/other/x.md").status_code == 409
+
+
+def test_workspace_file_preview_non_md_or_missing_404(client, kb) -> None:
+    _put_workspace(kb, "uploads", "x.pdf", "x\n")
+    assert client.get("/api/workspace/file?path=workspace/uploads/x.pdf").status_code == 404
+    assert client.get("/api/workspace/file?path=workspace/parsed/nope.md").status_code == 404
+
+
+def test_workspace_raw_serves_image_bytes(client, kb) -> None:
+    """GET /api/workspace/raw 回原字节 + 图像 content-type（供暂存区缩略图）。"""
+    png = b"\x89PNG\r\n\x1a\n" + b"pixels"
+    p = _put_workspace(kb, "uploads", "shot.png", "x")  # 先建目录
+    (kb / p).write_bytes(png)
+    resp = client.get(f"/api/workspace/raw?path={p}")
+    assert resp.status_code == 200
+    assert resp.content == png
+    assert resp.headers["content-type"].startswith("image/png")
+
+
+def test_workspace_raw_non_image_404(client, kb) -> None:
+    """非图像文件不经本端点 inline 提供（防把任意 scratch 文件吐出去）→ 404。"""
+    p = _put_workspace(kb, "uploads", "doc.pdf", "x\n")
+    assert client.get(f"/api/workspace/raw?path={p}").status_code == 404
+
+
+def test_workspace_raw_whitelist_400(client, kb) -> None:
+    """白名单外（wiki/raw/越界）→ 400，绝不吐库内其它文件。"""
+    (kb / "raw" / "x.png").write_bytes(b"\x89PNG")
+    assert client.get("/api/workspace/raw?path=raw/x.png").status_code == 400
+
+
+def test_workspace_delete_removes_scratch(client, kb) -> None:
+    """DELETE /api/workspace/file 删 uploads/ 与 parsed/ 内文件 → 消失、返回 {deleted}。"""
+    u = _put_workspace(kb, "uploads", "report.pdf", "x\n")
+    p = _put_workspace(kb, "parsed", "draft.md", "正文。\n")
+    assert client.delete(f"/api/workspace/file?path={u}").json() == {"deleted": u}
+    assert client.delete(f"/api/workspace/file?path={p}").json() == {"deleted": p}
+    assert not (kb / u).exists() and not (kb / p).exists()
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["wiki/index.md", "raw/x.md", "workspace/other/x.md", "workspace", "../etc/passwd"],
+)
+def test_workspace_delete_whitelist_400(client, kb, path) -> None:
+    """白名单外（wiki/raw/workspace 根/其它子目录/越界）→ 400，绝不碰。"""
+    (kb / "raw" / "x.md").write_text("x\n", encoding="utf-8")
+    assert client.delete(f"/api/workspace/file?path={path}").status_code == 400
+    assert (kb / "raw" / "x.md").exists()  # raw/ 绝不被删
+
+
+def test_workspace_delete_missing_404(client, kb) -> None:
+    (kb / "workspace" / "parsed").mkdir(parents=True)
+    assert client.delete("/api/workspace/file?path=workspace/parsed/nope.md").status_code == 404
+
+
+def test_workspace_delete_423_during_writable_turn(kb) -> None:
+    """删除是宿主写：可写 turn 活跃期被层③ 423 拒（防删到 turn 正读/写的 scratch）。"""
+    p = _put_workspace(kb, "parsed", "d.md", "正文。\n")
+    with TestClient(create_app(kb)) as client:
+        client.app.state.write_gate.enter_writable()
+        try:
+            assert client.delete(f"/api/workspace/file?path={p}").status_code == 423
+        finally:
+            client.app.state.write_gate.exit_writable()
+        assert (kb / p).exists()  # 被拒、未删
+
+
+def test_workspace_list_reflects_added_and_removed(client, kb) -> None:
+    """修订回路刷新：写入后列出多一项、删除后少一项（前端每轮 turn 收尾重拉的依据）。"""
+    a = _put_workspace(kb, "parsed", "a.md", "正文。\n")
+    _put_workspace(kb, "parsed", "b.md", "正文。\n")
+    names = {it["name"] for it in client.get("/api/workspace").json()["parsed"]}
+    assert names == {"a.md", "b.md"}
+    client.delete(f"/api/workspace/file?path={a}")
+    names = {it["name"] for it in client.get("/api/workspace").json()["parsed"]}
+    assert names == {"b.md"}
 
 
 def test_raw_write_serial_does_not_collide_with_ingest(kb) -> None:
@@ -897,6 +1520,7 @@ class _FakeAgent:
         # P4.5：可写 turn 测试用——arun 内（executor 线程，镜像真 turn 写盘时机）跑此回调，
         # 经注入的 PolicyFileSystem（kwargs["filesystem"]）做结构化写、或直接写盘模拟 shell 旁路。
         self.action = None
+        self.images_seen: list = []  # 每轮 arun 收到的 images 载荷（None / list），附件测试断言用
 
     def get_current_model(self) -> str:
         return self._model or "fake-model"
@@ -904,8 +1528,21 @@ class _FakeAgent:
     def _build_system_prompt(self) -> str:
         return "SYS"  # _context_stats 前置它入 messages_with_system（验 system 分项被计入）
 
-    async def arun(self, msg: str, **_kw) -> str:
-        self.messages.append({"role": "user", "content": msg})
+    async def arun(self, msg: str, images=None, **_kw) -> str:
+        self.images_seen.append(images)
+        if images:
+            # 镜像真 agent：有图轮的 user message 是 OpenAI 多模态 content 列表
+            # （text part + image_url data-URL part）——_lean_messages 落盘压平靠此形态验证。
+            content: object = [{"type": "text", "text": msg}] + [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{im['mimeType']};base64,{im['data']}"},
+                }
+                for im in images
+            ]
+        else:
+            content = msg
+        self.messages.append({"role": "user", "content": content})
         n = sum(1 for m in self.messages if m.get("role") == "user")
         answer = f"#{n} 回应：{msg}"  # 含轮次 → 第二轮答案体现累积历史
 
@@ -968,6 +1605,27 @@ def _chat(client, message, conversation_id=None, model=None):
     with client.stream("POST", "/api/chat", json=body) as resp:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
+        event = None
+        for line in resp.iter_lines():
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                data = json.loads(line.split(":", 1)[1].strip())
+                if event == "token":
+                    tokens.append(data)
+                elif event == "done":
+                    done = data
+                elif event == "error":
+                    error = data
+    return tokens, done, error
+
+
+def _chat_with(client, message, attachments):
+    """发一轮带附件的 chat（成功流），解析 SSE；返回 (tokens, done, error)。"""
+    tokens: list[str] = []
+    done = error = None
+    with client.stream("POST", "/api/chat", json={"message": message, "attachments": attachments}) as resp:
+        assert resp.status_code == 200
         event = None
         for line in resp.iter_lines():
             if line.startswith("event:"):
@@ -2644,6 +3302,7 @@ def test_writable_turn_runs_check_unconditionally(chat_env) -> None:
     with TestClient(app) as client:
         _, done1, _ = _chat(client, "建会话")  # 本轮无写
         assert done1["check"]["ok"] is True  # check 仍无条件跑（干净）
+        assert done1["check"]["total"] == 0  # 整库现状（干净库无存量）
         assert "undo" not in done1  # 无写 → 无撤销
         cid = done1["conversation_id"]
         agent = captured["agents"][0]
@@ -2657,10 +3316,90 @@ def test_writable_turn_runs_check_unconditionally(chat_env) -> None:
         _, done2, _ = _chat(client, "写页", conversation_id=cid)
         assert done2["check"]["ok"] is False
         assert any("Bad.md" in v["page"] for v in done2["check"]["violations"])
+        assert done2["check"]["total"] == len(done2["check"]["violations"])  # 无存量时两者相等
         assert "repair_prompt" in done2["check"]  # 「让 Agent 修复」用的下一轮消息
         assert done2["undo"]["available"] is True
         assert any("Bad.md" in p for p in done2["undo"]["paths"])
         assert (kb / "wiki" / "entities" / "Bad.md").exists()  # 不硬阻断：页照常写盘
+
+
+def test_writable_turn_check_reports_only_new_violations(chat_env) -> None:
+    """写后 check 按「本轮新增」口径呈现（决策P4.5-4 修订）：存量进 total、不进 violations。
+
+    否则库里数百条存量断链会在每个可写轮整批刷屏（「✗ check 发现 403 条问题」）。守卫不变：
+    本轮新增（含 shell 直写引入）仍被差集逮住；repair_prompt 只针对新增、不驱动 agent 修存量。
+    """
+    app, kb, captured = _writable_app(chat_env)
+    (kb / "wiki" / "entities").mkdir(parents=True, exist_ok=True)
+    (kb / "wiki" / "entities" / "Legacy.md").write_text("legacy garbage\n", encoding="utf-8")
+    with TestClient(app) as client:
+        # 轮 1：无写。存量不算本轮问题（ok），但 total 如实计数、不刷屏、无修复 prompt。
+        _, done1, _ = _chat(client, "无写轮")
+        assert done1["check"]["ok"] is True
+        assert done1["check"]["violations"] == []
+        assert done1["check"]["total"] >= 1
+        assert "repair_prompt" not in done1["check"]
+        cid = done1["conversation_id"]
+        agent = captured["agents"][0]
+
+        # 轮 2：写坏一页。只报新增 Bad2，存量 Legacy 不混入（呈现与修复 prompt 都不带）。
+        def write_bad(a):
+            a.kwargs["filesystem"].write_text(
+                kb / "wiki" / "entities" / "Bad2.md", "no frontmatter\n"
+            )
+
+        agent.action = write_bad
+        _, done2, _ = _chat(client, "写坏页", conversation_id=cid)
+        assert done2["check"]["ok"] is False
+        pages = [v["page"] for v in done2["check"]["violations"]]
+        assert any("Bad2.md" in p for p in pages)
+        assert not any("Legacy.md" in p for p in pages)
+        assert "Bad2.md" in done2["check"]["repair_prompt"]
+        assert "Legacy.md" not in done2["check"]["repair_prompt"]
+        assert done2["check"]["total"] > len(done2["check"]["violations"])  # 存量在 total 里
+
+        # 轮 3：shell 直写清掉存量页（不经 wrapper）→ resolved 计数；Bad2 是上轮存量、不再报。
+        def fix_legacy(_a):
+            (kb / "wiki" / "entities" / "Legacy.md").unlink()
+
+        agent.action = fix_legacy
+        _, done3, _ = _chat(client, "清理", conversation_id=cid)
+        assert done3["check"]["ok"] is True
+        assert done3["check"]["violations"] == []
+        assert done3["check"]["resolved"] >= 1
+
+
+def test_writable_turn_check_baseline_cached(chat_env, monkeypatch) -> None:
+    """基线缓存（决策P4.5-4 修订，性能）：同会话连续可写轮稳态每轮只跑 1 次 check（收尾），
+
+    不每轮重拍基线。首轮 2 次（拍基线 + 收尾）；之后代际未变 → 复用缓存、每轮 1 次。
+    ingest/heal 完工 bump 代际后下一轮重拍（基线失效）。
+    """
+    import guanlan.web.chat as chat_mod
+
+    calls = {"n": 0}
+    real = chat_mod.run_check
+
+    def counting(wiki):
+        calls["n"] += 1
+        return real(wiki)
+
+    monkeypatch.setattr(chat_mod, "run_check", counting)
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done1, _ = _chat(client, "首轮")  # 拍基线 + 收尾 = 2
+        assert calls["n"] == 2
+        cid = done1["conversation_id"]
+        calls["n"] = 0
+        _chat(client, "二轮", conversation_id=cid)  # 复用基线 → 只收尾 = 1
+        _chat(client, "三轮", conversation_id=cid)  # 同上 = 1
+        assert calls["n"] == 2  # 两轮各 1 次
+
+        # 模拟别处 ingest/heal 写 wiki → bump 代际 → 下轮基线失效、重拍。
+        app.state.write_gate.bump_wiki_generation()
+        calls["n"] = 0
+        _chat(client, "四轮", conversation_id=cid)  # 重拍基线 + 收尾 = 2
+        assert calls["n"] == 2
 
 
 def test_writable_turn_undo_restores_wiki_and_schema(chat_env) -> None:

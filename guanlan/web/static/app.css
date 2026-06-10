@@ -43,13 +43,36 @@ body {
 .wordmark { display: flex; align-items: flex-end; gap: .5rem; }
 .logo { font-size: 1.3rem; font-weight: 700; letter-spacing: .15em; line-height: 1; }
 .tagline { font-size: .8rem; color: #BBDDE3; opacity: .8; line-height: 1; }
-.actions button {
-  background: transparent; color: var(--lan-foam);
-  border: 1px solid rgba(255,255,255,.35); border-radius: 4px;
-  padding: .3rem .7rem; margin-left: .4rem; cursor: pointer; font-size: .85rem;
-  transition: color .15s, background .15s;
+/* 顶栏动作：图标在上、中文在下，每枚按钮等宽等高（统一小规格），分组以细澜纹分隔；
+   低饱和墨底，靠 hover 染澜青；线性图标随 currentColor 同步变色。标准窗宽下整排成一行。 */
+.actions { display: flex; align-items: center; gap: .15rem; flex-wrap: wrap; justify-content: flex-end; }
+/* 分组分隔：一道半透白细线，把「会话 | 写入 | 报告」三组分开。 */
+.act-sep { width: 1px; height: 1.43rem; background: rgba(255,255,255,.18); margin: 0 .16rem; flex: none; }
+.actions .btn {
+  /* 上下排布 + 居中：图标在上、中文在下；图标/中文在各按钮间横向对齐。 */
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: .14rem;
+  width: 2.25rem; min-height: 2.03rem;        /* 等宽等高：统一小规格（现尺寸的 3/4） */
+  padding: .22rem .15rem;
+  background: rgba(255,255,255,.05); color: var(--lan-foam);
+  border: 1px solid rgba(255,255,255,.14); border-radius: 5px;
+  cursor: pointer; line-height: 1; white-space: nowrap;
+  transition: background .16s, border-color .16s, color .16s, transform .08s;
 }
-.actions button:hover { background: var(--lan-ripple); border-color: var(--lan-ripple); }
+.actions .btn:hover {
+  background: var(--lan-ripple); border-color: var(--lan-ripple); color: #fff;
+}
+.actions .btn:active { transform: translateY(1px); }
+.actions .btn:focus-visible { outline: 2px solid var(--lan-foam); outline-offset: 1px; }
+/* 线性图标：随按钮 currentColor 上色，hover 转白；细描边、圆角端点呼应水墨笔意。 */
+.ico {
+  width: .8rem; height: .8rem; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 1.9;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.btn-zh { font-size: .53rem; letter-spacing: .02em; }
+/* 窄屏退让：只留图标（藏中文），按钮再收窄，保证顶栏不溢出。 */
+@media (max-width: 900px) { .actions .btn .btn-zh { display: none; } .actions .btn { width: 1.72rem; min-height: 1.65rem; } }
 
 /* 姿态徽标（P4.5）：只读=低调；可写=醒目橙提示 Agent 可写。 */
 .mode-badge {
@@ -165,16 +188,121 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .wiki-view a.wikilink:hover { color: var(--lan-deep); }
 .wiki-view .wikilink.broken { color: var(--lan-ink-soft); border-bottom: 1px dotted var(--lan-mist); cursor: default; } /* 水静无澜 */
 
-/* ── 对话输入框（底部满宽） ── */
-.chat-form { grid-area: input; display: flex; gap: .5rem; padding: .7rem 1rem; border-top: 1px solid var(--lan-mist); background: var(--lan-surface); }
-.chat-form textarea { flex: 1; resize: none; border: 1px solid var(--lan-mist); border-radius: 6px; padding: .5rem; font: inherit; }
-.chat-form textarea:focus { outline: none; border-color: var(--lan-ripple); }
-.chat-form button { background: var(--lan-deep); color: #fff; border: 0; border-radius: 6px; padding: 0 1.4rem; cursor: pointer; transition: background .15s; }
-.chat-form button:hover { background: var(--lan-ripple); }
-.chat-form button:disabled { opacity: .5; cursor: default; }
-/* 流式中按钮转「停止」：暖红区分，点击即中断当前轮。 */
-.chat-form button.stopping { background: #8a1f1f; }
-.chat-form button.stopping:hover { background: #6f1818; }
+/* ── 对话输入框（底部满宽，OpenAI 风格圆角 composer，承观澜水墨 + 澜配色） ──
+   外层 .composer 是带边框/圆角的卡片（focus-within 时下沉澜纹边）；内含附件徽章行、
+   自增高文本域、底栏（左＋上传 / 右↑发送）。拖文件到框上 .drag-active 高亮。 */
+.chat-form.composer {
+  grid-area: input; display: flex; flex-direction: column; gap: .5rem;
+  margin: .7rem 1rem; padding: .55rem .7rem;
+  background: var(--lan-surface); border: 1px solid var(--lan-mist); border-radius: 16px;
+  box-shadow: 0 1px 4px rgba(15, 76, 92, .05); transition: border-color .15s, box-shadow .15s;
+}
+.chat-form.composer:focus-within { border-color: var(--lan-ripple); box-shadow: 0 1px 8px rgba(63, 157, 179, .14); }
+.chat-form.composer.drag-active { border-color: var(--lan-ripple); border-style: dashed; box-shadow: 0 0 0 3px rgba(63, 157, 179, .12); }
+
+.composer-wrap { position: relative; }
+.chat-form.composer textarea {
+  width: 100%; box-sizing: border-box; resize: none; border: 0; background: transparent;
+  padding: .35rem .25rem; font: inherit; line-height: 1.45;
+  min-height: 1.8rem; max-height: 200px; overflow-y: hidden; display: block; color: var(--lan-ink);
+}
+.chat-form.composer textarea:focus { outline: none; }
+
+/* 底栏：＋上传（左）· 提示 · ↑发送（右，margin-left:auto 顶到底栏右端） */
+.composer-bar { display: flex; align-items: center; gap: .5rem; }
+.composer-attach {
+  flex-shrink: 0; width: 34px; height: 34px; padding: 0; display: inline-flex;
+  align-items: center; justify-content: center; line-height: 1;
+  color: var(--lan-ink-soft); background: transparent; border: 1px solid var(--lan-mist);
+  border-radius: 50%; cursor: pointer; transition: background .15s, color .15s, border-color .15s;
+}
+.composer-attach:hover:not(:disabled) { background: var(--lan-foam); color: var(--lan-deep); border-color: var(--lan-ripple); }
+.composer-attach:disabled { opacity: .45; cursor: default; }
+.composer-send {
+  flex-shrink: 0; margin-left: auto; width: 36px; height: 36px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center; line-height: 1;
+  color: #fff; background: var(--lan-deep); border: 0; border-radius: 50%; cursor: pointer;
+  transition: background .15s;
+}
+.composer-send:hover:not(:disabled) { background: var(--lan-ripple); }
+.composer-send:disabled { opacity: .5; cursor: default; }
+/* 流式中按钮转「停止」(■)：暖红区分，点击即中断当前轮。 */
+.composer-send.stopping { background: #8a1f1f; }
+.composer-send.stopping:hover:not(:disabled) { background: #6f1818; }
+/* composer 图标（＋/↑/■）：粗描边的线性图标，比 Unicode 字形更挺括、笔画可控。 */
+.composer-ico {
+  width: 18px; height: 18px; fill: none; stroke: currentColor;
+  stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round;
+}
+/* 停止用实心圆角方块（粗看即「停」）：填充当前色、无描边。 */
+.ico-stop { fill: currentColor; stroke: none; width: 15px; height: 15px; }
+/* 发送↔停止图标切换：默认显示↑、藏■；.stopping 时反转（由 setChatSending 切类）。 */
+.composer-send .ico-stop { display: none; }
+.composer-send.stopping .ico-send { display: none; }
+.composer-send.stopping .ico-stop { display: inline; }
+
+/* 附件徽章行（composer 内，待发送的上传文件）：每枚 = 图标 · 名 · 类型 · ×移除。 */
+.attach-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .4rem; }
+.attach-list[hidden] { display: none; }
+.attach-chip {
+  display: inline-flex; align-items: center; gap: .4rem; max-width: 16rem;
+  padding: .25rem .35rem .25rem .5rem; font-size: .82rem; color: var(--lan-ink);
+  background: var(--lan-paper); border: 1px solid var(--lan-mist); border-radius: 10px;
+}
+.attach-chip.attach-error { background: #fbeaea; border-color: #f3c4c4; color: #8a1f1f; }
+.attach-icon { flex-shrink: 0; display: inline-flex; }
+/* 图像附件缩略图（本地 blob URL，镜像 chahua）：composer 徽章 24px、气泡回显 20px。 */
+.attach-thumb { width: 24px; height: 24px; border-radius: 6px; object-fit: cover; display: block; }
+.user-file-chip .attach-thumb { width: 20px; height: 20px; border-radius: 4px; }
+
+/* ── 统一文件图标（暂存区 / 上传徽章 / 气泡共用）：图像缩略图 + 彩色文件类型角标 ── */
+/* 缩略图：方形、cover 裁切；解码失败时 JS 回退为类型角标。 */
+.file-thumb { width: 26px; height: 26px; border-radius: 5px; object-fit: cover; display: block; flex-shrink: 0; background: var(--lan-mist); }
+/* 文件类型角标：页形（折角）+ 扩展名文字，按类别上色。常见办公/压缩/代码/媒体各成一色。 */
+.file-ico {
+  position: relative; flex-shrink: 0;
+  width: 22px; height: 26px;
+  display: inline-flex; align-items: flex-end; justify-content: center;
+  padding-bottom: 3px; box-sizing: border-box;
+  font-size: 8px; font-weight: 700; letter-spacing: .2px; line-height: 1;
+  color: #fff; background: #6b7a80; border-radius: 3px;
+}
+.file-ico::after {  /* 右上折角（dog-ear）：深一档的三角，读作「纸页」。 */
+  content: ""; position: absolute; top: 0; right: 0;
+  border-top: 7px solid rgba(0,0,0,.22); border-left: 7px solid transparent;
+  border-top-right-radius: 3px;
+}
+.file-ico[data-cat="pdf"]   { background: #c0392b; }
+.file-ico[data-cat="doc"]   { background: #2b5797; }
+.file-ico[data-cat="xls"]   { background: #1e7145; }
+.file-ico[data-cat="ppt"]   { background: #d24726; }
+.file-ico[data-cat="zip"]   { background: #b8860b; }
+.file-ico[data-cat="md"]    { background: var(--lan-ripple); }
+.file-ico[data-cat="txt"]   { background: #6b7a80; }
+.file-ico[data-cat="code"]  { background: #6a4ca5; }
+.file-ico[data-cat="img"]   { background: #2a9d8f; }
+.file-ico[data-cat="audio"] { background: #b5468a; }
+.file-ico[data-cat="video"] { background: #3f5fb3; }
+.file-ico[data-cat="file"]  { background: #6b7a80; }
+/* 角标在小处（上传徽章 / 气泡）按比例缩一档。 */
+.attach-chip .file-ico { width: 20px; height: 24px; font-size: 7.5px; }
+.user-file-chip .file-ico { width: 17px; height: 20px; font-size: 6.5px; padding-bottom: 2px; }
+.user-file-chip .file-ico::after { border-top-width: 6px; border-left-width: 6px; }
+.attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-meta { flex-shrink: 0; font-size: .72rem; color: var(--lan-ink-soft); text-transform: uppercase; letter-spacing: .3px; }
+.attach-remove {
+  flex-shrink: 0; width: 18px; height: 18px; padding: 0; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 13px; line-height: 1;
+  color: #fff; background: var(--lan-ink-soft); border: 0; border-radius: 50%; cursor: pointer;
+}
+.attach-remove:hover { background: var(--lan-deep); }
+
+/* 用户气泡下方的附件徽章（已发送，回显用）：与 composer 内徽章同形、不可移除。 */
+.msg.user-files { align-self: flex-end; max-width: 78%; display: flex; flex-wrap: wrap; gap: .35rem; padding: 0; background: none; }
+.user-file-chip { display: inline-flex; align-items: center; gap: .3rem; padding: .2rem .5rem;
+  font-size: .78rem; color: var(--lan-ink-soft); background: var(--lan-surface);
+  border: 1px solid var(--lan-mist); border-radius: 9px; }
+
 .msg .stop-note { color: var(--lan-ink-soft); font-size: .85em; margin-left: .35rem; }
 
 /* ── 浮层（报告 / 作业 / ingest 选择） ── */
@@ -237,6 +365,40 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 
 /* 载入历史会话时的系统提示气泡（既非用户也非模型答案）。 */
 .msg.note { align-self: stretch; background: var(--lan-foam); color: var(--lan-ink-soft); border: 1px dashed var(--lan-mist); font-size: .85rem; }
+
+/* 暂存区浮层（P4.6）：分段标题 + uploads/parsed 文件行（徽章 + 操作 + 🗑）+ 行内晋级表单 + 合并条。 */
+.stage-head { margin: .7rem 0 .3rem; font-weight: 600; color: var(--lan-deep); font-size: .92rem; }
+.stage-head:first-child { margin-top: 0; }
+.stage-sub { font-weight: 400; color: var(--lan-ink-soft); font-size: .78rem; }
+.stage-empty { margin: .2rem 0 .4rem; }
+.stage-row { display: flex; align-items: center; gap: .4rem; padding: .3rem .35rem; border-bottom: 1px solid var(--lan-mist); font-size: .85rem; flex-wrap: wrap; }
+.stage-pick { flex: none; cursor: pointer; }
+.stage-name { flex: 1; min-width: 7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--lan-ink); }
+.stage-size { flex: none; font-size: .78rem; }
+.stage-act { background: var(--lan-ripple); color: #fff; border: 0; border-radius: 4px; padding: .2rem .6rem; cursor: pointer; font-size: .8rem; }
+.stage-act:disabled { opacity: .5; cursor: default; }
+.stage-trash { background: transparent; border: 0; cursor: pointer; font-size: .95rem; padding: .1rem .3rem; }
+.stage-trash:disabled { opacity: .4; cursor: default; }
+/* 目录导航：面包屑（返回上一级 + 当前路径）。 */
+.stage-crumb { display: flex; align-items: center; gap: .5rem; margin: .2rem 0 .5rem; }
+.stage-crumb-path { font-size: .82rem; color: var(--lan-ink-soft); word-break: break-all; }
+/* 子目录行：文件夹图标 + 名（可点入）+ 🗑。 */
+.stage-folder .stage-folder-ico { flex-shrink: 0; display: inline-flex; color: var(--lan-deep); }
+.stage-folder .stage-folder-ico .ico { width: 1.15rem; height: 1.15rem; stroke-width: 1.7; }
+.stage-foldername {
+  flex: 1; min-width: 5rem; text-align: left; padding: .1rem .15rem;
+  background: transparent; border: 0; cursor: pointer; font: inherit; color: var(--lan-deep);
+  font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.stage-foldername:hover { color: var(--lan-ripple); text-decoration: underline; }
+.stage-mergebar { margin: .5rem 0; text-align: right; }
+.stage-merge { background: transparent; color: var(--lan-deep); border: 1px solid var(--lan-mist); border-radius: 4px; padding: .25rem .8rem; cursor: pointer; font-size: .82rem; }
+.stage-merge:disabled { opacity: .5; cursor: default; }
+.stage-flow { margin: .8rem 0 0; padding-top: .5rem; border-top: 1px solid var(--lan-mist); }
+.stage-promote-form { flex-basis: 100%; display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; padding: .35rem 0 .1rem; }
+.stage-promote-form input { flex: 1; min-width: 8rem; padding: .3rem .45rem; border: 1px solid var(--lan-mist); border-radius: 5px; font-size: .82rem; }
+.stage-promote-status { flex-basis: 100%; font-size: .82rem; display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.stage-preview { margin-top: .5rem; padding: .6rem .8rem; background: var(--lan-foam); border-radius: 6px; }
 
 .muted { color: var(--lan-ink-soft); font-size: .85rem; }
 .hidden { display: none; }
