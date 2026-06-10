@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: 装 uv（带依赖缓存）
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
