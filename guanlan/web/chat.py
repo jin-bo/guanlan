@@ -40,7 +40,7 @@ from agentao.embedding import (
 from agentao.embedding.compat import build_compat_transport
 from agentao.permissions import PermissionMode
 
-from ..check import run_check
+from ..check import Violation, run_check
 from ..gate import REPAIR_PROMPT, _render_violations
 from ..skill import SKILL_NAME, ensure_skill_available
 from .jobs import WriteGate
@@ -190,6 +190,34 @@ def _prune_old_snapshots(kb: Path, session_id: str) -> None:
             continue  # 读坏 / 删失败：跳过，best-effort
 
 
+def _violation_key(v: Violation) -> tuple:
+    """check violation 的稳定身份键（页+类+详情）：用于「本轮新增」差集与基线缓存（决策P4.5-4）。"""
+    return (v.page, v.kind, v.detail)
+
+
+def _lean_messages(messages: list[dict]) -> list[dict]:
+    """落盘前把多模态 content 列表压成纯文本（chahua 不变量：base64 **绝不入快照**）。
+
+    图像轮在 `agent.messages` 里是 OpenAI 形态的 content 列表（text part + `image_url` data-URL
+    part，单图 base64 可达 ~27MB）；会话快照每轮重写一份，照存会让 `.agentao/sessions/` 膨胀到
+    不可用。这里只取 text part 拼接（text 里已含与 `_source` 同 uri 的 `<attachment>` 标签，文本
+    引用不丢）——与 agentao 模型拒图后的降级重写**同形**，恢复出的会话等价于「降级过的历史」。
+    不可变处理：返回新列表/新 dict，绝不改 `agent.messages` 本体（live 会话保留视觉上下文）。
+    """
+    out: list[dict] = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):
+            text = "\n".join(
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+            )
+            m = {**m, "content": text}
+        out.append(m)
+    return out
+
+
 def configure_agent_log(root: Path) -> Path:
     """把嵌入 chat 的会话日志接到 `<root>/agentao.log`（与 CLI 同名同轮转），**全进程仅挂一次**。
 
@@ -259,6 +287,11 @@ class Conversation:
         # 撤销本轮写（决策P4.5-4/13）：最近一个可写 turn 的写日志 + 一次性 token。
         self._undo_token: str | None = None
         self._undo_journal: dict[Path, tuple[bytes | None, str]] = {}
+        # 写后 check 基线缓存（决策P4.5-4 修订，性能）：上次见到的 wiki/ violation 键集 + 拍它时的
+        # 写代际。可写 turn 起跑时若代际未变即复用、跳过重拍基线（同会话连续对话省每轮 ~0.36s）；
+        # 代际变了（别处 ingest/heal、或本会话上轮改了 violation 集）或首轮 → 重新拍。None = 未拍。
+        self._check_baseline: set[tuple] | None = None
+        self._check_baseline_gen = -1
 
         ensure_skill_available(kb)  # 嵌入式同样需保证 skill 可发现（坑②前置）
 
@@ -337,8 +370,19 @@ class Conversation:
             self._inflight = 0
             self._stop_requested = False  # 无在飞轮了：清掉未兑现的待停，绝不泄漏到下一轮
 
-    async def turn(self, msg: str, emit: Emit, meta_out: dict | None = None) -> str:
+    async def turn(
+        self,
+        msg: str,
+        emit: Emit,
+        meta_out: dict | None = None,
+        images: list[dict[str, str]] | None = None,
+    ) -> str:
         """跑一轮：把 token 经 emit 推前端，返回完整答案；`asyncio.Lock` 串行同会话各轮。
+
+        `images`（可选）：图像附件载荷 `[{data, mimeType, _source}, …]`，原样透传 `arun(images=)`
+        走视觉通道（agentao 文档化嵌入面）；模型不支持视觉时由 agentao 自动降级为
+        `<attachment uri= mimetype=/>` 标签文本重试（宿主不做能力探测）。`_source` = 消息里
+        既有标签的 uri，降级后 prompt 前后引用一致。
 
         可写姿态（workspace-write）下还在收尾把**层②还原 / 写后 check / 撤销可用性**写进 `meta_out`
         （由端点装进 done/error/stopped 帧的可选字段，§7）。`meta_out` 由端点持有 → 无论本轮返回
@@ -353,6 +397,7 @@ class Conversation:
             # close 了 agent。锁内复检 closed，拒绝在已关闭 agent 上跑（端点据异常发 error 事件）。
             guarded = self._mode == "workspace-write" and not self.closed
             before_agentao: AgentaoSnapshot | None = None
+            before_check: set[tuple] | None = None
             # 写锁持有标志用**可变容器**、且在 acquire 的线程函数内置位：`run_sync(acquire)` 默认
             # abandon_on_cancel=False——被取消时仍等 acquire 返回（锁已到手）、再在 await 处抛
             # CancelledError，使「await 之后」的赋值永不执行。把置位放进线程函数则不论 CancelledError
@@ -382,6 +427,22 @@ class Conversation:
                         )
                     # 层②（决策P4.5-3/c）：只拍 AGENTAO.md 一个文件（近免费）；raw/ 树不扫。
                     before_agentao = snapshot_agentao(self._kb)
+                    # check 基线（决策P4.5-4 修订）：收尾只 surface 本轮**新增**的 violations——否则
+                    # 库存量问题（数百条断链很常见）每个可写轮整批刷屏、把「本轮搞坏了什么」淹没。
+                    # 基线即起跑时的 wiki/ violation 键集；**缓存复用**（性能）：写代际未变即复用上次
+                    # 见到的集、跳过重拍（同会话连续对话省每轮 ~0.36s）；代际变了或首轮才真拍。
+                    # 拍取失败 → before_check 留 None，收尾退化为全量呈现（绝不让基线毁本轮）。
+                    gen = self._write_gate.wiki_generation if self._write_gate else 0
+                    if self._check_baseline is not None and self._check_baseline_gen == gen:
+                        before_check = self._check_baseline  # 复用：零 check 成本
+                    else:
+                        try:
+                            r = await anyio.to_thread.run_sync(run_check, self._kb / "wiki")
+                            before_check = {_violation_key(v) for v in r.violations}
+                            self._check_baseline = before_check
+                            self._check_baseline_gen = gen
+                        except Exception:  # noqa: BLE001 — 基线失败只降级呈现口径，不毁本轮
+                            _logger.warning("会话 %s check 基线拍取失败", self.id, exc_info=True)
                     self._policy_fs.begin_journal()  # 开本轮写日志（wiki/ + SCHEMA.md）
 
                 # 每轮一枚取消令牌，**锁内**创建/安装：故 _cancel_token 恒指向持锁的活跃轮，并发同会话
@@ -400,7 +461,10 @@ class Conversation:
                 if self.title is None:
                     self.title = msg.strip()[:50] or "（空）"
                 # arun = chat 的 async 包装（内部 run_in_executor）；传入令牌让停止可控。
-                answer = await self.agent.arun(msg, cancellation_token=token)
+                # images 仅本轮有图时传（None 走纯文本路径，与 agentao chat() 契约一致）。
+                answer = await self.agent.arun(
+                    msg, cancellation_token=token, images=images or None
+                )
                 if self._persist:
                     # 仅成功轮落盘、off-loop 不堵事件循环；任何异常（prune / save_session）只记日志，
                     # **绝不**让它冒泡把已成功的 arun 答案翻成 error（失败不毁答案，同 §4.4 降级精神）。
@@ -413,7 +477,7 @@ class Conversation:
                 # ── 可写 turn 收尾（决策P4.5-3/4，评审 High：还原须早于 error SSE / 计数-- / 释锁）──
                 if guarded:
                     try:
-                        await self._finalize_writable(before_agentao, meta_out)
+                        await self._finalize_writable(before_agentao, before_check, meta_out)
                     finally:
                         # 计数-- 与释锁须发生在 finally 内、且在 meta 落定之后（评审 High）。
                         if lock_held[0] and self._write_gate is not None:
@@ -425,14 +489,18 @@ class Conversation:
                 self._cancel_token = None
 
     async def _finalize_writable(
-        self, before_agentao: AgentaoSnapshot | None, meta_out: dict | None
+        self,
+        before_agentao: AgentaoSnapshot | None,
+        before_check: set[tuple] | None,
+        meta_out: dict | None,
     ) -> None:
         """可写 turn 收尾：层②还原 + 无条件写后 check + 撤销可用性，写进 `meta_out`（决策P4.5-3/4）。
 
         在 `write_lock` 内跑（权威 `wiki/` 门禁，§5）：① 先把被旁路改的 `AGENTAO.md` 还原（早于
         error SSE）；② 取本轮写日志、登记撤销 token（写日志非空即可用，**独立于 check**）；③ 无条件
         跑 `run_check(wiki)`——既不靠写日志、也不用 mtime/size 指纹（评审 High/Medium），覆盖 shell
-        直写。任何一步抛错只记日志，绝不连累已成功的答案（同 §4.4 降级精神）。
+        直写；呈现按「本轮新增」口径与起跑基线 `before_check` 做差（决策P4.5-4 修订，见 §3 步骤）。
+        任何一步抛错只记日志，绝不连累已成功的答案（同 §4.4 降级精神）。
         """
         # ① 层②：AGENTAO.md 被旁路改/删/换形态 → 还原原字节（先清替身、不顺 symlink 写穿）。
         try:
@@ -458,22 +526,44 @@ class Conversation:
             self._undo_journal = {}
             self._undo_token = None
 
-        # ③ 无条件写后 check（零 LLM、锁内一致状态；覆盖 shell 直写 wiki/）。
+        # ③ 无条件写后 check（零 LLM、锁内一致状态；覆盖 shell 直写 wiki/）。**呈现按「本轮新增」
+        # 口径**（决策P4.5-4 修订）：与起跑基线（同样锁内拍取）做差——`violations` 只装本轮新增、
+        # 库存量进 `total`、本轮消除数进 `resolved`、`ok` = 本轮未新增。否则存量问题（数百条断链
+        # 很常见）在每个可写轮整批刷屏，把本轮真正引入的问题彻底淹没。守卫强度不变：check 仍每轮
+        # 全量跑、shell 直写引入的新问题照样落进差集。基线缺失（拍取失败）退化为全量呈现。
         check: dict | None = None
         try:
             result = await anyio.to_thread.run_sync(run_check, self._kb / "wiki")
+            after = {_violation_key(v) for v in result.violations}
+            if before_check is not None:
+                new = [v for v in result.violations if _violation_key(v) not in before_check]
+                resolved = len(before_check - after)
+            else:
+                new = list(result.violations)
+                resolved = 0
+            # 刷新基线缓存为本轮收尾态（下轮起跑代际未变即复用、零重拍）。violation 集变了 →
+            # bump 写代际：使**别的**可写会话缓存失效、下轮重拍（本会话已持最新 after，更新自己的 gen）。
+            self._check_baseline = after
+            if before_check is None or after != before_check:
+                if self._write_gate is not None:
+                    self._write_gate.bump_wiki_generation()
+            self._check_baseline_gen = (
+                self._write_gate.wiki_generation if self._write_gate else 0
+            )
             check = {
-                "ok": result.ok,
+                "ok": not new,  # 本轮口径：未新增即通过；整库现状看 total（==0 才是全绿）
+                "total": len(result.violations),
+                "resolved": resolved,
                 "violations": [
-                    {"page": v.page, "kind": v.kind, "detail": v.detail}
-                    for v in result.violations
+                    {"page": v.page, "kind": v.kind, "detail": v.detail} for v in new
                 ],
             }
-            if not result.ok:
+            if new:
                 # 「让 Agent 修复」用的下一轮消息：服务端用 gate.REPAIR_PROMPT 格式化（复用 ingest
-                # 自愈同一薄 prompt，§3 决策P4.5-4）。前端把它当下一轮 user 消息发出即驱动修复。
+                # 自愈同一薄 prompt，§3 决策P4.5-4）。只针对**本轮新增**——不驱动 agent 一上来
+                # 修几百条存量（那是 heal/lint 的活）。前端把它当下一轮 user 消息发出即驱动修复。
                 check["repair_prompt"] = REPAIR_PROMPT.format(
-                    violations=_render_violations(result.violations)
+                    violations=_render_violations(new)
                 )
         except Exception:  # noqa: BLE001 — check 失败仅记日志，不毁答案
             _logger.warning("会话 %s 写后 check 失败", self.id, exc_info=True)
@@ -557,7 +647,7 @@ class Conversation:
         active = list(self.agent.skill_manager.get_active_skills().keys())  # 镜像 cli/session.py
         _prune_old_snapshots(self._kb, self.id)
         save_session(
-            self.agent.messages,
+            _lean_messages(self.agent.messages),  # 多模态 base64 不入快照（见 _lean_messages）
             self._model,
             active_skills=active,
             session_id=self.id,

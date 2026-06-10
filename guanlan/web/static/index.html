@@ -9,6 +9,24 @@
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
+<!-- 顶栏按钮图标雪碧（线性墨笔风，stroke=currentColor 随澜色/hover 变色，见 app.css .ico）。 -->
+<svg class="icon-sprite" aria-hidden="true" focusable="false" width="0" height="0">
+  <symbol id="i-new" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-feed" viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
+  <symbol id="i-staging" viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></symbol>
+  <symbol id="i-ingest" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
+  <symbol id="i-heal" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></symbol>
+  <symbol id="i-health" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
+  <symbol id="i-lint" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></symbol>
+  <symbol id="i-graph" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></symbol>
+  <!-- composer 图标（＋ / ↑ / ■）：粗描边，stroke=currentColor。 -->
+  <symbol id="i-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="5"/><polyline points="6 11 12 5 18 11"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+</svg>
 <header class="topbar">
   <div class="brand">
     <img class="brand-icon" src="/static/logo.png" alt="观澜 logo" width="38" height="38">
@@ -19,15 +37,29 @@
   </div>
   <nav class="actions">
     <span id="mode-badge" class="mode-badge" title="当前会话姿态（/mode 切换）">read-only</span>
-    <button id="chat-new" title="开启新会话（清空上下文）">新会话</button>
-    <button id="history-btn" title="历史会话：列出、点开续聊、删除">历史会话</button>
-    <button id="feed-btn" title="投喂：把一篇素材粘贴存进 raw/">投喂</button>
-    <button id="ingest-btn" title="从 raw/ 选一篇触发 ingest">ingest</button>
-    <button id="heal-btn" title="物化高频缺失实体：缺页补全，走写门禁">heal</button>
-    <button data-report="check">check</button>
-    <button data-report="health">health</button>
-    <button data-report="lint">lint</button>
-    <button id="graph-btn">graph</button>
+    <span class="act-sep" aria-hidden="true"></span>
+    <button id="chat-new" class="btn" title="开启新会话（清空上下文）">
+      <svg class="ico"><use href="#i-new"/></svg><span class="btn-zh">新会话</span></button>
+    <button id="history-btn" class="btn" title="历史会话：列出、点开续聊、删除">
+      <svg class="ico"><use href="#i-history"/></svg><span class="btn-zh">历史</span></button>
+    <span class="act-sep" aria-hidden="true"></span>
+    <button id="feed-btn" class="btn" title="投喂：把一篇素材粘贴存进 raw/">
+      <svg class="ico"><use href="#i-feed"/></svg><span class="btn-zh">投喂</span></button>
+    <button id="staging-btn" class="btn" title="暂存区：浏览上传/派生物，审阅·修订·晋级为源 → ingest">
+      <svg class="ico"><use href="#i-staging"/></svg><span class="btn-zh">暂存区</span></button>
+    <button id="ingest-btn" class="btn" title="ingest：从 raw/ 选一篇触发入库 → wiki/">
+      <svg class="ico"><use href="#i-ingest"/></svg><span class="btn-zh">入库</span></button>
+    <button id="heal-btn" class="btn" title="heal：补全高频缺失实体，缺页物化，走写门禁">
+      <svg class="ico"><use href="#i-heal"/></svg><span class="btn-zh">补全</span></button>
+    <span class="act-sep" aria-hidden="true"></span>
+    <button data-report="check" class="btn" title="check：确定性校验（frontmatter / 断链 / 源）">
+      <svg class="ico"><use href="#i-check"/></svg><span class="btn-zh">校验</span></button>
+    <button data-report="health" class="btn" title="health：stub 页 + 索引↔磁盘同步（建议性）">
+      <svg class="ico"><use href="#i-health"/></svg><span class="btn-zh">健康</span></button>
+    <button data-report="lint" class="btn" title="lint：孤页 / 断链 / 缺失实体（建议性）">
+      <svg class="ico"><use href="#i-lint"/></svg><span class="btn-zh">巡检</span></button>
+    <button id="graph-btn" class="btn" title="graph：构建并打开知识图谱视图">
+      <svg class="ico"><use href="#i-graph"/></svg><span class="btn-zh">图谱</span></button>
   </nav>
 </header>
 
@@ -50,9 +82,19 @@
     <div id="wiki-view" class="wiki-view"></div>
   </aside>
 
-  <form id="chat-form" class="chat-form" aria-label="对话输入框">
-    <textarea id="chat-input" rows="2" placeholder="向 agent 提问（只读，跨轮保留上下文）… 回车发送，Option-Enter 换行，输入 / 看命令"></textarea>
-    <button type="submit" id="chat-send">发送</button>
+  <!-- 对话输入框（底部满宽，OpenAI 风格圆角 composer）：附件徽章 · 文本域 · 底栏(＋上传 / 发送) -->
+  <form id="chat-form" class="chat-form composer" aria-label="对话输入框">
+    <input id="file-input" type="file" multiple hidden>
+    <ul id="attach-list" class="attach-list" hidden aria-label="待发送附件"></ul>
+    <div class="composer-wrap">
+      <textarea id="chat-input" rows="1" placeholder="向 agent 提问（只读，跨轮保留上下文）… 回车发送，Shift-Enter 换行，输入 / 看命令"></textarea>
+    </div>
+    <div class="composer-bar">
+      <button type="button" id="attach-btn" class="composer-attach"
+              title="上传文件作附件：以 <attachment> 标签随消息发给 agent；图像直接给模型看（不支持视觉时自动降级为文本引用）"
+              aria-label="添加附件"><svg class="composer-ico"><use href="#i-plus"/></svg></button>
+      <button type="submit" id="chat-send" class="composer-send" title="发送（Enter）" aria-label="发送"><svg class="composer-ico ico-send"><use href="#i-up"/></svg><svg class="composer-ico ico-stop"><use href="#i-stop"/></svg></button>
+    </div>
   </form>
 </main>
 
