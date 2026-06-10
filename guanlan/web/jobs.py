@@ -49,6 +49,22 @@ class WriteGate:
         self.write_lock = threading.Lock()
         self._turns = 0
         self._turns_lock = threading.Lock()  # 独立于 write_lock：只护计数器
+        # wiki 写代际（P4.5-4 修订）：每次 wiki/ 内容可能变化（ingest/heal 作业、改了 violation
+        # 集的可写 turn）即 +1，单调递增。可写 turn 用它判「缓存的 check 基线是否仍准」——同一会话
+        # 连续对话、代际没变 → 复用基线、收尾只查一次（省掉每轮重拍基线那 ~0.36s）；代际变了或
+        # 首轮 → 重新拍。纯软优化：漏/多 bump 至多多查一次基线，绝不影响守卫（收尾 check 仍每轮全跑）。
+        self._wiki_generation = 0
+        self._gen_lock = threading.Lock()  # 独立小锁：只护代际计数原子自增
+
+    def bump_wiki_generation(self) -> None:
+        """标记 wiki/ 可能已变（ingest/heal 作业完成、或改了 violation 集的可写 turn 收尾时调）。"""
+        with self._gen_lock:
+            self._wiki_generation += 1
+
+    @property
+    def wiki_generation(self) -> int:
+        with self._gen_lock:
+            return self._wiki_generation
 
     def enter_writable(self) -> None:
         with self._turns_lock:
@@ -111,11 +127,18 @@ class Job:
 class JobQueue:
     """单 worker 线程 + FIFO 队列 + 内存作业表。线程随进程退出（daemon）。"""
 
-    def __init__(self, write_lock: threading.Lock | None = None) -> None:
+    def __init__(
+        self,
+        write_lock: threading.Lock | None = None,
+        on_job_done: Callable[[str], None] | None = None,
+    ) -> None:
         self._queue: queue.Queue[tuple[Job, Callable[[], object]]] = queue.Queue()
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()  # 仅护 _jobs / _counter；worker 改 job 字段无并发读写竞态点
         self._counter = 0
+        # 作业完工回调（域无关）：worker 跑完即以 job.kind 调它；kind→语义（如哪些写 wiki）
+        # 的判定留给注入方（create_app 用它 bump wiki 代际，见 P4.5-4 缓存基线）。None = 不回调。
+        self._on_job_done = on_job_done
         # 单写者写锁（P4.5 决策P4.5-6）：worker 跑 `fn()`（真正的写执行）时持有，与可写 chat
         # turn / 撤销回放 / GET /graph 串行。None = 未注入（旧测试 / 纯读场景）→ 不串行（沿用 P4
         # 行为：唯一写者就是本 worker，自带 FIFO 串行）。绝不与 `_lock`（只护作业表）混用。
@@ -194,3 +217,8 @@ class JobQueue:
                 job.output = buf.getvalue()
                 job.state = "done"
                 job.done_event.set()
+            # 完工回调在 write_lock 释放后调（不在临界区内做额外工作）；best-effort：异常不能
+            # 让 worker 死（它已捕获作业本体异常，这里再裹一层只为隔离回调意外）。
+            if self._on_job_done is not None:
+                with contextlib.suppress(Exception):
+                    self._on_job_done(job.kind)
