@@ -164,6 +164,8 @@ $("#wiki-view").addEventListener("click", (e) => {
 // ── 浮层 ──────────────────────────────────────────────────────────────────────
 
 function showOverlay(title, html) {
+  stagingOpen = false; // 任何其它浮层（报告/投喂/ingest/heal/历史）打开即清——openStaging 之后再置回，
+  // 防 done/stopped 误把 renderStaging 灌进别的浮层 body（暂存区 P4.6）。
   $("#overlay-title").textContent = title;
   $("#overlay-body").innerHTML = html;
   $("#overlay").classList.remove("hidden");
@@ -552,6 +554,439 @@ async function submitFeed(overwrite) {
   status.appendChild(ingestBtn);
 }
 
+// ── 暂存区（P4.6）：浏览 workspace/ → 审阅/修订/晋级为源/删除 → ingest 串联 ──────────
+//
+// 顶栏「暂存区」→ 浮层：① 待解析 uploads/（[问 agent 解析] 回填 composer / [晋级为源]（仅 .md）/ 🗑）
+// + ② 待晋级 parsed/（[预览]/[让 agent 修订] 回填 composer/[晋级为源]/🗑 + 勾选「合并选中…」）。
+// 复用既有 #overlay / triggerIngest / pollJob / 投喂 slug-409 交互，不引新组件、不改两栏（决策P4-3）。
+// 晋级/删除是宿主写：可写 turn 跑动期（workspace-write + chatStreaming）置灰，对应后端层③ 423（§7.3）。
+
+let stagingOpen = false; // 暂存区浮层是否打开：修订 turn 收尾（done/stopped）后据此自动重拉刷新
+let stagingPath = null;  // 当前浏览目录（相对根，如 workspace/uploads/第一章）；null = 根视图（uploads/parsed 两段）
+
+function fmtBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// 宿主写动作在可写 turn 跑动期是否应置灰（晋级/删除/ingest）——对应后端层③ 423（§7.3）。
+function hostWriteBlocked() {
+  return chatStreaming && currentMode === "workspace-write";
+}
+
+// 回填 composer（[问 agent 解析] / [让 agent 修订] / [合并选中] 共用）：把指令塞进输入框、聚焦、收起浮层。
+// 当前 read-only 时先提示切 /mode workspace-write（解析/修订都需可写会话，§7.2 ①）。
+function fillComposer(text, { needWritable = false } = {}) {
+  $("#overlay").classList.add("hidden");
+  const ta = $("#chat-input");
+  ta.value = text;
+  autoGrowInput();
+  ta.focus();
+  if (needWritable && currentMode !== "workspace-write") {
+    addMsg("note", "提示：解析/修订需可写会话，请先 /mode workspace-write 再发送。");
+  }
+}
+
+$("#staging-btn").addEventListener("click", openStaging);
+
+async function openStaging() {
+  stagingPath = null; // 每次从顶栏打开都回到根视图
+  showOverlay("暂存区 · workspace", '<p class="muted">加载 workspace…</p>');
+  stagingOpen = true; // 须在 showOverlay 之后（它会清 stagingOpen）
+  loadStaging();
+}
+
+// 浮层关闭时清 stagingOpen（done/stopped 不再误刷已关的浮层）。挂一次，幂等。
+$("#overlay-close").addEventListener("click", () => { stagingOpen = false; });
+$("#overlay").addEventListener("click", (e) => { if (e.target.id === "overlay") stagingOpen = false; });
+
+// 拉当前目录（stagingPath）并渲染。目录已被删/失效（4xx）→ 退回根视图重拉一次（避免卡在坏路径）。
+async function loadStaging() {
+  const qs = stagingPath ? `?path=${encodeURIComponent(stagingPath)}` : "";
+  let data;
+  try {
+    data = await getJSON(`/api/workspace${qs}`);
+  } catch (e) {
+    if (stagingPath !== null) { stagingPath = null; return loadStaging(); } // 坏路径 → 回根
+    $("#overlay-body").innerHTML = `<p class="report-bad">加载 workspace 失败：${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  renderStaging(data);
+}
+
+// 进入子目录 / 返回上一级。返回到 scratch 根（workspace/uploads|parsed）即回根两段视图。
+function stagingEnter(path) { stagingPath = path; loadStaging(); }
+function stagingUp() {
+  if (!stagingPath) return;
+  const parent = stagingPath.slice(0, stagingPath.lastIndexOf("/"));
+  stagingPath = (parent === "workspace/uploads" || parent === "workspace/parsed") ? null : parent;
+  loadStaging();
+}
+
+// 修订 turn 收尾（done/stopped）后，若暂存区仍开着则自动重拉刷新当前目录（决策P4.6-9）。
+async function refreshStagingIfOpen() {
+  if (!stagingOpen || $("#overlay").classList.contains("hidden")) return;
+  loadStaging();
+}
+
+function renderStaging(data) {
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  const blocked = hostWriteBlocked();
+  if (blocked) {
+    const warn = document.createElement("p");
+    warn.className = "muted";
+    warn.textContent = "会话写作业进行中…晋级/删除/ingest 暂不可用（稍后重试）。";
+    box.appendChild(warn);
+  }
+
+  if (data.root) {
+    // 根视图：两段（uploads / parsed）。每段列其**直接子项**（子目录可点入、文件带操作）。
+    renderSection(box, `① 待解析 · uploads/`, "uploads", "workspace/uploads",
+      data.uploads || [], blocked, "上传文件即在此暂存。");
+    renderSection(box, `② 待晋级 · parsed/`, "parsed", "workspace/parsed",
+      data.parsed || [], blocked, "让 agent 把 uploads/ 解析成 parsed/*.md。", "agent 解析产物，人审/修订后升源");
+  } else {
+    // 目录视图：面包屑 + 返回上一级 + 该目录直接子项（一级一级点）。
+    const crumb = document.createElement("div");
+    crumb.className = "stage-crumb";
+    const up = document.createElement("button");
+    up.className = "stage-act";
+    up.textContent = "← 返回上一级";
+    up.addEventListener("click", stagingUp);
+    const label = document.createElement("span");
+    label.className = "stage-crumb-path";
+    label.textContent = data.path; // textContent：路径按字面显示
+    crumb.append(up, label);
+    box.appendChild(crumb);
+    renderSection(box, "", data.base, data.path, data.items || [], blocked, "空目录。");
+  }
+
+  const flow = document.createElement("p");
+  flow.className = "stage-flow muted";
+  flow.textContent = "流程：上传 → 解析 →（预览/修订·拆分·合并/删冗余）→ 晋级 → ingest";
+  box.appendChild(flow);
+}
+
+// 渲染一段目录列表：子目录行（可点入 + 整删）在前，文件行（按 base 决定 uploads/parsed 操作）在后。
+// `base` ∈ {uploads, parsed} 决定文件操作集；`dirPath` 是本段所在目录（合并产物落此目录）。
+function renderSection(box, headerText, base, dirPath, items, blocked, emptyText, sub) {
+  if (headerText) box.appendChild(stagingHeader(headerText, sub));
+  if (!items.length) { box.appendChild(stagingEmpty(`（空）${emptyText}`)); return; }
+  const selected = new Set();
+  const mergeBtn = document.createElement("button");
+  mergeBtn.className = "stage-merge";
+  mergeBtn.textContent = "合并选中…";
+  mergeBtn.disabled = true;
+  const updateMerge = () => { mergeBtn.disabled = selected.size < 2; };
+  let parsedFiles = 0;
+  for (const it of items) {
+    if (it.is_dir) {
+      box.appendChild(renderFolderRow(it, blocked));
+    } else if (base === "uploads") {
+      box.appendChild(renderUploadRow(it, blocked));
+    } else {
+      parsedFiles++;
+      box.appendChild(renderParsedRow(it, blocked, selected, updateMerge));
+    }
+  }
+  if (base === "parsed" && parsedFiles) {
+    // 合并（复用 heal 勾选子集骨架，决策P4.6-9）：勾 ≥2 个 → 预填 agent 建议名（可改）→ 回填 composer。
+    mergeBtn.addEventListener("click", () => {
+      const picks = [...selected];
+      if (picks.length < 2) return;
+      const suggested = "合并-" + picks.map((p) => p.split("/").pop().replace(/\.md$/i, "")).join("-") + ".md";
+      const name = window.prompt("合并后文件名（agent 建议，可改；人最终定）：", suggested);
+      if (!name) return;
+      const list = picks.join(" 与 ");
+      fillComposer(`把 ${list} 合并成一篇，写到 ${dirPath}/${name}。`, { needWritable: true });
+    });
+    const mergeBar = document.createElement("div");
+    mergeBar.className = "stage-mergebar";
+    mergeBar.appendChild(mergeBtn);
+    box.appendChild(mergeBar);
+  }
+}
+
+// 子目录行：文件夹图标 + 名（点入）+ 🗑（整目录删除，需确认）。
+function renderFolderRow(it, blocked) {
+  const row = document.createElement("div");
+  row.className = "stage-row stage-folder";
+  const ico = document.createElement("span");
+  ico.className = "stage-folder-ico";
+  ico.innerHTML = '<svg class="ico"><use href="#i-folder"/></svg>';
+  const nm = document.createElement("button");
+  nm.className = "stage-foldername";
+  nm.textContent = `${it.name}/`; // textContent：目录名按字面显示
+  nm.title = "进入目录";
+  nm.addEventListener("click", () => stagingEnter(it.path));
+  const spacer = document.createElement("span");
+  spacer.className = "stage-size"; // 占位把 🗑 推到右侧
+  row.append(ico, nm, spacer, dirTrashButton(it, blocked));
+  return row;
+}
+
+// 🗑 整目录删除：DELETE /api/workspace/dir（递归，需确认；单写者 + 层③ 423）。可写 turn 跑动期置灰。
+function dirTrashButton(it, blocked) {
+  const btn = document.createElement("button");
+  btn.className = "stage-trash";
+  btn.textContent = "🗑";
+  btn.title = blocked ? "会话写作业进行中…" : "删除整个目录及其内容";
+  btn.disabled = blocked;
+  btn.addEventListener("click", async () => {
+    if (!window.confirm(`删除整个目录「${it.name}/」及其全部内容？此操作不可撤销。`)) return;
+    btn.disabled = true;
+    try {
+      const res = await fetch(`/api/workspace/dir?path=${encodeURIComponent(it.path)}`, { method: "DELETE" });
+      if (res.status === 423) { btn.disabled = false; btn.title = "可写会话进行中，稍后重试"; return; }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      loadStaging(); // 重拉刷新（目录连同子项已删）
+    } catch (e) {
+      btn.disabled = false;
+      btn.title = `删除失败：${e.message}`;
+    }
+  });
+  return btn;
+}
+
+function stagingHeader(text, sub) {
+  const h = document.createElement("div");
+  h.className = "stage-head";
+  h.textContent = text;
+  if (sub) {
+    const s = document.createElement("span");
+    s.className = "stage-sub";
+    s.textContent = `（${sub}）`;
+    h.appendChild(s);
+  }
+  return h;
+}
+
+function stagingEmpty(text) {
+  const p = document.createElement("p");
+  p.className = "muted stage-empty";
+  p.textContent = text;
+  return p;
+}
+
+// uploads/ 行：徽章 + 文件名 + [问 agent 解析]（+ .md 额外 [晋级为源]）+ 🗑。
+function renderUploadRow(it, blocked) {
+  const row = document.createElement("div");
+  row.className = "stage-row";
+  // 图像 → 缩略图（经 /api/workspace/raw 取原字节）；其它 → 文件类型角标。
+  const ico = makeFileIcon(it.name, {
+    isImage: it.kind === "image",
+    thumbUrl: `/api/workspace/raw?path=${encodeURIComponent(it.path)}`,
+  });
+  ico.classList.add("stage-ico");
+  const nm = document.createElement("span");
+  nm.className = "stage-name";
+  nm.textContent = it.name; // textContent：文件名按字面显示，无注入
+  nm.title = it.name;
+  const sz = document.createElement("span");
+  sz.className = "stage-size muted";
+  sz.textContent = fmtBytes(it.bytes);
+  const parse = document.createElement("button");
+  parse.className = "stage-act";
+  parse.textContent = "问 agent 解析";
+  parse.addEventListener("click", () =>
+    fillComposer(`把 ${it.path} 解析成 Markdown，写到 workspace/parsed/。`, { needWritable: true })
+  );
+  row.append(ico, nm, sz, parse);
+  // 退化路径（§6 / §7.2 ①）：uploads/*.md 也可直接晋级（source 校验只需 workspace/ + .md + 存在）。
+  if (it.kind === "text" && /\.md$/i.test(it.name)) {
+    row.appendChild(promoteButton(it, blocked));
+  }
+  row.appendChild(trashButton(it.path, row, blocked));
+  return row;
+}
+
+// parsed/ 行：勾选框 + 文件名 + [预览] + [让 agent 修订] + [晋级为源] + 🗑。
+function renderParsedRow(it, blocked, selected, updateMerge) {
+  const row = document.createElement("div");
+  row.className = "stage-row";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.className = "stage-pick";
+  cb.title = "勾选以合并（≥2 个）";
+  cb.addEventListener("change", () => {
+    if (cb.checked) selected.add(it.path);
+    else selected.delete(it.path);
+    updateMerge();
+  });
+  const ico = makeFileIcon(it.name, {
+    isImage: it.kind === "image",
+    thumbUrl: `/api/workspace/raw?path=${encodeURIComponent(it.path)}`,
+  });
+  ico.classList.add("stage-ico");
+  const nm = document.createElement("span");
+  nm.className = "stage-name";
+  nm.textContent = it.name;
+  nm.title = it.name;
+  const preview = document.createElement("button");
+  preview.className = "stage-act";
+  preview.textContent = "预览";
+  preview.addEventListener("click", () => previewWorkspaceFile(it.path));
+  const revise = document.createElement("button");
+  revise.className = "stage-act";
+  revise.textContent = "让 agent 修订";
+  revise.addEventListener("click", () => {
+    const what = window.prompt(`让 agent 修订 ${it.name}（如「拆成战法/案例两篇」「删第3节补小结」）：`, "");
+    if (what === null || !what.trim()) return;
+    fillComposer(`针对 ${it.path}：${what.trim()}（产物写回 workspace/parsed/）。`, { needWritable: true });
+  });
+  row.append(cb, ico, nm, preview, revise, promoteButton(it, blocked), trashButton(it.path, row, blocked));
+  return row;
+}
+
+// 「晋级为源」按钮：点开行内晋级表单（名/出处 + 确认）；复用投喂 slug-409 交互。
+function promoteButton(it, blocked) {
+  const btn = document.createElement("button");
+  btn.className = "stage-act stage-promote";
+  btn.textContent = "晋级为源 →";
+  btn.disabled = blocked;
+  if (blocked) btn.title = "会话写作业进行中…";
+  btn.addEventListener("click", () => openPromoteForm(it, btn));
+  return btn;
+}
+
+// 🗑 删 scratch：DELETE /api/workspace/file（单写者 + 层③ 423）。可写 turn 跑动期置灰。
+function trashButton(path, row, blocked) {
+  const btn = document.createElement("button");
+  btn.className = "stage-trash";
+  btn.textContent = "🗑";
+  btn.title = blocked ? "会话写作业进行中…" : "删除该 scratch 文件";
+  btn.disabled = blocked;
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try {
+      const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+      if (res.status === 423) { btn.disabled = false; btn.title = "可写会话进行中，稍后重试"; return; }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      row.remove();
+    } catch (e) {
+      btn.disabled = false;
+      btn.title = `删除失败：${e.message}`;
+    }
+  });
+  return btn;
+}
+
+async function previewWorkspaceFile(path) {
+  stagingOpen = false; // 看预览期间暂停自动刷新：否则并发 turn 的 done/stopped 会把预览刷回列表
+  const box = $("#overlay-body");
+  box.innerHTML = '<p class="muted">加载预览…</p>';
+  // 「返回暂存区」恢复自动刷新并重拉当前目录——成败两路都挂上，避免预览失败时无路可回、
+  // 且 stagingOpen 永久停在 false 令本会话后续 turn 收尾不再刷新（评审）。
+  const back = document.createElement("button");
+  back.className = "stage-act";
+  back.textContent = "← 返回暂存区";
+  back.addEventListener("click", () => { stagingOpen = true; loadStaging(); });
+  let data;
+  try {
+    data = await getJSON(`/api/workspace/file?path=${encodeURIComponent(path)}`);
+  } catch (e) {
+    box.innerHTML = "";
+    const err = document.createElement("p");
+    err.className = "report-bad";
+    err.textContent = `预览失败：${e.message}`;
+    box.append(back, err);
+    return;
+  }
+  box.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "stage-head";
+  title.textContent = path; // textContent：路径按字面显示
+  const view = document.createElement("div");
+  view.className = "stage-preview rendered";
+  view.innerHTML = data.html; // render_page 已 sanitize（同 /api/page）
+  box.append(back, title, view);
+}
+
+// 行内晋级表单：名（slug 预填 stem）+ 出处（可选，空则后端回退 source）+ 确认；409 引导改名/覆盖（失真告警）。
+function openPromoteForm(it, anchorBtn) {
+  const existing = anchorBtn.parentElement.querySelector(".stage-promote-form");
+  if (existing) { existing.remove(); return; } // 再点收起
+  const form = document.createElement("div");
+  form.className = "stage-promote-form";
+  const stem = it.name.replace(/\.md$/i, "");
+  const nameIn = document.createElement("input");
+  nameIn.type = "text";
+  nameIn.value = stem;
+  nameIn.placeholder = "源文件名（自动 slug + .md）";
+  const originIn = document.createElement("input");
+  originIn.type = "text";
+  originIn.placeholder = "出处 origin（可选；空则回退 source 路径）";
+  const go = document.createElement("button");
+  go.className = "stage-act";
+  go.textContent = "确认晋级";
+  const status = document.createElement("div");
+  status.className = "stage-promote-status";
+  go.addEventListener("click", () =>
+    submitPromote(it.path, nameIn.value.trim(), originIn.value, false, go, status)
+  );
+  form.append(nameIn, originIn, go, status);
+  anchorBtn.parentElement.appendChild(form);
+  nameIn.focus();
+}
+
+async function submitPromote(source, name, origin, overwrite, go, status) {
+  if (!name) { status.innerHTML = '<span class="report-bad">源文件名不能为空。</span>'; return; }
+  go.disabled = true;
+  go.textContent = "晋级中…";
+  status.textContent = "";
+  const reset = () => { go.disabled = false; go.textContent = "确认晋级"; };
+  let res, data;
+  try {
+    const body = { name, source, overwrite };
+    if (origin.trim()) body.origin = origin;
+    res = await fetch("/api/raw", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (e) {
+    reset();
+    status.innerHTML = `<span class="report-bad">晋级失败：${escapeHtml(e.message)}</span>`;
+    return;
+  }
+  if (res.status === 423) {
+    reset();
+    status.innerHTML = '<span class="report-bad">可写会话进行中，稍后重试。</span>';
+    return;
+  }
+  if (res.status === 409) {
+    // 默认引导改名（开新源）；覆盖须显式确认 + 失真告警（决策P4.6-10）。
+    reset();
+    status.innerHTML = `<span class="report-bad">${escapeHtml(data.detail || "同名源已存在。")}</span> 改名开新源，或 `;
+    const ow = document.createElement("button");
+    ow.className = "stage-act";
+    ow.textContent = "覆盖（有失真风险）";
+    ow.title = "覆盖会改写已有源：引用此源的 wiki 页可能失真，建议覆盖后重 ingest + check";
+    ow.addEventListener("click", () => {
+      if (window.confirm("覆盖已有源？引用此源的 wiki 页可能失真，建议覆盖后重 ingest + check。"))
+        submitPromote(source, name, origin, true, go, status);
+    });
+    status.appendChild(ow);
+    return;
+  }
+  if (!res.ok) {
+    reset();
+    status.innerHTML = `<span class="report-bad">晋级失败：${escapeHtml(data.detail || `HTTP ${res.status}`)}</span>`;
+    return;
+  }
+  // 成功：原地变「✓ 已晋级 + 立即 ingest」。
+  status.innerHTML = `<span class="report-ok">✓ 已晋级 ${escapeHtml(data.saved)}</span> `;
+  go.remove();
+  const ingestBtn = document.createElement("button");
+  ingestBtn.className = "stage-act";
+  ingestBtn.textContent = "立即 ingest →";
+  ingestBtn.addEventListener("click", () => triggerIngest(data.saved));
+  status.appendChild(ingestBtn);
+}
+
 // ── 问答 / 多轮会话（fetch 流式读 SSE）─────────────────────────────────────
 
 let conversationId = null;
@@ -560,6 +995,23 @@ let chatStreaming = false; // 一轮在飞时为 true：发送按钮切「停止
 let pendingStop = false; // 首轮 id 未回时点了「停止」：标记待停，start 帧回填 id 后立即补发
 let currentMode = "read-only"; // 当前会话姿态（P4.5）：徽标显示、/mode 切换更新
 let defaultMode = "read-only"; // 进程 --mode 默认（启动 /api/info 拉取）：新会话开局姿态
+
+// 会话 id ↔ 浏览器 URL 同步：把当前会话写进 ?c=<id>，刷新即据此懒恢复续聊（startup 读取）。
+// 用 replaceState（不入浏览器历史栈）——右栏 wiki 走自家 history 数组，与浏览器前进/后退互不干扰。
+function syncConversationUrl() {
+  const url = new URL(window.location.href);
+  if (conversationId) url.searchParams.set("c", conversationId);
+  else url.searchParams.delete("c");
+  // 注意：本文件顶部有模块级 `let history = []`（右栏 wiki 视图栈），遮蔽了 window.history，
+  // 故这里必须显式走 window.history，否则 history.replaceState 落到那个数组上、抛 not a function。
+  window.history.replaceState(null, "", url);
+}
+
+// 唯一改写 conversationId 的入口：改值即同步 URL（含置 null → 抹掉 ?c=）。
+function setConversation(id) {
+  conversationId = id;
+  syncConversationUrl();
+}
 
 // 姿态徽标（P4.5）：随 /mode 翻转更新；workspace-write 用醒目色提示「Agent 可写」。
 function setModeBadge(mode) {
@@ -578,8 +1030,9 @@ function startNewConversation() {
   // 持久历史，普通"切换/新建"不该销毁记录。旧会话持久化开时已落盘、可从"历史会话"再开；
   // 持久化关时它仍是 live、列在历史里（进程退出即清）。要永久删除走历史列表的"删除"。
   chatLoadToken++; // 作废任何在飞的历史气泡回放（用户已开新会话）
-  conversationId = null;
+  setConversation(null);
   $("#chat-log").innerHTML = "";
+  clearAttachments(); // 弃掉未发送的附件徽章（新会话不继承上一会话的待发附件）
   setModeBadge(defaultMode); // 新会话开局 = 进程默认姿态（决策P4.5-8）
 }
 $("#chat-new").addEventListener("click", startNewConversation);
@@ -635,10 +1088,15 @@ async function openConversation(c) {
     $("#chat-input").focus();
     return;
   }
-  // 切到历史会话：仅切本地 id（下一条提问即触发后端透明 rebuild 懒恢复）。**绝不** DELETE
-  // 当前会话——它仍要留在历史里，普通切换不该销毁其持久记录（要永久删除走历史列表的"删除"）。
+  await restoreConversation(c);
+}
+
+// 切到某会话并回放其历史气泡：仅切本地 id（下一条提问即触发后端透明 rebuild 懒恢复）。**绝不**
+// DELETE 任何会话——它仍要留在历史里，普通切换不该销毁其持久记录（要永久删除走历史列表的"删除"）。
+// 抽出供「历史会话」点开与启动时 ?c= 懒恢复共用。
+async function restoreConversation(c) {
   const tok = ++chatLoadToken;
-  conversationId = c.id;
+  setConversation(c.id);
   const log = $("#chat-log");
   log.innerHTML = "";
   $("#chat-input").focus();
@@ -679,9 +1137,9 @@ async function openConversation(c) {
 
 async function deleteConversation(id, row) {
   try {
-    const res = await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+    const res = await fetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
     if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
-    if (id === conversationId) conversationId = null; // 删的是当前会话则清掉本地引用
+    if (id === conversationId) setConversation(null); // 删的是当前会话则清掉本地引用（连带抹 ?c=）
     row.remove();
     if (!$("#overlay-body").querySelector(".conv-row")) {
       $("#overlay-body").innerHTML = '<p class="muted">暂无会话：在左侧提问即开启一个。</p>';
@@ -701,12 +1159,17 @@ function submitChat(override) {
   if (typeof override === "string" && override) { sendChat(override); return; }
   const input = $("#chat-input");
   const msg = input.value.trim();
-  if (!msg) return;
+  const atts = pendingAttachments.slice(); // 快照本轮附件（仅已上传成功者在册）
+  if (!msg && !atts.length) return; // 空消息且无附件 → 不发
+  // 斜杠命令前置解析（决策P4.4-1）：以 `/` 开头**一律**本地处理、**绝不进 /api/chat**——不打 LLM、
+  // 不占对话轮次、不入历史。**即便有待发附件**也走本地（绝不把斜杠命令当消息连同附件发给 LLM）；
+  // 附件保留 pending、留给下一条真消息。
+  if (msg.startsWith("/")) { input.value = ""; autoGrowInput(); handleSlash(msg); return; }
   input.value = "";
-  // 斜杠命令前置解析（决策P4.4-1）：以 `/` 开头一律本地处理、**绝不进 /api/chat**——不打 LLM、
-  // 不占对话轮次、不入历史。展示/自省/生命周期分流见 handleSlash。
-  if (msg.startsWith("/")) { handleSlash(msg); return; }
-  sendChat(msg);
+  autoGrowInput();
+  // 附件已快照，清 composer 徽章行；不回收缩略图 blob URL（气泡回显沿用）。
+  clearAttachments({ revoke: false });
+  sendChat(msg, atts);
 }
 
 // ── 斜杠命令（P4.4）：镜像 agentao 交互 CLI 的 8 条只读命令，全部本地解析、不进 /api/chat ──
@@ -935,17 +1398,21 @@ function setChatSending(sending) {
   chatStreaming = sending;
   if (!sending) pendingStop = false; // 流结束：清掉未消费的待停标志（防跨轮残留）
   btn.dataset.mode = sending ? "stop" : "send";
-  btn.textContent = sending ? "停止" : "发送";
+  // 发送↑ / 停止■ 的图标切换由 .stopping 类驱动（见 app.css .ico-send/.ico-stop），不改 innerHTML——
+  // 否则会抹掉按钮内的 <svg> 图标。
+  btn.setAttribute("aria-label", sending ? "停止" : "发送");
+  btn.title = sending ? "停止（中断当前轮）" : "发送（Enter）";
   btn.classList.toggle("stopping", sending);
   btn.disabled = false;
+  $("#attach-btn").disabled = sending; // 流式中禁上传（避免在飞轮里改附件）
+  if (sending) refreshStagingIfOpen(); // 可写 turn 起跑：暂存区开着则重渲染、置灰宿主写动作（§7.3）
 }
 
 // 停止：POST /api/chat/{id}/stop 置位服务端取消令牌。不在此复位按钮——等流尾的 stopped/done
 // 帧由 sendChat 的 finally 统一复位（避免与在飞流抢状态）。停止请求飞行中先禁用防重复点。
 async function stopChat() {
   const btn = $("#chat-send");
-  btn.disabled = true;
-  btn.textContent = "停止中…";
+  btn.disabled = true; // 停止请求飞行中先禁用防重复点（图标保持 ■，禁用态即反馈）
   // 首轮 id 由 start 帧回填，可能尚未到：标记待停，start 处理处一拿到 id 就补发本请求，
   // 而不是静默放弃（否则用户点了停止却毫无反应）。按钮已显示「停止中…」给出反馈。
   if (!conversationId) { pendingStop = true; return; }
@@ -982,10 +1449,280 @@ $("#chat-input").addEventListener("keydown", (e) => {
     const { selectionStart: s, selectionEnd: t, value } = ta;
     ta.value = value.slice(0, s) + "\n" + value.slice(t);
     ta.selectionStart = ta.selectionEnd = s + 1;
+    autoGrowInput(); // 换行后随内容增高
     return;
   }
   e.preventDefault();
   submitChat();
+});
+
+// ── 输入框自增高 + 文件上传/附件（OpenAI 风格 composer，P4.6 Web 文件上传）──────────────
+//
+// 「附件」语义（agentao 附件约定，镜像 chahua）：上传文件先经 POST /api/upload 落
+// workspace/uploads/，发送时服务端把每个附件以 <attachment uri="…" [mimetype="…"]/> 标签追加进
+// 发给 agent 的消息；**图像**附件额外走 arun(images=) 视觉通道（base64），模型不支持视觉时由
+// agentao 自动以同格式标签降级重试（宿主/前端不做能力探测）。徽章在 composer 内可移除（图像
+// 显示本地缩略图）；发送后清空、用户气泡下回显。
+
+// 文本域随内容自增高（rows=1 起，至 200px 封顶后内部滚动）。
+function autoGrowInput() {
+  const ta = $("#chat-input");
+  ta.style.height = "auto";
+  const max = 200;
+  ta.style.height = Math.min(ta.scrollHeight, max) + "px";
+  ta.style.overflowY = ta.scrollHeight > max ? "auto" : "hidden";
+}
+$("#chat-input").addEventListener("input", autoGrowInput);
+autoGrowInput(); // 初始同步一次高度
+
+// 待发送附件（仅上传成功者在册）：{rel, name, kind, thumb, visionOversize}。
+// rel = workspace/uploads/<名>；thumb = 图像的本地 blob URL（缩略图，镜像 chahua）。
+const pendingAttachments = [];
+
+// 图像扩展名白名单（与服务端 _IMAGE_EXT_TO_MIME / agentao 视觉通道同口径）。
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
+// 视觉单图上限（同 agentao.media_limits.MAX_IMAGE_BYTES）：超出仍可上传（≤50MiB），但不走
+// 视觉通道、agent 只看 <attachment> 文本引用——徽章上预先提示（镜像 chahua visionOversize）。
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+function isImageName(name) {
+  const i = name.lastIndexOf(".");
+  return i > 0 && IMAGE_EXTS.has(name.slice(i + 1).toLowerCase());
+}
+
+// ── 文件类型图标（统一：图像→缩略图，其它→彩色文件类型角标，三处共用：暂存区 / 上传徽章 / 气泡）──
+//
+// 扩展名 → 类别（决定角标配色），角标文字取扩展名大写（≤4 字）。常见办公/压缩/代码/媒体各成一色。
+const FILE_CAT = {
+  pdf: "pdf",
+  doc: "doc", docx: "doc", rtf: "doc", odt: "doc", pages: "doc",
+  xls: "xls", xlsx: "xls", csv: "xls", tsv: "xls", ods: "xls",
+  ppt: "ppt", pptx: "ppt", key: "ppt", odp: "ppt",
+  zip: "zip", tar: "zip", gz: "zip", tgz: "zip", "7z": "zip", rar: "zip", bz2: "zip", xz: "zip",
+  md: "md", markdown: "md",
+  txt: "txt", text: "txt", log: "txt", rst: "txt", org: "txt",
+  json: "code", yaml: "code", yml: "code", toml: "code", xml: "code", html: "code", htm: "code",
+  css: "code", scss: "code", js: "code", mjs: "code", ts: "code", tsx: "code", jsx: "code",
+  py: "code", sh: "code", bash: "code", c: "code", h: "code", cpp: "code", go: "code",
+  rs: "code", java: "code", rb: "code", php: "code", lua: "code", sql: "code",
+  png: "img", jpg: "img", jpeg: "img", gif: "img", webp: "img", svg: "img", bmp: "img",
+  tiff: "img", tif: "img", ico: "img", heic: "img",
+  mp3: "audio", wav: "audio", flac: "audio", m4a: "audio", ogg: "audio", aac: "audio",
+  mp4: "video", mov: "video", mkv: "video", webm: "video", avi: "video", m4v: "video",
+};
+
+function fileKindInfo(name) {
+  const base = name.slice(name.lastIndexOf("/") + 1); // 取 basename：name 可能含子目录（暂存区嵌套）
+  const dot = base.lastIndexOf(".");
+  const ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
+  return { ext, cat: FILE_CAT[ext] || "file", label: ext ? ext.toUpperCase().slice(0, 4) : "FILE" };
+}
+
+// 文件类型角标：页形 + 扩展名文字（textContent 安全），按类别上色（见 app.css .file-ico[data-cat]）。
+function fileTypeBadge(name) {
+  const { cat, label } = fileKindInfo(name);
+  const span = document.createElement("span");
+  span.className = "file-ico";
+  span.dataset.cat = cat;
+  span.textContent = label;
+  return span;
+}
+
+// 统一文件图标：有缩略图 URL 且是图像 → <img> 缩略图（解码失败回退角标）；否则文件类型角标。
+function makeFileIcon(name, { thumbUrl = null, isImage = false } = {}) {
+  if (isImage && thumbUrl) {
+    const img = document.createElement("img");
+    img.className = "file-thumb";
+    img.src = thumbUrl;
+    img.alt = "";
+    img.addEventListener("error", () => img.replaceWith(fileTypeBadge(name)), { once: true });
+    return img;
+  }
+  return fileTypeBadge(name);
+}
+
+function showAttachList() {
+  const ul = $("#attach-list");
+  ul.hidden = ul.children.length === 0;
+}
+
+// revoke=false 供「发送」路径：附件快照已交给气泡回显，缩略图 blob URL 须继续存活。
+function clearAttachments({ revoke = true } = {}) {
+  if (revoke) {
+    for (const a of pendingAttachments) if (a.thumb) URL.revokeObjectURL(a.thumb);
+  }
+  pendingAttachments.length = 0;
+  const ul = $("#attach-list");
+  if (ul) { ul.innerHTML = ""; ul.hidden = true; }
+}
+
+// 建一枚徽章 DOM（占位「上传中」态；图像直接显示本地缩略图）。返回各节点引用，供上传成败后改写。
+function addAttachChip(name, thumb) {
+  const li = document.createElement("li");
+  li.className = "attach-chip";
+  const icon = document.createElement("span");
+  icon.className = "attach-icon";
+  if (thumb) {
+    const img = document.createElement("img");
+    img.className = "attach-thumb";
+    img.src = thumb;
+    img.alt = "";
+    // 解码失败（坏图/不支持的编码）→ 降级为文件类型角标。
+    img.addEventListener("error", () => { img.remove(); icon.appendChild(fileTypeBadge(name)); }, { once: true });
+    icon.appendChild(img);
+  } else {
+    icon.textContent = "…";
+  }
+  const label = document.createElement("span");
+  label.className = "attach-name";
+  label.textContent = name; // textContent：文件名按字面显示，无注入
+  label.title = name;
+  const meta = document.createElement("span");
+  meta.className = "attach-meta";
+  meta.textContent = "上传中";
+  li.append(icon, label, meta);
+  $("#attach-list").appendChild(li);
+  showAttachList();
+  return { li, icon, label, meta, thumb };
+}
+
+// 上传成功：占位徽章定型 + 入册 pendingAttachments + 挂「×移除」。
+function finalizeAttachChip(chip, att) {
+  if (!chip.thumb) { chip.icon.textContent = ""; chip.icon.appendChild(fileTypeBadge(att.name)); }
+  chip.meta.textContent =
+    att.kind === "image"
+      ? (att.visionOversize ? "超 20MB·文本引用" : "图像")
+      : att.kind === "binary" ? "二进制" : "文本";
+  if (att.visionOversize) chip.meta.title = "超过视觉单图上限，agent 只看 <attachment> 文本引用";
+  chip.li.dataset.rel = att.rel;
+  pendingAttachments.push(att);
+  const rm = document.createElement("button");
+  rm.type = "button";
+  rm.className = "attach-remove";
+  rm.textContent = "×";
+  rm.title = "移除附件";
+  rm.addEventListener("click", () => {
+    const i = pendingAttachments.findIndex((a) => a.rel === att.rel);
+    if (i >= 0) pendingAttachments.splice(i, 1);
+    if (att.thumb) URL.revokeObjectURL(att.thumb);
+    chip.li.remove();
+    showAttachList();
+  });
+  chip.li.appendChild(rm);
+}
+
+// 上传失败：徽章转错误态 + 挂「×」手动清（×时回收缩略图 blob URL）。
+function errorAttachChip(chip, message) {
+  if (!chip.thumb) chip.icon.textContent = "⚠";
+  chip.li.classList.add("attach-error");
+  chip.meta.textContent = "";
+  chip.label.title = message;
+  const rm = document.createElement("button");
+  rm.type = "button";
+  rm.className = "attach-remove";
+  rm.textContent = "×";
+  rm.title = message;
+  rm.addEventListener("click", () => {
+    if (chip.thumb) URL.revokeObjectURL(chip.thumb);
+    chip.li.remove();
+    showAttachList();
+  });
+  chip.li.appendChild(rm);
+}
+
+// 串行上传一批文件（拖拽 / 选择 / 粘贴共用）。每个文件 POST /api/upload。
+// 刻意串行（镜像 chahua）：避免并发持多份大文件 body 撑内存。
+async function uploadFiles(files) {
+  files = Array.from(files || []);
+  for (const file of files) await uploadOne(file);
+}
+
+async function uploadOne(file) {
+  // 图像：上传前先出本地缩略图（blob URL，零网络往返）+ 预判视觉超限（镜像 chahua）。
+  const isImage = isImageName(file.name);
+  const thumb = isImage ? URL.createObjectURL(file) : null;
+  const visionOversize = isImage && file.size > MAX_IMAGE_BYTES;
+  const chip = addAttachChip(file.name, thumb);
+  try {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    const res = await fetch("/api/upload", { method: "POST", body: fd });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 423) throw new Error("可写会话进行中，稍后重试");
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    finalizeAttachChip(chip, { rel: data.saved, name: data.name, kind: data.kind, thumb, visionOversize });
+  } catch (e) {
+    errorAttachChip(chip, e.message);
+  }
+}
+
+// 用户气泡下回显本轮已发送的附件徽章（不可移除，仅记录；图像沿用缩略图）。
+function addUserAttachments(atts) {
+  const div = document.createElement("div");
+  div.className = "msg user-files";
+  for (const a of atts) {
+    const chip = document.createElement("span");
+    chip.className = "user-file-chip";
+    if (a.thumb) {
+      const img = document.createElement("img");
+      img.className = "attach-thumb";
+      img.src = a.thumb;
+      img.alt = "";
+      chip.appendChild(img);
+    } else {
+      chip.appendChild(fileTypeBadge(a.name)); // 其它类型 → 文件类型角标
+    }
+    chip.appendChild(document.createTextNode(` ${a.name}`)); // textContent 安全：文件名按字面显示
+    div.appendChild(chip);
+  }
+  const log = $("#chat-log");
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+// ＋按钮 → 打开文件选择器（流式中禁用）。
+$("#attach-btn").addEventListener("click", () => {
+  if (chatStreaming) return;
+  const fi = $("#file-input");
+  fi.value = ""; // 复位，允许重选同一文件
+  fi.click();
+});
+$("#file-input").addEventListener("change", () => { uploadFiles($("#file-input").files); });
+
+// 拖拽上传：计数法消抖嵌套 drag 事件，只对文件拖拽响应。
+const composerEl = $("#chat-form");
+let dragDepth = 0;
+composerEl.addEventListener("dragenter", (e) => {
+  if (!e.dataTransfer || !e.dataTransfer.types || !e.dataTransfer.types.includes("Files")) return;
+  e.preventDefault(); dragDepth++; composerEl.classList.add("drag-active");
+});
+composerEl.addEventListener("dragover", (e) => {
+  if (!e.dataTransfer || !e.dataTransfer.types || !e.dataTransfer.types.includes("Files")) return;
+  e.preventDefault(); e.dataTransfer.dropEffect = "copy";
+});
+composerEl.addEventListener("dragleave", (e) => {
+  if (!e.dataTransfer || !e.dataTransfer.types || !e.dataTransfer.types.includes("Files")) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) composerEl.classList.remove("drag-active");
+});
+composerEl.addEventListener("drop", (e) => {
+  const f = e.dataTransfer && e.dataTransfer.files;
+  if (!f || !f.length) return;
+  e.preventDefault(); dragDepth = 0; composerEl.classList.remove("drag-active");
+  if (!chatStreaming) uploadFiles(f);
+});
+
+// 粘贴上传：剪贴板含文件（截图 / 拷贝的文件）则上传；纯文本粘贴照常进文本域。
+$("#chat-input").addEventListener("paste", (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  const files = [];
+  for (const it of items) {
+    if (it.kind === "file") { const f = it.getAsFile(); if (f) files.push(f); }
+  }
+  if (!files.length) return; // 无文件 → 让文本照常粘贴
+  e.preventDefault();
+  if (!chatStreaming) uploadFiles(files);
 });
 
 function addMsg(cls, text) {
@@ -1004,15 +1741,18 @@ $("#chat-log").addEventListener("click", (e) => {
   if (a) { e.preventDefault(); navigate({ kind: "page", path: a.dataset.page }); }
 });
 
-async function sendChat(message) {
-  addMsg("user", message);
+async function sendChat(message, attachments) {
+  if (message) addMsg("user", message);
+  if (attachments && attachments.length) addUserAttachments(attachments); // 用户气泡下回显附件徽章
   const botEl = addMsg("bot", "");
   setChatSending(true); // 按钮切「停止」、置 chatStreaming，整轮可中断
   try {
+    const body = { message, conversation_id: conversationId };
+    if (attachments && attachments.length) body.attachments = attachments.map((a) => a.rel);
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, conversation_id: conversationId }),
+      body: JSON.stringify(body),
     });
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
     const reader = res.body.getReader();
@@ -1055,22 +1795,23 @@ function handleSSE(frame, botEl) {
   const log = $("#chat-log");
   if (event === "start") {
     // 服务端尽早回填会话 id：首轮请求里 id 为 null，拿到它「停止」按钮才能在首轮就生效。
-    if (payload.conversation_id) conversationId = payload.conversation_id;
+    if (payload.conversation_id) setConversation(payload.conversation_id); // 连带写进 ?c=（刷新可恢复）
     if (pendingStop) { pendingStop = false; stopChat(); } // 首轮 id 未回时点过停止 → 现在补发
   } else if (event === "token") {
     botEl.textContent += payload;
     log.scrollTop = log.scrollHeight;
   } else if (event === "stopped") {
     // 用户主动停止：保留已流出的纯文本（不再渲染 markdown），加一行轻提示。
-    if (payload.conversation_id) conversationId = payload.conversation_id;
+    if (payload.conversation_id) setConversation(payload.conversation_id);
     const note = document.createElement("span");
     note.className = "stop-note";
     note.textContent = "（已停止）";
     botEl.appendChild(note);
     renderWritableReceipts(payload); // 可写 turn 被停也可能已写盘：照常出 check/撤销/告警
+    refreshStagingIfOpen(); // 修订 turn 收尾：暂存区开着则重拉刷新池（决策P4.6-9）
     log.scrollTop = log.scrollHeight;
   } else if (event === "done") {
-    conversationId = payload.conversation_id;
+    setConversation(payload.conversation_id);
     // 收尾：用服务端渲染的安全 markdown HTML 替换流式纯文本（含 [[页]]→站内链接）。
     if (payload.answer_html !== undefined) {
       botEl.classList.add("rendered"); // 切到正常空白模型 + 富排版（见 app.css）
@@ -1079,10 +1820,11 @@ function handleSSE(frame, botEl) {
       botEl.textContent = payload.answer;
     }
     renderWritableReceipts(payload); // 可写 turn 收尾：check 回执 / 撤销 / immutable 告警
+    refreshStagingIfOpen(); // 修订 turn 收尾：暂存区开着则重拉刷新池（决策P4.6-9）
     log.scrollTop = log.scrollHeight;
   } else if (event === "error") {
     // 记下服务端已建会话（即便本轮失败）：否则首轮失败时下次又以 null 另起新会话，堆到 503。
-    if (payload.conversation_id) conversationId = payload.conversation_id;
+    if (payload.conversation_id) setConversation(payload.conversation_id);
     botEl.classList.replace("bot", "err");
     botEl.textContent = `错误：${payload.message}`;
     renderWritableReceipts(payload); // 可写 turn 抛错前的写已被服务端收尾捕获
@@ -1106,20 +1848,20 @@ function renderWritableReceipts(payload) {
       div.appendChild(p);
     });
   }
-  // ② check 回执 + 「让 Agent 修复」。
+  // ② check 回执 + 「让 Agent 修复」。口径＝**本轮新增**（决策P4.5-4 修订）：ok = 本轮未新增、
+  // violations 只装新增；库存量（total）只作旁注（拼进文案的全是数字，无注入面）。
+  // **本轮无新增（check.ok）时不出回执**（用户要求）——只静默刷新右栏页面列表，不刷屏。
   if (check) {
+    const legacyNote = (n) => (n > 0 ? `（库存量 ${n} 条，与本轮无关）` : "");
     if (check.ok) {
-      addNote((div) => {
-        const p = document.createElement("div");
-        p.innerHTML = '<span class="report-ok">✓ check 通过</span> 已写 wiki。';
-        div.appendChild(p);
-      });
-      loadPages(); refreshed = true; // 写后刷新右栏 wiki 列表
+      loadPages(); refreshed = true; // 写后静默刷新右栏 wiki 列表（无回执）
     } else {
       addNote((div) => {
         div.classList.add("receipt-bad");
         const head = document.createElement("div");
-        head.innerHTML = `<span class="report-bad">✗ check 发现 ${check.violations.length} 条问题</span>`;
+        head.innerHTML =
+          `<span class="report-bad">✗ check 本轮新增 ${check.violations.length} 条问题</span>` +
+          legacyNote(check.total - check.violations.length);
         div.appendChild(head);
         for (const v of check.violations.slice(0, 20)) {
           const li = document.createElement("div");
@@ -1251,5 +1993,26 @@ loadPages().then(() => { if (histPos < 0) navigate({ kind: "index", query: "" })
 
 // 拉进程默认姿态设初始徽标（P4.5）：失败则保留 CSS/HTML 默认 read-only。
 getJSON("/api/info").then((info) => {
-  if (info && info.mode) { defaultMode = info.mode; setModeBadge(info.mode); }
+  if (!info || !info.mode) return;
+  defaultMode = info.mode;
+  // 仅当尚无活动会话时才据进程默认置徽标：?c= 恢复已设了该会话的真实姿态（restoreConversation 的
+  // 每会话 /info 校正），此处的进程默认晚到一拍会把它覆盖回去——正是评审指出的「徽标说谎」竞态。
+  if (conversationId === null) setModeBadge(info.mode);
 }).catch(() => {});
+
+// 按 ?c=<id> 懒恢复会话（刷新保留当前会话）：仅当该 id 仍在会话目录（内存 ∪ 盘上）里才恢复，
+// 否则抹掉 ?c= 另起新会话——避免握着一个已删 / 进程重启后不存在的 id（下条提问会撞 404 未知会话）。
+(async function restoreConversationFromUrl() {
+  const want = new URL(window.location.href).searchParams.get("c");
+  if (!want) return;
+  let conversations = null;
+  try {
+    ({ conversations } = await getJSON("/api/conversations"));
+  } catch { /* 列举失败：退回干净起手（除非用户已自行开聊，见下） */ }
+  // 拉取期间用户可能已自行开聊（SSE start 已置 conversationId / 正在流式）——此时**绝不**碰其会话或
+  // URL：既不回放覆盖、也不 setConversation(null) 抹掉其 id（仿首页 `histPos < 0` 守卫，决策P4.6）。
+  if (conversationId !== null || chatStreaming) return;
+  const hit = conversations && conversations.find((c) => c.id === want);
+  if (hit) { await restoreConversation(hit); return; }
+  setConversation(null); // 失效 / 未知 id / 列举失败 → 抹掉 ?c=，干净起手
+})();

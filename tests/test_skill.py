@@ -70,6 +70,42 @@ def test_ensure_skips_when_global_present(fake_home, tmp_path):
     assert skill.ensure_skill_available(wd) is None
 
 
+def test_bundled_aux_skill_dir_resolves():
+    """辅助 skill pdf-to-markdown（P4.6）随包携带、可定位且含 SKILL.md。"""
+    src = skill.bundled_skill_dir("pdf-to-markdown")
+    assert src.is_dir()
+    assert (src / "SKILL.md").is_file()
+
+
+def test_install_skill_also_installs_aux(fake_home):
+    """install-skill 一并把辅助 skill 铺到全局，供可写会话 Agent 发现。"""
+    skill.install_skill()
+    for name in skill.BUNDLED_SKILL_NAMES:
+        assert (skill.global_skill_dir(name) / "SKILL.md").is_file()
+
+
+def test_ensure_installs_aux_even_when_engine_already_global(fake_home, tmp_path):
+    """引擎已全局可发现、但辅助 skill 缺失时，ensure 仍补齐辅助 skill（best-effort）。"""
+    skill._install_one(skill.SKILL_NAME)  # 只装引擎，不装辅助
+    assert not skill.global_skill_dir("pdf-to-markdown").exists()
+    wd = tmp_path / "extkb_aux"
+    wd.mkdir()
+    assert skill.ensure_skill_available(wd) is None  # 引擎已可发现 → 不动引擎
+    assert (skill.global_skill_dir("pdf-to-markdown") / "SKILL.md").is_file()  # 辅助被补齐
+
+
+def test_ensure_skips_aux_when_repo_skills_present(fake_home, tmp_path):
+    """开发期：wd/skills 下两 skill 齐全 → 既不装引擎也不装辅助到全局。"""
+    wd = tmp_path / "wd"
+    for name in skill.BUNDLED_SKILL_NAMES:
+        d = wd / "skills" / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n", encoding="utf-8")
+    assert skill.ensure_skill_available(wd) is None
+    for name in skill.BUNDLED_SKILL_NAMES:
+        assert not skill.global_skill_dir(name).exists()
+
+
 def test_partial_stub_not_discoverable_and_gets_repaired(fake_home, tmp_path):
     """缺 SKILL.md 的半成品目录不算已装；ensure/install 应修复它。"""
     wd = tmp_path / "extkb3"
