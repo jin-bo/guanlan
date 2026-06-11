@@ -26,40 +26,47 @@
   <symbol id="i-up" viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="5"/><polyline points="6 11 12 5 18 11"/></symbol>
   <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/></symbol>
   <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <!-- 语言切换（P4.7）：地球 + 经纬线。 -->
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></symbol>
 </svg>
 <header class="topbar">
   <div class="brand">
     <img class="brand-icon" src="/static/logo.png" alt="观澜 logo" width="38" height="38">
     <span class="wordmark">
       <span class="logo">观澜</span>
-      <span class="tagline">观水有术，必观其澜</span>
+      <span class="tagline" data-i18n="tagline">观水有术，必观其澜</span>
     </span>
   </div>
   <nav class="actions">
-    <span id="mode-badge" class="mode-badge" title="当前会话姿态（/mode 切换）">read-only</span>
+    <span id="mode-badge" class="mode-badge" data-i18n-title="tip.modeBadge" title="当前会话姿态（/mode 切换）">read-only</span>
     <span class="act-sep" aria-hidden="true"></span>
-    <button id="chat-new" class="btn" title="开启新会话（清空上下文）">
-      <svg class="ico"><use href="#i-new"/></svg><span class="btn-zh">新会话</span></button>
-    <button id="history-btn" class="btn" title="历史会话：列出、点开续聊、删除">
-      <svg class="ico"><use href="#i-history"/></svg><span class="btn-zh">历史</span></button>
+    <button id="chat-new" class="btn" data-i18n-title="tip.newChat" title="开启新会话（清空上下文）">
+      <svg class="ico"><use href="#i-new"/></svg><span class="btn-zh" data-i18n="btn.newChat">新会话</span></button>
+    <button id="history-btn" class="btn" data-i18n-title="tip.history" title="历史会话：列出、点开续聊、删除">
+      <svg class="ico"><use href="#i-history"/></svg><span class="btn-zh" data-i18n="btn.history">历史</span></button>
     <span class="act-sep" aria-hidden="true"></span>
-    <button id="feed-btn" class="btn" title="投喂：把一篇素材粘贴存进 raw/">
-      <svg class="ico"><use href="#i-feed"/></svg><span class="btn-zh">投喂</span></button>
-    <button id="staging-btn" class="btn" title="暂存区：浏览上传/派生物，审阅·修订·晋级为源 → ingest">
-      <svg class="ico"><use href="#i-staging"/></svg><span class="btn-zh">暂存区</span></button>
-    <button id="ingest-btn" class="btn" title="ingest：从 raw/ 选一篇触发入库 → wiki/">
-      <svg class="ico"><use href="#i-ingest"/></svg><span class="btn-zh">入库</span></button>
-    <button id="heal-btn" class="btn" title="heal：补全高频缺失实体，缺页物化，走写门禁">
-      <svg class="ico"><use href="#i-heal"/></svg><span class="btn-zh">补全</span></button>
+    <button id="feed-btn" class="btn" data-i18n-title="tip.feed" title="投喂：把一篇素材粘贴存进 raw/">
+      <svg class="ico"><use href="#i-feed"/></svg><span class="btn-zh" data-i18n="btn.feed">投喂</span></button>
+    <button id="staging-btn" class="btn" data-i18n-title="tip.staging" title="暂存区：浏览上传/派生物，审阅·修订·晋级为源 → ingest">
+      <svg class="ico"><use href="#i-staging"/></svg><span class="btn-zh" data-i18n="btn.staging">暂存区</span></button>
+    <button id="ingest-btn" class="btn" data-i18n-title="tip.ingest" title="ingest：从 raw/ 选一篇触发入库 → wiki/">
+      <svg class="ico"><use href="#i-ingest"/></svg><span class="btn-zh" data-i18n="btn.ingest">入库</span></button>
+    <button id="heal-btn" class="btn" data-i18n-title="tip.heal" title="heal：补全高频缺失实体，缺页物化，走写门禁">
+      <svg class="ico"><use href="#i-heal"/></svg><span class="btn-zh" data-i18n="btn.heal">补全</span></button>
     <span class="act-sep" aria-hidden="true"></span>
-    <button data-report="check" class="btn" title="check：确定性校验（frontmatter / 断链 / 源）">
-      <svg class="ico"><use href="#i-check"/></svg><span class="btn-zh">校验</span></button>
-    <button data-report="health" class="btn" title="health：stub 页 + 索引↔磁盘同步（建议性）">
-      <svg class="ico"><use href="#i-health"/></svg><span class="btn-zh">健康</span></button>
-    <button data-report="lint" class="btn" title="lint：孤页 / 断链 / 缺失实体（建议性）">
-      <svg class="ico"><use href="#i-lint"/></svg><span class="btn-zh">巡检</span></button>
-    <button id="graph-btn" class="btn" title="graph：构建并打开知识图谱视图">
-      <svg class="ico"><use href="#i-graph"/></svg><span class="btn-zh">图谱</span></button>
+    <button data-report="check" class="btn" data-i18n-title="tip.check" title="check：确定性校验（frontmatter / 断链 / 源）">
+      <svg class="ico"><use href="#i-check"/></svg><span class="btn-zh" data-i18n="btn.check">校验</span></button>
+    <button data-report="health" class="btn" data-i18n-title="tip.health" title="health：stub 页 + 索引↔磁盘同步（建议性）">
+      <svg class="ico"><use href="#i-health"/></svg><span class="btn-zh" data-i18n="btn.health">健康</span></button>
+    <button data-report="lint" class="btn" data-i18n-title="tip.lint" title="lint：孤页 / 断链 / 缺失实体（建议性）">
+      <svg class="ico"><use href="#i-lint"/></svg><span class="btn-zh" data-i18n="btn.lint">巡检</span></button>
+    <button id="graph-btn" class="btn" data-i18n-title="tip.graph" title="graph：构建并打开知识图谱视图">
+      <svg class="ico"><use href="#i-graph"/></svg><span class="btn-zh" data-i18n="btn.graph">图谱</span></button>
+    <span class="act-sep" aria-hidden="true"></span>
+    <!-- 语言切换（P4.7）：显「目标语言」码（zh 态 EN / en 态 中），点击翻转 zh⇄en。 -->
+    <button id="lang-btn" class="btn" data-i18n-title="tip.lang" data-i18n-aria="tip.lang"
+            title="切换界面语言 中文 / English" aria-label="切换界面语言">
+      <svg class="ico"><use href="#i-globe"/></svg><span id="lang-label" class="btn-zh">EN</span></button>
   </nav>
 </header>
 
@@ -74,10 +81,10 @@
 
   <aside class="wiki" aria-label="Wiki">
     <div class="wiki-bar">
-      <button id="wiki-home" class="nav-btn" title="回到 Concept 目录">⌂ Home</button>
-      <button id="wiki-back" class="nav-btn" title="回退" disabled>←</button>
-      <button id="wiki-fwd" class="nav-btn" title="往前" disabled>→</button>
-      <input id="wiki-search" type="search" placeholder="Wiki Search…" autocomplete="off">
+      <button id="wiki-home" class="nav-btn" data-i18n="wiki.home" data-i18n-title="tip.wikiHome" title="回到 Concept 目录">⌂ Home</button>
+      <button id="wiki-back" class="nav-btn" data-i18n-title="tip.wikiBack" title="回退" disabled>←</button>
+      <button id="wiki-fwd" class="nav-btn" data-i18n-title="tip.wikiFwd" title="往前" disabled>→</button>
+      <input id="wiki-search" type="search" data-i18n-placeholder="wiki.search" placeholder="Wiki Search…" autocomplete="off">
     </div>
     <div id="wiki-view" class="wiki-view"></div>
   </aside>
@@ -87,13 +94,14 @@
     <input id="file-input" type="file" multiple hidden>
     <ul id="attach-list" class="attach-list" hidden aria-label="待发送附件"></ul>
     <div class="composer-wrap">
-      <textarea id="chat-input" rows="1" placeholder="向 agent 提问（只读，跨轮保留上下文）… 回车发送，Shift-Enter 换行，输入 / 看命令"></textarea>
+      <textarea id="chat-input" rows="1" data-i18n-placeholder="composer.placeholder" placeholder="向 agent 提问（只读，跨轮保留上下文）… 回车发送，Shift-Enter 换行，输入 / 看命令"></textarea>
     </div>
     <div class="composer-bar">
       <button type="button" id="attach-btn" class="composer-attach"
+              data-i18n-title="tip.attach" data-i18n-aria="aria.attach"
               title="上传文件作附件：以 <attachment> 标签随消息发给 agent；图像直接给模型看（不支持视觉时自动降级为文本引用）"
               aria-label="添加附件"><svg class="composer-ico"><use href="#i-plus"/></svg></button>
-      <button type="submit" id="chat-send" class="composer-send" title="发送（Enter）" aria-label="发送"><svg class="composer-ico ico-send"><use href="#i-up"/></svg><svg class="composer-ico ico-stop"><use href="#i-stop"/></svg></button>
+      <button type="submit" id="chat-send" class="composer-send" data-i18n-title="tip.send" data-i18n-aria="chat.send" title="发送（Enter）" aria-label="发送"><svg class="composer-ico ico-send"><use href="#i-up"/></svg><svg class="composer-ico ico-stop"><use href="#i-stop"/></svg></button>
     </div>
   </form>
 </main>
@@ -103,12 +111,13 @@
   <div class="overlay-card">
     <div class="overlay-head">
       <h3 id="overlay-title">报告</h3>
-      <button id="overlay-close" aria-label="关闭">×</button>
+      <button id="overlay-close" data-i18n-aria="aria.overlayClose" aria-label="关闭">×</button>
     </div>
     <div id="overlay-body" class="overlay-body"></div>
   </div>
 </div>
 
+<script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
