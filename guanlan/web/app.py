@@ -41,7 +41,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..check import format_report as _format_check
 from ..check import run_check
-from ..errors import EXIT_OK, EXIT_USAGE
+from ..errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from ..graph import build_and_write_graph
 from ..health import format_report as _format_health
 from ..health import run_health
@@ -58,7 +58,7 @@ from ..lint import run_lint
 from ..pages import iter_pages, load_page, page_title, page_type, split_frontmatter
 from ..query import run_query
 from ..runtime import AgentRunner
-from .chat import MAX_CONVERSATIONS, ConversationStore
+from .chat import IDLE_TTL_SECONDS, MAX_CONVERSATIONS, ConversationStore
 from .jobs import JobQueue, WriteGate
 from .render import render_markdown, render_page
 
@@ -816,6 +816,8 @@ def create_app(
     runner: AgentRunner | None = None,
     session_persist: bool = True,
     mode: str = "read-only",
+    reader: bool = False,
+    max_conversations: int | None = None,
 ) -> FastAPI:
     """构造绑定到知识库 `root` 的 FastAPI app。
 
@@ -825,7 +827,27 @@ def create_app(
         runner: 可注入的 `AgentRunner`（测试用 fake，不打真实 LLM）；None 走默认子进程 runner。
         session_persist: 会话落盘开关（P4.2，默认开）；关时退回 P4 纯内存（`--no-session-persist`）。
         mode: 新会话开局姿态（P4.5，默认 `read-only`）；`--mode workspace-write` 起即可写。
+        reader: 只读多会话部署模式（P4.9，默认关）。开时**不注册**全部写路由 + 会话枚举端点
+            （决策P4.9-2/3/17），并在 `create_app` 内**强制** `session_persist=False` + `mode="read-only"`
+            （覆盖入参——任何 caller 直建也零写、只读姿态，钳制落点，决策P4.9-2）。
+        max_conversations: 内存会话硬上限（P4.9-18，`None`=用默认 100）。显式 `< 1` 即抛
+            `GuanlanError(EXIT_USAGE)`（权威校验同落 `create_app`，堵「绕过 CLI 直建得到坏配置 app」
+            的直建漏口）。`None` 透传 `ConversationStore`、调用时回落模块常量。
     """
+    # 权威校验（决策P4.9-18）：任何 caller（CLI/serve/嵌入/测试直建）显式传 < 1 都早失败，
+    # 不下沉 ConversationStore（那时 app 已建、太晚）。CLI/serve 可另作友好早提示，但权威点在此。
+    # None = 未指定 → 不校验（ConversationStore 回落默认 100，合法）。
+    if max_conversations is not None and max_conversations < 1:
+        raise GuanlanError(
+            f"--max-conversations 须 ≥ 1（收到 {max_conversations}）。", exit_code=EXIT_USAGE
+        )
+    # 解析有效上限（None → 模块默认 100）：传给 ConversationStore 并供 /api/info 如实回报（非 reader）。
+    effective_max = MAX_CONVERSATIONS if max_conversations is None else max_conversations
+    # reader 钳制（决策P4.9-2）：只读部署强制零写姿态——覆盖入参的 session_persist/mode，使
+    # 「测试/嵌入只关了路由却仍落 .agentao/sessions/ 或起可写会话」的漏口从源头堵死。
+    if reader:
+        session_persist = False
+        mode = "read-only"
     app = FastAPI(title="观澜 Web 宿主", docs_url=None, redoc_url=None)
     # 配置挂在 app.state：后续提交的端点（报告/写作业/会话）从这里读 root/model/runner，
     # 避免在模块级全局变量上分裂状态（与 workers=1 单进程单事件循环假设一致，决策P4-2）。
@@ -853,9 +875,31 @@ def create_app(
     # 会话表（问答走嵌入会话）：persist 开时每轮落 .agentao/sessions/ + 懒恢复（P4.2 决策P4.2-1）；
     # default_mode/write_gate 透传到每个会话（P4.5）。
     conversations = ConversationStore(
-        root, model, persist=session_persist, default_mode=mode, write_gate=write_gate
+        root,
+        model,
+        persist=session_persist,
+        default_mode=mode,
+        write_gate=write_gate,
+        max_conversations=effective_max,
+        # idle 回收**仅 reader 启用**（决策P4.9-6，评审 codex P2）：reader=多用户共享，需缓解并发顶满
+        # 上限；非 reader=单用户、无上限压力，且 workspace-write 会话被逐会丢 memory-only 的 undo 日志/
+        # 姿态（用户拿着的 undo token 随即 404）——故非 reader 关回收（idle_ttl=None），不动既有 P4/P4.5 行为。
+        idle_ttl=IDLE_TTL_SECONDS if reader else None,
     )
     app.state.conversations = conversations
+    app.state.reader = reader
+
+    # reader 路由裁剪（决策P4.9-2/3/17）：写路由 + GET /graph 重建 + GET /api/conversations 枚举 +
+    # POST .../undo 包进此装饰器——reader 下**不注册**（命中即 404、物理写不了 KB / 枚举不了他人会话），
+    # 非 reader 原样注册。比「注册后运行时拒绝」强：写端点根本不存在。用法：把 `@app.post("/x")` 换成
+    # `@_writer_only(app.post("/x"))`，函数体不动。
+    def _writer_only(decorator):
+        def wrap(fn):
+            if not reader:
+                decorator(fn)
+            return fn  # 恒返回原函数（FastAPI 装饰器本就返回原函数）：reader 下只是不注册路由
+
+        return wrap
 
     app.mount("/static", _NoCacheStatic(directory=STATIC_DIR), name="static")
 
@@ -870,14 +914,19 @@ def create_app(
     # 零 LLM、不建 agent；仅读 app.state 配置 + 内存会话计数（in-memory，零盘读）。恒 200。
     @app.get("/api/info")
     async def api_info() -> dict:
-        return {
+        info = {
             "kb_name": root.name,
             "model": model,  # --model 覆盖（可能 None：未覆盖时由各会话构造期环境发现）
             "mode": mode,  # 进程默认开局姿态（P4.5：read-only / workspace-write）
             "persist": session_persist,
-            "conversations": conversations.live_count(),
-            "max_conversations": MAX_CONVERSATIONS,
+            "reader": reader,  # P4.9：驱动前端隐藏写/历史/维护按钮（非安全边界，仅 UX，决策P4.9-9）
         }
+        # reader 下**移除** conversations/max_conversations（决策P4.9-9）：无鉴权多用户下，在线会话数
+        # 与硬上限对「占满上限挤掉别人」者是情报，不外泄。前端 reader 路径不依赖它们（/status 跳过该行）。
+        if not reader:
+            info["conversations"] = conversations.live_count()
+            info["max_conversations"] = effective_max
+        return info
 
     def _reject_if_writable_active() -> None:
         """层③ 时序互斥（决策P4.5-10）：可写 turn 活跃期间宿主写端点一律 `423 Locked`。
@@ -908,7 +957,7 @@ def create_app(
     # 投喂（P4.1）：把粘贴正文存为 raw/<安全名>.md。校验在端点（快 4xx）、写盘进单写者队列
     # 串行（杜绝与在飞 ingest 的 raw/ 快照窗口竞态，决策P4.1-2）。**同步等作业完成**再返回——
     # 投喂自身极快，但会**排在队列前序写作业之后**（如在飞 ingest），故响应可能等数十秒。
-    @app.post("/api/raw")
+    @_writer_only(app.post("/api/raw"))  # reader 下不注册（投喂/晋级是写，决策P4.9-2）
     async def write_raw(body: RawBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
         # 判别式 body（决策P4.6-4）：content 与 source 互斥且必选其一（同给/都不给 → 400）。
@@ -953,7 +1002,7 @@ def create_app(
     # 网络接收不持锁；收齐后把原子写**提交单写者 JobQueue**，与投喂/ingest/可写 turn 同写者串行。
     # 层③：可写 turn 活跃 → 423（与 /api/raw 同口径——否则 agent shell `curl /api/upload` 会让本端点
     # 的写作业排在 turn 的 write_lock 后空等、而 turn 在等这条响应，互相空等死锁）。
-    @app.post("/api/upload")
+    @_writer_only(app.post("/api/upload"))  # reader 下不注册（上传是写，决策P4.9-2）
     async def upload(file: UploadFile = File(...)) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
         data = await file.read()  # 网络接收不持锁（大文件不阻塞队列）
@@ -1007,7 +1056,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="仅供图像缩略图：非图像文件不经本端点提供。")
         return FileResponse(target, media_type=mime)
 
-    @app.delete("/api/workspace/file")
+    @_writer_only(app.delete("/api/workspace/file"))  # reader 下不注册（删除是写，决策P4.9-2）
     async def workspace_delete(
         path: str = Query(..., description="待删的 workspace/uploads/ 或 parsed/ 内文件"),
     ) -> dict:
@@ -1026,7 +1075,7 @@ def create_app(
 
     # 整目录删除（决策P4.6-11）：递归删 uploads/parsed 内的一个**子目录**（根目录拒，400）。
     # 同文件删除：单写者 FIFO + 层③ 423。
-    @app.delete("/api/workspace/dir")
+    @_writer_only(app.delete("/api/workspace/dir"))  # reader 下不注册（删除是写，决策P4.9-2）
     async def workspace_delete_dir(
         path: str = Query(..., description="待整删的 workspace/uploads|parsed 内子目录"),
     ) -> dict:
@@ -1064,7 +1113,7 @@ def create_app(
         return _report_response(format_fn(result, json_output=True))
 
     # graph：构建（写派生 graph/）后 302 到自包含静态视图。json_only 时改跳 graph.json。
-    @app.get("/graph")
+    @_writer_only(app.get("/graph"))  # reader 下不注册（重建写 graph/，决策P4.9-11）
     async def graph(json_only: bool = False) -> RedirectResponse:
         # 用无打印的 build_and_write_graph（非 graph_entrypoint）：worker 的进程级 redirect_stdout
         # 期间不引入并发打印者（决策P4-5 红线）。写失败 → 500，别 302 到缺失文件让用户撞 404。
@@ -1108,7 +1157,7 @@ def create_app(
         return FileResponse(path, media_type=media_type)
 
     # 写（唯一写入口 = ingest）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
-    @app.post("/api/ingest")
+    @_writer_only(app.post("/api/ingest"))  # reader 下不注册（入库是写，决策P4.9-2）
     async def ingest(body: IngestBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
         # target 不在此预校验：run_ingest 内部 _resolve_raw_target 是单一归口（须在 raw/、是 .md、
@@ -1135,7 +1184,7 @@ def create_app(
 
     # heal 物化（写，决策P4.3-2）：入单写者 FIFO 队列、即时返回 job_id、前端轮询（与 ingest 同构）。
     # worklist 由作业**服务端重算**（不收 target 列表，决策P4.3-3）；走子进程 runner、过 P2 写门禁。
-    @app.post("/api/heal")
+    @_writer_only(app.post("/api/heal"))  # reader 下不注册（物化是写，决策P4.9-2）
     async def heal(body: HealBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
 
@@ -1157,7 +1206,7 @@ def create_app(
     # 写（唯一写入口之一 = backfill，P4.8）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
     # 与 ingest 端点逐行同构——整体复用 run_query(backfill=True)，答案 + 门禁回执经 stdout 捕获进 job.output。
     # 比 ingest 还薄：_job 返回退出码 int → worker 走既有 int 鸭子分流分支、result 恒 None（决策P4.8-2）。
-    @app.post("/api/backfill")
+    @_writer_only(app.post("/api/backfill"))  # reader 下不注册（回填是 gated 写，决策P4.9-2）
     async def backfill(body: BackfillBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10 / P4.8-5）
 
@@ -1337,6 +1386,12 @@ def create_app(
     # agent 可翻）；422 非法 mode（含 full-access/plan/full）。逻辑落 chat.py，本端点只分流（决策P4.5-9）。
     @app.post("/api/chat/{conversation_id}/mode")
     async def chat_mode(conversation_id: str, body: ModeBody) -> dict:
+        # reader 强制只读姿态（决策P4.9-4）：拒绝切到 workspace-write（否则可写工作会话能写
+        # workspace/，破「全只读」）。端点本身保留（仍可「切回」read-only、查询无害），仅挡可写姿态。
+        if reader and body.mode == "workspace-write":
+            raise HTTPException(
+                status_code=409, detail="只读部署（--reader）下不可切换到 workspace-write 姿态。"
+            )
         conv = conversations.get(conversation_id)
         if conv is None:
             # 冷会话（盘上有、内存无 live agent）→ 409「先续聊一轮恢复再切」；纯未知 → 404。
@@ -1361,7 +1416,7 @@ def create_app(
     # 统一锁序 conversation.lock → write_lock（与可写 turn 同序、绝不反序，否则交叉死锁，评审 High）；
     # 逐文件乐观校验当前哈希 == 本 turn 写后哈希，相等才还原、否则跳过并计入 conflicts。某文件冲突 →
     # 整体 409（前端标红、其余仍还原）；全清 → 200。token 失效 / 无可撤销 → 409。404 未知/冷会话。
-    @app.post("/api/chat/{conversation_id}/undo")
+    @_writer_only(app.post("/api/chat/{conversation_id}/undo"))  # reader 下不注册（撤销是写，决策P4.9-17）
     async def chat_undo(conversation_id: str, body: UndoBody) -> dict:
         conv = conversations.get(conversation_id)
         if conv is None:
@@ -1396,7 +1451,7 @@ def create_app(
             return JSONResponse(status_code=409, content=result)
         return result
 
-    @app.get("/api/conversations")
+    @_writer_only(app.get("/api/conversations"))  # reader 下不注册：防枚举他人会话 id（决策P4.9-3）
     async def list_conversations() -> dict:
         # persist 开时 list() 即时 list_sessions(kb) 读盘（合并去重），故 off-loop 卸到线程池。
         return {"conversations": await anyio.to_thread.run_sync(conversations.list)}

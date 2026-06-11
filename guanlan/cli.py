@@ -98,15 +98,19 @@ def _cmd_web(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
+    # agent_log 三态**透传**（决策P4.9-15）：BooleanOptionalAction 给 True/False/None（未指定）；
+    # 「省略→按 reader 取默认」的解析归口在 serve（评审 codex P2，公开 API 自洽），CLI 只透传原值。
     try:
         return serve(
             args.dir,
             port=args.port,
             open_browser=not args.no_browser,
             model=args.model,
-            agent_log=not args.no_agent_log,
+            agent_log=args.agent_log,
             session_persist=not args.no_session_persist,
             mode=args.mode,
+            reader=args.reader,
+            max_conversations=args.max_conversations,
         )
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
@@ -251,9 +255,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_web.add_argument("--model", default=None, help="覆盖 Agentao 模型（透传写作业与会话）")
     p_web.add_argument(
-        "--no-agent-log",
+        "--reader",
         action="store_true",
-        help="不把会话 agent 日志写入 <库>/agentao.log（默认像 CLI 那样写；ingest 子进程日志不受影响）",
+        help="只读多会话部署（P4.9）：裁掉全部写端点与会话枚举、强制只读姿态、默认 KB 零字节写入；"
+        "多用户各持自己的 ?c= 会话 UUID 各聊各的、互不可见（无账号、无用户管理）",
+    )
+    # 三态日志旗标（决策P4.9-15）：BooleanOptionalAction 给 --agent-log / --no-agent-log，default=None
+    # （未指定）。_cmd_web 按 reader 解析默认：非 reader 默认开 / reader 默认关 / 显式旗标覆盖。
+    p_web.add_argument(
+        "--agent-log",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="是否把会话 agent 日志写入 <库>/agentao.log（未指定：非 reader 默认开、reader 默认关；"
+        "ingest 子进程日志不受影响）",
+    )
+    p_web.add_argument(
+        "--max-conversations",
+        type=int,
+        default=100,
+        help="内存会话硬上限（默认 100；须 ≥ 1，多用户部署可调高，P4.9-18）",
     )
     p_web.add_argument(
         "--no-session-persist",
