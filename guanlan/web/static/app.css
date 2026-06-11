@@ -355,6 +355,21 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .heal-warn { color: #8a1f1f; font-weight: 600; margin-top: .5rem; font-size: .85rem; }
 .heal-warn-item { color: #8a1f1f; font-size: .82rem; padding-left: .6rem; }
 
+/* 回填浮层（P4.8）：问题文本域 + 「沉淀」提交（同 feed/heal 配色）。 */
+.backfill-question { width: 100%; box-sizing: border-box; padding: .5rem .6rem; resize: vertical;
+  min-height: 5rem; border: 1px solid var(--lan-mist); border-radius: 5px; font-size: .88rem;
+  line-height: 1.5; font-family: inherit; margin: .4rem 0 .6rem; }
+.backfill-go { background: var(--lan-ripple); color: #fff; border: 0; border-radius: 5px;
+  padding: .4rem 1.1rem; cursor: pointer; font-size: .9rem; }
+.backfill-go:disabled { opacity: .5; cursor: default; }
+/* 问答气泡尾部的「沉淀」小按钮：图标 + 文案，与 stop-note 同档次的 inline 动作（P4.8 入口②）。 */
+.msg .bubble-backfill { display: inline-flex; align-items: center; gap: .32rem; margin-top: .45rem;
+  background: transparent; color: var(--lan-ripple); border: 1px solid var(--lan-mist);
+  border-radius: 999px; padding: .2rem .7rem; cursor: pointer; font-size: .8em; line-height: 1;
+  transition: background .16s, border-color .16s, color .16s; }
+.msg .bubble-backfill .ico { width: .92em; height: .92em; stroke-width: 1.8; }
+.msg .bubble-backfill:hover { background: var(--lan-ripple); border-color: var(--lan-ripple); color: #fff; }
+
 /* 历史会话行（P4.2）：标题 + live/落盘徽标 + 打开/删除。 */
 .conv-row { display: flex; align-items: center; gap: .5rem; padding: .35rem .4rem; border-bottom: 1px solid var(--lan-mist); font-size: .9rem; }
 .conv-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .1rem; }

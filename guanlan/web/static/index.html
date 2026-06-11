@@ -17,6 +17,8 @@
   <symbol id="i-staging" viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></symbol>
   <symbol id="i-ingest" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
   <symbol id="i-heal" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></symbol>
+  <!-- backfill（P4.8）：水滴沉入横线/层，贴「澜」沉淀意象。 -->
+  <symbol id="i-backfill" viewBox="0 0 24 24"><path d="M12 2s5 5.5 5 9a5 5 0 0 1-10 0c0-3.5 5-9 5-9z"/><line x1="4" y1="21" x2="20" y2="21"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></symbol>
   <symbol id="i-health" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
   <symbol id="i-lint" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></symbol>
@@ -53,6 +55,8 @@
       <svg class="ico"><use href="#i-ingest"/></svg><span class="btn-zh" data-i18n="btn.ingest">入库</span></button>
     <button id="heal-btn" class="btn" data-i18n-title="tip.heal" title="heal：补全高频缺失实体，缺页物化，走写门禁">
       <svg class="ico"><use href="#i-heal"/></svg><span class="btn-zh" data-i18n="btn.heal">补全</span></button>
+    <button id="backfill-btn" class="btn" data-i18n-title="tip.backfill" title="backfill：把一次好问答沉淀为 wiki/syntheses/ 综合页，走写门禁">
+      <svg class="ico"><use href="#i-backfill"/></svg><span class="btn-zh" data-i18n="btn.backfill">回填</span></button>
     <span class="act-sep" aria-hidden="true"></span>
     <button data-report="check" class="btn" data-i18n-title="tip.check" title="check：确定性校验（frontmatter / 断链 / 源）">
       <svg class="ico"><use href="#i-check"/></svg><span class="btn-zh" data-i18n="btn.check">校验</span></button>
