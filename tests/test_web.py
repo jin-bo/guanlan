@@ -1704,10 +1704,11 @@ def test_app_info_no_conversation(chat_client) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert set(body) == {
-        "kb_name", "model", "mode", "persist", "conversations", "max_conversations"
+        "kb_name", "model", "mode", "persist", "reader", "conversations", "max_conversations"
     }
     assert body["mode"] == "read-only"
     assert body["persist"] is True
+    assert body["reader"] is False  # 默认非 reader（P4.9）
     assert body["conversations"] == 0  # 尚无会话
     assert body["max_conversations"] == 100
     assert captured["agents"] == []  # app 级 info 不建 agent
@@ -3767,3 +3768,357 @@ def test_undo_success_releases_write_lock(chat_env) -> None:
         client.post(f"/api/chat/{cid}/undo", json={"token": done2["undo"]["token"]})
         assert app.state.write_gate.write_lock.acquire(blocking=False) is True  # 撤销后未泄漏
         app.state.write_gate.write_lock.release()
+
+
+# ═══════════════════════ P4.9：只读多会话（reader 部署）═══════════════════════
+# 见 docs/P4.9-只读多会话.md §7。reader=True 裁写端点 + 关会话枚举 + 强制只读姿态 +
+# KB 零字节写入 + 能力 UUID 隔离；max_conversations 可配 + 校验；idle 回收。两类 LLM 都打桩。
+
+import guanlan.web.chat as _p49_chat  # noqa: E402
+
+
+def _reader_client(kb):
+    """绑定到 kb 的 reader 部署 TestClient（无 fake agent；只测写端点裁剪/只读端点）。"""
+    return TestClient(create_app(kb, reader=True))
+
+
+@pytest.mark.parametrize(
+    "method,path,body,expected",
+    [
+        # 独占路径的写方法 → 404（路由整个不存在）
+        ("POST", "/api/ingest", {"target": "raw/x.md"}, 404),
+        ("POST", "/api/backfill", {"question": "q"}, 404),
+        ("POST", "/api/heal", {}, 404),
+        ("DELETE", "/api/workspace/dir", None, 404),
+        ("GET", "/graph", None, 404),
+        # 与只读端点**共用路径**的写方法 → 405（路径仍在但该方法 handler 未注册）：POST /api/raw
+        # 共用 GET /api/raw（读源）、DELETE /api/workspace/file 共用 GET（预览）。写能力同样被裁，
+        # 405 与 404 都=写不了 KB，安全属性不变（决策P4.9-2）。
+        ("POST", "/api/raw", {"name": "x", "content": "hi"}, 405),
+        ("DELETE", "/api/workspace/file", None, 405),
+    ],
+)
+def test_reader_trims_write_routes(kb, method, path, body, expected) -> None:
+    """reader 下全部写路由 + GET /graph 重建均不可达（404，或与只读端点共路径时 405，决策P4.9-2/11）。"""
+    with _reader_client(kb) as client:
+        resp = client.request(method, path, json=body, follow_redirects=False)
+    assert resp.status_code == expected
+
+
+def test_reader_trims_upload_and_undo_404(kb, chat_env) -> None:
+    """reader 下 POST /api/upload（上传写）与 POST /api/chat/{id}/undo（撤销写）均 404（决策P4.9-2/17）。"""
+    kb2, _ = chat_env
+    with TestClient(create_app(kb2, reader=True)) as client:
+        up = client.post("/api/upload", files={"file": ("a.txt", b"x", "text/plain")})
+        assert up.status_code == 404
+        undo = client.post("/api/chat/whatever/undo", json={"token": "t"})
+        assert undo.status_code == 404
+
+
+def test_reader_keeps_readonly_reports_and_graph_file(kb) -> None:
+    """reader 保留只读端点：report/{name} 仍 200；graph 静态产物 缺失→404 / 预生成→200（决策P4.9-10/11）。"""
+    from guanlan.graph import build_and_write_graph
+
+    with _reader_client(kb) as client:
+        assert client.get("/api/report/check").status_code == 200
+        assert client.get("/api/report/health").status_code == 200
+        assert client.get("/api/report/lint").status_code == 200
+        # 未生成 → 404（不断言「恒 200」）
+        assert client.get("/graph/graph.json").status_code == 404
+    build_and_write_graph(kb, json_only=True)  # writer 侧预生成
+    with _reader_client(kb) as client:
+        assert client.get("/graph/graph.json").status_code == 200
+
+
+def test_reader_workspace_shared_readable(kb, chat_env) -> None:
+    """reader 保留 GET /api/workspace*（共享可读，决策P4.9-16）；写端点已裁。"""
+    kb2, _ = chat_env
+    (kb2 / "workspace" / "parsed").mkdir(parents=True)
+    (kb2 / "workspace" / "parsed" / "x.md").write_text("# x\n", encoding="utf-8")
+    with TestClient(create_app(kb2, reader=True)) as client:
+        assert client.get("/api/workspace").status_code == 200
+        assert client.get("/api/workspace/file", params={"path": "workspace/parsed/x.md"}).status_code == 200
+        # 裸请求缺 path → 422（语义不变）
+        assert client.get("/api/workspace/file").status_code == 422
+        # 写端点已裁：DELETE /api/workspace/file 共用 GET 路径 → 405（method 未注册，写不了）
+        assert client.delete("/api/workspace/file", params={"path": "workspace/parsed/x.md"}).status_code == 405
+
+
+def test_reader_closes_enumeration_keeps_capability(chat_env) -> None:
+    """reader 关 GET /api/conversations（枚举）、保留按-id /info 与 DELETE（能力寻址，决策P4.9-3/12）。"""
+    kb, _ = chat_env
+    with TestClient(create_app(kb, reader=True)) as client:
+        assert client.get("/api/conversations").status_code == 404  # 枚举端点不存在
+        _, done, _ = _chat(client, "问")
+        cid = done["conversation_id"]
+        # 按-id 探针恢复（决策P4.9-12）：/info 命中
+        assert client.get(f"/api/chat/{cid}/info").status_code == 200
+        # 未知 id → 404
+        assert client.get(f"/api/chat/{uuid.uuid4()}/info").status_code == 404
+        # 能力式 DELETE 对已持有 id 仍 200
+        assert client.delete(f"/api/conversations/{cid}").status_code == 200
+
+
+def test_reader_capability_isolation(chat_env) -> None:
+    """两会话 A/B：仅持各自 id 能读其 /messages；reader 下无枚举可发现对方（决策P4.9-1）。"""
+    kb, _ = chat_env
+    with TestClient(create_app(kb, reader=True)) as client:
+        _, da, _ = _chat(client, "A")
+        _, db, _ = _chat(client, "B")
+        a, b = da["conversation_id"], db["conversation_id"]
+        assert a != b
+        assert client.get(f"/api/conversations/{a}/messages").status_code == 200
+        assert client.get(f"/api/conversations/{b}/messages").status_code == 200
+        assert client.get("/api/conversations").status_code == 404  # 无从枚举出对方
+
+
+def test_reader_chat_still_streams(chat_env) -> None:
+    """reader 只读问答主路照常：SSE start/token/done（读不走 write_lock，决策P4.9-7）。"""
+    kb, _ = chat_env
+    with TestClient(create_app(kb, reader=True)) as client:
+        tokens, done, error = _chat(client, "只读问")
+        assert error is None and done is not None
+        assert "".join(tokens) == done["answer"]
+
+
+def test_reader_info_fields_trimmed(kb, chat_env) -> None:
+    """reader /api/info：reader=True 且**移除** conversations/max_conversations；非 reader 二字段仍在（决策P4.9-9）。"""
+    kb2, _ = chat_env
+    with TestClient(create_app(kb2, reader=True)) as client:
+        body = client.get("/api/info").json()
+        assert body["reader"] is True
+        assert "conversations" not in body and "max_conversations" not in body
+    with TestClient(create_app(kb2)) as client:
+        body = client.get("/api/info").json()
+        assert body["reader"] is False
+        assert body["conversations"] == 0 and body["max_conversations"] == 100
+
+
+def test_reader_rejects_workspace_write_mode(chat_env) -> None:
+    """reader 下 POST /api/chat/{id}/mode {workspace-write} → 409（强制只读姿态，决策P4.9-4）。"""
+    kb, _ = chat_env
+    with TestClient(create_app(kb, reader=True)) as client:
+        _, done, _ = _chat(client, "问")
+        cid = done["conversation_id"]
+        resp = client.post(f"/api/chat/{cid}/mode", json={"mode": "workspace-write"})
+        assert resp.status_code == 409
+
+
+def test_create_app_reader_clamps_persist_and_mode(chat_env) -> None:
+    """直建 create_app(reader=True, session_persist=True, mode=workspace-write)：内部覆盖为零写只读（决策P4.9-2）。"""
+    kb, _ = chat_env
+    app = create_app(kb, reader=True, session_persist=True, mode="workspace-write")
+    assert app.state.conversations._persist is False
+    assert app.state.mode == "read-only"
+    assert app.state.reader is True
+    with TestClient(app) as client:
+        _chat(client, "问")  # 跑一轮只读问答
+    # session_persist 钳为 False → 不落 .agentao/sessions/（堵「只关路由仍落盘」漏口）
+    assert not (kb / ".agentao" / "sessions").exists()
+
+
+def test_reader_kb_zero_write(chat_env) -> None:
+    """reader 默认（无 agent_log）：persist False、跑一轮后 KB 内不新增 .agentao/sessions（决策P4.9-14）。"""
+    kb, _ = chat_env
+    with TestClient(create_app(kb, reader=True)) as client:
+        _chat(client, "问")
+    assert not (kb / ".agentao").exists()
+    assert not (kb / "agentao.log").exists()
+
+
+def test_max_conversations_configurable_and_runtime_503(chat_env) -> None:
+    """max_conversations 可配：max=2 连建 3 个 → 第 3 个**运行时** 503（决策P4.9-18；非 EXIT）。"""
+    kb, _ = chat_env
+    with TestClient(create_app(kb, max_conversations=2)) as client:
+        _, d1, _ = _chat(client, "1")
+        _, d2, _ = _chat(client, "2")
+        assert d1["conversation_id"] and d2["conversation_id"]
+        # 第 3 个新会话 → ConversationStore.create() 抛 RuntimeError → HTTP 503
+        resp = client.post("/api/chat", json={"message": "3"})
+        assert resp.status_code == 503
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_create_app_max_conversations_validation(kb, bad) -> None:
+    """直建 create_app(max_conversations<1)（不经 CLI/serve）即 GuanlanError(EXIT_USAGE)（堵直建漏口，决策P4.9-18）。"""
+    with pytest.raises(GuanlanError) as ei:
+        create_app(kb, max_conversations=bad)
+    assert ei.value.exit_code == 1
+
+
+def test_idle_reclaim_evicts_stale_skips_inflight(chat_env) -> None:
+    """注入时钟 + 小 TTL：久无活动会话被淘汰、有在飞 turn 的不被淘汰、满活跃仍拒（决策P4.9-6）。"""
+    kb, _ = chat_env
+    now = [1000.0]
+    store = _p49_chat.ConversationStore(
+        kb, None, persist=False, max_conversations=2, idle_ttl=100, clock=lambda: now[0]
+    )
+    a = store.create()
+    now[0] += 200  # a 超 TTL
+    b = store.create()  # 触发回收：a 久无活动且无在飞 → 淘汰；b 建成
+    assert store.get(a.id) is None  # a 被回收
+    assert store.get(b.id) is not None
+    assert store.live_count() == 1
+
+    # 有在飞 turn 的会话即便超时也不被淘汰
+    b._inflight = 1
+    now[0] += 500  # b 超 TTL，但在飞
+    c = store.create()
+    assert store.get(b.id) is not None  # 在飞，跳过回收
+    assert store.live_count() == 2
+
+    # 满 max=2 且全活跃（无 idle slack）→ 新建仍 RuntimeError（运行时上限）
+    b._inflight = 0
+    c_token = None  # noqa: F841
+    # b、c 都刚活跃（last_active 在 c 建时未变；让二者都不超 TTL）
+    b.last_active = now[0]
+    c.last_active = now[0]
+    with pytest.raises(RuntimeError):
+        store.create()
+
+
+def test_idle_reclaim_only_enabled_in_reader(kb) -> None:
+    """idle 回收仅 reader 启用（评审 codex P2）：非 reader 关（idle_ttl=None），不逐 write 会话丢 undo/姿态。"""
+    non_reader = create_app(kb)
+    assert non_reader.state.conversations._idle_ttl is None  # 非 reader：关回收（不动 P4/P4.5 行为）
+    reader = create_app(kb, reader=True)
+    assert reader.state.conversations._idle_ttl == _p49_chat.IDLE_TTL_SECONDS  # reader：开回收（多用户）
+
+
+def test_idle_get_refreshes_last_active_prevents_eviction(chat_env) -> None:
+    """按-id get() 刷新 last_active：堵「端点取出 conv → 起 turn 前被 reclaim 误逐」竞态（评审 P4.9）。"""
+    kb, _ = chat_env
+    now = [1000.0]
+    store = _p49_chat.ConversationStore(
+        kb, None, persist=False, max_conversations=2, idle_ttl=100, clock=lambda: now[0]
+    )
+    a = store.create()
+    now[0] += 200  # a 已超 TTL
+    # 模拟端点在新 create 触发 reclaim **之前** 先 get() 取出 a（保活）
+    assert store.get(a.id) is a  # get 刷新 a.last_active = now(1200)
+    store.create()  # 触发 reclaim：a 刚被 get 刷新过、非 idle → 不被逐
+    assert store.get(a.id) is not None  # a 仍在（竞态已堵）
+
+
+def test_idle_end_turn_refreshes_last_active(chat_env) -> None:
+    """跑得比 TTL 久的一轮收尾后刷新 last_active：刚用完的会话不被立刻逐（评审 codex P2）。"""
+    kb, _ = chat_env
+    now = [1000.0]
+    store = _p49_chat.ConversationStore(
+        kb, None, persist=False, max_conversations=2, idle_ttl=100, clock=lambda: now[0]
+    )
+    a = store.create()
+    a.begin_turn()  # 起跑打点（last_active=1000, _inflight=1）
+    now[0] += 500  # 一轮跑 500s（> TTL=100）
+    a.end_turn()  # 收尾按「完成时刻」刷新 last_active=1500
+    assert a.is_idle(now[0], 100) is False  # 刚收尾 → 非 idle
+    store.create()  # 触发 reclaim：a 非 idle → 不被逐
+    assert store.live_count() == 2  # a 与新会话都在（a 未被误逐）
+
+
+def test_idle_reclaim_off_when_ttl_none(chat_env) -> None:
+    """idle_ttl=None 关回收：满上限即拒、不淘汰（退回纯硬上限语义）。"""
+    kb, _ = chat_env
+    now = [0.0]
+    store = _p49_chat.ConversationStore(
+        kb, None, persist=False, max_conversations=1, idle_ttl=None, clock=lambda: now[0]
+    )
+    store.create()
+    now[0] += 10**9  # 即便时间巨进，TTL=None 不回收
+    with pytest.raises(RuntimeError):
+        store.create()
+
+
+def test_cli_web_tristate_passthrough(kb, monkeypatch) -> None:
+    """CLI 透传（决策P4.9-15）：reader / agent_log(原始三态) / max_conversations 原样传给 serve。
+
+    「省略 agent_log → 按 reader 取默认」的解析归口在 serve（评审 codex P2），故 CLI 这里只透传
+    `args.agent_log` 的原值（None/True/False），不自己解析——见 test_serve_resolves_agent_log_default。
+    """
+    from guanlan.cli import main
+
+    seen: list[dict] = []
+    monkeypatch.setattr("guanlan.web.serve", lambda root, **kw: (seen.append(kw), 0)[1])
+
+    base = ["-C", str(kb), "web", "--no-browser"]
+    main(base)  # ① 无 --reader 无旗标 → 透传 None（由 serve 解析为开）
+    assert seen[-1]["reader"] is False and seen[-1]["agent_log"] is None
+    main(base + ["--reader"])  # ② --reader 无旗标 → 透传 None（serve 解析为关）
+    assert seen[-1]["reader"] is True and seen[-1]["agent_log"] is None
+    main(base + ["--reader", "--agent-log"])  # ③ 显式 opt-in → True
+    assert seen[-1]["reader"] is True and seen[-1]["agent_log"] is True
+    main(base + ["--no-agent-log"])  # ④ 任意模式显式关 → False
+    assert seen[-1]["agent_log"] is False
+    main(base + ["--max-conversations", "7"])  # max-conversations 透传
+    assert seen[-1]["max_conversations"] == 7
+
+
+def test_serve_resolves_agent_log_default(kb, monkeypatch) -> None:
+    """公开 serve API 自洽（评审 codex P2）：省略 agent_log 时 reader→不写日志 / 非 reader→写日志。"""
+    import guanlan.web.server as server
+
+    calls: list[str] = []
+    monkeypatch.setattr(server.uvicorn, "run", lambda app, **kw: None)
+    monkeypatch.setattr(server, "configure_agent_log", lambda _kb: calls.append("configure"))
+    monkeypatch.setattr(server, "disable_agent_log", lambda: calls.append("disable"))
+
+    # 直接调用 serve(reader=True) 且省略 agent_log → 默认关（零写契约），不 configure。
+    server.serve(kb, port=8808, open_browser=False, reader=True)
+    assert calls == ["disable"]
+    calls.clear()
+    # 非 reader 省略 agent_log → 默认开。
+    server.serve(kb, port=8809, open_browser=False, reader=False)
+    assert calls == ["configure"]
+
+
+def test_cli_reader_mode_mutual_exclusion(kb) -> None:
+    """--reader 与 --mode workspace-write 互斥 → EXIT_USAGE（决策P4.9-4）。"""
+    from guanlan.cli import main
+
+    rc = main(["-C", str(kb), "web", "--no-browser", "--reader", "--mode", "workspace-write"])
+    assert rc == 1
+
+
+def test_cli_max_conversations_zero_is_usage_error(kb) -> None:
+    """--max-conversations 0 → EXIT_USAGE（serve 友好早提示 / create_app 权威，决策P4.9-18）。"""
+    from guanlan.cli import main
+
+    rc = main(["-C", str(kb), "web", "--no-browser", "--max-conversations", "0"])
+    assert rc == 1
+
+
+def test_serve_no_agent_log_removes_prior_handler(kb, monkeypatch) -> None:
+    """同进程先 serve(agent_log=True) 后 serve(agent_log=False)：摘掉旧 file handler，真零写（评审 codex P2）。"""
+    import logging.handlers
+
+    import guanlan.web.chat as chatmod
+    import guanlan.web.server as server
+
+    monkeypatch.setattr(server.uvicorn, "run", lambda app, **kw: None)
+
+    def _has_file_handler() -> bool:
+        return any(
+            isinstance(h, logging.handlers.RotatingFileHandler)
+            for h in chatmod._logger.handlers
+        )
+
+    try:
+        server.serve(kb, port=8804, open_browser=False, agent_log=True)
+        assert _has_file_handler()  # 日志开 → 挂了 file handler
+        # 第二次同进程起服、关日志（reader 默认或 --no-agent-log）→ 摘除旧 handler
+        server.serve(kb, port=8805, open_browser=False, agent_log=False)
+        assert not _has_file_handler()  # 旧 handler 已摘，reader 不再续写 agentao.log
+    finally:
+        chatmod.disable_agent_log()  # 清场，避免泄漏到后续测试
+
+
+def test_serve_agent_log_write_probe_fails_early(kb, monkeypatch) -> None:
+    """--agent-log 在日志不可写时 → 启动即 EXIT_USAGE（独立 open() 探针，决策P4.9-13）。"""
+    import guanlan.web.server as server
+
+    monkeypatch.setattr(server.uvicorn, "run", lambda app, **kw: None)
+    # 把 agentao.log 造成一个目录 → open(..., "a") 抛 IsADirectoryError(OSError)，探针转 EXIT_USAGE。
+    (kb / "agentao.log").mkdir()
+    with pytest.raises(GuanlanError) as ei:
+        server.serve(kb, port=8801, open_browser=False, agent_log=True)
+    assert ei.value.exit_code == 1
