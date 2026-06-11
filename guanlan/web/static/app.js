@@ -602,6 +602,7 @@ async function triggerBackfill(question) {
 // 给一条问答气泡尾部挂「沉淀」小按钮：点击预填该轮用户问题、打开 backfill 浮层（决策P4.8-3）。
 // done / stopped 收尾时调用；read-only / workspace-write 两种姿态都挂（backfill 是独立写端点）。
 function appendBackfillButton(botEl) {
+  if (readerMode) return; // reader 下 /api/backfill 已裁（404）：不挂「沉淀」写按钮，免无效写入口（评审 codex P3）
   if (botEl.querySelector(".bubble-backfill")) return; // 幂等：done 之后又 stopped 不重复挂
   const question = botEl.dataset.question || "";
   const btn = document.createElement("button");
@@ -1152,6 +1153,8 @@ let chatStreaming = false; // 一轮在飞时为 true：发送按钮切「停止
 let pendingStop = false; // 首轮 id 未回时点了「停止」：标记待停，start 帧回填 id 后立即补发
 let currentMode = "read-only"; // 当前会话姿态（P4.5）：徽标显示、/mode 切换更新
 let defaultMode = "read-only"; // 进程 --mode 默认（启动 /api/info 拉取）：新会话开局姿态
+let readerMode = false; // 只读多会话部署（P4.9）：启动 /api/info 的 reader 字段；驱动隐藏写/历史/维护 chrome
+                        // 与 ?c= 按-id 恢复（决策P4.9-9/12）。安全边界是端点 404，这只是 UX。
 
 // 会话 id ↔ 浏览器 URL 同步：把当前会话写进 ?c=<id>，刷新即据此懒恢复续聊（startup 读取）。
 // 用 replaceState（不入浏览器历史栈）——右栏 wiki 走自家 history 数组，与浏览器前进/后退互不干扰。
@@ -1178,6 +1181,27 @@ function setModeBadge(mode) {
   el.textContent = currentMode;
   el.classList.toggle("writable", currentMode === "workspace-write");
   el.title = currentMode === "workspace-write" ? t("mode.writeTip") : t("mode.readonlyTip");
+}
+
+// 只读多会话部署（P4.9）：隐藏写 / 历史枚举 / 维护诊断 chrome——纯 UX（安全边界是端点 404、不是隐藏）。
+// 保留：新会话 / 发送 / Wiki 导航 / 语言。用 inline display:none（稳胜 .btn 的 display 规则，
+// [hidden] 属性会被 .btn 的 display 覆盖、未必生效）。决策P4.9-9/10/11/17。
+function applyReaderMode() {
+  const hideIds = [
+    "history-btn",                                          // 枚举他人会话 → 破隔离（决策P4.9-3）
+    "feed-btn", "ingest-btn", "heal-btn", "backfill-btn", "staging-btn", // 写端点（reader 下 404）
+    "attach-btn",                                           // 上传是写（404）
+    "graph-btn",                                            // 重建是写者（404）；不给死链（决策P4.9-11）
+    "mode-badge",                                           // 姿态恒只读、/mode 已禁可写 → 冻结隐藏（决策P4.9-4）
+  ];
+  for (const id of hideIds) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = "none";
+  }
+  // check/health/lint 维护诊断按钮（决策P4.9-10）：端点只读保留、仅隐藏按钮。
+  for (const el of document.querySelectorAll("[data-report]")) el.style.display = "none";
+  // 收掉顶栏分隔符，避免隐藏后留连续竖线。
+  for (const el of document.querySelectorAll(".topbar .act-sep")) el.style.display = "none";
 }
 
 function startNewConversation() {
@@ -1480,7 +1504,11 @@ function renderSlashInfo(cmd, info) {
       lines.push(t("slash.kb", info.kb_name));
       lines.push(t("slash.model", info.model || t("slash.modelUnspecified")));
       lines.push(t("slash.mode", info.mode));
-      lines.push(t("slash.sessions", info.conversations, info.max_conversations));
+      // reader 下 /api/info 移除 conversations/max_conversations（决策P4.9-9）：字段缺失则跳过本行，
+      // 不渲染 `undefined/undefined`。非 reader 下二字段仍在、照常显示（不回归）。
+      if (info.conversations !== undefined) {
+        lines.push(t("slash.sessions", info.conversations, info.max_conversations));
+      }
       lines.push(t("slash.noSessionHint"));
     } else {
       if (info.mode) setModeBadge(info.mode);
@@ -2160,26 +2188,44 @@ initLang();
 // （loadPages 解析后会就地重渲染当前 index 条目，故用户的搜索结果照常出现）。
 loadPages().then(() => { if (histPos < 0) navigate({ kind: "index", query: "" }); });
 
-// 拉进程默认姿态设初始徽标（P4.5）：失败则保留 CSS/HTML 默认 read-only。
-getJSON("/api/info").then((info) => {
-  if (!info || !info.mode) return;
-  defaultMode = info.mode;
-  // 仅当尚无活动会话时才据进程默认置徽标：?c= 恢复已设了该会话的真实姿态（restoreConversation 的
-  // 每会话 /info 校正），此处的进程默认晚到一拍会把它覆盖回去——正是评审指出的「徽标说谎」竞态。
-  if (conversationId === null) setModeBadge(info.mode);
-}).catch(() => {});
+// 启动协调（P4.9）：先拉一次 /api/info 取进程默认姿态 + reader 标志，**再**按模式恢复 ?c= 会话——
+// 二者本是两段独立异步、会赛跑；合一后 reader 标志在恢复策略选择前就绪（reader 走按-id 探针、不枚举）。
+(async function bootstrapSession() {
+  // 拉进程默认姿态设初始徽标（P4.5）+ reader 标志（P4.9）：失败则保留 HTML/CSS 默认（非 reader / read-only）。
+  let info = null;
+  try { info = await getJSON("/api/info"); } catch { /* 失败：保留默认 */ }
+  if (info) {
+    readerMode = !!info.reader;
+    if (info.mode) {
+      defaultMode = info.mode;
+      // 仅当尚无活动会话时才据进程默认置徽标：?c= 恢复会设该会话真实姿态（restoreConversation 的
+      // 每会话 /info 校正），此处进程默认晚到一拍会覆盖回去——正是评审指出的「徽标说谎」竞态。
+      if (conversationId === null) setModeBadge(info.mode);
+    }
+    if (readerMode) applyReaderMode(); // 隐藏写/历史/维护 chrome（决策P4.9-9/10/11/17）
+  }
 
-// 按 ?c=<id> 懒恢复会话（刷新保留当前会话）：仅当该 id 仍在会话目录（内存 ∪ 盘上）里才恢复，
-// 否则抹掉 ?c= 另起新会话——避免握着一个已删 / 进程重启后不存在的 id（下条提问会撞 404 未知会话）。
-(async function restoreConversationFromUrl() {
+  // 按 ?c=<id> 懒恢复会话（刷新保留当前会话）：仅当该 id 仍可达才恢复，否则抹掉 ?c= 另起新会话——
+  // 避免握着一个已删 / 进程重启后不存在的 id（下条提问会撞 404 未知会话）。
   const want = new URL(window.location.href).searchParams.get("c");
   if (!want) return;
+  if (readerMode) {
+    // reader 关了枚举（决策P4.9-3）：改走**按-id 探针** GET /api/chat/{id}/info（决策P4.9-12），
+    // **绝不**调 /api/conversations（reader 下 404）。命中→恢复、404→抹掉 ?c= 干净起手。
+    let hitInfo = null;
+    try { hitInfo = await getJSON(`/api/chat/${encodeURIComponent(want)}/info`); }
+    catch { /* 404/网络失败 → 下面据 hitInfo===null 抹掉 ?c= */ }
+    // 拉取期间用户可能已自行开聊（SSE start 已置 conversationId / 正在流式）——绝不覆盖其会话或 URL。
+    if (conversationId !== null || chatStreaming) return;
+    if (hitInfo) await restoreConversation({ id: want, title: hitInfo.title });
+    else setConversation(null);
+    return;
+  }
+  // 非 reader：沿用枚举恢复（不回归既有行为）。
   let conversations = null;
   try {
     ({ conversations } = await getJSON("/api/conversations"));
   } catch { /* 列举失败：退回干净起手（除非用户已自行开聊，见下） */ }
-  // 拉取期间用户可能已自行开聊（SSE start 已置 conversationId / 正在流式）——此时**绝不**碰其会话或
-  // URL：既不回放覆盖、也不 setConversation(null) 抹掉其 id（仿首页 `histPos < 0` 守卫，决策P4.6）。
   if (conversationId !== null || chatStreaming) return;
   const hit = conversations && conversations.find((c) => c.id === want);
   if (hit) { await restoreConversation(hit); return; }
