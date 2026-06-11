@@ -4,4 +4,4 @@ P1 交付 `guanlan init`（确定性生成最小模板）。ingest / query 等 L
 由 `guanlan-wiki` skill 驱动 Agentao 完成；本包只做编排与确定性门禁。
 """
 
-__version__ = "0.1.5"
+__version__ = "0.1.6.dev0"
