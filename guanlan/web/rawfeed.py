@@ -117,7 +117,7 @@ def _check_text_admission(content: str) -> None:
         raise HTTPException(status_code=400, detail="raw/ 只收文本素材；检测到 NUL/控制字符。")
 
 
-def _safe_workspace_source(root: Path, rel: str) -> Path:
+def _safe_promotion_source(root: Path, rel: str) -> Path:
     """把晋级 `source` 解析为 `workspace/` 内一个**存在的 `.md`**；否则 400/404（决策P4.6-4）。
 
     校验顺序：① 路径包含——resolve + `relative_to(workspace)`（越界 400）；② 必须 `.md`
@@ -185,7 +185,7 @@ def _prepare_promotion(root: Path, source: str, origin: str | None) -> str:
     与投喂 `content` 分支「端点校验、只把写入队」同构。层③ 423 已挡可写 turn 活跃期的并发改写，
     `source` 读后随即原子写、TOCTOU 窗口极小（决策P4.6-4）。
     """
-    path = _safe_workspace_source(root, source)
+    path = _safe_promotion_source(root, source)
     try:
         content = path.read_bytes().decode("utf-8")
     except UnicodeDecodeError:
