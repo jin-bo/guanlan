@@ -16,6 +16,7 @@ window.I18N = {
     "btn.staging": "暂存区",
     "btn.ingest": "入库",
     "btn.heal": "补全",
+    "btn.backfill": "回填",
     "btn.check": "校验",
     "btn.health": "健康",
     "btn.lint": "巡检",
@@ -26,6 +27,7 @@ window.I18N = {
     "tip.staging": "暂存区：浏览上传/派生物，审阅·修订·晋级为源 → ingest",
     "tip.ingest": "ingest：从 raw/ 选一篇触发入库 → wiki/",
     "tip.heal": "heal：补全高频缺失实体，缺页物化，走写门禁",
+    "tip.backfill": "backfill：把一次好问答沉淀为 wiki/syntheses/ 综合页，走写门禁",
     "tip.check": "check：确定性校验（frontmatter / 断链 / 源）",
     "tip.health": "health：stub 页 + 索引↔磁盘同步（建议性）",
     "tip.lint": "lint：孤页 / 断链 / 缺失实体（建议性）",
@@ -55,6 +57,7 @@ window.I18N = {
     "chat.stopped": "（已停止）",
     "chat.fail": "对话失败：{0}",
     "chat.error": "错误：{0}",
+    "chat.backfill": "沉淀为综合页",
     // —— 弹层通用 ——
     "aria.overlayClose": "关闭",
     "common.running": "运行中…",
@@ -96,6 +99,12 @@ window.I18N = {
     "heal.stillBroken": "· {0}（仍断：{1}）",
     "heal.unexpected": "⚠ 非预期 wiki 写入（人工审计）：",
     "heal.donePostponed": "另有 {0} 个缺失实体因 limit 推迟，重跑续补。",
+    // —— 回填 backfill（P4.8）——
+    "backfill.placeholder": "提一个值得沉淀的问题，Agent 将综合带引用的答案并回填 syntheses/…",
+    "backfill.hint": "Agent 将重新综合带 [[页]] 引用的答案并回填 wiki/syntheses/，走写门禁（同 ingest）。",
+    "backfill.submit": "沉淀",
+    "backfill.submitted": "已提交，排队中（与 ingest/补全同写者串行）…",
+    "backfill.busy": "可写会话进行中，请稍后再沉淀。",
     // —— 投喂 ——
     "feed.namePlaceholder": "文件名或标题（自动 slug 化 + 补 .md）",
     "feed.contentPlaceholder": "粘贴素材正文（Markdown 文本，原样存进 raw/）…",
@@ -252,6 +261,7 @@ window.I18N = {
     "btn.staging": "Staging",
     "btn.ingest": "Ingest",
     "btn.heal": "Heal",
+    "btn.backfill": "Backfill",
     "btn.check": "Check",
     "btn.health": "Health",
     "btn.lint": "Lint",
@@ -262,6 +272,7 @@ window.I18N = {
     "tip.staging": "Staging: browse uploads/derivatives, review · revise · promote to source → ingest",
     "tip.ingest": "ingest: pick a file from raw/ to ingest → wiki/",
     "tip.heal": "heal: materialize frequently-missing entities and stub pages (write-gated)",
+    "tip.backfill": "backfill: distill a good Q&A into a wiki/syntheses/ page, gated write",
     "tip.check": "check: deterministic validation (frontmatter / broken links / sources)",
     "tip.health": "health: stub pages + index↔disk sync (advisory)",
     "tip.lint": "lint: orphans / broken links / missing entities (advisory)",
@@ -291,6 +302,7 @@ window.I18N = {
     "chat.stopped": "(stopped)",
     "chat.fail": "Chat failed: {0}",
     "chat.error": "Error: {0}",
+    "chat.backfill": "Distill into a page",
     // —— Overlay common ——
     "aria.overlayClose": "Close",
     "common.running": "Running…",
@@ -332,6 +344,12 @@ window.I18N = {
     "heal.stillBroken": "· {0} (still broken: {1})",
     "heal.unexpected": "⚠ Unexpected wiki writes (manual audit):",
     "heal.donePostponed": "{0} more missing entities postponed by limit; rerun to continue.",
+    // —— Backfill (P4.8) ——
+    "backfill.placeholder": "Ask a question worth distilling; the Agent will synthesize a cited answer into syntheses/…",
+    "backfill.hint": "The Agent re-synthesizes a [[page]]-cited answer into wiki/syntheses/ via the write gate (same as ingest).",
+    "backfill.submit": "Distill",
+    "backfill.submitted": "Submitted, queued (serialized with ingest/heal on the same writer)…",
+    "backfill.busy": "A writable session is in progress; try distilling later.",
     // —— Feed ——
     "feed.namePlaceholder": "Filename or title (auto slug + .md)",
     "feed.contentPlaceholder": "Paste the source body (Markdown text, stored verbatim into raw/)…",

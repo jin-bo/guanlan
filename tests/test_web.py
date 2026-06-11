@@ -2845,6 +2845,180 @@ def test_heal_no_sse_no_path_param(client) -> None:
     assert client.post("/api/heal", json={"limit": 0}).status_code == 422
 
 
+# ═══════════════════════ P4.8 Web 回填 backfill（C1） ═══════════════════════
+#
+# 见 docs/P4.8-Web回填.md §7。POST /api/backfill 只是 run_query(backfill=True) 的薄 adapter——
+# P2 的 backfill 门禁/自愈/失败语义已由 test_query.py 证过，Web 测试**只聚焦 adapter 本身**：
+# 入队、退出码透传、result 恒 null、旧 job 兼容、FIFO 烟测、422、model 透传、形态。
+
+
+def test_backfill_post_enqueues_and_answer_in_output(kb) -> None:
+    """POST /api/backfill 即时返回 job_id（非阻塞）→ 轮询至 done：exit_code==0、答案落 output、
+    result==null（与 ingest 同形，决策P4.8-2）。仅此一条 happy-path 用 fake runner 端到端跑通。"""
+    runner = make_runner(
+        lambda root: write_page(root, "wiki/syntheses/q.md", type="synthesis"),
+        final_text="带 [[页]] 引用的好答案。",
+    )
+    with TestClient(create_app(kb, runner=runner)) as client:
+        resp = client.post("/api/backfill", json={"question": "什么是 Foo？"})
+        assert resp.status_code == 200
+        job_id = resp.json()["job_id"]
+        data = _wait_job(client, job_id)
+
+    assert data["kind"] == "backfill"
+    assert data["state"] == "done"
+    assert data["exit_code"] == 0  # EXIT_OK
+    assert "带 [[页]] 引用的好答案。" in data["output"]
+    assert data["result"] is None  # 散文在 output、无结构化回执（决策P4.8-2）
+
+
+def test_backfill_exit_code_passthrough(kb) -> None:
+    """纯 adapter：monkeypatch run_query 返回选定退出码 → 原样进 job.exit_code、result 仍 null。
+    **不**用 fake runner 制造坏 frontmatter 触发真 gate（那会在 Web 层重证 P2 gate 行为，违测试分工）。"""
+    import guanlan.web.app as app_mod
+    from guanlan.errors import EXIT_CHECK_FAILED
+
+    with TestClient(create_app(kb)) as client:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(app_mod, "run_query", lambda *a, **k: EXIT_CHECK_FAILED)
+            job_id = client.post("/api/backfill", json={"question": "q"}).json()["job_id"]
+            data = _wait_job(client, job_id)
+    assert data["exit_code"] == 3  # EXIT_CHECK_FAILED，原样透传
+    assert data["result"] is None
+
+
+@pytest.mark.parametrize("body", [{"question": ""}, {"question": "   "}, {}])
+def test_backfill_blank_or_missing_question_is_422(kb, body) -> None:
+    """空 / 纯空白 / 缺 question → 均 422（field_validator strip 后判空，决策P4.8-8）；
+    **未触 runner / 不入队**（fake runner 零调用）。"""
+    runner = make_runner(lambda root: None)
+    with TestClient(create_app(kb, runner=runner)) as client:
+        assert client.post("/api/backfill", json=body).status_code == 422
+    assert runner.calls == []  # 422 在校验层挡下、未入队、未触 runner
+
+
+def test_backfill_question_is_stripped(kb) -> None:
+    """合法问句被 strip：monkeypatch run_query 截获 question 实参，`"  问题  "` → 端点传入 `"问题"`。
+    直接断 endpoint→core 入参，**不**断 runner 收到的文本（runner 拿的是组装后的完整 prompt）。"""
+    import guanlan.web.app as app_mod
+
+    seen: dict = {}
+
+    def fake_run_query(question, **kwargs):
+        seen["question"] = question
+        return 0
+
+    with TestClient(create_app(kb)) as client:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(app_mod, "run_query", fake_run_query)
+            job_id = client.post("/api/backfill", json={"question": "  问题  "}).json()["job_id"]
+            _wait_job(client, job_id)
+    assert seen["question"] == "问题"  # 前后空白已剥
+
+
+def test_backfill_job_result_null_like_ingest(kb) -> None:
+    """旧 job 兼容：backfill 作业 result 恒 null（与 ingest 同形，worker int 分支，零回归）。"""
+    import guanlan.web.app as app_mod
+
+    with TestClient(create_app(kb)) as client:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(app_mod, "run_query", lambda *a, **k: 0)
+            data = _wait_job(
+                client, client.post("/api/backfill", json={"question": "q"}).json()["job_id"]
+            )
+    assert data["kind"] == "backfill"
+    assert data["result"] is None
+
+
+def test_backfill_serial_behind_ingest(kb) -> None:
+    """单写者 FIFO 烟测：先入队卡住的 ingest，再 POST /api/backfill → backfill 在 ingest 之后完成，
+    两者皆 done、ingest 不被冤判 raw_mutated（同 worker 串行，决策P4.8-1）。"""
+    _put_raw(kb, "src.md")
+    gate = threading.Event()
+    order: list[str] = []
+
+    def runner(prompt, **kwargs):
+        # 第一个作业（ingest）卡住，张开 raw/ 快照窗口；backfill 在其后才跑。
+        if "syntheses" in prompt or "沉淀" in prompt or "回填" in prompt:  # backfill prompt 含回填指令
+            order.append("backfill")
+            write_page(kwargs["working_directory"], "wiki/syntheses/q.md", type="synthesis")
+        else:
+            order.append("ingest")
+            gate.wait(timeout=3)
+            write_page(kwargs["working_directory"], "wiki/concepts/N.md")
+        return AgentRunResult(ok=True, final_text="done")
+
+    with TestClient(create_app(kb, runner=runner)) as client:
+        ing_id = client.post("/api/ingest", json={"target": "raw/src.md"}).json()["job_id"]
+        bf_id = client.post("/api/backfill", json={"question": "q"}).json()["job_id"]
+        time.sleep(0.1)
+        assert order == ["ingest"]  # backfill 被挡在在飞 ingest 之后（同 FIFO worker）
+        gate.set()
+        ing = _wait_job(client, ing_id)
+        bf = _wait_job(client, bf_id)
+
+    assert order == ["ingest", "backfill"]  # FIFO：backfill 在 ingest 之后才跑
+    assert ing["exit_code"] == 0  # ingest 没被 backfill 的写冤判 EXIT_RAW_MUTATED
+    assert bf["exit_code"] == 0
+
+
+def test_backfill_423_during_writable_turn(kb) -> None:
+    """层③：可写 turn 活跃期 agent shell curl POST /api/backfill 被 423 拒、根本不入队
+    （决策P4.8-5，与 /api/raw·ingest·heal 同口径）。"""
+    with TestClient(create_app(kb)) as client:
+        client.app.state.write_gate.enter_writable()
+        try:
+            r = client.post("/api/backfill", json={"question": "q"})
+            assert r.status_code == 423
+        finally:
+            client.app.state.write_gate.exit_writable()
+
+
+def test_backfill_model_passthrough(kb) -> None:
+    """model 透传（body.model or model，决策P4.8-6）：① 省略 → app 级 model；② 显式 null → **同样**
+    回落 app 级（验 null≡省略）；③ 给 "m" → "m"；④ app 级与请求体皆无 → None（合法，走子进程无嵌入坑）。"""
+    import guanlan.web.app as app_mod
+
+    seen: list = []
+
+    def fake_run_query(question, **kwargs):
+        seen.append(kwargs.get("model"))
+        return 0
+
+    def _post(app_model, body):
+        with TestClient(create_app(kb, model=app_model)) as client:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(app_mod, "run_query", fake_run_query)
+                _wait_job(client, client.post("/api/backfill", json=body).json()["job_id"])
+
+    _post("app-model", {"question": "q"})  # ① 省略 → app 级
+    _post("app-model", {"question": "q", "model": None})  # ② 显式 null → app 级（null≡省略）
+    _post("app-model", {"question": "q", "model": "m"})  # ③ 给值 → 透传
+    _post(None, {"question": "q"})  # ④ 皆无 → None（合法）
+    assert seen == ["app-model", "app-model", "m", None]
+
+
+def test_backfill_no_sse_no_path_param(client) -> None:
+    """形态红线：无 backfill SSE（/api/backfill/{id}/events → 404/405）；端点无 path/name 入参
+    （只 question/model，无穿越面）；未新增退出码。"""
+    assert client.get("/api/backfill/1/events").status_code in (404, 405)
+    # POST /api/backfill 不接受 path/name（只 question/model）：缺 question 才 422、path 被忽略。
+    assert client.post("/api/backfill", json={"path": "../x"}).status_code == 422
+
+
+def test_backfill_frontend_wired(client) -> None:
+    """前端接线（C2）：顶栏有 backfill 按钮 + 图标，app.js POST /api/backfill、复用 pollJob，
+    问答气泡挂「沉淀」按钮预填该轮问题。"""
+    index = client.get("/").text
+    assert 'id="backfill-btn"' in index
+    assert "#i-backfill" in index  # 图标 symbol + 引用
+    js = client.get("/static/app.js").text
+    assert '"/api/backfill"' in js  # POST 回填
+    assert "openBackfill" in js and "triggerBackfill" in js
+    assert "appendBackfillButton" in js  # 气泡尾部「沉淀」按钮
+    assert "botEl.dataset.question" in js  # 记住该轮问题供预填
+
+
 # ═══════════════════════ P4.5 可写 Web 工作会话（C0 + a/b/c）═══════════════════════
 #
 # 见 docs/P4.5-可写Web工作会话.md §10。可写/守卫/翻姿态用注入 fake/轻量 agent，不打真实 LLM；
