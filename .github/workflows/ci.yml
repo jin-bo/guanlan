@@ -16,6 +16,11 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # requires-python = ">=3.10"：在下限 3.10 到 3.12 全跑，确保最低支持版本不破。
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v6
 
@@ -25,8 +30,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
-      - name: 装 Python 3.12
-        run: uv python install 3.12
+      - name: 装 Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
       # ruff 用 uvx 临时拉，不进 lock；与本地 `uvx ruff check` 一致。
       - name: Lint（ruff）
@@ -35,7 +40,7 @@ jobs:
       # --extra web 装上 fastapi/uvicorn/markdown，否则 test_web.py / test_aliases.py
       # 会被 importorskip 跳过；dev 组（pytest）uv sync 默认带上。
       - name: 装依赖
-        run: uv sync --extra web
+        run: uv sync --extra web --python ${{ matrix.python-version }}
 
       - name: 跑测试
-        run: uv run --extra web pytest -q
+        run: uv run --extra web --python ${{ matrix.python-version }} pytest -q
