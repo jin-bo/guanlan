@@ -3,6 +3,24 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [0.1.4] - 2026-06-11
+
+一次维护版：放宽 Python 下限以扩大可安装人群，并补全发布链路。无功能变更，
+无新退出码，不动门禁，markdown 仍是唯一事实来源，`raw/` 仍对 Agent 只读。
+
+### 变更
+
+- **`requires-python` 降级 `>=3.12` → `>=3.10`** —— 此前 `>=3.12` 的下限纯属多余
+  （源码及依赖均不依赖任何 3.11/3.12 专属语法或 API，`agentao` 本身 `Requires-Python`
+  即 `>=3.10`），却导致 `>=3.10` 的消费项目解析 `guanlan-wiki` 时 unsatisfiable。
+  同步：`pyproject` classifiers 补 3.10/3.11，CI 由单一 3.12 改为 3.10/3.11/3.12 矩阵
+  （`sync`/`run` 显式 `--python`），`uv.lock` 随之降下限并纳入 3.10/3.11 传递依赖
+  （如 `exceptiongroup`）。3.10 全量 516 passed + ruff 通过。
+
+- **release workflow 自动建 GitHub Release** —— PyPI 发布成功后由 `release.yml` 的
+  `github-release` job 从 CHANGELOG 抽对应版段作 notes，自动建与 tag/PyPI 对齐的
+  GitHub Release（免手工补，附 Full Changelog 比较链接）。
+
 ## [0.1.3] - 2026-06-11
 
 P4 Web 宿主之上的又一个写入口半相位（P4.8），补齐 P4 §10 推后项里最后一个 Web 写入口。
