@@ -2154,7 +2154,7 @@ def test_web_invalid_port(kb, bad_port) -> None:
 
 
 def test_web_missing_extra_degrades(kb, monkeypatch, capsys) -> None:
-    """缺 web extra（fastapi 导入失败）→ EXIT_USAGE 并引导 `pip install 'guanlan[web]'`。"""
+    """缺 web extra（fastapi 导入失败）→ EXIT_USAGE 并引导 `pip install 'guanlan-wiki[web]'`。"""
     from guanlan.cli import main
 
     # 清掉已缓存的 web 子模块，令重新 import 时命中被打桩为不可用的 fastapi。
@@ -2165,7 +2165,7 @@ def test_web_missing_extra_degrades(kb, monkeypatch, capsys) -> None:
 
     rc = main(["-C", str(kb), "web", "--no-browser"])
     assert rc == 1
-    assert "guanlan[web]" in capsys.readouterr().err
+    assert "guanlan-wiki[web]" in capsys.readouterr().err
 
 
 # ───────────────────────── 会话落盘与跨重启恢复（P4.2） ─────────────────────────

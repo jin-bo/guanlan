@@ -27,6 +27,53 @@ function escapeHtml(s) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ── 界面双语（P4.7，见 docs/P4.7-中英双语.md）──────────────────────────────────
+//
+// 只翻界面 chrome（按钮/tooltip/占位符/弹层标题/前端生成的提示·错误），内容真相（wiki 正文 /
+// agent 回答 / 报告·自省正文 / 文件名）一律不译。词表与 t()/setLang()/currentLang() 在 i18n.js。
+// 切换=刷静态 data-i18n + 用「已取回数据」纯渲染少数动态面，绝不重载页面、绝不重发网络请求（决策P4.7-6）。
+
+// 声明式回填：把静态节点上的 data-i18n* 据当前语言写回 textContent / title / placeholder / aria-label。
+// 注：这四处 t(el.dataset.*) 是动态 key（由 HTML data-i18n* 喂入），决策P4.7-8 唯一白名单。
+function applyI18n(root = document) {
+  root.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  root.querySelectorAll("[data-i18n-title]").forEach((el) => { el.title = t(el.dataset.i18nTitle); });
+  root.querySelectorAll("[data-i18n-placeholder]").forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+  root.querySelectorAll("[data-i18n-aria]").forEach((el) => { el.setAttribute("aria-label", t(el.dataset.i18nAria)); });
+}
+
+// 切换时重渲染开着的动态面（纯渲染、吃已缓存数据，不取数）。C2 各动态面注册自己的重画函数。
+let overlayRepaint = null; // 打开浮层的 opener 取数后存一个「纯渲染」闭包；切换/关闭时用/清
+function rerenderDynamic() {
+  // 右栏 Wiki：列表态就地重算空态/分组；单页态用缓存数据重绘外围 chrome（不重拉 /api/page）。
+  const cur = currentView();
+  if (cur && cur.kind === "index") renderIndex(cur);
+  else if (cur && cur.kind === "page") repaintPageChrome();
+  // 打开着的浮层：跑 opener 留下的纯渲染闭包（吃缓存数据，不重发请求）。
+  if (overlayRepaint && !$("#overlay").classList.contains("hidden")) overlayRepaint();
+  // 姿态徽标 tooltip（随 currentMode）+ 发送/停止按钮文案（随 chatStreaming）。
+  setModeBadge(currentMode);
+  setChatSending(chatStreaming);
+}
+
+function applyLang(lang) {
+  setLang(lang);                                              // i18n.js 内部 _lang
+  try { localStorage.setItem("guanlan.lang", lang); } catch (_e) { /* 隐私模式可能禁写，忽略 */ }
+  document.documentElement.lang = lang;                       // <html lang> 同步（a11y）
+  const label = $("#lang-label");
+  if (label) label.textContent = (lang === "zh") ? "EN" : "中"; // 按钮显「目标语言」码
+  applyI18n(document);                                        // 刷所有静态 data-i18n 节点
+  rerenderDynamic();                                          // 重渲染开着的动态面
+}
+function toggleLang() { applyLang(currentLang() === "zh" ? "en" : "zh"); }
+
+// 用「最后一次语言设置」初始化；首访/无记忆默认 zh，不做 navigator 探测（决策P4.7-5）。
+function initLang() {
+  let saved = null;
+  try { saved = localStorage.getItem("guanlan.lang"); } catch (_e) { /* 读失败 → 默认 zh */ }
+  applyLang(saved === "zh" || saved === "en" ? saved : "zh");
+}
+
 // ── Wiki：合并视图（Concept 列表 ⇄ 单页）+ 回退/往前历史 ────────────────────
 //
 // 右栏只有一个 #wiki-view：启动显示 Concept 列表；点页进单页内容；正文 [[链接]] 续进。
@@ -87,7 +134,7 @@ function renderIndex(entry) {
   renderToken++; // 作废任何在飞的单页渲染（用户已切回列表）
   const view = $("#wiki-view");
   if (pagesError) {
-    view.innerHTML = `<div class="empty">加载页面失败：${escapeHtml(pagesError)}（请重试或检查服务端）</div>`;
+    view.innerHTML = `<div class="empty">${escapeHtml(t("wiki.loadFail", pagesError))}</div>`;
     return;
   }
   const q = ((entry && entry.query) || "").trim().toLowerCase();
@@ -95,7 +142,7 @@ function renderIndex(entry) {
     ? allPages.filter((p) => p.title.toLowerCase().includes(q) || p.path.toLowerCase().includes(q))
     : allPages;
   if (!matched.length) {
-    view.innerHTML = `<div class="empty">${allPages.length ? "无匹配页面" : "暂无页面"}</div>`;
+    view.innerHTML = `<div class="empty">${allPages.length ? t("wiki.emptyMatch") : t("wiki.emptyAll")}</div>`;
     return;
   }
   const groups = Object.create(null); // null 原型：type 是容错用户值，防 __proto__/constructor 污染
@@ -118,25 +165,40 @@ function renderIndex(entry) {
   }
 }
 
+let lastPage = null; // {path, data}：当前单页态缓存，供语言切换时纯重绘外围 chrome（不重拉 /api/page）
+
+// 纯渲染：用已取回的页数据画「外围 chrome（page-meta）+ 正文 HTML」。chrome 走 t()；正文是内容、原样。
+function paintPage(data, path) {
+  const view = $("#wiki-view");
+  let meta;
+  if (data.meta) {
+    const typeTag = data.meta.type ? `<span class="ptype">${escapeHtml(String(data.meta.type))}</span>` : "";
+    const lu = data.meta.last_updated ? escapeHtml(t("wiki.updatedAt", String(data.meta.last_updated))) : "";
+    meta = `${typeTag}<span>${escapeHtml(path)}</span> · <span>${lu}</span>`;
+  } else {
+    meta = `<span>${escapeHtml(path)}</span> · <span class="muted">${escapeHtml(t("wiki.noFrontmatter"))}</span>`;
+  }
+  view.innerHTML = `<div class="page-meta">${meta}</div>` + data.html;
+}
+
+// 语言切换时纯重绘当前单页的外围 chrome（吃缓存数据，绝不重拉 /api/page，决策P4.7-6）。
+function repaintPageChrome() {
+  const cur = currentView();
+  if (cur && cur.kind === "page" && lastPage && lastPage.path === cur.path) paintPage(lastPage.data, cur.path);
+}
+
 async function renderPage(path) {
   const tok = ++renderToken; // 本次渲染的序号
   const view = $("#wiki-view");
-  view.innerHTML = '<p class="muted">加载中…</p>';
+  view.innerHTML = `<p class="muted">${escapeHtml(t("wiki.loading"))}</p>`;
   try {
     const data = await getJSON(`/api/page?path=${encodeURIComponent(path)}`);
     if (tok !== renderToken) return; // 已导航走（回退/搜索/续进），丢弃迟到响应
-    let meta;
-    if (data.meta) {
-      const t = data.meta.type ? `<span class="ptype">${escapeHtml(String(data.meta.type))}</span>` : "";
-      const lu = data.meta.last_updated ? `更新于 ${escapeHtml(String(data.meta.last_updated))}` : "";
-      meta = `${t}<span>${escapeHtml(path)}</span> · <span>${lu}</span>`;
-    } else {
-      meta = `<span>${escapeHtml(path)}</span> · <span class="muted">无 frontmatter</span>`;
-    }
-    view.innerHTML = `<div class="page-meta">${meta}</div>` + data.html;
+    lastPage = { path, data }; // 缓存供语言切换纯重绘
+    paintPage(data, path);
   } catch (e) {
     if (tok !== renderToken) return;
-    view.innerHTML = `<p class="muted">打开失败：${escapeHtml(e.message)}</p>`;
+    view.innerHTML = `<p class="muted">${escapeHtml(t("wiki.openFail", e.message))}</p>`;
   }
 }
 
@@ -166,6 +228,7 @@ $("#wiki-view").addEventListener("click", (e) => {
 function showOverlay(title, html) {
   stagingOpen = false; // 任何其它浮层（报告/投喂/ingest/heal/历史）打开即清——openStaging 之后再置回，
   // 防 done/stopped 误把 renderStaging 灌进别的浮层 body（暂存区 P4.6）。
+  overlayRepaint = null; // 新浮层默认无重画闭包；opener 取数后再按需注册（语言切换纯重渲染，P4.7）
   $("#overlay-title").textContent = title;
   $("#overlay-body").innerHTML = html;
   $("#overlay").classList.remove("hidden");
@@ -178,23 +241,26 @@ $("#overlay").addEventListener("click", (e) => { if (e.target.id === "overlay") 
 function renderReport(name, data) {
   const itemsKey = "violations" in data ? "violations" : "findings";
   const items = data[itemsKey] || [];
+  const word = itemsKey === "violations" ? t("report.violation") : t("report.finding");
   const head = data.ok
-    ? `<p class="report-ok">✓ ${name} 通过（${data.pages_checked} 页，无${itemsKey === "violations" ? "违规" : "建议"}）</p>`
-    : `<p class="report-bad">✗ ${name}：${data.pages_checked} 页，${items.length} 条</p>`;
+    ? `<p class="report-ok">${escapeHtml(t("report.ok", name, data.pages_checked, word))}</p>`
+    : `<p class="report-bad">${escapeHtml(t("report.bad", name, data.pages_checked, items.length))}</p>`;
   const body = items.map((it) =>
-    `<div class="finding"><span class="kind">[${escapeHtml(it.kind)}]</span> ${escapeHtml(it.page || "(全局)")}: ${escapeHtml(it.detail)}</div>`
+    `<div class="finding"><span class="kind">[${escapeHtml(it.kind)}]</span> ${escapeHtml(it.page || t("report.global"))}: ${escapeHtml(it.detail)}</div>`
   ).join("");
   return head + body;
 }
 
 document.querySelectorAll(".actions button[data-report]").forEach((btn) => {
   btn.addEventListener("click", async () => {
-    const name = btn.dataset.report;
-    showOverlay(name, '<p class="muted">运行中…</p>');
+    const name = btn.dataset.report; // 命令名（check/health/lint），作弹层标题不译
+    showOverlay(name, `<p class="muted">${escapeHtml(t("common.running"))}</p>`);
     try {
-      showOverlay(name, renderReport(name, await getJSON(`/api/report/${name}`)));
+      const data = await getJSON(`/api/report/${name}`);
+      $("#overlay-body").innerHTML = renderReport(name, data);
+      overlayRepaint = () => { $("#overlay-body").innerHTML = renderReport(name, data); }; // 语言切换纯重渲染（吃缓存 data）
     } catch (e) {
-      showOverlay(name, `<p class="report-bad">失败：${escapeHtml(e.message)}</p>`);
+      $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.fail", e.message))}</p>`;
     }
   });
 });
@@ -206,18 +272,24 @@ $("#graph-btn").addEventListener("click", () => window.open("/graph", "_blank"))
 $("#ingest-btn").addEventListener("click", openIngestPicker);
 
 async function openIngestPicker() {
-  showOverlay("ingest", '<p class="muted">加载 raw/…</p>');
+  showOverlay("ingest", `<p class="muted">${escapeHtml(t("ingest.loadingRaw"))}</p>`);
   let files;
   try {
     ({ files } = await getJSON("/api/raw"));
   } catch (e) {
-    $("#overlay-body").innerHTML = `<p class="report-bad">加载 raw/ 失败：${escapeHtml(e.message)}</p>`;
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("ingest.loadRawFail", e.message))}</p>`;
     return;
   }
+  renderRawPicker(files);
+  overlayRepaint = () => renderRawPicker(files); // 语言切换纯重渲染（吃缓存 files）
+}
+
+// 纯渲染 raw/ 选单（文件名是内容、按字面显示；空态/按钮是 chrome）。
+function renderRawPicker(files) {
   const box = $("#overlay-body");
   box.innerHTML = "";
   if (!files.length) {
-    box.innerHTML = '<p class="muted">raw/ 为空：把 .md 放进 raw/ 再来。</p>';
+    box.innerHTML = `<p class="muted">${escapeHtml(t("ingest.rawEmpty"))}</p>`;
     return;
   }
   for (const f of files) {
@@ -226,7 +298,7 @@ async function openIngestPicker() {
     const name = document.createElement("span");
     name.textContent = `${f.name} (${f.size}B)`; // textContent：文件名按字面显示，无注入
     const btn = document.createElement("button");
-    btn.textContent = "ingest";
+    btn.textContent = "ingest"; // 命令名，不译
     btn.addEventListener("click", () => triggerIngest(`raw/${f.name}`));
     row.append(name, btn);
     box.appendChild(row);
@@ -234,12 +306,12 @@ async function openIngestPicker() {
 }
 
 async function triggerIngest(target) {
-  showOverlay("ingest", `<p class="muted">已提交 <code>${escapeHtml(target)}</code>，排队中…</p>`);
+  showOverlay("ingest", `<p class="muted">${escapeHtml(t("ingest.submitted", target))}</p>`);
   try {
     const { job_id } = await postJSON("/api/ingest", { target });
     await pollJob(job_id, target);
   } catch (e) {
-    $("#overlay-body").innerHTML = `<p class="report-bad">提交失败：${escapeHtml(e.message)}</p>`;
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.submitFail", e.message))}</p>`;
   }
 }
 
@@ -253,13 +325,15 @@ async function pollJob(jobId, label, renderDone) {
         renderDone(job);
       } else {
         const ok = job.exit_code === 0;
-        const badge = ok ? '<span class="report-ok">✓ 通过</span>' : `<span class="report-bad">✗ 退出码 ${job.exit_code}</span>`;
-        $("#overlay-body").innerHTML = `<p>${escapeHtml(label)} ${badge}</p><pre>${escapeHtml(job.output || "(无输出)")}</pre>`;
+        const badge = ok
+          ? `<span class="report-ok">${escapeHtml(t("common.passed"))}</span>`
+          : `<span class="report-bad">${escapeHtml(t("common.exitCode", job.exit_code))}</span>`;
+        $("#overlay-body").innerHTML = `<p>${escapeHtml(label)} ${badge}</p><pre>${escapeHtml(job.output || t("common.noOutput"))}</pre>`;
       }
       await loadPages(); // 写后刷新 wiki 搜索列表（heal 新建了页）
       return;
     }
-    $("#overlay-body").innerHTML = `<p class="muted">${escapeHtml(label)} · ${job.state}…</p>`;
+    $("#overlay-body").innerHTML = `<p class="muted">${escapeHtml(t("job.running", label, job.state))}</p>`;
     await sleep(400);
   }
 }
@@ -274,7 +348,7 @@ async function pollJob(jobId, label, renderDone) {
 $("#heal-btn").addEventListener("click", () => openHealPreview());
 
 async function openHealPreview(limit, minRefs) {
-  showOverlay("heal", '<p class="muted">计算 worklist（零 LLM）…</p>');
+  showOverlay("heal", `<p class="muted">${escapeHtml(t("heal.computing"))}</p>`);
   const qs = new URLSearchParams();
   if (limit) qs.set("limit", limit);
   if (minRefs) qs.set("min_refs", minRefs);
@@ -283,10 +357,11 @@ async function openHealPreview(limit, minRefs) {
   try {
     data = await getJSON(`/api/heal/preview${suffix}`);
   } catch (e) {
-    $("#overlay-body").innerHTML = `<p class="report-bad">预览失败：${escapeHtml(e.message)}</p>`;
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("heal.previewFail", e.message))}</p>`;
     return;
   }
   renderHealPreview(data, limit, minRefs);
+  overlayRepaint = () => renderHealPreview(data, limit, minRefs); // 语言切换纯重渲染（吃缓存 data）
 }
 
 function renderHealPreview(data, limit, minRefs) {
@@ -301,7 +376,7 @@ function renderHealPreview(data, limit, minRefs) {
   let go = null;
   const updateGo = () => {
     if (!go) return;
-    go.textContent = selected.size ? `物化 ${selected.size} 个目标` : "未选择目标";
+    go.textContent = selected.size ? t("heal.materializeN", selected.size) : t("heal.noTarget");
     go.disabled = selected.size === 0;
   };
 
@@ -330,7 +405,7 @@ function renderHealPreview(data, limit, minRefs) {
   minIn.type = "number"; minIn.min = "1"; minIn.className = "heal-num";
   minIn.placeholder = "min-refs"; if (minRefs) minIn.value = minRefs;
   const refresh = document.createElement("button");
-  refresh.textContent = "预览";
+  refresh.textContent = t("heal.preview");
   refresh.addEventListener("click", () => openHealPreview(limitIn.value || "", minIn.value || ""));
   ctrl.append(limitIn, minIn, refresh);
   top.appendChild(ctrl);
@@ -340,13 +415,13 @@ function renderHealPreview(data, limit, minRefs) {
     const note = document.createElement("p");
     note.className = "muted";
     note.textContent = postponed.length
-      ? `本批无目标；${postponed.length} 个高频缺失实体因 limit 全部推迟（提高 limit 续补）。`
-      : "✓ 无可物化的缺失实体（图已充分连通或均低于阈值）。";
+      ? t("heal.batchEmpty", postponed.length)
+      : t("heal.none");
     box.appendChild(note);
     if (!postponed.length) return;
   } else {
     const head = document.createElement("p");
-    head.textContent = `勾选要物化的高频缺失实体（默认全选，共 ${worklist.length} 个）：`;
+    head.textContent = t("heal.pickHead", worklist.length);
     box.appendChild(head);
     for (const w of worklist) {
       // <label> 包 checkbox：整行可点切换。默认勾选，change 同步 selected + 刷新按钮。
@@ -363,13 +438,13 @@ function renderHealPreview(data, limit, minRefs) {
       });
       const bodyEl = document.createElement("span");
       bodyEl.className = "heal-item-body";
-      const t = document.createElement("span");
-      t.className = "heal-target";
-      t.textContent = `+ ${w.target}`; // textContent：目标名/文件名按字面显示，无注入
+      const tgt = document.createElement("span");
+      tgt.className = "heal-target";
+      tgt.textContent = `+ ${w.target}`; // textContent：目标名/文件名按字面显示，无注入
       const meta = document.createElement("span");
       meta.className = "heal-meta";
-      meta.textContent = `${w.ref_count} 页引用：${(w.ref_pages || []).join("、")}`;
-      bodyEl.append(t, meta);
+      meta.textContent = t("heal.refBy", w.ref_count, (w.ref_pages || []).join("、"));
+      bodyEl.append(tgt, meta);
       row.append(cb, bodyEl);
       box.appendChild(row);
     }
@@ -378,19 +453,19 @@ function renderHealPreview(data, limit, minRefs) {
   if (postponed.length) {
     const ph = document.createElement("p");
     ph.className = "muted";
-    ph.textContent = `另有 ${postponed.length} 个因 limit 本次推迟（不可勾选，提高 limit 续补）：`;
+    ph.textContent = t("heal.postponedHead", postponed.length);
     box.appendChild(ph);
     for (const w of postponed) {
       const row = document.createElement("div");
       row.className = "heal-item postponed";
-      row.textContent = `· ${w.target}（${w.ref_count} 页引用）`;
+      row.textContent = t("heal.postponedItem", w.target, w.ref_count);
       box.appendChild(row);
     }
   }
 }
 
 async function triggerHeal(limit, minRefs, targets) {
-  showOverlay("heal", '<p class="muted">已提交，排队中（与 ingest/投喂同写者串行）…</p>');
+  showOverlay("heal", `<p class="muted">${escapeHtml(t("heal.submitted"))}</p>`);
   const body = {};
   if (limit) body.limit = Number(limit);
   if (minRefs) body.min_refs = Number(minRefs);
@@ -400,7 +475,7 @@ async function triggerHeal(limit, minRefs, targets) {
     const { job_id } = await postJSON("/api/heal", body);
     await pollJob(job_id, "heal", renderHealDone);
   } catch (e) {
-    $("#overlay-body").innerHTML = `<p class="report-bad">提交失败：${escapeHtml(e.message)}</p>`;
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.submitFail", e.message))}</p>`;
   }
 }
 
@@ -410,8 +485,8 @@ function renderHealDone(job) {
   const ok = job.exit_code === 0;
   const badge = document.createElement("p");
   badge.innerHTML = ok
-    ? '<span class="report-ok">✓ 通过</span>'
-    : `<span class="report-bad">✗ 退出码 ${escapeHtml(String(job.exit_code))}</span>`;
+    ? `<span class="report-ok">${escapeHtml(t("common.passed"))}</span>`
+    : `<span class="report-bad">${escapeHtml(t("common.exitCode", job.exit_code))}</span>`;
   box.appendChild(badge);
 
   const result = job.result;
@@ -420,24 +495,24 @@ function renderHealDone(job) {
     const resolved = receipts.filter((r) => r.status === "resolved");
     const still = receipts.filter((r) => r.status === "still_broken");
     const summary = document.createElement("p");
-    summary.textContent = `物化 ${receipts.length} 个目标：${resolved.length} 个已解析，${still.length} 个仍断。`;
+    summary.textContent = t("heal.doneSummary", receipts.length, resolved.length, still.length);
     box.appendChild(summary);
     for (const r of resolved) {
       const div = document.createElement("div");
       div.className = "heal-receipt resolved";
-      div.textContent = `✓ ${r.target} → ${r.resolved_to}`; // textContent：路径无注入
+      div.textContent = t("heal.resolved", r.target, r.resolved_to); // 路径是内容、按字面显示
       box.appendChild(div);
     }
     for (const r of still) {
       const div = document.createElement("div");
       div.className = "heal-receipt broken";
-      div.textContent = `· ${r.target}（仍断：${r.reason}）`;
+      div.textContent = t("heal.stillBroken", r.target, r.reason);
       box.appendChild(div);
     }
     if ((result.unexpected_writes || []).length) {
       const h = document.createElement("div");
       h.className = "heal-warn";
-      h.textContent = "⚠ 非预期 wiki 写入（人工审计）：";
+      h.textContent = t("heal.unexpected");
       box.appendChild(h);
       for (const p of result.unexpected_writes) {
         const d = document.createElement("div");
@@ -449,7 +524,7 @@ function renderHealDone(job) {
     if ((result.postponed || []).length) {
       const d = document.createElement("div");
       d.className = "muted";
-      d.textContent = `另有 ${result.postponed.length} 个缺失实体因 limit 推迟，重跑续补。`;
+      d.textContent = t("heal.donePostponed", result.postponed.length);
       box.appendChild(d);
     }
   }
@@ -470,24 +545,24 @@ function renderHealDone(job) {
 $("#feed-btn").addEventListener("click", openFeed);
 
 function openFeed() {
-  showOverlay("投喂", "");
+  showOverlay(t("overlay.feed"), "");
   const box = $("#overlay-body");
   box.innerHTML = "";
   const nameInput = document.createElement("input");
   nameInput.id = "feed-name";
   nameInput.className = "feed-name";
   nameInput.type = "text";
-  nameInput.placeholder = "文件名或标题（自动 slug 化 + 补 .md）";
+  nameInput.placeholder = t("feed.namePlaceholder");
   nameInput.autocomplete = "off";
   const textarea = document.createElement("textarea");
   textarea.id = "feed-content";
   textarea.className = "feed-content";
   textarea.rows = 12;
-  textarea.placeholder = "粘贴素材正文（Markdown 文本，原样存进 raw/）…";
+  textarea.placeholder = t("feed.contentPlaceholder");
   const saveBtn = document.createElement("button");
   saveBtn.id = "feed-save";
   saveBtn.className = "feed-save";
-  saveBtn.textContent = "存盘";
+  saveBtn.textContent = t("feed.save");
   const status = document.createElement("div");
   status.className = "feed-status";
   box.append(nameInput, textarea, saveBtn, status);
@@ -505,14 +580,14 @@ async function submitFeed(overwrite) {
   // 不复位、按钮永久禁用，连存多篇要重开浮层）。
   const resetSave = () => {
     saveBtn.disabled = false;
-    saveBtn.textContent = "存盘";
+    saveBtn.textContent = t("feed.save");
   };
   if (!name || !content.trim()) {
-    status.innerHTML = '<span class="report-bad">文件名与正文都不能为空。</span>';
+    status.innerHTML = `<span class="report-bad">${escapeHtml(t("feed.emptyErr"))}</span>`;
     return;
   }
   saveBtn.disabled = true;
-  saveBtn.textContent = "保存中…"; // 会等队列前序写作业（如在飞 ingest），不可让用户以为卡死
+  saveBtn.textContent = t("feed.saving"); // 会等队列前序写作业（如在飞 ingest），不可让用户以为卡死
   status.textContent = "";
   let res, data;
   try {
@@ -524,32 +599,32 @@ async function submitFeed(overwrite) {
     data = await res.json().catch(() => ({}));
   } catch (e) {
     resetSave();
-    status.innerHTML = `<span class="report-bad">存盘失败：${escapeHtml(e.message)}</span>`;
+    status.innerHTML = `<span class="report-bad">${escapeHtml(t("feed.saveFail", e.message))}</span>`;
     return;
   }
   if (res.status === 409) {
     // 已存在：就地给「改名 / 覆盖」二选项（覆盖 = 带 overwrite=true 重发）。
     resetSave();
-    status.innerHTML = `<span class="report-bad">${escapeHtml(data.detail || "同名文件已存在。")}</span> `;
+    status.innerHTML = `<span class="report-bad">${escapeHtml(data.detail || t("feed.conflictDefault"))}</span> `;
     const ow = document.createElement("button");
     ow.className = "feed-overwrite";
-    ow.textContent = "覆盖";
+    ow.textContent = t("feed.overwrite");
     ow.addEventListener("click", () => submitFeed(true));
     status.appendChild(ow);
     return;
   }
   if (!res.ok) {
     resetSave();
-    status.innerHTML = `<span class="report-bad">存盘失败：${escapeHtml(data.detail || `HTTP ${res.status}`)}</span>`;
+    status.innerHTML = `<span class="report-bad">${escapeHtml(t("feed.saveFail", data.detail || `HTTP ${res.status}`))}</span>`;
     return;
   }
   // 成功：复位按钮（可接着存下一篇）+ 提示 + 一键「立即 ingest」（复用既有 ingest 流）。存盘后
   // raw/ 列表已更新，下次开 ingest 选单即见新文件（无常驻列表，无需显式刷新）。
   resetSave();
-  status.innerHTML = `<span class="report-ok">✓ 已存 ${escapeHtml(data.saved)}</span> `;
+  status.innerHTML = `<span class="report-ok">${escapeHtml(t("feed.saved", data.saved))}</span> `;
   const ingestBtn = document.createElement("button");
   ingestBtn.className = "feed-ingest";
-  ingestBtn.textContent = "立即 ingest";
+  ingestBtn.textContent = t("feed.ingestNow");
   ingestBtn.addEventListener("click", () => triggerIngest(data.saved));
   status.appendChild(ingestBtn);
 }
@@ -584,7 +659,7 @@ function fillComposer(text, { needWritable = false } = {}) {
   autoGrowInput();
   ta.focus();
   if (needWritable && currentMode !== "workspace-write") {
-    addMsg("note", "提示：解析/修订需可写会话，请先 /mode workspace-write 再发送。");
+    addMsg("note", t("staging.needWritableNote"));
   }
 }
 
@@ -592,7 +667,7 @@ $("#staging-btn").addEventListener("click", openStaging);
 
 async function openStaging() {
   stagingPath = null; // 每次从顶栏打开都回到根视图
-  showOverlay("暂存区 · workspace", '<p class="muted">加载 workspace…</p>');
+  showOverlay(t("overlay.staging"), `<p class="muted">${escapeHtml(t("staging.loading"))}</p>`);
   stagingOpen = true; // 须在 showOverlay 之后（它会清 stagingOpen）
   loadStaging();
 }
@@ -609,7 +684,7 @@ async function loadStaging() {
     data = await getJSON(`/api/workspace${qs}`);
   } catch (e) {
     if (stagingPath !== null) { stagingPath = null; return loadStaging(); } // 坏路径 → 回根
-    $("#overlay-body").innerHTML = `<p class="report-bad">加载 workspace 失败：${escapeHtml(e.message)}</p>`;
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.loadFail", e.message))}</p>`;
     return;
   }
   renderStaging(data);
@@ -631,41 +706,42 @@ async function refreshStagingIfOpen() {
 }
 
 function renderStaging(data) {
+  overlayRepaint = () => renderStaging(data); // 语言切换纯重渲染（吃缓存 data，不重拉 /api/workspace）
   const box = $("#overlay-body");
   box.innerHTML = "";
   const blocked = hostWriteBlocked();
   if (blocked) {
     const warn = document.createElement("p");
     warn.className = "muted";
-    warn.textContent = "会话写作业进行中…晋级/删除/ingest 暂不可用（稍后重试）。";
+    warn.textContent = t("staging.busyBanner");
     box.appendChild(warn);
   }
 
   if (data.root) {
     // 根视图：两段（uploads / parsed）。每段列其**直接子项**（子目录可点入、文件带操作）。
-    renderSection(box, `① 待解析 · uploads/`, "uploads", "workspace/uploads",
-      data.uploads || [], blocked, "上传文件即在此暂存。");
-    renderSection(box, `② 待晋级 · parsed/`, "parsed", "workspace/parsed",
-      data.parsed || [], blocked, "让 agent 把 uploads/ 解析成 parsed/*.md。", "agent 解析产物，人审/修订后升源");
+    renderSection(box, t("staging.uploadsHead"), "uploads", "workspace/uploads",
+      data.uploads || [], blocked, t("staging.uploadsEmpty"));
+    renderSection(box, t("staging.parsedHead"), "parsed", "workspace/parsed",
+      data.parsed || [], blocked, t("staging.parsedEmpty"), t("staging.parsedSub"));
   } else {
     // 目录视图：面包屑 + 返回上一级 + 该目录直接子项（一级一级点）。
     const crumb = document.createElement("div");
     crumb.className = "stage-crumb";
     const up = document.createElement("button");
     up.className = "stage-act";
-    up.textContent = "← 返回上一级";
+    up.textContent = t("staging.up");
     up.addEventListener("click", stagingUp);
     const label = document.createElement("span");
     label.className = "stage-crumb-path";
     label.textContent = data.path; // textContent：路径按字面显示
     crumb.append(up, label);
     box.appendChild(crumb);
-    renderSection(box, "", data.base, data.path, data.items || [], blocked, "空目录。");
+    renderSection(box, "", data.base, data.path, data.items || [], blocked, t("staging.dirEmpty"));
   }
 
   const flow = document.createElement("p");
   flow.className = "stage-flow muted";
-  flow.textContent = "流程：上传 → 解析 →（预览/修订·拆分·合并/删冗余）→ 晋级 → ingest";
+  flow.textContent = t("staging.flow");
   box.appendChild(flow);
 }
 
@@ -673,11 +749,11 @@ function renderStaging(data) {
 // `base` ∈ {uploads, parsed} 决定文件操作集；`dirPath` 是本段所在目录（合并产物落此目录）。
 function renderSection(box, headerText, base, dirPath, items, blocked, emptyText, sub) {
   if (headerText) box.appendChild(stagingHeader(headerText, sub));
-  if (!items.length) { box.appendChild(stagingEmpty(`（空）${emptyText}`)); return; }
+  if (!items.length) { box.appendChild(stagingEmpty(t("staging.emptyWrap", emptyText))); return; }
   const selected = new Set();
   const mergeBtn = document.createElement("button");
   mergeBtn.className = "stage-merge";
-  mergeBtn.textContent = "合并选中…";
+  mergeBtn.textContent = t("staging.merge");
   mergeBtn.disabled = true;
   const updateMerge = () => { mergeBtn.disabled = selected.size < 2; };
   let parsedFiles = 0;
@@ -697,10 +773,10 @@ function renderSection(box, headerText, base, dirPath, items, blocked, emptyText
       const picks = [...selected];
       if (picks.length < 2) return;
       const suggested = "合并-" + picks.map((p) => p.split("/").pop().replace(/\.md$/i, "")).join("-") + ".md";
-      const name = window.prompt("合并后文件名（agent 建议，可改；人最终定）：", suggested);
+      const name = window.prompt(t("staging.mergePrompt"), suggested);
       if (!name) return;
-      const list = picks.join(" 与 ");
-      fillComposer(`把 ${list} 合并成一篇，写到 ${dirPath}/${name}。`, { needWritable: true });
+      const list = picks.join("、");
+      fillComposer(t("staging.mergeCmd", list, `${dirPath}/${name}`), { needWritable: true });
     });
     const mergeBar = document.createElement("div");
     mergeBar.className = "stage-mergebar";
@@ -719,7 +795,7 @@ function renderFolderRow(it, blocked) {
   const nm = document.createElement("button");
   nm.className = "stage-foldername";
   nm.textContent = `${it.name}/`; // textContent：目录名按字面显示
-  nm.title = "进入目录";
+  nm.title = t("tip.enterDir");
   nm.addEventListener("click", () => stagingEnter(it.path));
   const spacer = document.createElement("span");
   spacer.className = "stage-size"; // 占位把 🗑 推到右侧
@@ -732,19 +808,19 @@ function dirTrashButton(it, blocked) {
   const btn = document.createElement("button");
   btn.className = "stage-trash";
   btn.textContent = "🗑";
-  btn.title = blocked ? "会话写作业进行中…" : "删除整个目录及其内容";
+  btn.title = blocked ? t("staging.writeBusy") : t("tip.delDir");
   btn.disabled = blocked;
   btn.addEventListener("click", async () => {
-    if (!window.confirm(`删除整个目录「${it.name}/」及其全部内容？此操作不可撤销。`)) return;
+    if (!window.confirm(t("staging.delDirConfirm", it.name))) return;
     btn.disabled = true;
     try {
       const res = await fetch(`/api/workspace/dir?path=${encodeURIComponent(it.path)}`, { method: "DELETE" });
-      if (res.status === 423) { btn.disabled = false; btn.title = "可写会话进行中，稍后重试"; return; }
+      if (res.status === 423) { btn.disabled = false; btn.title = t("staging.writableRetry"); return; }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       loadStaging(); // 重拉刷新（目录连同子项已删）
     } catch (e) {
       btn.disabled = false;
-      btn.title = `删除失败：${e.message}`;
+      btn.title = t("staging.delFail", e.message);
     }
   });
   return btn;
@@ -789,9 +865,9 @@ function renderUploadRow(it, blocked) {
   sz.textContent = fmtBytes(it.bytes);
   const parse = document.createElement("button");
   parse.className = "stage-act";
-  parse.textContent = "问 agent 解析";
+  parse.textContent = t("staging.parse");
   parse.addEventListener("click", () =>
-    fillComposer(`把 ${it.path} 解析成 Markdown，写到 workspace/parsed/。`, { needWritable: true })
+    fillComposer(t("staging.parseCmd", it.path), { needWritable: true })
   );
   row.append(ico, nm, sz, parse);
   // 退化路径（§6 / §7.2 ①）：uploads/*.md 也可直接晋级（source 校验只需 workspace/ + .md + 存在）。
@@ -809,7 +885,7 @@ function renderParsedRow(it, blocked, selected, updateMerge) {
   const cb = document.createElement("input");
   cb.type = "checkbox";
   cb.className = "stage-pick";
-  cb.title = "勾选以合并（≥2 个）";
+  cb.title = t("tip.pickMerge");
   cb.addEventListener("change", () => {
     if (cb.checked) selected.add(it.path);
     else selected.delete(it.path);
@@ -826,15 +902,15 @@ function renderParsedRow(it, blocked, selected, updateMerge) {
   nm.title = it.name;
   const preview = document.createElement("button");
   preview.className = "stage-act";
-  preview.textContent = "预览";
+  preview.textContent = t("staging.preview");
   preview.addEventListener("click", () => previewWorkspaceFile(it.path));
   const revise = document.createElement("button");
   revise.className = "stage-act";
-  revise.textContent = "让 agent 修订";
+  revise.textContent = t("staging.revise");
   revise.addEventListener("click", () => {
-    const what = window.prompt(`让 agent 修订 ${it.name}（如「拆成战法/案例两篇」「删第3节补小结」）：`, "");
+    const what = window.prompt(t("staging.revisePrompt", it.name), "");
     if (what === null || !what.trim()) return;
-    fillComposer(`针对 ${it.path}：${what.trim()}（产物写回 workspace/parsed/）。`, { needWritable: true });
+    fillComposer(t("staging.reviseCmd", it.path, what.trim()), { needWritable: true });
   });
   row.append(cb, ico, nm, preview, revise, promoteButton(it, blocked), trashButton(it.path, row, blocked));
   return row;
@@ -844,9 +920,9 @@ function renderParsedRow(it, blocked, selected, updateMerge) {
 function promoteButton(it, blocked) {
   const btn = document.createElement("button");
   btn.className = "stage-act stage-promote";
-  btn.textContent = "晋级为源 →";
+  btn.textContent = t("staging.promote");
   btn.disabled = blocked;
-  if (blocked) btn.title = "会话写作业进行中…";
+  if (blocked) btn.title = t("staging.writeBusy");
   btn.addEventListener("click", () => openPromoteForm(it, btn));
   return btn;
 }
@@ -856,18 +932,18 @@ function trashButton(path, row, blocked) {
   const btn = document.createElement("button");
   btn.className = "stage-trash";
   btn.textContent = "🗑";
-  btn.title = blocked ? "会话写作业进行中…" : "删除该 scratch 文件";
+  btn.title = blocked ? t("staging.writeBusy") : t("tip.delFile");
   btn.disabled = blocked;
   btn.addEventListener("click", async () => {
     btn.disabled = true;
     try {
       const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`, { method: "DELETE" });
-      if (res.status === 423) { btn.disabled = false; btn.title = "可写会话进行中，稍后重试"; return; }
+      if (res.status === 423) { btn.disabled = false; btn.title = t("staging.writableRetry"); return; }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       row.remove();
     } catch (e) {
       btn.disabled = false;
-      btn.title = `删除失败：${e.message}`;
+      btn.title = t("staging.delFail", e.message);
     }
   });
   return btn;
@@ -875,13 +951,14 @@ function trashButton(path, row, blocked) {
 
 async function previewWorkspaceFile(path) {
   stagingOpen = false; // 看预览期间暂停自动刷新：否则并发 turn 的 done/stopped 会把预览刷回列表
+  overlayRepaint = null; // 预览态不挂重画闭包：避免语言切换把预览刷回暂存区列表（返回后由 renderStaging 重置）
   const box = $("#overlay-body");
-  box.innerHTML = '<p class="muted">加载预览…</p>';
+  box.innerHTML = `<p class="muted">${escapeHtml(t("staging.loadingPreview"))}</p>`;
   // 「返回暂存区」恢复自动刷新并重拉当前目录——成败两路都挂上，避免预览失败时无路可回、
   // 且 stagingOpen 永久停在 false 令本会话后续 turn 收尾不再刷新（评审）。
   const back = document.createElement("button");
   back.className = "stage-act";
-  back.textContent = "← 返回暂存区";
+  back.textContent = t("staging.backToStaging");
   back.addEventListener("click", () => { stagingOpen = true; loadStaging(); });
   let data;
   try {
@@ -890,7 +967,7 @@ async function previewWorkspaceFile(path) {
     box.innerHTML = "";
     const err = document.createElement("p");
     err.className = "report-bad";
-    err.textContent = `预览失败：${e.message}`;
+    err.textContent = t("staging.previewFail", e.message);
     box.append(back, err);
     return;
   }
@@ -914,13 +991,13 @@ function openPromoteForm(it, anchorBtn) {
   const nameIn = document.createElement("input");
   nameIn.type = "text";
   nameIn.value = stem;
-  nameIn.placeholder = "源文件名（自动 slug + .md）";
+  nameIn.placeholder = t("staging.promoteNamePh");
   const originIn = document.createElement("input");
   originIn.type = "text";
-  originIn.placeholder = "出处 origin（可选；空则回退 source 路径）";
+  originIn.placeholder = t("staging.promoteOriginPh");
   const go = document.createElement("button");
   go.className = "stage-act";
-  go.textContent = "确认晋级";
+  go.textContent = t("staging.promoteConfirm");
   const status = document.createElement("div");
   status.className = "stage-promote-status";
   go.addEventListener("click", () =>
@@ -932,11 +1009,11 @@ function openPromoteForm(it, anchorBtn) {
 }
 
 async function submitPromote(source, name, origin, overwrite, go, status) {
-  if (!name) { status.innerHTML = '<span class="report-bad">源文件名不能为空。</span>'; return; }
+  if (!name) { status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.promoteNameEmpty"))}</span>`; return; }
   go.disabled = true;
-  go.textContent = "晋级中…";
+  go.textContent = t("staging.promoting");
   status.textContent = "";
-  const reset = () => { go.disabled = false; go.textContent = "确认晋级"; };
+  const reset = () => { go.disabled = false; go.textContent = t("staging.promoteConfirm"); };
   let res, data;
   try {
     const body = { name, source, overwrite };
@@ -949,24 +1026,24 @@ async function submitPromote(source, name, origin, overwrite, go, status) {
     data = await res.json().catch(() => ({}));
   } catch (e) {
     reset();
-    status.innerHTML = `<span class="report-bad">晋级失败：${escapeHtml(e.message)}</span>`;
+    status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.promoteFail", e.message))}</span>`;
     return;
   }
   if (res.status === 423) {
     reset();
-    status.innerHTML = '<span class="report-bad">可写会话进行中，稍后重试。</span>';
+    status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.writableRetryDot"))}</span>`;
     return;
   }
   if (res.status === 409) {
     // 默认引导改名（开新源）；覆盖须显式确认 + 失真告警（决策P4.6-10）。
     reset();
-    status.innerHTML = `<span class="report-bad">${escapeHtml(data.detail || "同名源已存在。")}</span> 改名开新源，或 `;
+    status.innerHTML = `<span class="report-bad">${escapeHtml(data.detail || t("staging.promoteConflict"))}</span>${escapeHtml(t("staging.promoteRenameOr"))}`;
     const ow = document.createElement("button");
     ow.className = "stage-act";
-    ow.textContent = "覆盖（有失真风险）";
-    ow.title = "覆盖会改写已有源：引用此源的 wiki 页可能失真，建议覆盖后重 ingest + check";
+    ow.textContent = t("staging.overwriteRisk");
+    ow.title = t("tip.overwrite");
     ow.addEventListener("click", () => {
-      if (window.confirm("覆盖已有源？引用此源的 wiki 页可能失真，建议覆盖后重 ingest + check。"))
+      if (window.confirm(t("staging.overwriteConfirm")))
         submitPromote(source, name, origin, true, go, status);
     });
     status.appendChild(ow);
@@ -974,15 +1051,15 @@ async function submitPromote(source, name, origin, overwrite, go, status) {
   }
   if (!res.ok) {
     reset();
-    status.innerHTML = `<span class="report-bad">晋级失败：${escapeHtml(data.detail || `HTTP ${res.status}`)}</span>`;
+    status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.promoteFail", data.detail || `HTTP ${res.status}`))}</span>`;
     return;
   }
   // 成功：原地变「✓ 已晋级 + 立即 ingest」。
-  status.innerHTML = `<span class="report-ok">✓ 已晋级 ${escapeHtml(data.saved)}</span> `;
+  status.innerHTML = `<span class="report-ok">${escapeHtml(t("staging.promoted", data.saved))}</span> `;
   go.remove();
   const ingestBtn = document.createElement("button");
   ingestBtn.className = "stage-act";
-  ingestBtn.textContent = "立即 ingest →";
+  ingestBtn.textContent = t("staging.ingestNow");
   ingestBtn.addEventListener("click", () => triggerIngest(data.saved));
   status.appendChild(ingestBtn);
 }
@@ -1020,9 +1097,7 @@ function setModeBadge(mode) {
   if (!el) return;
   el.textContent = currentMode;
   el.classList.toggle("writable", currentMode === "workspace-write");
-  el.title = currentMode === "workspace-write"
-    ? "可写会话：Agent 可写 wiki/workspace（raw/ 与 AGENTAO.md 仍只读）。/mode read-only 切回"
-    : "只读会话：Agent 仅问答。/mode workspace-write 切到可写";
+  el.title = currentMode === "workspace-write" ? t("mode.writeTip") : t("mode.readonlyTip");
 }
 
 function startNewConversation() {
@@ -1041,18 +1116,24 @@ $("#chat-new").addEventListener("click", startNewConversation);
 $("#history-btn").addEventListener("click", openHistory);
 
 async function openHistory() {
-  showOverlay("历史会话", '<p class="muted">加载会话…</p>');
+  showOverlay(t("overlay.history"), `<p class="muted">${escapeHtml(t("history.loading"))}</p>`);
   let conversations;
   try {
     ({ conversations } = await getJSON("/api/conversations"));
   } catch (e) {
-    $("#overlay-body").innerHTML = `<p class="report-bad">加载会话失败：${escapeHtml(e.message)}</p>`;
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("history.loadFail", e.message))}</p>`;
     return;
   }
+  renderHistory(conversations);
+  overlayRepaint = () => renderHistory(conversations); // 语言切换纯重渲染（吃缓存 conversations）
+}
+
+// 纯渲染历史会话列表（标题是内容、按字面显示；空态/徽标/按钮是 chrome）。
+function renderHistory(conversations) {
   const box = $("#overlay-body");
   box.innerHTML = "";
   if (!conversations.length) {
-    box.innerHTML = '<p class="muted">暂无会话：在左侧提问即开启一个。</p>';
+    box.innerHTML = `<p class="muted">${escapeHtml(t("history.empty"))}</p>`;
     return;
   }
   for (const c of conversations) {
@@ -1062,19 +1143,19 @@ async function openHistory() {
     meta.className = "conv-meta";
     const title = document.createElement("span");
     title.className = "conv-title";
-    title.textContent = c.title || "（空）"; // textContent：标题按字面显示，无注入
+    title.textContent = c.title || t("history.untitled"); // textContent：标题按字面显示，无注入
     const tag = document.createElement("span");
     tag.className = "conv-tag";
     // live 条目报真实轮次，冷条目报消息总数（list_sessions 给 message_count，非轮次）。
-    const count = c.live ? `${c.turns ?? 0} 轮` : `${c.messages ?? 0} 条`;
-    tag.textContent = c.live ? `内存 · ${count}` : `落盘 · ${count}`;
+    const count = c.live ? t("history.turns", c.turns ?? 0) : t("history.messages", c.messages ?? 0);
+    tag.textContent = c.live ? t("history.live", count) : t("history.cold", count);
     meta.append(title, tag);
     const open = document.createElement("button");
-    open.textContent = "打开";
+    open.textContent = t("history.open");
     open.addEventListener("click", () => openConversation(c));
     const del = document.createElement("button");
     del.className = "conv-del";
-    del.textContent = "删除";
+    del.textContent = t("history.delete");
     del.addEventListener("click", () => deleteConversation(c.id, row));
     row.append(meta, open, del);
     box.appendChild(row);
@@ -1113,7 +1194,7 @@ async function restoreConversation(c) {
     const { messages } = await getJSON(`/api/conversations/${encodeURIComponent(c.id)}/messages`);
     if (tok !== chatLoadToken) return; // 已切走（开了别的会话/新会话），丢弃迟到回放
     if (!messages.length) {
-      addMsg("note", `已载入会话「${c.title || "（空）"}」（暂无历史消息），继续提问以续聊。`);
+      addMsg("note", t("conv.loadedEmpty", c.title || t("history.untitled")));
       return;
     }
     for (const m of messages) {
@@ -1131,7 +1212,7 @@ async function restoreConversation(c) {
     }
   } catch (e) {
     if (tok !== chatLoadToken) return;
-    addMsg("note", `已载入会话「${c.title || "（空）"}」，但历史消息加载失败（${e.message}）；仍可继续提问。`);
+    addMsg("note", t("conv.loadedErr", c.title || t("history.untitled"), e.message));
   }
 }
 
@@ -1142,11 +1223,11 @@ async function deleteConversation(id, row) {
     if (id === conversationId) setConversation(null); // 删的是当前会话则清掉本地引用（连带抹 ?c=）
     row.remove();
     if (!$("#overlay-body").querySelector(".conv-row")) {
-      $("#overlay-body").innerHTML = '<p class="muted">暂无会话：在左侧提问即开启一个。</p>';
+      $("#overlay-body").innerHTML = `<p class="muted">${escapeHtml(t("history.empty"))}</p>`;
     }
   } catch (e) {
     // 经 textContent 赋值，浏览器自会转义；勿再 escapeHtml（否则显示字面 &lt; 实体）。
-    row.querySelector(".conv-del").textContent = `删除失败（${e.message}）`;
+    row.querySelector(".conv-del").textContent = t("history.deleteFail", e.message);
   }
 }
 
@@ -1178,16 +1259,19 @@ function submitChat(override) {
 // /skills /tools /mode）调只读端点（有会话 GET /api/chat/{id}/info，否则 app 级 GET /api/info），
 // 按命令取字段渲染成 note 气泡。/compact 与未知命令一律本地「未知命令」提示（决策P4.4-5）。
 
-const SLASH_HELP = [  // /help 列这 8 条（**无** /compact，决策P4.4-5）
-  "/help — 显示本命令列表",
-  "/new — 开启新会话（保留盘上历史）",
-  "/clear — 删除当前会话并开新会话",
-  "/status — 模型 / 姿态 / 上下文用量",
-  "/context — 上下文 token 用量明细",
-  "/skills — 列技能（可用 / 已激活）",
-  "/tools — 列工具（只读下被禁的标注）",
-  "/mode [read-only|workspace-write] — 查看 / 切换姿态",
-];
+// /help 列这 8 条（**无** /compact，决策P4.4-5）。函数式：每次按当前语言取词（P4.7）。
+function slashHelpLines() {
+  return [
+    t("slash.help.help"),
+    t("slash.help.new"),
+    t("slash.help.clear"),
+    t("slash.help.status"),
+    t("slash.help.context"),
+    t("slash.help.skills"),
+    t("slash.help.tools"),
+    t("slash.help.mode"),
+  ];
+}
 
 // 命令输出气泡：buildFn 用 textContent 填充各行/项（杜绝注入），落对话流、不开浮层（决策P4.4-2）。
 function addNote(buildFn) {
@@ -1217,10 +1301,10 @@ async function handleSlash(raw) {
   addMsg("cmd", body); // 回显键入的命令（cmd 样式），与其只读输出 note 区分
   switch (cmd) {
     case "help":
-      return noteLines(SLASH_HELP);
+      return noteLines(slashHelpLines());
     case "new":
       startNewConversation();
-      return noteLines(["已开启新会话（旧会话保留在「历史会话」）。"]);
+      return noteLines([t("slash.newDone")]);
     case "clear":
       return slashClear();
     case "mode": {
@@ -1235,7 +1319,7 @@ async function handleSlash(raw) {
     case "tools":
       return slashInfo(cmd);
     default:  // 含 /compact（决策P4.4-5）与一切未知命令
-      return noteLines([`未知命令：${body}。输入 /help 看支持的命令。`]);
+      return noteLines([t("slash.unknown", body)]);
   }
 }
 
@@ -1244,27 +1328,27 @@ async function handleSlash(raw) {
 async function slashClear() {
   if (!conversationId) {
     startNewConversation();
-    return noteLines(["无活动会话，已开启新会话。"]);
+    return noteLines([t("slash.clearNoSession")]);
   }
   const id = conversationId;
   try {
     const res = await fetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
     if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
   } catch (e) {
-    return noteLines([`清除失败：${e.message}`]);
+    return noteLines([t("slash.clearFail", e.message)]);
   }
   startNewConversation(); // 先清屏 + 置 conversationId=null，再把确认 note 落进新会话视图
-  noteLines(["已删除当前会话并开启新会话。"]);
+  noteLines([t("slash.clearDone")]);
 }
 
 // /mode <值>：运行时翻姿态（P4.5 决策P4.5-5）。仅 read-only / workspace-write 合法；无活动会话
 // 或冷会话先提示续聊（端点 404/409）。成功后更新徽标 + note 回报新姿态。
 async function slashSetMode(arg) {
   if (arg !== "read-only" && arg !== "workspace-write") {
-    return noteLines([`仅支持 read-only / workspace-write，收到：${arg}`]);
+    return noteLines([t("slash.modeInvalidArg", arg)]);
   }
   if (!conversationId) {
-    return noteLines(["无活动会话：先提一个问题开启会话，再切换姿态。"]);
+    return noteLines([t("slash.modeNoSession")]);
   }
   let res;
   try {
@@ -1274,17 +1358,15 @@ async function slashSetMode(arg) {
       body: JSON.stringify({ mode: arg }),
     });
   } catch (e) {
-    return noteLines([`切换姿态失败：${e.message}`]);
+    return noteLines([t("slash.modeFail", e.message)]);
   }
-  if (res.status === 409) return noteLines(["会话未激活，先续聊一轮恢复再切。"]);
-  if (res.status === 422) return noteLines(["非法姿态：仅支持 read-only / workspace-write。"]);
-  if (!res.ok) return noteLines([`切换姿态失败：HTTP ${res.status}`]);
+  if (res.status === 409) return noteLines([t("slash.modeInactive")]);
+  if (res.status === 422) return noteLines([t("slash.modeIllegal")]);
+  if (!res.ok) return noteLines([t("slash.modeFailHttp", res.status)]);
   const { mode } = await res.json();
   setModeBadge(mode);
   return noteLines([
-    mode === "workspace-write"
-      ? "已切到 workspace-write：Agent 可写 wiki/workspace、跑 shell（raw/ 与 AGENTAO.md 仍只读）。"
-      : "已切回 read-only：Agent 仅问答。",
+    mode === "workspace-write" ? t("slash.modeToWrite") : t("slash.modeToRead"),
   ]);
 }
 
@@ -1298,7 +1380,7 @@ async function slashInfo(cmd) {
   try {
     info = await getJSON(url);
   } catch (e) {
-    return noteLines([`/${cmd} 获取失败：${e.message}`]);
+    return noteLines([t("slash.infoFail", cmd, e.message)]);
   }
   renderSlashInfo(cmd, info);
 }
@@ -1309,39 +1391,37 @@ function renderSlashInfo(cmd, info) {
 
   if (cmd === "mode") {
     if (!appLevel && info.mode) setModeBadge(info.mode); // 会话级 info 同步徽标
-    const hint = info.mode === "workspace-write"
-      ? "（Agent 可写 wiki/workspace；raw/ 与 AGENTAO.md 仍只读）"
-      : "（Agent 仅问答；/mode workspace-write 切到可写）";
-    return noteLines([`姿态：${info.mode || "read-only"}${hint}`]);
+    const hint = info.mode === "workspace-write" ? t("slash.modeHintWrite") : t("slash.modeHintRead");
+    return noteLines([t("slash.modeLine", info.mode || "read-only", hint)]);
   }
   if (cmd === "status") {
     const lines = [];
     if (appLevel) {
-      lines.push(`知识库：${info.kb_name}`);
-      lines.push(`模型：${info.model || "（未指定，由会话构造期发现）"}`);
-      lines.push(`姿态：${info.mode}`);
-      lines.push(`会话：${info.conversations} / ${info.max_conversations}`);
-      lines.push("（尚无活动会话：提一个问题以查看上下文用量 / 技能 / 工具。）");
+      lines.push(t("slash.kb", info.kb_name));
+      lines.push(t("slash.model", info.model || t("slash.modelUnspecified")));
+      lines.push(t("slash.mode", info.mode));
+      lines.push(t("slash.sessions", info.conversations, info.max_conversations));
+      lines.push(t("slash.noSessionHint"));
     } else {
       if (info.mode) setModeBadge(info.mode);
-      lines.push(`模型：${info.model || "未知"}`);
-      lines.push(`姿态：${info.mode}`);
-      lines.push(`轮次：${info.turns ?? "—"}　消息：${info.messages ?? "—"}`);
+      lines.push(t("slash.model", info.model || t("slash.modelUnknown")));
+      lines.push(t("slash.mode", info.mode));
+      lines.push(t("slash.turnsMessages", info.turns ?? "—", info.messages ?? "—"));
       if (info.context) {
         const c = info.context;
-        lines.push(`上下文：${c.estimated_tokens} / ${c.max_tokens} tokens（${c.usage_percent}%）`);
+        lines.push(t("slash.contextLine", c.estimated_tokens, c.max_tokens, c.usage_percent));
       } else if (cold) {
-        lines.push("（冷会话：续聊一轮以恢复完整上下文 / 技能 / 工具。）");
+        lines.push(t("slash.coldHint"));
       }
     }
     return noteLines(lines);
   }
   // context / skills / tools 是 agent 级事实：无会话 → 提示开会话；冷会话 → 提示续聊恢复。
   if (appLevel) {
-    return noteLines([`/${cmd} 需要活动会话：先提一个问题以开启会话。`]);
+    return noteLines([t("slash.needSession", cmd)]);
   }
   if (cold) {
-    return noteLines([`/${cmd}：冷会话尚未恢复——续聊一轮以恢复完整上下文 / 技能 / 工具。`]);
+    return noteLines([t("slash.coldNeedResume", cmd)]);
   }
   if (cmd === "context") return renderSlashContext(info.context);
   if (cmd === "skills") return renderSlashSkills(info.skills);
@@ -1349,23 +1429,24 @@ function renderSlashInfo(cmd, info) {
 }
 
 function renderSlashContext(c) {
-  if (!c) return noteLines(["无上下文用量数据。"]);
+  if (!c) return noteLines([t("slash.noContext")]);
   const bd = c.token_breakdown || {};
   return noteLines([
-    `估算 tokens：${c.estimated_tokens} / ${c.max_tokens}（${c.usage_percent}%）`,
-    `分项：system ${bd.system ?? 0} · messages ${bd.messages ?? 0} · tools ${bd.tools ?? 0} · 合计 ${bd.total ?? 0}`,
+    t("slash.ctxEstimate", c.estimated_tokens, c.max_tokens, c.usage_percent),
+    t("slash.ctxBreakdown", bd.system ?? 0, bd.messages ?? 0, bd.tools ?? 0, bd.total ?? 0),
   ]);
 }
 
 function renderSlashSkills(skills) {
-  if (!skills) return noteLines(["无技能信息。"]);
+  if (!skills) return noteLines([t("slash.noSkills")]);
   return addNote((div) => {
     const head = document.createElement("div");
-    head.textContent = `技能（已激活 ${skills.active.length} / 可用 ${skills.available.length}）：`;
+    head.textContent = t("slash.skillsHead", skills.active.length, skills.available.length);
     div.appendChild(head);
     for (const s of skills.available) {
       const row = document.createElement("div");
       row.className = "slash-skill" + (s.active ? " active" : "");
+      // 名/描述是后端内容、按字面显示；● / ○ 是标记。
       row.textContent = `${s.active ? "● " : "○ "}${s.name}${s.description ? " — " + s.description : ""}`;
       div.appendChild(row);
     }
@@ -1373,19 +1454,19 @@ function renderSlashSkills(skills) {
 }
 
 function renderSlashTools(tools) {
-  if (!tools) return noteLines(["无工具信息。"]);
+  if (!tools) return noteLines([t("slash.noTools")]);
   return addNote((div) => {
     const head = document.createElement("div");
-    head.textContent = `工具（${tools.length}，只读下被禁者灰显）：`;
+    head.textContent = t("slash.toolsHead", tools.length);
     div.appendChild(head);
-    for (const t of tools) {
+    for (const tool of tools) {
       const row = document.createElement("div");
       // blocked ∈ {true,false,"unknown"}：true=只读禁（灰显）、unknown=无法判定（标注）、false=可用。
-      row.className = "slash-tool" + (t.blocked === true ? " blocked" : "");
+      row.className = "slash-tool" + (tool.blocked === true ? " blocked" : "");
       let tag = "";
-      if (t.blocked === true) tag = "（只读禁）";
-      else if (t.blocked === "unknown") tag = "（未知）";
-      row.textContent = `${t.name}${tag ? " " + tag : ""}${t.description ? " — " + t.description : ""}`;
+      if (tool.blocked === true) tag = t("slash.toolBlocked");
+      else if (tool.blocked === "unknown") tag = t("slash.toolUnknown");
+      row.textContent = `${tool.name}${tag ? " " + tag : ""}${tool.description ? " — " + tool.description : ""}`;
       div.appendChild(row);
     }
   });
@@ -1400,8 +1481,8 @@ function setChatSending(sending) {
   btn.dataset.mode = sending ? "stop" : "send";
   // 发送↑ / 停止■ 的图标切换由 .stopping 类驱动（见 app.css .ico-send/.ico-stop），不改 innerHTML——
   // 否则会抹掉按钮内的 <svg> 图标。
-  btn.setAttribute("aria-label", sending ? "停止" : "发送");
-  btn.title = sending ? "停止（中断当前轮）" : "发送（Enter）";
+  btn.setAttribute("aria-label", sending ? t("chat.stop") : t("chat.send"));
+  btn.title = sending ? t("tip.stop") : t("tip.send");
   btn.classList.toggle("stopping", sending);
   btn.disabled = false;
   $("#attach-btn").disabled = sending; // 流式中禁上传（避免在飞轮里改附件）
@@ -1579,7 +1660,7 @@ function addAttachChip(name, thumb) {
   label.title = name;
   const meta = document.createElement("span");
   meta.className = "attach-meta";
-  meta.textContent = "上传中";
+  meta.textContent = t("attach.uploading");
   li.append(icon, label, meta);
   $("#attach-list").appendChild(li);
   showAttachList();
@@ -1591,16 +1672,16 @@ function finalizeAttachChip(chip, att) {
   if (!chip.thumb) { chip.icon.textContent = ""; chip.icon.appendChild(fileTypeBadge(att.name)); }
   chip.meta.textContent =
     att.kind === "image"
-      ? (att.visionOversize ? "超 20MB·文本引用" : "图像")
-      : att.kind === "binary" ? "二进制" : "文本";
-  if (att.visionOversize) chip.meta.title = "超过视觉单图上限，agent 只看 <attachment> 文本引用";
+      ? (att.visionOversize ? t("attach.visionOversize") : t("attach.image"))
+      : att.kind === "binary" ? t("attach.binary") : t("attach.text");
+  if (att.visionOversize) chip.meta.title = t("tip.visionOversize");
   chip.li.dataset.rel = att.rel;
   pendingAttachments.push(att);
   const rm = document.createElement("button");
   rm.type = "button";
   rm.className = "attach-remove";
   rm.textContent = "×";
-  rm.title = "移除附件";
+  rm.title = t("tip.attachRemove");
   rm.addEventListener("click", () => {
     const i = pendingAttachments.findIndex((a) => a.rel === att.rel);
     if (i >= 0) pendingAttachments.splice(i, 1);
@@ -1648,7 +1729,7 @@ async function uploadOne(file) {
     fd.append("file", file, file.name);
     const res = await fetch("/api/upload", { method: "POST", body: fd });
     const data = await res.json().catch(() => ({}));
-    if (res.status === 423) throw new Error("可写会话进行中，稍后重试");
+    if (res.status === 423) throw new Error(t("staging.writableRetry"));
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     finalizeAttachChip(chip, { rel: data.saved, name: data.name, kind: data.kind, thumb, visionOversize });
   } catch (e) {
@@ -1771,7 +1852,7 @@ async function sendChat(message, attachments) {
     }
   } catch (e) {
     botEl.classList.replace("bot", "err");
-    botEl.textContent = `对话失败：${e.message}`;
+    botEl.textContent = t("chat.fail", e.message);
   } finally {
     setChatSending(false); // 复位：按钮切回「发送」、清 chatStreaming/禁用
   }
@@ -1805,7 +1886,7 @@ function handleSSE(frame, botEl) {
     if (payload.conversation_id) setConversation(payload.conversation_id);
     const note = document.createElement("span");
     note.className = "stop-note";
-    note.textContent = "（已停止）";
+    note.textContent = t("chat.stopped");
     botEl.appendChild(note);
     renderWritableReceipts(payload); // 可写 turn 被停也可能已写盘：照常出 check/撤销/告警
     refreshStagingIfOpen(); // 修订 turn 收尾：暂存区开着则重拉刷新池（决策P4.6-9）
@@ -1826,7 +1907,7 @@ function handleSSE(frame, botEl) {
     // 记下服务端已建会话（即便本轮失败）：否则首轮失败时下次又以 null 另起新会话，堆到 503。
     if (payload.conversation_id) setConversation(payload.conversation_id);
     botEl.classList.replace("bot", "err");
-    botEl.textContent = `错误：${payload.message}`;
+    botEl.textContent = t("chat.error", payload.message);
     renderWritableReceipts(payload); // 可写 turn 抛错前的写已被服务端收尾捕获
   }
 }
@@ -1844,7 +1925,7 @@ function renderWritableReceipts(payload) {
     addNote((div) => {
       div.classList.add("receipt-alert");
       const p = document.createElement("div");
-      p.textContent = `⚠️ 检测到 ${mutated.join("、")} 被旁路改写，已自动还原（请人工核查 shell 来源）。`;
+      p.textContent = t("receipt.mutated", mutated.join("、"));
       div.appendChild(p);
     });
   }
@@ -1852,7 +1933,7 @@ function renderWritableReceipts(payload) {
   // violations 只装新增；库存量（total）只作旁注（拼进文案的全是数字，无注入面）。
   // **本轮无新增（check.ok）时不出回执**（用户要求）——只静默刷新右栏页面列表，不刷屏。
   if (check) {
-    const legacyNote = (n) => (n > 0 ? `（库存量 ${n} 条，与本轮无关）` : "");
+    const legacyNote = (n) => (n > 0 ? t("receipt.legacy", n) : "");
     if (check.ok) {
       loadPages(); refreshed = true; // 写后静默刷新右栏 wiki 列表（无回执）
     } else {
@@ -1860,8 +1941,8 @@ function renderWritableReceipts(payload) {
         div.classList.add("receipt-bad");
         const head = document.createElement("div");
         head.innerHTML =
-          `<span class="report-bad">✗ check 本轮新增 ${check.violations.length} 条问题</span>` +
-          legacyNote(check.total - check.violations.length);
+          `<span class="report-bad">${escapeHtml(t("receipt.checkBad", check.violations.length))}</span>` +
+          escapeHtml(legacyNote(check.total - check.violations.length));
         div.appendChild(head);
         for (const v of check.violations.slice(0, 20)) {
           const li = document.createElement("div");
@@ -1872,7 +1953,7 @@ function renderWritableReceipts(payload) {
         if (check.repair_prompt) {
           const btn = document.createElement("button");
           btn.className = "receipt-btn";
-          btn.textContent = "让 Agent 修复";
+          btn.textContent = t("receipt.repair");
           btn.addEventListener("click", () => {
             btn.disabled = true;
             submitChat(check.repair_prompt); // 以 REPAIR_PROMPT 作下一轮消息驱动修复
@@ -1886,11 +1967,11 @@ function renderWritableReceipts(payload) {
   if (undo && undo.available) {
     addNote((div) => {
       const p = document.createElement("div");
-      p.textContent = `本轮写了 ${undo.paths.length} 个文件（${undo.paths.join("、")}）。`;
+      p.textContent = t("receipt.undoInfo", undo.paths.length, undo.paths.join("、"));
       div.appendChild(p);
       const btn = document.createElement("button");
       btn.className = "receipt-btn";
-      btn.textContent = "撤销本轮写";
+      btn.textContent = t("receipt.undo");
       btn.addEventListener("click", () => undoTurn(undo.token, btn, div));
       div.appendChild(btn);
     });
@@ -1912,7 +1993,7 @@ async function undoTurn(token, btn, box) {
   } catch (e) {
     box.classList.add("receipt-bad");
     const p = document.createElement("div");
-    p.textContent = `撤销失败：${e.message}`;
+    p.textContent = t("undo.fail", e.message);
     box.appendChild(p);
     return;
   }
@@ -1921,15 +2002,15 @@ async function undoTurn(token, btn, box) {
   const note = document.createElement("div");
   if (res.status === 409 && data.conflicts) {
     box.classList.add("receipt-bad");
-    note.textContent = `部分未撤销：${(data.conflicts || []).join("、")} 已被后续写改动，请人工核查；其余 ${(data.undone || []).join("、") || "（无）"} 已还原。`;
+    note.textContent = t("undo.partial", (data.conflicts || []).join("、"), (data.undone || []).join("、") || t("undo.none"));
   } else if (res.status === 409) {
     box.classList.add("receipt-bad");
-    note.textContent = "撤销已失效（无本轮写日志或已有后续写）。";
+    note.textContent = t("undo.stale");
   } else if (res.ok) {
-    note.textContent = `已撤销本轮写：${(data.undone || []).join("、") || "（无）"}。`;
+    note.textContent = t("undo.done", (data.undone || []).join("、") || t("undo.none"));
   } else {
     box.classList.add("receipt-bad");
-    note.textContent = `撤销失败：HTTP ${res.status}`;
+    note.textContent = t("undo.failHttp", res.status);
   }
   box.appendChild(note);
   loadPages(); // 撤销后刷新右栏 wiki 列表
@@ -1986,6 +2067,11 @@ async function undoTurn(token, btn, box) {
 })();
 
 // ── 启动 ────────────────────────────────────────────────────────────────────
+// 界面语言（P4.7）：用「最后一次设置」初始化（首访默认 zh），刷静态 chrome + 动态面；按钮翻转 zh⇄en。
+// 须在此（模块级 let 已初始化后）调用——rerenderDynamic 会读 currentMode/chatStreaming（决策P4.7-5/6）。
+$("#lang-btn").addEventListener("click", toggleLang);
+initLang();
+
 // 先拉页面再进"列表"视图（首页）——启动即显示 Concept 列表。
 // 仅当用户尚未导航时才进首页：否则页面慢加载期间用户已输入的搜索会被这次空首页覆盖
 // （loadPages 解析后会就地重渲染当前 index 条目，故用户的搜索结果照常出现）。
