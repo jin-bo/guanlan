@@ -603,7 +603,7 @@ def test_raw_write_empty_is_400(client, body) -> None:
 
 
 def test_raw_write_too_large_is_400(client, kb) -> None:
-    from guanlan.web.app import MAX_RAW_BYTES
+    from guanlan.web.rawfeed import MAX_RAW_BYTES
 
     resp = client.post("/api/raw", json={"name": "big", "content": "a" * (MAX_RAW_BYTES + 1)})
     assert resp.status_code == 400
@@ -684,7 +684,7 @@ def test_raw_overwrite_semantics(client, kb) -> None:
 def test_atomic_write_raw_worker_recheck(kb) -> None:
     """worker turn 内复检：已存在 + 无 overwrite → EXIT_USAGE（端点据此转 409），不覆盖。"""
     from guanlan.errors import EXIT_OK, EXIT_USAGE
-    from guanlan.web.app import _atomic_write_raw
+    from guanlan.web.rawfeed import _atomic_write_raw
 
     target = kb / "raw" / "x.md"
     target.write_text("原\n", encoding="utf-8")
@@ -741,7 +741,7 @@ def test_upload_binary_keeps_extension_and_kind_binary(client, kb) -> None:
 
 
 def test_upload_empty_and_oversize_are_400(client, kb) -> None:
-    from guanlan.web.app import MAX_UPLOAD_BYTES
+    from guanlan.web.uploads import MAX_UPLOAD_BYTES
 
     assert client.post("/api/upload", files={"file": ("e.txt", b"", "text/plain")}).status_code == 400
     big = b"a" * (MAX_UPLOAD_BYTES + 1)
@@ -831,7 +831,7 @@ def test_chat_image_attachment_goes_through_images_param(chat_client, kb) -> Non
 
 def test_chat_image_oversize_or_excess_keeps_tag_only(chat_client, kb, monkeypatch) -> None:
     """超视觉单图上限 / 超单轮张数的图像不入 images（标签仍在 = 文本引用，与降级同形）。"""
-    import guanlan.web.app as app_mod
+    import guanlan.web.uploads as uploads_mod  # _augment_with_attachments 在此读两上限
 
     client, captured = chat_client
     up = kb / "workspace" / "uploads"
@@ -839,8 +839,8 @@ def test_chat_image_oversize_or_excess_keeps_tag_only(chat_client, kb, monkeypat
     (up / "big.png").write_bytes(b"\x89PNG" + b"x" * 64)
     (up / "a.png").write_bytes(b"\x89PNGa")
     (up / "b.png").write_bytes(b"\x89PNGb")
-    monkeypatch.setattr(app_mod, "MAX_IMAGE_BYTES", 16)  # big.png 超视觉单图上限
-    monkeypatch.setattr(app_mod, "MAX_IMAGES_PER_TURN", 1)  # b.png 超单轮张数
+    monkeypatch.setattr(uploads_mod, "MAX_IMAGE_BYTES", 16)  # big.png 超视觉单图上限
+    monkeypatch.setattr(uploads_mod, "MAX_IMAGES_PER_TURN", 1)  # b.png 超单轮张数
 
     _t, done, error = _chat_with(
         client,
@@ -1020,7 +1020,7 @@ def test_promote_text_admission_non_utf8_is_400(client, kb) -> None:
 
 
 def test_promote_text_admission_oversize_is_400(client, kb) -> None:
-    from guanlan.web.app import MAX_RAW_BYTES
+    from guanlan.web.rawfeed import MAX_RAW_BYTES
 
     src = _put_workspace(kb, "parsed", "big.md", "a" * (MAX_RAW_BYTES + 1))
     r = client.post("/api/raw", json={"name": "big", "source": src})
