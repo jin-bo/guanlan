@@ -1,6 +1,6 @@
 """单页渲染（P4，见 docs/P4-Web宿主.md §6）。
 
-`load_page` 取正文 → 若装了 `markdown`（`guanlan[web]` extra）渲染为 HTML，否则回退到
+`load_page` 取正文 → 若装了 `markdown`（`guanlan-wiki[web]` extra）渲染为 HTML，否则回退到
 转义后的 `<pre>` 源码视图（**缺 extra 也能跑、只是不美观**）。`[[wikilink]]` 重写复用
 `pages.WIKILINK_RE` + `pages.link_stem` + 全页面 stem 解析集——与 `check`/`graph` **同一口径**，
 不另写解析。
