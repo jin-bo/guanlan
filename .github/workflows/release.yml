@@ -36,3 +36,47 @@ jobs:
 
       - name: 发布到 PyPI（Trusted Publishing，免 token）
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  # PyPI 发布成功后，用 CHANGELOG 对应段自动建 GitHub Release（免手工补；与 tag/PyPI 对齐）。
+  github-release:
+    needs: pypi-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 建 GitHub Release 必需
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # 取上一个 tag 作 compare 链接
+
+      - name: 从 CHANGELOG 抽取本版 notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          # 抽取 "## [VERSION]" 到下一个 "## [" 之间的正文（跳过标题行本身）。
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" {flag=1; next}
+            flag && /^## \[/ {exit}
+            flag {print}
+          ' CHANGELOG.md > notes.md
+          # 没抽到内容（CHANGELOG 漏记本版）就回退占位，别让 Release 空着。
+          if [ ! -s notes.md ]; then
+            echo "见 [CHANGELOG.md](CHANGELOG.md)。" > notes.md
+          fi
+          # 有上一个 tag 才追加 Full Changelog 比较链接。
+          PREV="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+          if [ -n "$PREV" ]; then
+            printf '\n**Full Changelog**: %s/compare/%s...%s\n' \
+              "${{ github.server_url }}/${{ github.repository }}" "$PREV" "$TAG" >> notes.md
+          fi
+
+      - name: 建 GitHub Release（已存在则跳过，便于重跑）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，跳过。"
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md
+          fi
