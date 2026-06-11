@@ -24,6 +24,7 @@ import json
 import logging
 import logging.handlers
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -67,8 +68,15 @@ _logger.propagate = False
 # 已接上 agentao.log 的库根（幂等：重复 serve/create_app 不重挂 handler，避免每行写多遍）。
 _agent_log_paths: set[str] = set()
 
-# 内存会话数硬上限：超出拒新建（决策P4-8：v1 不上 LRU，仅一个保守上界给内存设界）。
+# 内存会话数硬上限**默认值**：超出拒新建（决策P4-8：v1 不上 LRU，仅一个保守上界给内存设界）。
+# P4.9 起改为 `ConversationStore(max_conversations=…)` 形参可配（决策P4.9-18），多用户部署可调高；
+# 本常量仅作默认，仍被 `create_app`/`serve`/CLI 一路透传（直读它的旧点已归口 self._max_conversations）。
 MAX_CONVERSATIONS = 100
+
+# 内存会话 idle 回收 TTL（秒，决策P4.9-6）：久无活动（> 此值）且无在飞 turn 的会话在「新建/恢复」
+# 锁内惰性淘汰，缓解多并发用户顶满 max_conversations。时间源 time.monotonic（免墙钟跳变）、可注入
+# （测试决定性）。默认 30 min；置 None 关闭回收（纯保留旧硬上限语义）。
+IDLE_TTL_SECONDS = 30 * 60
 
 # 只读姿态下某工具是否被 `tool_runner` 拦（喂 `/tools` 的 `blocked` 列，决策P4.4-2/§3）。
 # 判定**纯静态、绝不试调工具**：① 优先读 agentao 工具元数据 `is_read_only`——这正是 agentao
@@ -242,6 +250,21 @@ def configure_agent_log(root: Path) -> Path:
     _agent_log_paths.add(key)
     return target
 
+
+def disable_agent_log() -> None:
+    """摘掉 `_logger` 上已挂的 agentao.log file handler，并清幂等缓存（`--no-agent-log` / reader 用）。
+
+    `_logger` 是**进程级共享单例**：若同进程先前 `serve(agent_log=True)` 挂过 `RotatingFileHandler`，
+    后续 `serve(reader=True / agent_log=False)` 仅「跳过 configure」**并不会**摘掉旧 handler——reader
+    会话仍续写 `<kb>/agentao.log`，破「默认 KB 零字节写入」契约（评审 codex P2）。本函数显式 remove +
+    close 这些 file handler、清空 `_agent_log_paths`，使「关日志」真生效。`serve` 阻塞跑 uvicorn，同
+    进程同一时刻只一个活跃 server，故清空全部 file handler 不会误伤并发 server。"""
+    for h in list(_logger.handlers):
+        if isinstance(h, logging.handlers.RotatingFileHandler):
+            _logger.removeHandler(h)
+            h.close()
+    _agent_log_paths.clear()
+
 # 当前 turn 的事件发射器：emit(kind, data)。kind ∈ {"token"}（done/error 由端点补）。
 Emit = Callable[[str, object], None]
 
@@ -263,9 +286,15 @@ class Conversation:
         persist: bool,
         mode: str = "read-only",
         write_gate: WriteGate | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.id = cid
         self._kb = kb
+        # idle 回收用时间戳（决策P4.9-6）：time.monotonic（免墙钟跳变）、可注入（测试决定性）。
+        # 每轮起跑 / 控制操作刷新（见 begin_turn / request_stop）；store 在「新建/恢复」锁内据
+        # `is_idle` 淘汰久无活动者。
+        self._clock = clock
+        self.last_active = clock()
         # 撤销/写日志的路径都来自 policy_fs 的 `resolve(strict=False)`（同 kb.resolve() 坐标系）；
         # 对外算相对路径须用**同一 resolved kb**，否则 macOS `/var`→`/private/var` 等 symlink 下
         # `relative_to(未 resolve 的 kb)` 抛 ValueError（写日志键是 resolved、kb 不是）。
@@ -362,10 +391,23 @@ class Conversation:
         待停（而非当 idle 丢弃），待 `turn` 进锁装上令牌即兑现。令牌**仍在锁内**创建/安装，故并发同
         会话时 `_cancel_token` 始终指向持锁的活跃轮、stop 不会误打排队轮（不同于把令牌装在锁外）。"""
         self._inflight += 1
+        self.last_active = self._clock()  # 刷新活跃时间戳：本会话有轮起跑，idle 回收顺延（决策P4.9-6）
+
+    def is_idle(self, now: float, ttl: float) -> bool:
+        """供 store 在「新建/恢复」锁内判本会话是否可被 idle 回收（决策P4.9-6）。
+
+        **必须无在飞 turn**（`_inflight == 0`）——否则会淘汰正在流式回答的会话；再要久无活动
+        （`now - last_active > ttl`）。`now`/`ttl` 由 store 用其注入时钟与 TTL 给出，判定纯读、无副作用。
+        """
+        return self._inflight == 0 and (now - self.last_active) > ttl
 
     def end_turn(self) -> None:
         """端点在该轮彻底收尾（含 stopped/error）后调，与 `begin_turn` 配对。"""
         self._inflight -= 1
+        # 收尾也刷新活跃时间戳（评审 codex P2）：begin_turn 只在**起跑**打点，若一轮跑得比 IDLE_TTL
+        # 还久（长 LLM/工具轮），收尾瞬间 _inflight→0 而 last_active 仍是 30min 前的起跑值，下一个
+        # create/restore 会立刻把这个**刚用完**的会话逐掉。故按「最后一次完成活动」重新打点。
+        self.last_active = self._clock()
         if self._inflight <= 0:
             self._inflight = 0
             self._stop_requested = False  # 无在飞轮了：清掉未兑现的待停，绝不泄漏到下一轮
@@ -624,6 +666,7 @@ class Conversation:
         令牌尚未装上）→ 记待停，turn 进锁即兑现（关首轮 start→装令牌窗口的竞态）。③ 无在飞轮（idle）
         → False。待停只在「无任何活跃令牌」时设，故绝不殃及已装令牌的排队/活跃轮。
         """
+        self.last_active = self._clock()  # 控制操作也刷新活跃时间戳（决策P4.9-6：每轮问答/控制刷新）
         token = self._cancel_token
         if token is not None:
             # 持锁活跃轮：幂等打断（已 cancel 则什么都不做），不设待停——重复 stop 不外溢到排队轮。
@@ -723,6 +766,9 @@ class ConversationStore:
         persist: bool = True,
         default_mode: str = "read-only",
         write_gate: WriteGate | None = None,
+        max_conversations: int | None = None,
+        idle_ttl: float | None = IDLE_TTL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._kb = kb
         self._default_model = default_model
@@ -730,10 +776,45 @@ class ConversationStore:
         # 新会话开局姿态 = 进程 --mode 默认（决策P4.5-8：恢复不回放盘上姿态、用进程默认）。
         self._default_mode = default_mode
         self._write_gate = write_gate  # 进程级单写者协调，注入每个会话
+        # 内存会话硬上限（决策P4.9-18）：取代直读模块常量 MAX_CONVERSATIONS，供多用户部署可配。
+        # 存原值（可能 None=未指定）；**在 create/restore 取上限时**经 `_cap()` 解析——None 则读模块
+        # 全局。这样既保「默认 100」，又让 `monkeypatch.setattr(chat, "MAX_CONVERSATIONS", n)` 这类既有
+        # 测试（构造后改全局再触发上限）照旧生效，不被 def-time / 构造期绑死。
+        self._max_conversations = max_conversations
+        # idle 回收（决策P4.9-6）：注入时钟（默认 monotonic）+ TTL（None=关）；create/restore 锁内惰性扫。
+        self._idle_ttl = idle_ttl
+        self._clock = clock
         self._convs: dict[str, Conversation] = {}
         # create/restore 经 anyio.to_thread 卸载（构造慢），故跑在**线程池线程**——字典写必须用
         # threading.Lock 护住，否则两个并发新建/恢复会撞 id、互相覆盖会话。
         self._lock = threading.Lock()
+
+    def _cap(self) -> int:
+        """解析当前内存会话硬上限：构造未指定（None）则读模块全局（call-time，决策P4.9-18）。"""
+        return MAX_CONVERSATIONS if self._max_conversations is None else self._max_conversations
+
+    def _reclaim_idle_locked(self) -> list[Conversation]:
+        """惰性回收久无活动且无在飞 turn 的会话（决策P4.9-6）。**调用方须持 `self._lock`**。
+
+        在 `create`/`restore` 取上限判定**之前**调：先腾出 idle slack，缓解多并发用户顶满
+        `max_conversations` 后新用户被拒。跳过有在飞 turn 的会话（`is_idle` 守卫）——绝不淘汰正在
+        流式回答者。`idle_ttl=None` 时短路（不回收，退回纯硬上限语义）。
+
+        **只 pop、不 close**：返回被逐出的会话，由调用方在**释锁后** `close()`——`close()` 慢（可能
+        MCP 断开），锁内做会把所有 get/create/restore/list 串行在网络拆连之后（与 `delete()` 同约定，
+        见其「锁外 close」注释，评审 P4.9）。被回收会话的盘上快照（persist 开时）**不删**——仅从内存
+        逐出、仍可懒恢复（reader 用 persist=False，无盘上副本，UX 悬崖见 §4 决策P4.9-6）。
+        """
+        if self._idle_ttl is None:
+            return []
+        now = self._clock()
+        stale = [cid for cid, c in self._convs.items() if c.is_idle(now, self._idle_ttl)]
+        evicted: list[Conversation] = []
+        for cid in stale:
+            conv = self._convs.pop(cid, None)
+            if conv is not None:
+                evicted.append(conv)
+        return evicted
 
     @property
     def default_mode(self) -> str:
@@ -748,28 +829,45 @@ class ConversationStore:
         短暂阻塞并发 get/list 可接受；为此换得简单且无并发绕过的实现。
         """
         conv_model = model if model is not None else self._default_model
-        with self._lock:
-            if len(self._convs) >= MAX_CONVERSATIONS:
-                raise RuntimeError(
-                    f"内存会话数已达上限 {MAX_CONVERSATIONS}，请先 DELETE 一些会话。"
+        evicted: list[Conversation] = []
+        try:
+            with self._lock:
+                evicted = self._reclaim_idle_locked()  # 先腾 idle slack（决策P4.9-6）再判上限（仅 pop）
+                cap = self._cap()
+                if len(self._convs) >= cap:
+                    raise RuntimeError(
+                        f"内存会话数已达上限 {cap}，请先 DELETE 一些会话。"
+                    )
+                # id 改用 agentao 的稳定 UUID（写进每份快照的 session_id）：进程内自增计数器重启归零、
+                # 与盘上对不上无法续；UUID 跨重启稳定、读/删/续全归口同一 id（决策P4.2-2）。
+                cid = str(uuid.uuid4())
+                conv = Conversation(
+                    cid,
+                    self._kb,
+                    conv_model,
+                    persist=self._persist,
+                    mode=self._default_mode,
+                    write_gate=self._write_gate,
+                    clock=self._clock,
                 )
-            # id 改用 agentao 的稳定 UUID（写进每份快照的 session_id）：进程内自增计数器重启归零、
-            # 与盘上对不上无法续；UUID 跨重启稳定、读/删/续全归口同一 id（决策P4.2-2）。
-            cid = str(uuid.uuid4())
-            conv = Conversation(
-                cid,
-                self._kb,
-                conv_model,
-                persist=self._persist,
-                mode=self._default_mode,
-                write_gate=self._write_gate,
-            )
-            self._convs[cid] = conv
-            return conv
+                self._convs[cid] = conv
+                return conv
+        finally:
+            # 锁外 close 被逐会话（决策P4.9-6/评审 P4.9）：return/raise 都先退出 with（释锁）再跑本
+            # finally，故 close() 的慢 MCP 拆连不占 store 锁、不阻塞并发 get/create/restore。
+            for c in evicted:
+                c.close()
 
     def get(self, cid: str) -> Conversation | None:
         with self._lock:
-            return self._convs.get(cid)
+            conv = self._convs.get(cid)
+            if conv is not None:
+                # 任何按-id 命中都刷新活跃时间戳（锁内、与 reclaim 串行）：堵「端点 get() 拿到 conv →
+                # 起 turn 前（begin_turn 尚未 +inflight）被并发 create/restore 的 reclaim 误逐、turn 撞
+                # closed agent」这段竞态（评审 P4.9）。get 与 reclaim 都持 self._lock，故刷新原子可见：
+                # 一旦本会话被取出即非 idle，后续 reclaim 不会逐它。/info·/stop·/mode 走 get 同样保活。
+                conv.last_active = self._clock()
+            return conv
 
     def live_count(self) -> int:
         """内存现存会话数（喂 `GET /api/info` 的 `conversations` 计数，零盘读）。"""
@@ -856,39 +954,47 @@ class ConversationStore:
             messages, _model, _ = load_session(cid, project_root=self._kb)  # 全 UUID + 已确认存在
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return None  # 竞态/坏文件 → 当未知 id（404），**绝不**冒泡成流式 error
-        with self._lock:  # 同 create：构造慢但本地单用户罕见，换无并发绕过
-            existing = self._convs.get(cid)  # double-check：并发已 rebuild 同一 id → 复用、丢弃本次
-            if existing is not None:
-                return existing
-            if len(self._convs) >= MAX_CONVERSATIONS:  # 恢复同样受内存硬上限约束
-                raise RuntimeError(
-                    f"内存会话数已达上限 {MAX_CONVERSATIONS}，请先 DELETE 一些会话。"
+        evicted: list[Conversation] = []
+        try:
+            with self._lock:  # 同 create：构造慢但本地单用户罕见，换无并发绕过
+                existing = self._convs.get(cid)  # double-check：并发已 rebuild 同一 id → 复用、丢弃本次
+                if existing is not None:
+                    return existing
+                evicted = self._reclaim_idle_locked()  # 先腾 idle slack（决策P4.9-6）再判上限（仅 pop）
+                cap = self._cap()
+                if len(self._convs) >= cap:  # 恢复同样受内存硬上限约束
+                    raise RuntimeError(
+                        f"内存会话数已达上限 {cap}，请先 DELETE 一些会话。"
+                    )
+                # **不**恢复盘上持久的 model（镜像 agentao PR #81 "don't restore persisted model on
+                # resume"）：快照只存 model **名**、不存其 provider（api_key/base_url 从不落盘）。把这个
+                # 名字重新绑到当前进程恰好在用的 provider 上，会得到不一致的 (provider, model) 对——例如
+                # 在 provider A 存的模型在当前 provider B 上根本不存在，只在下次 LLM 调用时才炸。故恢复
+                # 一律用与新建**同一**的当前进程模型（self._default_model，= --model / 环境发现），保持已
+                # 一致的 (provider, model)；盘上的 _model 仅留作参考、不回绑。
+                # 恢复用**当前进程默认姿态**、不回放盘上姿态（盘上不存运行时姿态，决策P4.5-8）。
+                conv = Conversation(
+                    cid,
+                    self._kb,
+                    self._default_model,
+                    persist=self._persist,
+                    mode=self._default_mode,
+                    write_gate=self._write_gate,
+                    clock=self._clock,
                 )
-            # **不**恢复盘上持久的 model（镜像 agentao PR #81 "don't restore persisted model on
-            # resume"）：快照只存 model **名**、不存其 provider（api_key/base_url 从不落盘）。把这个
-            # 名字重新绑到当前进程恰好在用的 provider 上，会得到不一致的 (provider, model) 对——例如
-            # 在 provider A 存的模型在当前 provider B 上根本不存在，只在下次 LLM 调用时才炸。故恢复
-            # 一律用与新建**同一**的当前进程模型（self._default_model，= --model / 环境发现），保持已
-            # 一致的 (provider, model)；盘上的 _model 仅留作参考、不回绑。
-            # 恢复用**当前进程默认姿态**、不回放盘上姿态（盘上不存运行时姿态，决策P4.5-8）。
-            conv = Conversation(
-                cid,
-                self._kb,
-                self._default_model,
-                persist=self._persist,
-                mode=self._default_mode,
-                write_gate=self._write_gate,
-            )
-            conv.agent.messages = messages  # 镜像 agentao cli/commands/sessions.py 的 resume
-            # 只认构造已激活的 SKILL_NAME，**不**回放盘上任意 active_skills（扩大姿态，决策P4.2-4/6）
-            conv.turns = len([m for m in messages if m.get("role") == "user"])  # 还原轮次
-            first_user = next(
-                (m.get("content") for m in messages if m.get("role") == "user"), ""
-            )
-            # 回填标题：否则 live 视图（内存优先合并）会把刚续聊的历史会话标题显示成空。
-            conv.title = (first_user if isinstance(first_user, str) else "")[:50] or "（空）"
-            self._convs[cid] = conv
-            return conv
+                conv.agent.messages = messages  # 镜像 agentao cli/commands/sessions.py 的 resume
+                # 只认构造已激活的 SKILL_NAME，**不**回放盘上任意 active_skills（扩大姿态，决策P4.2-4/6）
+                conv.turns = len([m for m in messages if m.get("role") == "user"])  # 还原轮次
+                first_user = next(
+                    (m.get("content") for m in messages if m.get("role") == "user"), ""
+                )
+                # 回填标题：否则 live 视图（内存优先合并）会把刚续聊的历史会话标题显示成空。
+                conv.title = (first_user if isinstance(first_user, str) else "")[:50] or "（空）"
+                self._convs[cid] = conv
+                return conv
+        finally:
+            for c in evicted:  # 锁外 close 被逐会话（同 create，慢 MCP 拆连不占 store 锁）
+                c.close()
 
     def delete(self, cid: str) -> bool:
         """内存命中支：丢内存对象 + best-effort 删盘（决策P4.2-5）。返回是否命中内存。
