@@ -88,13 +88,13 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
 
 
 def _cmd_web(args: argparse.Namespace) -> int:
-    # web 是可选叠加层：缺 `guanlan[web]`（fastapi/uvicorn 导入失败）时优雅降级、引导安装，
+    # web 是可选叠加层：缺 `guanlan-wiki[web]`（fastapi/uvicorn 导入失败）时优雅降级、引导安装，
     # 不让 CLI 抛 traceback（决策P4-2）。导入收在函数内，核心命令不为 Web 背 import 成本。
     try:
         from .web import serve
     except ImportError:
         print(
-            "`guanlan web` 需要可选依赖：请先 `pip install 'guanlan[web]'`。",
+            "`guanlan web` 需要可选依赖：请先 `pip install 'guanlan-wiki[web]'`。",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -243,7 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_web = sub.add_parser(
         "web",
         parents=[dir_parent],
-        help="起本地 Web 宿主（可选叠加层，需 `pip install 'guanlan[web]'`）",
+        help="起本地 Web 宿主（可选叠加层，需 `pip install 'guanlan-wiki[web]'`）",
     )
     p_web.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765，仅 127.0.0.1）")
     p_web.add_argument(
