@@ -37,7 +37,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..check import format_report as _format_check
 from ..check import run_check
@@ -56,6 +56,7 @@ from ..lint import MISSING_ENTITY_MIN_REFS
 from ..lint import format_report as _format_lint
 from ..lint import run_lint
 from ..pages import iter_pages, load_page, page_title, page_type, split_frontmatter
+from ..query import run_query
 from ..runtime import AgentRunner
 from .chat import MAX_CONVERSATIONS, ConversationStore
 from .jobs import JobQueue, WriteGate
@@ -67,6 +68,28 @@ class IngestBody(BaseModel):
 
     target: str
     model: str | None = None
+
+
+class BackfillBody(BaseModel):
+    """`POST /api/backfill` 请求体（P4.8）。`question` 必填、**strip 后非空**（含纯空白 `"   "`
+    → 422，对齐 CLI 必传问句、杜绝空白问句白触发一次 gated LLM 写）。`model` **省略或显式 `null`
+    均回落 app 级 `model`**（端点 `body.model or model`，与 ingest/heal 同口径，决策P4.8-6）；二者皆无
+    时**解析出的** `None` 直透子进程 runner 也合法（backfill 走 run_guarded_write 子进程、非嵌入会话、
+    无 P4-8 模型坑）。"""
+
+    question: str
+    model: str | None = None
+
+    @field_validator("question")
+    @classmethod
+    def _question_nonblank(cls, v: str) -> str:
+        # `min_length=1` 挡不住纯空白（`"   "` 长度非零、会过校验后入队白触发一次 gated 写）。
+        # 故 strip 后判空 → 抛 ValueError（Pydantic 归一为 422）；并**返回 strip 后的值**，使
+        # 发给 Agent 的问句不带前后空白噪声（决策P4.8-8）。
+        s = v.strip()
+        if not s:
+            raise ValueError("question 不能为空（含纯空白）。")
+        return s
 
 
 class ChatBody(BaseModel):
@@ -815,13 +838,15 @@ def create_app(
     # （可写 turn 异步取 write_lock + 计数）；写端点经 app.state.write_gate 查计数。
     write_gate = WriteGate()
     app.state.write_gate = write_gate
-    # 单写者作业队列（ingest/heal/投喂走它，FIFO 串行；决策P4-5）：worker 跑 fn() 包 write_lock。
-    # on_job_done：ingest/heal 写 wiki/ → bump 代际，使可写会话缓存的 check 基线失效、下轮重拍
-    # （投喂/上传写 raw//workspace、不动 wiki，不 bump，P4.5-4 缓存基线）。
+    # 单写者作业队列（ingest/heal/backfill/投喂走它，FIFO 串行；决策P4-5）：worker 跑 fn() 包 write_lock。
+    # on_job_done：ingest/heal/backfill 写 wiki/ → bump 代际，使可写会话缓存的 check 基线失效、下轮重拍
+    # （投喂/上传写 raw//workspace、不动 wiki，不 bump，P4.5-4 缓存基线；backfill 写 syntheses/，决策P4.8-5）。
     jobs = JobQueue(
         write_lock=write_gate.write_lock,
         on_job_done=lambda kind: (
-            write_gate.bump_wiki_generation() if kind in ("ingest", "heal") else None
+            write_gate.bump_wiki_generation()
+            if kind in ("ingest", "heal", "backfill")
+            else None
         ),
     )
     app.state.jobs = jobs
@@ -1128,6 +1153,24 @@ def create_app(
             return run
 
         return {"job_id": jobs.enqueue("heal", _job)}
+
+    # 写（唯一写入口之一 = backfill，P4.8）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
+    # 与 ingest 端点逐行同构——整体复用 run_query(backfill=True)，答案 + 门禁回执经 stdout 捕获进 job.output。
+    # 比 ingest 还薄：_job 返回退出码 int → worker 走既有 int 鸭子分流分支、result 恒 None（决策P4.8-2）。
+    @app.post("/api/backfill")
+    async def backfill(body: BackfillBody) -> dict:
+        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10 / P4.8-5）
+
+        def _job() -> int:  # 返回退出码 int（与 ingest 同形）→ worker 鸭子分流走 int 分支、result 恒 None
+            return run_query(
+                body.question,
+                root=root,
+                backfill=True,
+                model=body.model or model,
+                runner=runner,
+            )
+
+        return {"job_id": jobs.enqueue("backfill", _job)}
 
     @app.get("/api/jobs/{job_id}")
     async def job_status(job_id: str) -> dict:
