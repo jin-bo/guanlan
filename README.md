@@ -27,9 +27,9 @@ P3 三个零-LLM 维护工具（advisory）：
 
 **P3.1 别名解析（零-LLM 增强）** —— entity/concept 页可在 frontmatter 声明可选 `aliases`，让别名进入 `[[wikilink]]` 解析命名空间（与页名同口径、大小写不敏感）：`[[大模型]]` / `[[LLM]]` 都解析到声明它们的页，**消假断链**（check / lint / graph / Web 一致）、**补 CJK 同义召回**（别名纳入 query 2-gram 与 ingest 去重）。别名全局唯一由 `check` 确定性校验（撞页名 / 重复 → 阻断写门禁）。这不是新里程碑，P5 仍是多格式与自动化。细化见 [`docs/P3.1-别名解析.md`](docs/P3.1-别名解析.md)。
 
-P4 之上已落地一批**零-LLM Web 宿主半相位**（仍在 P4 边界内，不引入新退出码）：缺失实体物化 `guanlan heal`（[P3.2](docs/P3.2-缺失实体物化.md)/[P3.3](docs/P3.3-规范标题页与别名收编.md)）、索引回填 `guanlan reindex`（[P3.4](docs/P3.4-索引回填.md)）、Web 投喂 `POST /api/raw`（[P4.1](docs/P4.1-Web投喂.md)）、会话落盘与恢复（[P4.2](docs/P4.2-会话落盘.md)）、Web-heal（[P4.3](docs/P4.3-Web-heal.md)）、Web 斜杠命令与只读自省（[P4.4](docs/P4.4-Web斜杠命令.md)）、可写 Web 工作会话（[P4.5](docs/P4.5-可写Web工作会话.md)）、Web 文件上传与派生物晋级为源（[P4.6](docs/P4.6-Web上传与晋级.md)）。
+P4 之上已落地一批 **Web 宿主半相位**（仍在 P4 边界内，不引入新退出码）：缺失实体物化 `guanlan heal`（[P3.2](docs/P3.2-缺失实体物化.md)/[P3.3](docs/P3.3-规范标题页与别名收编.md)）、索引回填 `guanlan reindex`（[P3.4](docs/P3.4-索引回填.md)）、Web 投喂 `POST /api/raw`（[P4.1](docs/P4.1-Web投喂.md)）、会话落盘与恢复（[P4.2](docs/P4.2-会话落盘.md)）、Web-heal（[P4.3](docs/P4.3-Web-heal.md)）、Web 斜杠命令与只读自省（[P4.4](docs/P4.4-Web斜杠命令.md)）、可写 Web 工作会话（[P4.5](docs/P4.5-可写Web工作会话.md)）、Web 文件上传与派生物晋级为源（[P4.6](docs/P4.6-Web上传与晋级.md)）、界面中英双语切换（[P4.7](docs/P4.7-中英双语.md)）、Web 端问答回填 `query --backfill`（[P4.8](docs/P4.8-Web回填.md)）。
 
-`query --backfill`、多格式自动 ingest 留待 P5（见 DESIGN §8 与 `docs/P4-Web宿主.md` §10）。别名自动物化建页（`heal`）、同义词表、向量检索按需驱动、另开方案。
+多格式自动 ingest 留待 P5（见 DESIGN §8 与 `docs/P4-Web宿主.md` §10）。别名自动物化建页（`heal`）、同义词表、向量检索按需驱动、另开方案。
 
 ## 安装
 

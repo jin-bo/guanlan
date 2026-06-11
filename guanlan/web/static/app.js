@@ -536,6 +536,86 @@ function renderHealDone(job) {
   }
 }
 
+// ── backfill：把一次好问答沉淀为 wiki/syntheses/ 综合页（P4.8）─────────────────────
+//
+// 顶栏「回填」或问答气泡的「沉淀」小按钮 → 同一浮层（问题文本域 + 「沉淀」提交）→ POST /api/backfill
+// （入单写者队列、与 ingest/heal 同 worker 串行）→ 复用 pollJob 默认渲染（退出码徽标 + job.output：
+// 答案 + 门禁回执）。完成后 loadPages() 刷新右栏 wiki，新综合页可搜索·点开核对。入口②只预填问题、
+// 不搬只读答案原文（backfill 是另起一次 gated 写，由子进程 Agent 重新综合，决策P4.8-3）。
+
+$("#backfill-btn").addEventListener("click", () => openBackfill());
+
+function openBackfill(prefillQuestion = "") {
+  showOverlay("backfill", ""); // 标题用命令名（同 heal/ingest，不译）
+  renderBackfillForm(prefillQuestion);
+  // 语言切换纯重渲染：从当前文本域读回实时输入作新 prefill（用户已输入未提交的内容不丢，决策P4.8-9）；
+  // 文本域尚未挂载（理论边界）时回退最初 prefill。
+  overlayRepaint = () => renderBackfillForm($("#backfill-question")?.value ?? prefillQuestion);
+}
+
+function renderBackfillForm(prefillQuestion) {
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  const hint = document.createElement("p");
+  hint.className = "muted";
+  hint.textContent = t("backfill.hint");
+  const ta = document.createElement("textarea");
+  ta.id = "backfill-question";
+  ta.className = "backfill-question";
+  ta.placeholder = t("backfill.placeholder");
+  ta.value = prefillQuestion || "";
+  const submit = document.createElement("button");
+  submit.className = "backfill-go";
+  submit.textContent = t("backfill.submit");
+  const updateDisabled = () => { submit.disabled = !ta.value.trim(); }; // 空问题禁用（双重兜底，非依赖）
+  ta.addEventListener("input", updateDisabled);
+  submit.addEventListener("click", () => {
+    const q = ta.value.trim();
+    if (q) triggerBackfill(q);
+  });
+  box.append(hint, ta, submit);
+  updateDisabled();
+}
+
+async function triggerBackfill(question) {
+  showOverlay("backfill", `<p class="muted">${escapeHtml(t("backfill.submitted"))}</p>`);
+  try {
+    // 不用 postJSON（它只 throw `url → status`、丢 detail，无法分流 423）：用裸 fetch 显式特判
+    // 423（可写 turn 活跃）→ 本地化 backfill.busy；其余非 2xx → common.submitFail（带状态码）。
+    const res = await fetch("/api/backfill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    });
+    if (res.status === 423) {
+      $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("backfill.busy"))}</p>`;
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { job_id } = await res.json();
+    await pollJob(job_id, "backfill"); // 复用默认渲染：退出码徽标 + job.output（答案 + 门禁回执）
+  } catch (e) {
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.submitFail", e.message))}</p>`;
+  }
+}
+
+// 给一条问答气泡尾部挂「沉淀」小按钮：点击预填该轮用户问题、打开 backfill 浮层（决策P4.8-3）。
+// done / stopped 收尾时调用；read-only / workspace-write 两种姿态都挂（backfill 是独立写端点）。
+function appendBackfillButton(botEl) {
+  if (botEl.querySelector(".bubble-backfill")) return; // 幂等：done 之后又 stopped 不重复挂
+  const question = botEl.dataset.question || "";
+  const btn = document.createElement("button");
+  btn.className = "bubble-backfill";
+  btn.type = "button";
+  // 水滴沉入横线图标（#i-backfill，贴「沉淀」意象）+ 文案。
+  btn.innerHTML = `<svg class="ico"><use href="#i-backfill"/></svg>`;
+  const label = document.createElement("span");
+  label.textContent = t("chat.backfill");
+  btn.appendChild(label);
+  btn.addEventListener("click", () => openBackfill(question)); // 预填该轮问题（不搬答案原文）
+  botEl.appendChild(btn);
+}
+
 // ── 投喂：粘贴正文 + 命名 → POST /api/raw → 一键 ingest（P4.1）──────────────────
 //
 // 顶栏「投喂」→ 浮层（文件名输入 + 正文 textarea + 存盘）。存盘期间按钮置「保存中…」并禁用
@@ -1826,6 +1906,7 @@ async function sendChat(message, attachments) {
   if (message) addMsg("user", message);
   if (attachments && attachments.length) addUserAttachments(attachments); // 用户气泡下回显附件徽章
   const botEl = addMsg("bot", "");
+  botEl.dataset.question = message || ""; // 记住该轮用户问题，供气泡「沉淀」按钮预填（P4.8）
   setChatSending(true); // 按钮切「停止」、置 chatStreaming，整轮可中断
   try {
     const body = { message, conversation_id: conversationId };
@@ -1889,6 +1970,7 @@ function handleSSE(frame, botEl) {
     note.textContent = t("chat.stopped");
     botEl.appendChild(note);
     renderWritableReceipts(payload); // 可写 turn 被停也可能已写盘：照常出 check/撤销/告警
+    appendBackfillButton(botEl); // 气泡尾部挂「沉淀」按钮：预填该轮问题（P4.8）
     refreshStagingIfOpen(); // 修订 turn 收尾：暂存区开着则重拉刷新池（决策P4.6-9）
     log.scrollTop = log.scrollHeight;
   } else if (event === "done") {
@@ -1901,6 +1983,7 @@ function handleSSE(frame, botEl) {
       botEl.textContent = payload.answer;
     }
     renderWritableReceipts(payload); // 可写 turn 收尾：check 回执 / 撤销 / immutable 告警
+    appendBackfillButton(botEl); // 气泡尾部挂「沉淀」按钮：预填该轮问题（P4.8）
     refreshStagingIfOpen(); // 修订 turn 收尾：暂存区开着则重拉刷新池（决策P4.6-9）
     log.scrollTop = log.scrollHeight;
   } else if (event === "error") {
