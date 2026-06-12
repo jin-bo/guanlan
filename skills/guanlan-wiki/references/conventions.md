@@ -190,7 +190,7 @@ last_updated: YYYY-MM-DD
 
 ## CJK 检索
 
-query 对中文用 **2-gram 滑窗**匹配 `index.md` 标题/摘要做粗召回；粗召回不足时扫相关目录或请用户补关键词（graceful fallback）。**不优先上分词**；逐级增强备选见 `docs/backlog/notes/cjk-retrieval-enhancements.md`。
+query 召回优先用**可用的 search 入口**（宿主 `guanlan_search` 工具 / `guanlan search "<词>"` CLI）：确定性整页 BM25 召回，中文走 **2-gram 滑窗**、别名已纳入匹配面（P5.0/P5.1）。search 入口都不可用或空手而回时**退回**扫 `index.md` 标题/摘要 + 相关目录，或请用户补关键词（graceful fallback）。**不优先上分词**；逐级增强备选见 `docs/backlog/notes/cjk-retrieval-enhancements.md`。
 
 ## 不纳入扫描的 config 文件
 

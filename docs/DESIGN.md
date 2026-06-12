@@ -243,16 +243,16 @@ P4 给同一文件库加一个**可选的本地 Web 图形入口**。**实现级
 |------|------|------|
 | **P1 — 骨架** | init + Schema 落地 | 观澜仓库 `skills/guanlan-wiki/`（开发期 repo-root 自动发现）；`guanlan init` 生成最小模板（`AGENTAO.md` 含 skill 指针 / `SCHEMA.md` / `raw/` / `wiki/` 含 index·log·overview）；wiki 数据默认 `.gitignore` |
 | **P2 — 最小闭环** | wrapper + ingest + query + 基础校验 | `guanlan ingest/query/check`；`.md` ingest；source/entity/concept 页生成；wikilink + frontmatter + `sources` + 断链校验 + `raw/` 快照比对（见 §4.7）；query 带引用；纯 CLI。**实现级细化见 [`P2-最小闭环.md`](P2-最小闭环.md)** |
-| **P3 — 健康与图谱** | health + 结构 lint + 确定性 graph | `guanlan health/lint/graph`：结构健康检查（桩页/index 同步）、结构 lint（孤儿/断链/缺失实体，零 LLM）、确定性 wikilink graph + 自包含 `graph.html`。**实现级细化见 [`P3-健康与图谱.md`](P3-健康与图谱.md)** |
-| **P4 — Web 宿主（可选）** | 复用同一文件库的本地 Web 图形入口 | `guanlan web`：浏览 wiki + 触发 `ingest` + **与 agent 单轮/多轮问答** + 跑 check/health/lint + 看 graph；FastAPI/uvicorn 薄表现层，写作业走子进程、所有问答走只读进程内嵌入（默认只读、token 流式）。**实现级细化见 [`P4-Web宿主.md`](P4-Web宿主.md)** |
-| **P5 — 多格式与自动化** | 多格式摄入、定时同步 | 多格式转换 adapter（markitdown 兜底，评估更高质量 PDF backend）；docx/web clip 等摄入；nightly health/lint |
+| **P3 — 健康与图谱** | health + 结构 lint + 确定性 graph | `guanlan health/lint/graph`：结构健康检查（桩页/index 同步）、结构 lint（孤儿/断链/缺失实体，零 LLM）、确定性 wikilink graph + 自包含 `graph.html`。**实现级细化见 [`P3-健康与图谱.md`](P3-健康与图谱.md)**；半阶段 P3.1–P3.4 已落（别名/heal/规范标题/reindex）。**P3.5 图谱分析**（确定性 Louvain 社区 + hub/bridge/silo 拓扑 lint，零 LLM；*设计文档已出、待实现*）见 [`P3.5-图谱分析.md`](P3.5-图谱分析.md) |
+| **P4 — 可选宿主层（Web + MCP）** | 复用同一文件库的本地宿主入口（浏览器 / Agent） | `guanlan web`：浏览 wiki + 触发 `ingest` + **与 agent 单轮/多轮问答** + 跑 check/health/lint + 看 graph；FastAPI/uvicorn 薄表现层，写作业走子进程、所有问答走只读进程内嵌入（默认只读、token 流式）。**实现级细化见 [`P4-Web宿主.md`](P4-Web宿主.md)**；半阶段 P4.1–P4.9 已落。**P4.10 MCP 宿主**（第二种传输：只读 stdio，把只读核心暴露给任意 Agent；*设计文档已出、待实现*）见 [`P4.10-MCP宿主.md`](P4.10-MCP宿主.md) |
+| **P5 — 语料规模化与自动化（多格式 + 检索）** | 多格式摄入、检索、定时同步 | **P5.0 检索层** `guanlan search`（确定性 BM25 + CJK 2-gram，零 LLM；E1 检索升级的零基建先行片；*设计文档已出、待实现*）见 [`P5.0-检索层.md`](P5.0-检索层.md)；多格式转换 adapter（markitdown 兜底，评估更高质量 PDF backend）；docx/web clip 等摄入；nightly health/lint |
 
 **企业版（E，方向；个人版跑通后另立设计文档详述，见 §6）**
 
 | 阶段 | 目标 | 方向 |
 |------|------|------|
-| **E1 — 存储与检索升级** | 大数据量 | markdown 仍是事实来源；index-only 撑不住时引入更强检索（选型另文） |
-| **E2 — 多租户权限** | 权限隔离 | source 级作用域 + 信任边界（本地全权 / 远程 scoped）。**会话分租先行**（[`P4.9-只读多会话.md`](P4.9-只读多会话.md)：只读多用户 / 能力 UUID 隔离 / 无用户管理，作 E2 前哨在 P4 半阶段落地）；**source 级作用域后续**（真正的 E2，动数据模型、排 P 轨之后） |
+| **E1 — 存储与检索升级** | 大数据量 | markdown 仍是事实来源；index-only 撑不住时引入更强检索（选型另文）。**零基建先行片**（确定性 BM25 轻量检索）已先行规划为 **P5.0**（见 [`P5.0-检索层.md`](P5.0-检索层.md)）；**向量 / 重排 / 持久化索引**仍属本阶段（选型另文） |
+| **E2 — 多租户权限** | 权限隔离 | source 级作用域 + 信任边界（本地全权 / 远程 scoped）。**会话分租先行**（[`P4.9-只读多会话.md`](P4.9-只读多会话.md)：只读多用户 / 能力 UUID 隔离 / 无用户管理，作 E2 前哨在 P4 半阶段落地）；只读本地 **MCP 宿主**（[`P4.10-MCP宿主.md`](P4.10-MCP宿主.md)）作"远程 / scoped MCP"前哨；**source 级作用域后续**（真正的 E2，动数据模型、排 P 轨之后） |
 | **E3 — 自动富化** | wiki 自保鲜 | health/lint/富化做成后台定时任务 |
 
 ---
@@ -263,9 +263,9 @@ P4 给同一文件库加一个**可选的本地 Web 图形入口**。**实现级
 - **wrapper 必要性**：MVP 需要真实的 `guanlan ingest/query`，但只做编排与确定性门禁；不做独立后端，不自管模型，不把 ingest/query 逻辑写成脱离 Agentao 的大脚本。
 - **skill 分发**：开发期用观澜仓库 `skills/guanlan-wiki/`（repo-root 自动发现，免安装，见 §5.1）；安装态下 skill 随 wheel 携带，wrapper 在 ingest/query 前**幂等装入全局 `~/.agentao/skills/`**（也可 `guanlan install-skill`），故 P2 既能在仓库内、也能在外部安装库跑通（落点 `guanlan/skill.py`）。分发渠道已落地：以 `guanlan-wiki` 发到 PyPI、skill 随 wheel 携带（见 §4.8）。
 - **个人版 → 企业版的数据迁移**：markdown 为事实来源的前提下，索引重建应可幂等、增量（SHA256 缓存）。
-- **CJK 检索质量（按需升级，不预先加机制）**：MVP 用 `index.md` + 2-gram 粗召回，召回不中时 Agent 扫目录或请用户补关键词兜底；后续仅在漏召回确有实证时再评估 aliases 或轻量检索，分词不优先（逐级增强备选见 `docs/backlog/notes/cjk-retrieval-enhancements.md`，具体规则待实现增强时再定）。
+- **CJK 检索质量（按需升级，不预先加机制）**：MVP 用 `index.md` + 2-gram 粗召回，召回不中时 Agent 扫目录或请用户补关键词兜底；后续仅在漏召回确有实证时再评估 aliases 或轻量检索，分词不优先（逐级增强备选见 `docs/backlog/notes/cjk-retrieval-enhancements.md`）。**别名已落 P3.1**；**轻量检索已细化为 P5.0**（确定性 BM25 + 2-gram，整页正文召回，见 [`P5.0-检索层.md`](P5.0-检索层.md)）；向量仍留 E1、分词仍不优先。
 - **语义 lint（P3 之后）**：矛盾、过期论断、资料缺口等需 LLM 的检查，在结构 lint 跑通后再加；成本较高，应可按需触发而非每次 lint 全量跑。
-- **graph 增强（P3 之后）**：在确定性 wikilink graph 之上是否加 LLM 推断边（`INFERRED`/`AMBIGUOUS`）、Louvain 社区检测、图感知**语义** lint、SHA256 增量缓存——成本/收益待评估，需可关闭与采样策略。（P3 的 `guanlan lint` 已是图感知的**确定性结构** lint，不在此推后项内。）
+- **graph 增强（P3 之后）**：在确定性 wikilink graph 之上是否加 LLM 推断边（`INFERRED`/`AMBIGUOUS`）、Louvain 社区检测、图感知**语义** lint、SHA256 增量缓存——成本/收益待评估，需可关闭与采样策略。（P3 的 `guanlan lint` 已是图感知的**确定性结构** lint，不在此推后项内。）其中 **Louvain 社区 + 拓扑 lint（hub/bridge/silo）的零 LLM 那半已细化为 P3.5**（见 [`P3.5-图谱分析.md`](P3.5-图谱分析.md)，确定性、保 graph 可重建）；**LLM 推断边**（非确定性、破坏 graph 可重建性）与 SHA256 增量缓存仍推后、需另开。
 
 ---
 

@@ -81,7 +81,7 @@ description: >
 
 ### query（P2）— `guanlan query "…"` / `--backfill`
 
-1. 读 `wiki/index.md` 定位相关页（CJK 用 2-gram 粗召回，**别名串一并纳入匹配面**——同义不同名时命中声明该别名的页；不中时扫相关目录或现有页 `aliases`，或请用户补关键词——graceful fallback）。
+1. **先用可用的 search 入口拿 top-N 候选页路径**——宿主 `guanlan_search` 工具（只读 Web 会话用它召回，无 shell 也能调）或 `guanlan search "<关键词>"` CLI（有 shell 时），二者同一确定性整页 BM25 召回（CJK 走 2-gram、**别名已纳入匹配面**——同义不同名时命中声明该别名的页）；读这些候选页 + `wiki/index.md` 综合。search 入口都不可用或空手而回（生僻/跨义）时**退回**原路径：扫 `index.md` / 相关目录 / 现有页 `aliases`，或请用户补关键词（graceful fallback，原行为保留）。
 2. 读相关页，**综合出带 `[[页]]` 引用的答案**；无可靠来源时明说，不编造。引用页面**一律裸 `[[stem]]`**——从 `index.md` 目录行取材时把 `[标题](dir/stem.md)` 改写成 `[[stem]]`，勿照抄目录行的 markdown 链接（否则渲染成不走站内导航的普通相对链接；详见 conventions §wikilink）。
 3. **默认只读**。仅当显式 `--backfill` 时把好答案回填 `wiki/syntheses/<slug>.md`（`type: synthesis`），并走与 ingest 同一套门禁。
 
