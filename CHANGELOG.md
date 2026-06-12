@@ -3,6 +3,32 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [Unreleased]
+
+在 P3「健康与图谱」主题内深化 `graph`/`lint`——把图从「看一眼的邻接列表」升级成**维护仪表**。
+**纯零 LLM、零新依赖、确定性、字节稳定**：不加子命令、不加旗标、不加退出码、不动门禁、不碰
+`raw/`/`log.md`。
+
+### 新增
+
+- **图谱分析（P3.5）** —— 新增 `guanlan/graphstats.py`（拓扑分析单一归口）：在 `graph.build_graph`
+  已有邻接表上算**确定性手写 Louvain** 社区（固定 id 升序遍历 + 仅 ΔQ>0 移动 + 平局优先当前社区/
+  其次最小成员 + 规范化重编号），手写纯 Python、零依赖、无 RNG，同图两次结果一致。
+  - `graph`：`graph.json` **additive** 多 `stats.communities` 计数与每节点 `community` 社区号（既有
+    键/顺序一字不动）；零-JS `graph.html` 加社区徽标 + 末尾确定性「拓扑提示」段（守决策P3-7）。
+  - `lint`：在同一份 `g` 上加三类**建议非门禁**拓扑 finding —— `lint.hub_node`（过载枢纽，
+    度 ≥ 均值+2σ 且 ≥ 5）、`lint.thin_intercommunity_link`（一对社区仅单条跨社区边互链）、
+    `lint.isolated_community`（规模 ≥2 且与其余社区零跨边的孤岛）。
+  - 算法边界收严：`undirected_adjacency` **显式过滤自环**（`build_graph` 只去重不删自环，自链页不虚增
+    度数，决策P3.5-11）；`isolated_community` **前置守卫全库社区数 >1**，单社区小库永不误判孤岛
+    （决策P3.5-12）；`thin_intercommunity_link` 命名取代 `fragile_bridge`，明确**非图论 bridge**
+    （不判删边断连，决策P3.5-13）。LLM 推断边明确排除（破坏 graph 可重建性）。
+  - 落地小设计见 [`docs/P3.5-图谱分析.md`](docs/P3.5-图谱分析.md)。
+
+由 `tests/test_graphstats.py`（确定性+字节稳定 / 两团单边→2 社区+thin-link / 有替代路径仍报 /
+枢纽 σ 阈值+度地板 / 孤岛双簇+单社区守卫+孤儿排除 / 自环+断链排除 / 空图+单节点）与
+`tests/test_graph.py`（additive `community`/`communities` 契约）守恒。
+
 ## [0.1.7] - 2026-06-12
 
 把 **P4「可选宿主层」** 从「仅 Web」扩为「**Web + MCP** 两种传输」——新增第二种本地宿主入口
