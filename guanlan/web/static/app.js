@@ -393,12 +393,52 @@ function renderRawPicker(files) {
     row.className = "raw-pick";
     const name = document.createElement("span");
     name.textContent = `${f.name} (${f.size}B)`; // textContent：文件名按字面显示，无注入
+    const preview = document.createElement("button");
+    preview.textContent = t("ingest.preview");
+    preview.addEventListener("click", () => previewRawFile(f.name, files));
     const btn = document.createElement("button");
     btn.textContent = "ingest"; // 命令名，不译
     btn.addEventListener("click", () => triggerIngest(`raw/${f.name}`));
-    row.append(name, btn);
+    row.append(name, preview, btn);
     box.appendChild(row);
   }
+}
+
+// raw 源预览（读，ingest 前看清正文）：渲染 markdown，与 workspace 暂存区预览同款 overlay + 返回。
+// `files` 透传供「返回」纯重渲染选单（吃缓存，不重拉 /api/raw）。
+async function previewRawFile(name, files) {
+  overlayRepaint = null; // 预览态不挂重画闭包：避免语言切换把预览刷回选单（返回后由 renderRawPicker 重置）
+  const box = $("#overlay-body");
+  box.innerHTML = `<p class="muted">${escapeHtml(t("ingest.loadingPreview"))}</p>`;
+  const loading = box.firstChild; // 哨兵：迟到响应回来时若浮层已被别的 opener（showOverlay）换走则丢弃（防 stale-overwrite，与 searchToken 同纪律）
+  const back = document.createElement("button");
+  back.className = "stage-act";
+  back.textContent = t("ingest.backToList");
+  back.addEventListener("click", () => {
+    renderRawPicker(files);
+    overlayRepaint = () => renderRawPicker(files); // 复位重画闭包（同 openIngestPicker）
+  });
+  let data;
+  try {
+    data = await getJSON(`/api/raw/file?name=${encodeURIComponent(name)}`);
+  } catch (e) {
+    if (!box.contains(loading)) return; // 浮层已切走 → 不抢渲染（防覆盖新浮层）
+    box.innerHTML = "";
+    const err = document.createElement("p");
+    err.className = "report-bad";
+    err.textContent = t("ingest.previewFail", e.message);
+    box.append(back, err);
+    return;
+  }
+  if (!box.contains(loading)) return; // 同上：成功响应迟到亦不得覆盖新浮层
+  box.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "stage-head";
+  title.textContent = `raw/${name}`; // textContent：路径按字面显示
+  const view = document.createElement("div");
+  view.className = "stage-preview rendered";
+  view.innerHTML = data.html; // render_page 已 sanitize（同 /api/page）
+  box.append(back, title, view);
 }
 
 async function triggerIngest(target) {
