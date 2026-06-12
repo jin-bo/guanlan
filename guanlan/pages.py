@@ -44,6 +44,7 @@ __all__ = [
     "link_resolution_index",
     "index_md_links",
     "index_sync_state",
+    "report_dict",
     "report_json",
 ]
 
@@ -267,14 +268,25 @@ def link_resolution_index(wiki: Path) -> dict[str, str]:
     return resolved
 
 
+def report_dict(*, ok: bool, pages_checked: int, items_key: str, items: list) -> dict:
+    """`check`/`health`/`lint` 报告信封的**产-dict 单一归口**（稳定契约 `{ok, pages_checked, <items_key>}`）。
+
+    `report_json` 在此之上做序列化；MCP 宿主的 `health`/`lint` 工具**直接拿这份 dict**喂结构化输出
+    （决策P4.10-10），不再 `json.loads(format_report(...))` 绕字符串往返。`items` 是 `Violation`/
+    `Finding` 同形 dataclass 列表；`items_key` 为 `"violations"`（check）或 `"findings"`（health/lint）。
+    """
+    return {"ok": ok, "pages_checked": pages_checked, items_key: [asdict(i) for i in items]}
+
+
 def report_json(*, ok: bool, pages_checked: int, items_key: str, items: list) -> str:
     """`check`/`health`/`lint` 共用的机器可读报告信封（稳定契约 `{ok, pages_checked, <items_key>}`）。
 
-    单一归口，杜绝三命令的 JSON schema 漂移。`items` 是 `Violation`/`Finding` 同形 dataclass 列表；
-    `items_key` 为 `"violations"`（check）或 `"findings"`（health/lint）。无尾随换行（与 P2 行为一致）。
+    单一归口，杜绝三命令的 JSON schema 漂移。底层 dict 经 `report_dict` 产出（MCP 工具共用同一份），
+    本函数只负责序列化：`ensure_ascii=False, indent=2`、**无尾随换行**（与 P2 行为一致；MCP 拆分须
+    原样保留这套参数，否则破 CLI/Web JSON 字节契约，决策P4.10-10）。
     """
     return json.dumps(
-        {"ok": ok, "pages_checked": pages_checked, items_key: [asdict(i) for i in items]},
+        report_dict(ok=ok, pages_checked=pages_checked, items_key=items_key, items=items),
         ensure_ascii=False,
         indent=2,
     )
