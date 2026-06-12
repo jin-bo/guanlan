@@ -11,6 +11,8 @@ import sys
 
 from . import __version__
 from .check import check_entrypoint
+from .convert import _BACKENDS as _CONVERT_BACKENDS
+from .convert import convert_entrypoint
 from .errors import EXIT_USAGE, GuanlanError
 from .graph import graph_entrypoint
 from .heal import DEFAULT_LIMIT, heal_entrypoint, positive_int
@@ -91,6 +93,19 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
 def _cmd_search(args: argparse.Namespace) -> int:
     return search_entrypoint(
         args.dir, query=args.query, limit=args.limit, json_output=args.json
+    )
+
+
+def _cmd_convert(args: argparse.Namespace) -> int:
+    return convert_entrypoint(
+        args.dir,
+        src=args.src,
+        name=args.name,
+        origin=args.origin,
+        overwrite=args.overwrite,
+        dry_run=args.dry_run,
+        do_ingest=args.ingest,
+        backend=args.backend,
     )
 
 
@@ -285,6 +300,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_search.add_argument("--json", action="store_true", help="输出 JSON 契约")
     p_search.set_defaults(func=_cmd_search)
+
+    # convert（P5.2）：多格式 → raw/<slug>.md（复用 pdf-to-markdown skill，脚本零 LLM）。
+    # 刻意**不设 `--model`**：转换的 LLM 用法由 `--backend` + 用户环境决定，guanlan 不代为指定
+    # （决策P5.2-4）。`--backend` 透传 skill convert.py。
+    p_convert = sub.add_parser(
+        "convert",
+        parents=[dir_parent],
+        help="多格式（PDF/DOCX/…）转 markdown 落 raw/<slug>.md（零 LLM，复用 pdf-to-markdown skill）",
+    )
+    p_convert.add_argument("src", help="待转换的文件（PDF/DOCX/PPTX/XLSX/HTML/图片…）")
+    p_convert.add_argument("--name", default=None, help="覆盖目标 slug（默认取原件 stem）")
+    p_convert.add_argument(
+        "--origin", default=None, help="显式出处（默认 = 转换前原始 src 路径）"
+    )
+    p_convert.add_argument(
+        "--overwrite", action="store_true", help="同名 raw/ 已存在时显式覆盖（默认不覆盖）"
+    )
+    p_convert.add_argument(
+        "--dry-run", action="store_true", help="只把转换结果打到 stdout，raw/ 零写（人审预览）"
+    )
+    p_convert.add_argument(
+        "--ingest", action="store_true", help="转换成功后串联 `ingest raw/<slug>.md`（默认关）"
+    )
+    p_convert.add_argument(
+        "--backend",
+        choices=_CONVERT_BACKENDS,
+        default="auto",
+        help="转换后端（透传 skill convert.py：auto/mineru/marker/python，默认 auto）",
+    )
+    p_convert.set_defaults(func=_cmd_convert)
 
     p_web = sub.add_parser(
         "web",

@@ -25,6 +25,30 @@
     （不判删边断连，决策P3.5-13）。LLM 推断边明确排除（破坏 graph 可重建性）。
   - 落地小设计见 [`docs/P3.5-图谱分析.md`](docs/P3.5-图谱分析.md)。
 
+- **多格式摄入（P5.2）** —— 新增 `guanlan convert <file>`：把 PDF/DOCX/PPTX/XLSX/HTML/图片… 经
+  **既有 `pdf-to-markdown` skill**（MinerU→marker→pypdf 分层兜底、随 wheel 全局安装）转成 markdown、
+  落成 `raw/<slug>.md` 源（含 `origin` provenance），复用 `.md` 单格式 ingest 不动。补的是**命令行
+  那个洞**——此前 CLI 用户没有官方的 `PDF/DOCX → raw/*.md → ingest` 路径（Web 那半 P4.6 已落）。
+  - **脚本零 LLM、宿主写 `raw/`**：guanlan 自身不内嵌 LLM 客户端/密钥，只 shell out 到外部转换进程；
+    该进程（如 marker）是否用 LLM 增强由**用户环境**决定，与 guanlan 正交——不做 env-scrub、不设
+    `--model`、不向 skill 透传 model（决策P5.2-4）。**无新依赖、无新 extra**，graceful degrade 复用
+    skill 既有分层（全后端耗尽 → `EXIT_USAGE` + 安装提示）。
+  - **默认两步、不自动 ingest**：`convert` 只做转换 + 落源（确定性宿主写、非 gated、不起 Agentao、
+    不取 raw 快照、不写 `log.md`）；建页仍由独立 `guanlan ingest` 完成。`--ingest` 便利串联（默认关）、
+    `--dry-run` 预览（raw/ 零写）、`--overwrite` 显式覆盖、`--name`/`--origin` 显式控制、`--backend`
+    透传 skill。子进程 `cwd=KB root` 保 skill `.env` 发现、temp 暂存防污染用户目录（决策P5.2-10/12）。
+  - **抽出 `guanlan/rawio.py` 写归口（零行为变更）**：把 P4.6 的 slug/文本准入/provenance/原子写从
+    `web/rawfeed.py` 抽成 transport-neutral 核心（校验函数 `raise ValueError`、`atomic_write_raw` 仍
+    返回退出码），CLI `convert` 与 web 投喂/晋级共用一道闸、消漂移；`web/rawfeed.py` 保薄壳、HTTP
+    409/500 分流逐字不变（决策P5.2-6）。无新退出码。
+  - `ingest` 对非-`.md` 的报错文案改为指向 `guanlan convert`；落地小设计见
+    [`docs/P5.2-多格式摄入.md`](docs/P5.2-多格式摄入.md)。
+
+由 `tests/test_convert.py`（定位 skill / 不带 LLM·不改 env / 无 --model·不透传 model / cwd=root
+保 `.env` / temp 防污染 / 转换落源 / 全后端耗尽 degrade / 文本准入 / provenance·默认 origin 钉口径 /
+覆盖 / dry-run / ingest 串联 / IO 失败映射 / 共用 rawio 归口 / 端到端）与 `tests/test_web.py`
+（P4.6 投喂/晋级逐条仍绿的硬回归门）守恒。
+
 由 `tests/test_graphstats.py`（确定性+字节稳定 / 两团单边→2 社区+thin-link / 有替代路径仍报 /
 枢纽 σ 阈值+度地板 / 孤岛双簇+单社区守卫+孤儿排除 / 自环+断链排除 / 空图+单节点）与
 `tests/test_graph.py`（additive `community`/`communities` 契约）守恒。
