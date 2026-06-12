@@ -40,9 +40,11 @@ from agentao.embedding import (
 )
 from agentao.embedding.compat import build_compat_transport
 from agentao.permissions import PermissionMode
+from agentao.tools.base import Tool
 
 from ..check import Violation, run_check
 from ..gate import REPAIR_PROMPT, _render_violations
+from ..search import CorpusCache, score, search_result_dict
 from ..skill import SKILL_NAME, ensure_skill_available
 from .jobs import WriteGate
 from .policy_fs import (
@@ -128,6 +130,93 @@ def _blocked_in_mode(tool: object, mode: str) -> bool | str:
     if mode == "workspace-write":
         return False
     return _blocked_in_readonly(tool)
+
+
+# guanlan_search 工具的稳定元数据（每实例同名/同描述/同 schema；只 cache/wiki 闭包不同）。
+_GUANLAN_SEARCH_NAME = "guanlan_search"
+_GUANLAN_SEARCH_DESC = (
+    "对本知识库 wiki/ 下的内容页做确定性整页召回（BM25 + 中文 2-gram + 标题/别名加权），"
+    "按相关度降序返回候选页路径 + 片段。**优先用它召回候选页**再读取综合，比裸 grep 更全"
+    "（命中正文、别名、跨义）。返回 JSON 字符串：{ok, query, pages_searched, results:["
+    "{page,title,type,score,snippet}]}。纯读、不写盘。"
+)
+_GUANLAN_SEARCH_PARAMS = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "description": "检索词（关键词/短语；中文按 2-gram 切分）"},
+        "limit": {
+            "type": "integer",
+            "description": "召回条数（默认 10，须 ≥ 1）",
+            "default": 10,
+        },
+    },
+    "required": ["query"],
+}
+
+
+def make_guanlan_search_tool(search_cache: CorpusCache, *, wiki: Path) -> Tool:
+    """工厂：**每个 `Conversation` 新建一个** `guanlan_search` 工具实例，只共享同一个
+    `CorpusCache`（决策P5.1-6，§5）。
+
+    为何工厂、为何每会话新实例：agentao 在 `register_extra_tools` 时把 `working_directory`/
+    `filesystem`/`shell` 等 **per-agent 绑定写到工具实例上**（见 `tools/base._BaseTool`），跨会话
+    复用同一实例会让后注册会话**覆盖**前一会话的绑定。故每会话用本工厂新建实例；`search_cache`
+    与固定 `wiki` 路径由闭包捕获——**不**依赖 agentao 绑到实例的 `working_directory` 取路径
+    （少一层隐式耦合，两参在 `create_app` 期已知、对全会话恒定）。
+
+    `is_read_only=True` 是硬要求：否则 agentao 在只读姿态按 `tool_planning._decide`
+    （`readonly_mode and not is_read_only → DENY`）会把它和 shell 一起拦掉，只读会话依旧召回不了
+    （正是本阶段要解的问题）。该工具纯读 `wiki/`、不写盘，标只读名正言顺。
+    """
+
+    class _GuanlanSearchTool(Tool):
+        # 注：同步 `execute`（非 `async_execute`）。`Agentao.arun` 已把整轮 `chat()` 放进
+        # `loop.run_in_executor()`，故本 execute 跑在该 turn 的 **chat-executor 线程**、**不**在
+        # FastAPI 事件循环上——不会卡住 loop / SSE。代价是它占住该 turn 的 executor 线程整段时长
+        # （全库 stat + 重建 + BM25），并持 CorpusCache 锁、与并发 /api/search 串行（§5，已接受）。
+        def __init__(self) -> None:
+            super().__init__()
+            # 工厂参数落实例私有属性（等价闭包捕获、且可供自省/测试断言「共享 cache」）：cache/wiki
+            # 在 create_app 期已知、对全会话恒定。**不**依赖 agentao 绑到实例的 working_directory 取
+            # 路径（少一层隐式耦合）；下划线私有名与 agentao 绑定面（working_directory/filesystem/shell）
+            # 无碰撞，注册时不会被覆盖。
+            self._search_cache = search_cache
+            self._wiki = wiki
+
+        @property
+        def name(self) -> str:
+            return _GUANLAN_SEARCH_NAME
+
+        @property
+        def description(self) -> str:
+            return _GUANLAN_SEARCH_DESC
+
+        @property
+        def parameters(self) -> dict:
+            return _GUANLAN_SEARCH_PARAMS
+
+        @property
+        def is_read_only(self) -> bool:
+            return True  # 硬要求：只读姿态不被 DENY（镜像 tool_planning._decide）
+
+        def execute(self, *, query: str = "", limit: int = 10, **_kw) -> str:
+            # 工具路径自校验 limit（决策P5.0-15）：HTTP 有 Query(ge=1) 兜底，工具是 LLM 填参、无此门。
+            # `score` 对 limit<1 raise ValueError，故先 clamp 到 ≥1（坏类型也回落 10），不让它冒泡成
+            # 工具崩溃。空/纯标点 query 不必额外管——score 对零 query-token 短路回空、安全。
+            try:
+                lim = max(1, int(limit))
+            except (TypeError, ValueError):
+                lim = 10
+            # query 同样防坏类型（LLM 可能填 number/array/null）：非 str 一律 str() 归一，否则
+            # tokenize→re.finditer 抛 TypeError（被 agentao executor 吞成错误串、召回静默失败）。
+            if not isinstance(query, str):
+                query = "" if query is None else str(query)
+            result = score(self._search_cache.corpus(self._wiki), query, limit=lim)
+            # 工具契约 execute() -> str（执行器把返回值当 result_text）：返回 **JSON 字符串**，
+            # 经 search_result_dict 单一归口、与 /api/search 字段同形（决策P5.1-4）。
+            return json.dumps(search_result_dict(result), ensure_ascii=False)
+
+    return _GuanlanSearchTool()
 
 
 def _context_stats(agent: object, msgs: list) -> dict:
@@ -286,10 +375,12 @@ class Conversation:
         persist: bool,
         mode: str = "read-only",
         write_gate: WriteGate | None = None,
+        search_cache: CorpusCache | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.id = cid
         self._kb = kb
+        self._search_cache = search_cache  # P5.1：共享的 CorpusCache（None=不注册召回工具，纯读测试）
         # idle 回收用时间戳（决策P4.9-6）：time.monotonic（免墙钟跳变）、可注入（测试决定性）。
         # 每轮起跑 / 控制操作刷新（见 begin_turn / request_stop）；store 在「新建/恢复」锁内据
         # `is_idle` 淘汰久无活动者。
@@ -341,6 +432,16 @@ class Conversation:
             # --model 仅在给定时入 overrides：显式 model=None 会盖掉 .env 发现的模型、
             # 触发 agent.py 的 "model required" ValueError（默认不带 --model 的常路就崩）。
             opts["model"] = model
+
+        # P5.1（§3.1/§5）：构造期注入 `guanlan_search` 召回工具——与 transport/filesystem 同在构造期
+        # 一处装齐、无「构造后再补挂」时序窗口（决策P5.1-6）。**每会话新建一个实例**（工厂闭包捕获
+        # 共享 cache 与固定 `wiki/`），只共享 cache、不共享实例（避免 agentao per-agent 绑定互相覆盖）。
+        # 新建与懒恢复**共用本 __init__**，故恢复出的会话也带召回工具，两路零漂移。is_read_only=True
+        # 使只读姿态下也不被 DENY——这正是只读 Web 会话首次拥有确定性召回入口（§1.2 死指令的解药）。
+        if search_cache is not None:
+            opts["extra_tools"] = [
+                make_guanlan_search_tool(search_cache, wiki=kb / "wiki")
+            ]
 
         self.agent = build_from_environment(**opts)
         # 姿态两点同步置位（缺第二步 = 没真正切换，照搬 cli/run.py）：开局用构造姿态。
@@ -768,11 +869,15 @@ class ConversationStore:
         write_gate: WriteGate | None = None,
         max_conversations: int | None = None,
         idle_ttl: float | None = IDLE_TTL_SECONDS,
+        search_cache: CorpusCache | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._kb = kb
         self._default_model = default_model
         self._persist = persist
+        # P5.1：共享的检索 CorpusCache（create_app 注入这一个）；透传到每个会话，由 Conversation
+        # 用 make_guanlan_search_tool 新建**每会话一个**工具实例、只共享本 cache（§3.1/§5）。None=不注册。
+        self._search_cache = search_cache
         # 新会话开局姿态 = 进程 --mode 默认（决策P4.5-8：恢复不回放盘上姿态、用进程默认）。
         self._default_mode = default_mode
         self._write_gate = write_gate  # 进程级单写者协调，注入每个会话
@@ -848,6 +953,7 @@ class ConversationStore:
                     persist=self._persist,
                     mode=self._default_mode,
                     write_gate=self._write_gate,
+                    search_cache=self._search_cache,
                     clock=self._clock,
                 )
                 self._convs[cid] = conv
@@ -980,6 +1086,7 @@ class ConversationStore:
                     persist=self._persist,
                     mode=self._default_mode,
                     write_gate=self._write_gate,
+                    search_cache=self._search_cache,  # 懒恢复同样带召回工具（§3.1，两路零漂移）
                     clock=self._clock,
                 )
                 conv.agent.messages = messages  # 镜像 agentao cli/commands/sessions.py 的 resume

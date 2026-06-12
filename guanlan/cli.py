@@ -20,6 +20,7 @@ from .init import run_init
 from .lint import MISSING_ENTITY_MIN_REFS, lint_entrypoint
 from .query import run_query
 from .reindex import reindex_entrypoint
+from .search import search_entrypoint
 from .skill import install_skill
 
 
@@ -84,6 +85,12 @@ def _cmd_heal(args: argparse.Namespace) -> int:
 def _cmd_reindex(args: argparse.Namespace) -> int:
     return reindex_entrypoint(
         args.dir, prune=args.prune, dry_run=args.dry_run, json_output=args.json
+    )
+
+
+def _cmd_search(args: argparse.Namespace) -> int:
+    return search_entrypoint(
+        args.dir, query=args.query, limit=args.limit, json_output=args.json
     )
 
 
@@ -243,6 +250,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_reindex.add_argument("--json", action="store_true", help="输出 JSON 契约")
     p_reindex.set_defaults(func=_cmd_reindex)
+
+    p_search = sub.add_parser(
+        "search",
+        parents=[dir_parent],
+        help="确定性整页召回：BM25 + CJK 2-gram，按分数降序打印 top-N 页（零 LLM）",
+    )
+    p_search.add_argument("query", help="检索词")
+    p_search.add_argument(
+        "--limit",
+        type=positive_int,
+        default=10,
+        help="召回条数（默认 10，须 ≥ 1）",
+    )
+    p_search.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p_search.set_defaults(func=_cmd_search)
 
     p_web = sub.add_parser(
         "web",
