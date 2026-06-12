@@ -124,6 +124,26 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return exc.exit_code
 
 
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    # mcp 是可选叠加层：缺 `guanlan-wiki[mcp]`（mcp SDK 导入失败）时优雅降级、引导安装，
+    # 不让 CLI 抛 traceback（决策P4.10-2，镜像 web）。导入收在函数内，核心命令不背 import 成本。
+    try:
+        from .mcp import serve_mcp
+    except ImportError:
+        print(
+            "`guanlan mcp` 需要可选依赖：请先 `pip install 'guanlan-wiki[mcp]'`。",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    # 注：本命令把 guanlan 作 MCP **服务端**（把 wiki 只读暴露给外部 Agent），
+    # 与「Agentao 作 MCP 客户端的 Tool 注入」方向相反（决策P4.10-6）。
+    try:
+        return serve_mcp(args.dir, model=args.model)
+    except GuanlanError as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
+
+
 def _cmd_install_skill(args: argparse.Namespace) -> int:
     dest = install_skill(force=args.force)
     print(f"✓ guanlan-wiki skill 已就位：{dest}")
@@ -309,6 +329,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="新会话开局姿态（默认 read-only；workspace-write 起即可让 Agent 写 wiki/workspace，浏览器内可 /mode 切换）",
     )
     p_web.set_defaults(func=_cmd_web)
+
+    p_mcp = sub.add_parser(
+        "mcp",
+        parents=[dir_parent],
+        help="起只读 MCP 服务端（stdio，可选叠加层，需 `pip install 'guanlan-wiki[mcp]'`）：把 wiki "
+        "检索/读页/图谱/体检暴露给任意 MCP 客户端（与『Agentao 作客户端的 Tool 注入』方向相反）",
+    )
+    p_mcp.add_argument("--model", default=None, help="覆盖 ask 工具的 Agentao 模型（仅 ask 用）")
+    p_mcp.set_defaults(func=_cmd_mcp)
 
     p_skill = sub.add_parser(
         "install-skill", help="把随包 guanlan-wiki skill 装入 ~/.agentao/skills/（外部库用）"

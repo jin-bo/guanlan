@@ -122,6 +122,40 @@ def test_heal_rejects_non_positive_limit(bad):
         _parse(["heal", "--min-refs", bad])
 
 
+def test_mcp_parser_defaults():
+    """`mcp` 子命令：-C 透传、--model 默认 None（P4.10）。"""
+    args = _parse(["-C", "/kb", "mcp"])
+    assert args.command == "mcp" and args.dir == "/kb" and args.model is None
+    args2 = _parse(["mcp", "--model", "M", "-C", "/kb"])
+    assert args2.dir == "/kb" and args2.model == "M"
+
+
+def test_mcp_missing_extra_degrades(tmp_path, monkeypatch, capsys):
+    """缺 mcp extra（mcp SDK 导入失败）→ EXIT_USAGE 并引导 `pip install 'guanlan-wiki[mcp]'`。
+
+    在**装有** mcp 的 CI 也覆盖此路径：monkeypatch 令 `import mcp...` 抛 ImportError（决策P4.10-2/§7
+    依赖门控；不能只靠『实际缺 SDK 的环境』，否则该环境整组 skip、降级路径永不被测）。
+    """
+    import sys
+
+    from guanlan.cli import main
+
+    # 同时清掉 guanlan.mcp* 与已缓存的 mcp.*：否则 `from mcp.server.fastmcp import FastMCP` 命中
+    # 缓存的子模块、不重经父包 `mcp`（被打桩为 None）→ 降级路径不触发。monkeypatch 在 teardown 复原。
+    for name in list(sys.modules):
+        if (
+            name in ("guanlan.mcp", "mcp")
+            or name.startswith("guanlan.mcp.")
+            or name.startswith("mcp.")
+        ):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setitem(sys.modules, "mcp", None)  # `import mcp` → ImportError
+
+    rc = main(["-C", str(tmp_path), "mcp"])
+    assert rc == 1
+    assert "guanlan-wiki[mcp]" in capsys.readouterr().err
+
+
 def test_p3_dispatch_end_to_end(tmp_path):
     """三命令经 main 真正分发到各 entrypoint：在 init 出的库上各自退 0。"""
     from guanlan.cli import main
