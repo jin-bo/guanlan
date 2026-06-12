@@ -6,6 +6,11 @@
 - **断链**（`lint.broken_link`）：未解析的 `[[…]]`——与 `check.wikilink.broken` 同源同口径（决策P3-6）。
 - **缺失实体页**（`lint.missing_entity`）：同一未解析目标被 ≥ `MISSING_ENTITY_MIN_REFS` 张不同页引用却无页。
 
+P3.5 在同一份图上再加三类**确定性拓扑**建议（零 LLM，见 docs/P3.5-图谱分析.md §3.4）：
+- **过载枢纽**（`lint.hub_node`）：无向度 ≥ 均值+`HUB_SIGMA`σ 且 ≥ `HUB_MIN_DEGREE`。
+- **稀疏跨社区链接**（`lint.thin_intercommunity_link`）：一对社区仅靠单条跨社区边相连（非图论 bridge）。
+- **孤岛社区**（`lint.isolated_community`）：规模 ≥2、全库社区数 >1、且与其余社区零跨边。
+
 findings 是**建议性**（决策P3-4）：默认退 0，`--strict` 下有 findings → `EXIT_LINT_FINDINGS(6)`。
 只做结构 lint，语义 lint（矛盾复检/过期论断/资料缺口，需 LLM）属 P3 之后。
 """
@@ -20,6 +25,14 @@ from pathlib import Path
 
 from .errors import EXIT_LINT_FINDINGS, EXIT_OK, GuanlanError
 from .graph import Graph, build_graph, compute_orphans
+from .graphstats import (
+    HUB_SIGMA,
+    detect_communities,
+    hub_nodes,
+    isolated_communities,
+    thin_intercommunity_links,
+    undirected_adjacency,
+)
 from .pages import Finding, report_json
 from .paths import require_kb_root
 
@@ -116,7 +129,56 @@ def run_lint(wiki: Path) -> LintReport:
             )
         )
 
+    # P3.5 拓扑建议（接在 orphan/broken/missing_entity 之后，保既有顺序）：在**同一份 g** 上算
+    # 确定性社区与拓扑特征，三类建议同走 lint「建议非门禁」语义（决策P3.5-7）。
+    findings.extend(_topology_findings(g, node_path))
+
     return LintReport(ok=not findings, pages_checked=len(g.nodes), findings=findings)
+
+
+def _topology_findings(g: Graph, node_path: dict[str, str]) -> list[Finding]:
+    """P3.5 三类拓扑 `Finding`：枢纽 / 稀疏跨社区链接 / 孤岛（确定性、零 LLM）。
+
+    `node_path`：node_id → 相对库根 posix 路径，用于把拓扑函数返回的 stem 映射回页面路径。
+    """
+    # 无向邻接算一次，社区检测与三特征函数共用（免 4× 重复构建）。
+    adj = undirected_adjacency(g)
+    comm = detect_communities(g, adj=adj)
+    findings: list[Finding] = []
+
+    # 枢纽（god node）：度过载，记在该页（hub_nodes 已按 (-度, id) 稳定排序）。
+    for nid, deg in hub_nodes(g, comm, adj=adj):
+        findings.append(
+            Finding(
+                node_path.get(nid, nid),
+                "lint.hub_node",
+                f"无向度 {deg}（≥ 均值+{HUB_SIGMA:g}σ），疑为过载枢纽，考虑拆分",
+            )
+        )
+
+    # 稀疏跨社区链接：一对社区仅靠单条跨社区边相连（**非图论 bridge**）。全局 finding（page=""）。
+    for u, v in thin_intercommunity_links(g, comm, adj=adj):
+        a, b = sorted((comm[u], comm[v]))
+        findings.append(
+            Finding(
+                "",
+                "lint.thin_intercommunity_link",
+                f"社区 {a}↔{b} 仅靠 [[{u}]]—[[{v}]] 一条边互链，跨社区引用偏稀，建议补交叉引用",
+            )
+        )
+
+    # 孤岛社区：规模 ≥2、全库社区数 >1、且与其余社区零跨边。全局 finding（page=""）。
+    for c, members in isolated_communities(g, comm, adj=adj):
+        pages = ", ".join(node_path.get(mid, mid) for mid in members)
+        findings.append(
+            Finding(
+                "",
+                "lint.isolated_community",
+                f"社区{{{pages}}}与其余 wiki 零互链（孤岛），建议补桥接",
+            )
+        )
+
+    return findings
 
 
 def format_report(report: LintReport, *, json_output: bool) -> str:

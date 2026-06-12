@@ -20,6 +20,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
+from .graphstats import (
+    HUB_SIGMA,
+    detect_communities,
+    hub_nodes,
+    isolated_communities,
+    thin_intercommunity_links,
+    undirected_adjacency,
+)
 from .pages import (
     WIKILINK_RE,
     alias_index,
@@ -152,12 +160,16 @@ def compute_orphans(g: Graph) -> list[Node]:
     return [n for n in g.nodes if n.id not in has_inlink]
 
 
-def graph_to_dict(g: Graph) -> dict:
-    """graph.json 的稳定数据结构（§6.2）。
+def graph_to_dict(g: Graph, *, communities: dict[str, int] | None = None) -> dict:
+    """graph.json 的稳定数据结构（§6.2 + P3.5 §3.2 富化）。
 
     stats.edges = resolved 边数（adjacency 关系数）；stats.broken = 断链边数；二者分列。
     edges 数组含 resolved + broken 两类，按 (source,target) 排序。
+    **P3.5 additive**：stats 多 `communities` 计数、每节点多 `community` 社区号（既有键/顺序/排序
+    一字不动，决策P3.5-4）。`communities` 可由调用方算好传入（避免一次写盘重复算确定性社区）。
     """
+    if communities is None:
+        communities = detect_communities(g)
     resolved_count = sum(1 for e in g.edges if e.resolved)
     return {
         "generated_from": "wiki/",
@@ -166,23 +178,79 @@ def graph_to_dict(g: Graph) -> dict:
             "edges": resolved_count,
             "broken": len(g.broken),
             "orphans": len(compute_orphans(g)),
+            "communities": len(set(communities.values())),
         },
-        "nodes": [{"id": n.id, "title": n.title, "type": n.type, "path": n.path} for n in g.nodes],
+        "nodes": [
+            {
+                "id": n.id,
+                "title": n.title,
+                "type": n.type,
+                "path": n.path,
+                "community": communities[n.id],
+            }
+            for n in g.nodes
+        ],
         "edges": [{"source": e.source, "target": e.target, "resolved": e.resolved} for e in g.edges],
     }
 
 
-def dump_json(g: Graph) -> str:
+def dump_json(g: Graph, *, communities: dict[str, int] | None = None) -> str:
     """渲染 graph.json 文本：同一 wiki 两次产出**字节级一致**（稳定排序 + 无时间戳/随机）。"""
-    return json.dumps(graph_to_dict(g), ensure_ascii=False, indent=2) + "\n"
+    return json.dumps(graph_to_dict(g, communities=communities), ensure_ascii=False, indent=2) + "\n"
 
 
-def render_html(g: Graph) -> str:
+def _render_topology_hints(g: Graph, communities: dict[str, int]) -> str:
+    """末尾「拓扑提示」段：确定性列出枢纽 / 稀疏跨社区链接 / 孤岛（与 lint 同数据，文字呈现）。
+
+    纯静态列表、Python 端稳定排序生成，天然字节稳定（决策P3.5-5，守决策P3-7）。
+    """
+    title_by_id = {n.id: n.title for n in g.nodes}
+    path_by_id = {n.id: n.path for n in g.nodes}
+    adj = undirected_adjacency(g)  # 算一次，三特征函数共用（免 3× 重复构建）。
+
+    def _block(heading: str, items: list[str]) -> list[str]:
+        out = [f"<h3>{heading}</h3>"]
+        if items:
+            out.append("<ul class='hints'>")
+            out.extend(f"<li>{it}</li>" for it in items)
+            out.append("</ul>")
+        else:
+            out.append("<p class='meta'>无</p>")
+        return out
+
+    hubs = [
+        f"<strong>{html.escape(title_by_id.get(nid, nid))}</strong> "
+        f"<code>{html.escape(nid)}</code> — 无向度 {deg}"
+        for nid, deg in hub_nodes(g, communities, adj=adj)
+    ]
+    thin: list[str] = []
+    for u, v in thin_intercommunity_links(g, communities, adj=adj):
+        a, b = sorted((communities[u], communities[v]))
+        thin.append(
+            f"社区 {a}↔{b}：<code>{html.escape(u)}</code>—<code>{html.escape(v)}</code>"
+        )
+    silos = [
+        f"社区 {c}：" + "、".join(html.escape(path_by_id.get(mid, mid)) for mid in members)
+        for c, members in isolated_communities(g, communities, adj=adj)
+    ]
+
+    parts = ["<h2>拓扑提示 <span class='n'>(确定性)</span></h2>"]
+    parts += _block("枢纽节点", hubs)
+    parts += _block("稀疏跨社区链接", thin)
+    parts += _block("孤岛社区", silos)
+    return "\n".join(parts)
+
+
+def render_html(g: Graph, *, communities: dict[str, int] | None = None) -> str:
     """渲染自包含、零网络的最小只读邻接列表静态视图（决策P3-7）。
 
     单文件、内联数据、无 CDN/第三方库、无图形布局算法——纯列表结构在 Python 端按稳定排序生成，
     天然字节稳定、可幂等重建。`type` 分组 → 每页 + 其 resolved 外链邻接，孤儿/断链以文字标注。
+    **P3.5**：每节点尾部加社区徽标、顶部摘要加社区数、末尾加确定性「拓扑提示」段（决策P3.5-5，
+    仍守决策P3-7 零 JS/零第三方库/纯静态列表）。
     """
+    if communities is None:
+        communities = detect_communities(g)
     orphan_ids = {n.id for n in compute_orphans(g)}
     broken_by_source: dict[str, list[str]] = {}
     for e in g.broken:
@@ -197,9 +265,10 @@ def render_html(g: Graph) -> str:
         parts.append("<ul class='nodes'>")
         for n in group:
             tags = " <span class='orphan'>[孤儿]</span>" if n.id in orphan_ids else ""
+            comm_badge = f" <span class='comm'>社区 {communities[n.id]}</span>"
             head = (
                 f"<strong>{html.escape(n.title)}</strong> "
-                f"<code>{html.escape(n.path)}</code>{tags}"
+                f"<code>{html.escape(n.path)}</code>{comm_badge}{tags}"
             )
             parts.append(f"<li>{head}")
             out_links = sorted(g.adjacency.get(n.id, set()))
@@ -218,13 +287,14 @@ def render_html(g: Graph) -> str:
 
     # 内联 graph.json：转义所有 < 为 <，彻底杜绝 title/path 里的 </script>、<!-- 等
     # 截断或干扰脚本块（比仅转义 </ 更稳妥；JSON 里 < 解析回 <，语义无损）。
-    data = graph_to_dict(g)  # 一次构建，内联数据与统计摘要共用，免重复计算。
+    data = graph_to_dict(g, communities=communities)  # 一次构建，内联数据与统计摘要共用，免重复计算。
     data_blob = json.dumps(data, ensure_ascii=False, indent=2).replace("<", "\\u003c")
     stats = data["stats"]
     summary = (
         f"节点 {stats['nodes']} · 链接 {stats['edges']} · "
-        f"断链 {stats['broken']} · 孤儿 {stats['orphans']}"
+        f"断链 {stats['broken']} · 孤儿 {stats['orphans']} · 社区 {stats['communities']}"
     )
+    parts.append(_render_topology_hints(g, communities))
     body = "\n".join(parts)
     return f"""<!doctype html>
 <html lang="zh">
@@ -239,6 +309,9 @@ def render_html(g: Graph) -> str:
   .n {{ color: #888; font-weight: normal; }}
   ul.links {{ margin: .2rem 0 .6rem 1.2rem; }}
   .orphan {{ color: #b06000; }} .broken {{ color: #b00020; }}
+  .comm {{ color: #3060a0; font-size: .82em; }}
+  h3 {{ font-size: 1rem; margin: .8rem 0 .2rem; color: #444; }}
+  ul.hints {{ margin: .2rem 0 .6rem 1.2rem; }}
   .meta {{ color: #666; }}
 </style>
 </head>
@@ -252,17 +325,26 @@ def render_html(g: Graph) -> str:
 """
 
 
-def write_graph(g: Graph, root: Path, *, json_only: bool) -> None:
+def write_graph(
+    g: Graph, root: Path, *, json_only: bool, communities: dict[str, int] | None = None
+) -> dict[str, int]:
     """把已建好的 `Graph` 写派生 `graph/`（**只写不读、无打印**）；写失败抛 `OSError`。
 
     与 `build_graph`（只读 `wiki/`）分立，让调用方能把"读页"与"写派生"的 `OSError` 分开归因
     （读不可读的页 ≠ 写不进 graph/），不把读错标成"写 graph 失败"。绝不碰 `raw/`/`wiki/`。
+    `communities` 可由调用方传入（默认 None 即内部算一次）并被返回，供随后打印 stats 复用，
+    免重复跑确定性 Louvain。json/html 共用同一份确定性社区号 → 字节稳定。
     """
+    if communities is None:
+        communities = detect_communities(g)
     graph_dir = root / "graph"
     graph_dir.mkdir(parents=True, exist_ok=True)
-    (graph_dir / "graph.json").write_text(dump_json(g), encoding="utf-8")
+    (graph_dir / "graph.json").write_text(dump_json(g, communities=communities), encoding="utf-8")
     if not json_only:
-        (graph_dir / "graph.html").write_text(render_html(g), encoding="utf-8")
+        (graph_dir / "graph.html").write_text(
+            render_html(g, communities=communities), encoding="utf-8"
+        )
+    return communities
 
 
 def build_and_write_graph(root: Path, *, json_only: bool) -> Graph:
@@ -291,16 +373,16 @@ def graph_entrypoint(root_dir: str | Path, *, json_only: bool) -> int:
 
     g = build_graph(root / "wiki")  # 读 wiki/：读不可读页的 OSError 直接外抛，不混入"写失败"标签。
     try:
-        write_graph(g, root, json_only=json_only)
+        communities = write_graph(g, root, json_only=json_only)
     except OSError as exc:
         print(f"写 {root / 'graph'} 失败：{exc}", file=sys.stderr)
         return EXIT_USAGE
 
-    stats = graph_to_dict(g)["stats"]
+    stats = graph_to_dict(g, communities=communities)["stats"]  # 复用已算社区号，不二次跑 Louvain。
     written = "graph.json" if json_only else "graph.json + graph.html"
     print(
         f"✓ 已写 graph/（{written}）：节点 {stats['nodes']} · 链接 {stats['edges']} · "
-        f"断链 {stats['broken']} · 孤儿 {stats['orphans']}。"
+        f"断链 {stats['broken']} · 孤儿 {stats['orphans']} · 社区 {stats['communities']}。"
     )
     return EXIT_OK
 
