@@ -45,7 +45,8 @@ def _resolve_raw_target(root: Path, target: str) -> Path:
         ) from None
     if tpath.suffix.lower() != ".md":
         raise GuanlanError(
-            f"MVP ingest 只吃 `.md`（多格式摄入属 P5）：{target}", exit_code=EXIT_USAGE
+            f"ingest 只吃 `.md`；多格式请先 `guanlan convert {target}` 转成 raw/<name>.md 再 ingest。",
+            exit_code=EXIT_USAGE,
         )
     if not tpath.is_file():
         raise GuanlanError(f"文件不存在：{target}", exit_code=EXIT_USAGE)
