@@ -215,6 +215,24 @@ def _safe_wiki_file(root: Path, rel: str) -> Path:
     return candidate
 
 
+def _safe_raw_file(root: Path, name: str) -> Path:
+    """把预览 `name` 解析为 `raw/` 内存在的 `.md`；越界 409、非 md/缺失 404（只读，路径穿越防御）。
+
+    与 `_safe_wiki_file` 同骨架，但夹在 `raw/`、强制 `.md`（raw 仅 `.md` 源、预览复用 `render_page`
+    只对 markdown 有意义）。**不**复用 `_safe_raw_target`——那是*写*目标校验器（撞已存在抛 409），
+    语义相反；本端点纯读。
+    """
+    raw = (root / "raw").resolve()
+    candidate = (root / "raw" / name).resolve()
+    try:
+        candidate.relative_to(raw)
+    except ValueError:
+        raise HTTPException(status_code=409, detail=f"路径越界（须在 raw/ 内）：{name}") from None
+    if candidate.suffix.lower() != ".md" or not candidate.is_file():
+        raise HTTPException(status_code=404, detail=f"raw 文件不存在或非 .md：{name}")
+    return candidate
+
+
 def _list_pages(root: Path) -> list[dict]:
     """非 config 页清单（排除 config 由 `iter_pages` 兜底，与 check/graph 同口径）。"""
     wiki = root / "wiki"
@@ -440,6 +458,17 @@ def create_app(
     @app.get("/api/raw")
     async def api_raw() -> dict:
         return {"files": await anyio.to_thread.run_sync(_list_raw, root)}
+
+    # raw 源预览（读，ingest 前看清正文，决策：渲染 markdown 与 /api/page·workspace 预览同口径）：
+    # 纯读 raw/、不写盘/不入队/不取快照，与 /api/raw 列表同读线。复用 render_page 同一 sanitize 归口
+    # （wikilink 仍按 wiki/ 解析）；reader 下仍注册（非写，但 ingest 入口本身是隐藏的写 chrome，故只在
+    # 非 reader 选单被触达）。阻塞的读盘/渲染经 anyio.to_thread 卸离事件循环（决策P4-2）。
+    @app.get("/api/raw/file")
+    async def api_raw_file(
+        name: str = Query(..., description="raw/ 内的 .md 文件名"),
+    ) -> dict:
+        raw_file = _safe_raw_file(root, name)  # 越界 409 / 非 md·缺失 404
+        return await anyio.to_thread.run_sync(render_page, root / "wiki", raw_file)
 
     # 检索（读，P5.1 决策P5.1-1/7）：直接调 P5.0 内核 `score(search_cache.corpus(wiki), …)`，
     # **不** shell out `guanlan search`、不入 JobQueue、不取快照、不 bump 代际——纯读 `wiki/`，与

@@ -471,6 +471,36 @@ def test_api_raw_lists_only(client, kb) -> None:
     assert all(isinstance(f["size"], int) for f in resp.json()["files"])
 
 
+def test_api_raw_file_renders_markdown(client, kb) -> None:
+    """raw 源预览：渲染 markdown（含 html 字段，同 /api/page）；纯读、不动盘。"""
+    (kb / "raw" / "note.md").write_text("# 标题\n\n正文一段。\n", encoding="utf-8")
+    resp = client.get("/api/raw/file", params={"name": "note.md"})
+    assert resp.status_code == 200
+    assert "<h1" in resp.json()["html"] and "标题" in resp.json()["html"]
+
+
+def test_api_raw_file_sanitizes_html(client, kb) -> None:
+    """预览复用 render_page 的 sanitize 归口：危险 html 不原样穿透（同 /api/page XSS 测）。"""
+    (kb / "raw" / "x.md").write_text("正常 [a](javascript:alert(1)) 文本\n", encoding="utf-8")
+    html = client.get("/api/raw/file", params={"name": "x.md"}).json()["html"]
+    assert "javascript:" not in html
+
+
+def test_api_raw_file_traversal_blocked(client, kb) -> None:
+    """越界 raw/ → 409（路径穿越防御）；非 .md / 缺失 → 404。"""
+    assert client.get("/api/raw/file", params={"name": "../wiki/index.md"}).status_code == 409
+    (kb / "raw" / "ignore.txt").write_text("x\n", encoding="utf-8")
+    assert client.get("/api/raw/file", params={"name": "ignore.txt"}).status_code == 404
+    assert client.get("/api/raw/file", params={"name": "missing.md"}).status_code == 404
+
+
+def test_api_raw_file_available_in_reader(kb) -> None:
+    """预览是纯读 → reader 模式仍注册可用（非写，决策P5.1-7 同口径）。"""
+    (kb / "raw" / "r.md").write_text("# R\n", encoding="utf-8")
+    with TestClient(create_app(kb, reader=True)) as c:
+        assert c.get("/api/raw/file", params={"name": "r.md"}).status_code == 200
+
+
 # ───────────────────────── ingest 写作业（C4） ─────────────────────────
 
 

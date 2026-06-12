@@ -84,6 +84,10 @@ window.I18N = {
     "ingest.loadingRaw": "加载 raw/…",
     "ingest.loadRawFail": "加载 raw/ 失败：{0}",
     "ingest.rawEmpty": "raw/ 为空：把 .md 放进 raw/ 再来。",
+    "ingest.preview": "预览",
+    "ingest.backToList": "← 返回 raw/ 列表",
+    "ingest.loadingPreview": "加载预览…",
+    "ingest.previewFail": "预览失败：{0}",
     "ingest.submitted": "已提交 {0}，排队中…",
     // —— heal ——
     "heal.computing": "计算 worklist（零 LLM）…",
@@ -333,6 +337,10 @@ window.I18N = {
     "ingest.loadingRaw": "Loading raw/…",
     "ingest.loadRawFail": "Failed to load raw/: {0}",
     "ingest.rawEmpty": "raw/ is empty: put a .md into raw/ and come back.",
+    "ingest.preview": "Preview",
+    "ingest.backToList": "← Back to raw/ list",
+    "ingest.loadingPreview": "Loading preview…",
+    "ingest.previewFail": "Preview failed: {0}",
     "ingest.submitted": "Submitted {0}, queued…",
     // —— heal ——
     "heal.computing": "Computing worklist (zero LLM)…",
