@@ -21,7 +21,6 @@ from pathlib import Path
 
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .graphstats import (
-    HUB_SIGMA,
     detect_communities,
     hub_nodes,
     isolated_communities,
