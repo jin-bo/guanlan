@@ -44,6 +44,8 @@ description: >
 
 摄入一篇 `.md` 资料。
 
+> **非 `.md` 源（PDF/DOCX/…）**：ingest 仍只吃 `.md`。命令行先 `guanlan convert <file>`（宿主侧零 LLM 转换，落成 `raw/*.md` + `origin` provenance，P5.2），再 ingest 那个 `.md`；Web 可写会话里走 `pdf-to-markdown` skill 解析到 `workspace/parsed/` 后由人审晋级为 `raw/` 源（P4.6）。两条路都把原件转成 `.md` 当源，ingest 不读二进制。
+
 **范围与切块**：
 - **单轮优先，必要时分步**——一篇资料可能触及 10–15 个页面。
 - **长资料**（长论文/算法手册等单轮易截断的）按**标题/段落语义边界**切块、逐块处理。
