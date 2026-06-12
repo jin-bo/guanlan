@@ -6,7 +6,9 @@
 - `undirected_adjacency`：resolved 有向邻接 → 无向投影（断链不算连通、**显式过滤自环**）；
 - `detect_communities`：手写**确定性 Louvain**，node_id → 规范化社区号（0..k-1），同图字节稳定；
 - `hub_nodes` / `thin_intercommunity_links` / `isolated_communities`：三类拓扑特征，供 `lint` 出建议、
-  `graph` 富化 html 拓扑提示段。
+  `graph` 富化 html 拓扑提示段；
+- `fragile_topology`（P3.6，见 docs/P3.6-图论桥与割点.md）：手写**确定性迭代式 Tarjan**，一趟 DFS 同时算
+  **割边（bridge）+ 割点（cut vertex）**——「删之即断」的单点故障，配最小保护规模过滤压噪。
 
 确定性三支柱（决策P3.5-2）：① 每轮按 node_id 升序遍历；② 仅 ΔQ > 0 才移动、平局优先当前社区、
 其次社区最小成员 id 最小；③ 规范化重编号（按社区最小原始成员 id 升序赋 0..k-1）——故社区号与
@@ -16,7 +18,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:  # 仅类型；运行期不 import graph，避免 graph↔graphstats 循环依赖。
     from .graph import Graph
@@ -26,18 +28,24 @@ __all__ = [
     "HUB_MIN_DEGREE",
     "MIN_COMMUNITY_SIZE",
     "LOUVAIN_RESOLUTION",
+    "BRIDGE_MIN_SIDE",
+    "CUT_MIN_COMPONENT",
     "undirected_adjacency",
     "detect_communities",
     "hub_nodes",
     "thin_intercommunity_links",
     "isolated_communities",
+    "FragileTopology",
+    "fragile_topology",
 ]
 
-# 阈值常量单一归口（决策P3.5-8），无魔数散落。
+# 阈值常量单一归口（决策P3.5-8 / P3.6-5），无魔数散落。
 HUB_SIGMA = 2.0  # 枢纽度阈值 = 均值 + HUB_SIGMA·σ（总体标准差）。
 HUB_MIN_DEGREE = 5  # 枢纽绝对度地板：低于它即便过 σ 阈值也不报（小库不被噪声淹没）。
 MIN_COMMUNITY_SIZE = 2  # 孤岛社区最小规模：单节点社区（孤儿）不报 isolated_community。
 LOUVAIN_RESOLUTION = 1.0  # 模块度分辨率 γ；1.0 = 标准 Louvain。
+BRIDGE_MIN_SIDE = 2  # 割边较小一侧最小规模：切单叶（侧 = 1）不报（决策P3.6-5）。
+CUT_MIN_COMPONENT = 2  # 割点删后第二大块最小规模：只切单叶不报（决策P3.6-5）。
 
 _MOD_MIN = 1e-7  # 外层聚合停止阈：模块度增量小于它即收敛（与 python-louvain 同量级）。
 
@@ -328,3 +336,113 @@ def isolated_communities(
             out.append((c, sorted(mem)))
     out.sort()
     return out
+
+
+# ---------------------------------------------------------------------------
+# 图论割边 / 割点（确定性迭代式 Tarjan，P3.6，见 docs/P3.6-图论桥与割点.md）
+# ---------------------------------------------------------------------------
+
+
+class FragileTopology(NamedTuple):
+    """一趟 Tarjan DFS 的两类「删之即断」产物（决策P3.6-3）。
+
+    `bridges`：割边 (u, v)，u < v，按 (u, v) 稳定排序——删之连通分量增加且较小侧 ≥ `BRIDGE_MIN_SIDE`。
+    `cut_vertices`：割点 node_id，按 id 稳定排序——删之连通分量增加且第二大块 ≥ `CUT_MIN_COMPONENT`。
+    """
+
+    bridges: list[tuple[str, str]]
+    cut_vertices: list[str]
+
+
+def _second_largest(sizes: list[int]) -> int:
+    """诸连通块尺寸里第二大者（不足两块 → 0）。最大块视作"主体"、第二大即"被切出去的非平凡一块"。"""
+    if len(sizes) < 2:
+        return 0
+    return sorted(sizes, reverse=True)[1]
+
+
+def fragile_topology(
+    g: Graph, *, adj: dict[str, set[str]] | None = None
+) -> FragileTopology:
+    """确定性迭代式 Tarjan：一趟 DFS 同时算割边与割点（决策P3.6-3/4）。
+
+    在 `undirected_adjacency`（resolved、无自环、断链不算连通，决策P3.6-1）上算；**根按 id 升序、
+    邻居按 id 升序** → DFS 树唯一确定，`disc/low` 唯一，输出稳定排序 ⇒ 同图字节稳定（§3.5）。
+    **显式栈非递归**（避大库长链爆栈，决策P3.6-4）。配 §3.2「删后第二大块 ≥ 阈值」过滤压掉近似树的
+    叶边/叶点噪声（决策P3.6-5）。`adj` 可由调用方复用（默认 None 即内部算）。空/单节点/无边图 → 空结果。
+    """
+    if adj is None:
+        adj = undirected_adjacency(g)
+
+    disc: dict[str, int] = {}
+    low: dict[str, int] = {}
+    subtree: dict[str, int] = {}  # DFS 子树规模
+    timer = 0
+    bridges_out: list[tuple[str, str]] = []
+    cuts_out: list[str] = []
+
+    for root in sorted(adj):  # 确定性：根按 id 升序逐连通分量。
+        if root in disc:
+            continue
+        comp_nodes: list[str] = []
+        all_children: dict[str, list[int]] = defaultdict(list)  # 节点 → 各 DFS 子树规模（根用）
+        cut_children: dict[str, list[int]] = defaultdict(list)  # 节点 → low≥disc 的子树规模（非根割点用）
+        bridges_raw: list[tuple[str, str, int]] = []  # (parent, child, child_subtree)
+
+        disc[root] = low[root] = timer
+        timer += 1
+        subtree[root] = 1
+        comp_nodes.append(root)
+        stack: list[tuple[str, str | None, object]] = [
+            (root, None, iter(sorted(adj[root])))
+        ]
+        while stack:
+            u, parent, it = stack[-1]
+            advanced = False
+            for w in it:  # type: ignore[union-attr]
+                if w == parent:  # 简单图（邻接为 set）：父边仅一条，跳过一次即可。
+                    continue
+                if w not in disc:  # 树边 → 下钻。
+                    disc[w] = low[w] = timer
+                    timer += 1
+                    subtree[w] = 1
+                    comp_nodes.append(w)
+                    stack.append((w, u, iter(sorted(adj[w]))))
+                    advanced = True
+                    break
+                elif disc[w] < low[u]:  # 回边到祖先 → 压低 low。
+                    low[u] = disc[w]
+            if advanced:
+                continue
+            stack.pop()  # u 子树处理完，回溯到 parent。
+            if parent is not None:
+                if low[u] < low[parent]:
+                    low[parent] = low[u]
+                subtree[parent] += subtree[u]
+                all_children[parent].append(subtree[u])
+                if low[u] >= disc[parent]:
+                    cut_children[parent].append(subtree[u])
+                if low[u] > disc[parent]:
+                    bridges_raw.append((parent, u, subtree[u]))
+
+        # 本连通分量定稿（comp 规模 = 根子树规模）。
+        comp_size = subtree[root]
+        for p, c, side in bridges_raw:
+            if _second_largest([side, comp_size - side]) >= BRIDGE_MIN_SIDE:
+                bridges_out.append((p, c) if p < c else (c, p))
+        for u in comp_nodes:
+            if u == root:  # 根：删之诸 DFS 子树各成一块；≥2 棵子树才可能是割点。
+                kids = all_children[u]
+                if len(kids) >= 2 and _second_largest(kids) >= CUT_MIN_COMPONENT:
+                    cuts_out.append(u)
+            else:  # 非根：删之 = {各 low≥disc 子树} ∪ {含父侧的其余}。
+                cc = cut_children[u]
+                if cc:
+                    rest = comp_size - 1 - sum(cc)
+                    comps = cc + ([rest] if rest > 0 else [])
+                    if _second_largest(comps) >= CUT_MIN_COMPONENT:
+                        cuts_out.append(u)
+
+    bridges_out.sort()
+    cuts_out.sort()
+    return FragileTopology(bridges_out, cuts_out)

@@ -21,7 +21,9 @@ from pathlib import Path
 
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .graphstats import (
+    FragileTopology,
     detect_communities,
+    fragile_topology,
     hub_nodes,
     isolated_communities,
     thin_intercommunity_links,
@@ -159,16 +161,26 @@ def compute_orphans(g: Graph) -> list[Node]:
     return [n for n in g.nodes if n.id not in has_inlink]
 
 
-def graph_to_dict(g: Graph, *, communities: dict[str, int] | None = None) -> dict:
+def graph_to_dict(
+    g: Graph,
+    *,
+    communities: dict[str, int] | None = None,
+    frag: FragileTopology | None = None,
+) -> dict:
     """graph.json 的稳定数据结构（§6.2 + P3.5 §3.2 富化）。
 
     stats.edges = resolved 边数（adjacency 关系数）；stats.broken = 断链边数；二者分列。
     edges 数组含 resolved + broken 两类，按 (source,target) 排序。
     **P3.5 additive**：stats 多 `communities` 计数、每节点多 `community` 社区号（既有键/顺序/排序
     一字不动，决策P3.5-4）。`communities` 可由调用方算好传入（避免一次写盘重复算确定性社区）。
+    **P3.6 additive**：stats 再多 `bridges`/`cut_vertices` 两计数（接在 `communities` 之后，**镜像
+    既有 `stats.orphans`**——计数进 stats、明细不进 node/edge 字典，由 html/lint 承载，决策P3.6-6）。
+    `frag` 同 `communities` 可由调用方算好传入，避免一次写盘（json+html）重复跑 Tarjan。
     """
     if communities is None:
         communities = detect_communities(g)
+    if frag is None:
+        frag = fragile_topology(g)
     resolved_count = sum(1 for e in g.edges if e.resolved)
     return {
         "generated_from": "wiki/",
@@ -178,6 +190,8 @@ def graph_to_dict(g: Graph, *, communities: dict[str, int] | None = None) -> dic
             "broken": len(g.broken),
             "orphans": len(compute_orphans(g)),
             "communities": len(set(communities.values())),
+            "bridges": len(frag.bridges),
+            "cut_vertices": len(frag.cut_vertices),
         },
         "nodes": [
             {
@@ -193,15 +207,30 @@ def graph_to_dict(g: Graph, *, communities: dict[str, int] | None = None) -> dic
     }
 
 
-def dump_json(g: Graph, *, communities: dict[str, int] | None = None) -> str:
+def dump_json(
+    g: Graph,
+    *,
+    communities: dict[str, int] | None = None,
+    frag: FragileTopology | None = None,
+) -> str:
     """渲染 graph.json 文本：同一 wiki 两次产出**字节级一致**（稳定排序 + 无时间戳/随机）。"""
-    return json.dumps(graph_to_dict(g, communities=communities), ensure_ascii=False, indent=2) + "\n"
+    return (
+        json.dumps(
+            graph_to_dict(g, communities=communities, frag=frag),
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    )
 
 
-def _render_topology_hints(g: Graph, communities: dict[str, int]) -> str:
-    """末尾「拓扑提示」段：确定性列出枢纽 / 稀疏跨社区链接 / 孤岛（与 lint 同数据，文字呈现）。
+def _render_topology_hints(
+    g: Graph, communities: dict[str, int], *, frag: FragileTopology | None = None
+) -> str:
+    """末尾「拓扑提示」段：确定性列出枢纽 / 稀疏跨社区链接 / 孤岛 / 割边 / 割点（与 lint 同数据，文字呈现）。
 
     纯静态列表、Python 端稳定排序生成，天然字节稳定（决策P3.5-5，守决策P3-7）。
+    `frag` 可由调用方传入复用同一份 Tarjan 结果（默认 None 即用同一份 `adj` 内部算）。
     """
     title_by_id = {n.id: n.title for n in g.nodes}
     path_by_id = {n.id: n.path for n in g.nodes}
@@ -232,24 +261,47 @@ def _render_topology_hints(g: Graph, communities: dict[str, int]) -> str:
         f"社区 {c}：" + "、".join(html.escape(path_by_id.get(mid, mid)) for mid in members)
         for c, members in isolated_communities(g, communities, adj=adj)
     ]
+    # P3.6 割边/割点（删之即断的单点故障，决策P3.6-7：仍纯静态文字列表）。
+    if frag is None:
+        frag = fragile_topology(g, adj=adj)
+    bridges = [
+        f"<code>{html.escape(u)}</code>—<code>{html.escape(v)}</code>"
+        for u, v in frag.bridges
+    ]
+    cuts = [
+        f"<strong>{html.escape(title_by_id.get(nid, nid))}</strong> "
+        f"<code>{html.escape(path_by_id.get(nid, nid))}</code>"
+        for nid in frag.cut_vertices
+    ]
 
     parts = ["<h2>拓扑提示 <span class='n'>(确定性)</span></h2>"]
     parts += _block("枢纽节点", hubs)
     parts += _block("稀疏跨社区链接", thin)
     parts += _block("孤岛社区", silos)
+    parts += _block("割边（单点故障边）", bridges)
+    parts += _block("割点（关节点）", cuts)
     return "\n".join(parts)
 
 
-def render_html(g: Graph, *, communities: dict[str, int] | None = None) -> str:
+def render_html(
+    g: Graph,
+    *,
+    communities: dict[str, int] | None = None,
+    frag: FragileTopology | None = None,
+) -> str:
     """渲染自包含、零网络的最小只读邻接列表静态视图（决策P3-7）。
 
     单文件、内联数据、无 CDN/第三方库、无图形布局算法——纯列表结构在 Python 端按稳定排序生成，
     天然字节稳定、可幂等重建。`type` 分组 → 每页 + 其 resolved 外链邻接，孤儿/断链以文字标注。
     **P3.5**：每节点尾部加社区徽标、顶部摘要加社区数、末尾加确定性「拓扑提示」段（决策P3.5-5，
-    仍守决策P3-7 零 JS/零第三方库/纯静态列表）。
+    仍守决策P3-7 零 JS/零第三方库/纯静态列表）。**P3.6**：拓扑提示段再加「割边」「割点」两块、
+    摘要加割边/割点计数（决策P3.6-7，仍纯静态文字）。`frag` 同 `communities` 可由调用方传入，
+    一次 `render_html` 内 stats 摘要与拓扑提示段共用同一份 Tarjan 结果，免重复算。
     """
     if communities is None:
         communities = detect_communities(g)
+    if frag is None:
+        frag = fragile_topology(g)
     orphan_ids = {n.id for n in compute_orphans(g)}
     broken_by_source: dict[str, list[str]] = {}
     for e in g.broken:
@@ -286,14 +338,16 @@ def render_html(g: Graph, *, communities: dict[str, int] | None = None) -> str:
 
     # 内联 graph.json：转义所有 < 为 <，彻底杜绝 title/path 里的 </script>、<!-- 等
     # 截断或干扰脚本块（比仅转义 </ 更稳妥；JSON 里 < 解析回 <，语义无损）。
-    data = graph_to_dict(g, communities=communities)  # 一次构建，内联数据与统计摘要共用，免重复计算。
+    # 一次构建，内联数据与统计摘要共用，免重复计算（communities/frag 均复用上面这份）。
+    data = graph_to_dict(g, communities=communities, frag=frag)
     data_blob = json.dumps(data, ensure_ascii=False, indent=2).replace("<", "\\u003c")
     stats = data["stats"]
     summary = (
         f"节点 {stats['nodes']} · 链接 {stats['edges']} · "
-        f"断链 {stats['broken']} · 孤儿 {stats['orphans']} · 社区 {stats['communities']}"
+        f"断链 {stats['broken']} · 孤儿 {stats['orphans']} · 社区 {stats['communities']} · "
+        f"割边 {stats['bridges']} · 割点 {stats['cut_vertices']}"
     )
-    parts.append(_render_topology_hints(g, communities))
+    parts.append(_render_topology_hints(g, communities, frag=frag))
     body = "\n".join(parts)
     return f"""<!doctype html>
 <html lang="zh">
@@ -332,16 +386,20 @@ def write_graph(
     与 `build_graph`（只读 `wiki/`）分立，让调用方能把"读页"与"写派生"的 `OSError` 分开归因
     （读不可读的页 ≠ 写不进 graph/），不把读错标成"写 graph 失败"。绝不碰 `raw/`/`wiki/`。
     `communities` 可由调用方传入（默认 None 即内部算一次）并被返回，供随后打印 stats 复用，
-    免重复跑确定性 Louvain。json/html 共用同一份确定性社区号 → 字节稳定。
+    免重复跑确定性 Louvain。json/html 共用同一份确定性社区号 → 字节稳定。**P3.6**：割边/割点
+    （`frag`）同样一次算定、json/html 共用，免一次写盘重复跑 Tarjan。
     """
     if communities is None:
         communities = detect_communities(g)
+    frag = fragile_topology(g)  # 一次算定，json/html 共用（与 communities 同理）。
     graph_dir = root / "graph"
     graph_dir.mkdir(parents=True, exist_ok=True)
-    (graph_dir / "graph.json").write_text(dump_json(g, communities=communities), encoding="utf-8")
+    (graph_dir / "graph.json").write_text(
+        dump_json(g, communities=communities, frag=frag), encoding="utf-8"
+    )
     if not json_only:
         (graph_dir / "graph.html").write_text(
-            render_html(g, communities=communities), encoding="utf-8"
+            render_html(g, communities=communities, frag=frag), encoding="utf-8"
         )
     return communities
 

@@ -11,6 +11,10 @@ P3.5 在同一份图上再加三类**确定性拓扑**建议（零 LLM，见 doc
 - **稀疏跨社区链接**（`lint.thin_intercommunity_link`）：一对社区仅靠单条跨社区边相连（非图论 bridge）。
 - **孤岛社区**（`lint.isolated_community`）：规模 ≥2、全库社区数 >1、且与其余社区零跨边。
 
+P3.6 在同一份图上再加两类**确定性图论割边/割点**建议（零 LLM，见 docs/P3.6-图论桥与割点.md §3.4）：
+- **割边**（`lint.bridge_edge`）：删之 wiki 图谱断为两块的「单点故障边」（图论 bridge，与 thin link 正交）。
+- **割点**（`lint.cut_vertex`）：删之 wiki 图谱断为多块的「关节点」（articulation point）。
+
 findings 是**建议性**（决策P3-4）：默认退 0，`--strict` 下有 findings → `EXIT_LINT_FINDINGS(6)`。
 只做结构 lint，语义 lint（矛盾复检/过期论断/资料缺口，需 LLM）属 P3 之后。
 """
@@ -28,6 +32,7 @@ from .graph import Graph, build_graph, compute_orphans
 from .graphstats import (
     HUB_SIGMA,
     detect_communities,
+    fragile_topology,
     hub_nodes,
     isolated_communities,
     thin_intercommunity_links,
@@ -175,6 +180,30 @@ def _topology_findings(g: Graph, node_path: dict[str, str]) -> list[Finding]:
                 "",
                 "lint.isolated_community",
                 f"社区{{{pages}}}与其余 wiki 零互链（孤岛），建议补桥接",
+            )
+        )
+
+    # P3.6 图论割边/割点（接在 P3.5 三类之后，保既有顺序）：同一份无向邻接上算「删之即断」的单点故障，
+    # 与 thin_intercommunity_link 正交、不去重（决策P3.6-2）。
+    frag = fragile_topology(g, adj=adj)
+
+    # 割边（单点故障边）：删之图谱断为两块。全局 finding（page=""，同 thin link 体例）。
+    for u, v in frag.bridges:
+        findings.append(
+            Finding(
+                "",
+                "lint.bridge_edge",
+                f"[[{u}]]—[[{v}]] 是割边：删之 wiki 图谱即断为两块（单点故障），建议补冗余交叉引用",
+            )
+        )
+
+    # 割点（关节点）：删之图谱断为多块。记在该页（同 hub_node 体例）。
+    for nid in frag.cut_vertices:
+        findings.append(
+            Finding(
+                node_path.get(nid, nid),
+                "lint.cut_vertex",
+                "本页是割点：删之 wiki 图谱断为多块（关节点），建议为其邻接页补旁路链接",
             )
         )
 
