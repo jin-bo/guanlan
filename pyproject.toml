@@ -46,6 +46,14 @@ web = [
     # 起才有（3.x 只有 `cancellable=`），不钉则可能传递解析到 anyio 3 → 每次 POST /api/raw 即 TypeError。
     "anyio>=4.1",
 ]
+# MCP 宿主（P4.10，可选叠加层，见 docs/P4.10-MCP宿主.md 决策P4.10-2/14）：装了 `guanlan-wiki[mcp]`
+# 才有 `guanlan mcp`（只读 MCP 服务端，stdio）。官方 `mcp` SDK v1.x 为当前 stable、v2 尚 alpha，
+# 故加 `<2` 上界防破坏性升级；下界 1.27 取已验证支持结构化输出（协议 ≥2025-06-18）的稳定版。
+mcp = [
+    "mcp>=1.27,<2",
+    # server.py 直接 import anyio（to_thread 卸 ask 子进程/读盘），显式声明而非靠 mcp 传递。
+    "anyio>=4.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/jin-bo/guanlan"
