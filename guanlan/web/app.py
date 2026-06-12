@@ -49,6 +49,7 @@ from ..lint import run_lint
 from ..pages import iter_pages, load_page, page_title, page_type
 from ..query import run_query
 from ..runtime import AgentRunner
+from ..search import CorpusCache, score, search_result_dict, tokenize
 from .chat import IDLE_TTL_SECONDS, MAX_CONVERSATIONS, ConversationStore
 from .jobs import JobQueue, WriteGate
 from .rawfeed import (
@@ -351,8 +352,14 @@ def create_app(
         ),
     )
     app.state.jobs = jobs
+    # P5.1 检索长驻缓存（决策P5.1-2）：进程内、不落盘、按 (mtime_ns,size) 增量失效；`/api/search`
+    # 与 chat 的 `guanlan_search` 工具**共吃这一个**实例（§3.1），同一进程多次搜索不重读全库。重启
+    # 即空、首搜按需重建；删除页由 CorpusCache.corpus() 的 stale 剪枝处理。不改 P5.0「无盘上派生」承诺。
+    search_cache = CorpusCache()
+    app.state.search_cache = search_cache
     # 会话表（问答走嵌入会话）：persist 开时每轮落 .agentao/sessions/ + 懒恢复（P4.2 决策P4.2-1）；
-    # default_mode/write_gate 透传到每个会话（P4.5）。
+    # default_mode/write_gate 透传到每个会话（P4.5）；search_cache 透传到每个会话（P5.1 §3.1：
+    # 每会话用 make_guanlan_search_tool 新建工具实例、只共享这一个 cache）。
     conversations = ConversationStore(
         root,
         model,
@@ -360,6 +367,7 @@ def create_app(
         default_mode=mode,
         write_gate=write_gate,
         max_conversations=effective_max,
+        search_cache=search_cache,
         # idle 回收**仅 reader 启用**（决策P4.9-6，评审 codex P2）：reader=多用户共享，需缓解并发顶满
         # 上限；非 reader=单用户、无上限压力，且 workspace-write 会话被逐会丢 memory-only 的 undo 日志/
         # 姿态（用户拿着的 undo token 随即 404）——故非 reader 关回收（idle_ttl=None），不动既有 P4/P4.5 行为。
@@ -432,6 +440,25 @@ def create_app(
     @app.get("/api/raw")
     async def api_raw() -> dict:
         return {"files": await anyio.to_thread.run_sync(_list_raw, root)}
+
+    # 检索（读，P5.1 决策P5.1-1/7）：直接调 P5.0 内核 `score(search_cache.corpus(wiki), …)`，
+    # **不** shell out `guanlan search`、不入 JobQueue、不取快照、不 bump 代际——纯读 `wiki/`，与
+    # `/api/pages`/`/api/page` 同读线。reader 下仍注册（非写、决策P5.1-7）。阻塞的 stat/分词/打分经
+    # `anyio.to_thread.run_sync` 卸离事件循环（CorpusCache 内部自持锁，Web 层不另加全局搜索锁，§3.3）。
+    # 成功体经 `search_result_dict` 单一归口（与 CLI `--json` 字段同形）；空/纯标点 query → 422
+    # （HTTP 原生 `{"detail":…}`，不复刻 CLI `{"ok":false,…}`，决策P5.1-4/5）；`limit<1` 由 `Query(ge=1)` → 422。
+    @app.get("/api/search")
+    async def api_search(
+        q: str = Query(..., min_length=1, description="检索词"),
+        limit: int = Query(10, ge=1, description="召回条数（默认 10，须 ≥ 1）"),
+    ) -> dict:
+        if not tokenize(q):  # 纯空白/标点 → 无可检索词；与 CLI run_search 同口径，但走 HTTP 422
+            raise HTTPException(status_code=422, detail="query 为空或无可检索词（纯空白/标点）。")
+
+        def _run():
+            return score(search_cache.corpus(root / "wiki"), q, limit=limit)
+
+        return search_result_dict(await anyio.to_thread.run_sync(_run))
 
     # 投喂（P4.1）：把粘贴正文存为 raw/<安全名>.md。校验在端点（快 4xx）、写盘进单写者队列
     # 串行（杜绝与在飞 ingest 的 raw/ 快照窗口竞态，决策P4.1-2）。**同步等作业完成**再返回——
