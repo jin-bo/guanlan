@@ -111,3 +111,17 @@ def test_js_t_calls_literal_and_defined():
     assert literal_keys, "app.js 未发现任何 t(\"…\") 调用（扫描失效？）"
     undefined = literal_keys - ZH_KEYS
     assert not undefined, f"app.js 引用了未定义的 key：{sorted(undefined)}"
+
+
+def test_rerender_dynamic_repaints_search_view():
+    """语言切换重绘必须覆盖搜索态（P5.1，code-review 修复）：rerenderDynamic 须为 kind==\"search\"
+    纯重绘——否则搜索结果头部/空态文案在切语言后停在旧语言（P4.7 不变量对新增动态面的盲区）。
+    静态守卫：rerenderDynamic 函数体内须含对 search 视图的重绘分支（不依赖 DOM 执行）。"""
+    src = _strip_comments(APP_JS)
+    m = re.search(r"function rerenderDynamic\(\)\s*\{", src)
+    assert m, "未找到 rerenderDynamic（扫描失效？）"
+    # 取函数体到下一处顶层 `}\n`（足够覆盖该函数；只断言含 search 重绘语义）。
+    body = src[m.end() : m.end() + 600]
+    assert '"search"' in body and "paintSearch(" in body, (
+        "rerenderDynamic 未覆盖 kind=='search' 的纯重绘——切语言后搜索态文案会停在旧语言"
+    )

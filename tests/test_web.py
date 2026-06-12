@@ -1513,7 +1513,11 @@ class _FakeAgent:
         self.tool_runner = _Recorder()
         self.skill_manager = _FakeSkillManager()
         self.context_manager = _FakeContextManager()  # /context /status 自省（P4.4）
-        self.tools = _FakeToolRegistry(_default_tools())  # /tools 自省（P4.4）
+        # /tools 自省（P4.4）：默认桩工具 + 宿主 extra_tools（P5.1 的 guanlan_search 经此进 /tools，
+        # 镜像真 agentao register_extra_tools 把构造期工具并入注册表）。
+        self.tools = _FakeToolRegistry(
+            _default_tools() + list(kwargs.get("extra_tools") or [])
+        )
         self._model = kwargs.get("model")  # 省略 --model 时无 model 键 → None → get_current_model 兜底
         self._plan_mode = False  # _context_stats 读它传给 to_openai_format（镜像真 agent）
         self.closed = False
@@ -1762,13 +1766,14 @@ def test_chat_info_tools_blocked_static(chat_client) -> None:
     client, _ = chat_client
     _, done, _ = _chat(client, "问")
     tools = client.get(f"/api/chat/{done['conversation_id']}/info").json()["tools"]
-    assert [t["name"] for t in tools] == [  # 按工具名排序
-        "mystery_tool", "read_file", "replace", "search_file_content", "write_file"
+    assert [t["name"] for t in tools] == [  # 按工具名排序（含 P5.1 注入的 guanlan_search）
+        "guanlan_search", "mystery_tool", "read_file", "replace", "search_file_content", "write_file"
     ]
     blocked = {t["name"]: t["blocked"] for t in tools}
     assert blocked["read_file"] is False and blocked["write_file"] is True  # 元数据路
     assert blocked["replace"] is True and blocked["search_file_content"] is False  # 静态名路
     assert blocked["mystery_tool"] == "unknown"  # 未识别 → unknown（非 True/False）
+    assert blocked["guanlan_search"] is False  # P5.1：is_read_only=True → 只读姿态不拦
 
 
 def test_chat_info_tools_unblocked_in_workspace_write(chat_client) -> None:
@@ -4122,3 +4127,202 @@ def test_serve_agent_log_write_probe_fails_early(kb, monkeypatch) -> None:
     with pytest.raises(GuanlanError) as ei:
         server.serve(kb, port=8801, open_browser=False, agent_log=True)
     assert ei.value.exit_code == 1
+
+
+# ═══════════════════════ P5.1：Web 检索接入（/api/search + 宿主工具）═══════════════════════
+# 见 docs/P5.1-Web检索接入.md §7。/api/search 直接调 P5.0 内核（不 shell out）、复用 CorpusCache；
+# guanlan_search 宿主工具 is_read_only=True、每会话新实例只共享 cache、返回 str。两类 LLM 都打桩。
+
+from guanlan.search import search_pages, search_result_dict as _srd  # noqa: E402
+from guanlan.web.chat import make_guanlan_search_tool  # noqa: E402
+
+
+def _seed_searchable(root) -> None:
+    """种几页：标题/路径不含「沉淀」但正文含——验 /api/search 能召回正文命中（旧本地过滤做不到）。"""
+    write_page(root, "wiki/concepts/Backfill.md", type="concept", body="把好答案沉淀到知识库供复用。")
+    write_page(root, "wiki/entities/Alice.md", type="entity", body="无关正文。")
+
+
+def test_search_recalls_body_term(client, kb) -> None:
+    """/api/search 召回标题/路径不含该词、但正文含该词的页（旧 /api/pages 本地过滤做不到）。"""
+    _seed_searchable(kb)
+    resp = client.get("/api/search", params={"q": "沉淀", "limit": 10})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    pages = [r["page"] for r in body["results"]]
+    assert "wiki/concepts/Backfill.md" in pages  # 正文命中（标题 Backfill、路径都不含「沉淀」）
+    assert "wiki/entities/Alice.md" not in pages
+
+
+def test_search_field_parity_with_cli(client, kb) -> None:
+    """`/api/search` 成功体与 CLI 冷算 `search_pages`→`search_result_dict` **字段/结构同形**（决策P5.1-4）。"""
+    _seed_searchable(kb)
+    web = client.get("/api/search", params={"q": "沉淀", "limit": 10}).json()
+    cli = _srd(search_pages(kb / "wiki", "沉淀", limit=10))
+    assert web == cli  # 解析后相等（同一 search_result_dict 归口；非字节级，二者序列化参数不同）
+
+
+@pytest.mark.parametrize("q", ["", "   ", "！？。", "  -- … "])
+def test_search_blank_or_punct_422(client, q) -> None:
+    """空/纯空白/纯标点 query → 422 + HTTP 原生 `{"detail":…}`（非 CLI 的 `{"ok":false,…}`，决策P5.1-4/5）。"""
+    resp = client.get("/api/search", params={"q": q})
+    assert resp.status_code == 422
+    body = resp.json()
+    assert "detail" in body and "ok" not in body  # HTTP 原生错误体，不复刻 CLI ok:false
+
+
+def test_search_limit_below_one_422(client, kb) -> None:
+    """`limit < 1` 被 `Query(ge=1)` 挡在端点 → 422（不让 score 的 ValueError 冒泡）。"""
+    _seed_searchable(kb)
+    assert client.get("/api/search", params={"q": "沉淀", "limit": 0}).status_code == 422
+
+
+def test_search_no_hits_ok_empty(client, kb) -> None:
+    """有词但无命中 → `ok:true, results:[]`（与「空 query 422」区分）。"""
+    _seed_searchable(kb)
+    body = client.get("/api/search", params={"q": "量子计算机芯片"}).json()
+    assert body["ok"] is True and body["results"] == []
+
+
+def test_search_cache_reused_and_incremental(kb, monkeypatch) -> None:
+    """同一 app 内连续搜索复用 CorpusCache：未变页不重建 build_doc；改一页后只该页重建、结果跟新（§3.1）。"""
+    import guanlan.search as search_mod
+
+    _seed_searchable(kb)
+    builds: list[str] = []
+    real_build = search_mod.build_doc
+
+    def counting_build(path, *, root):
+        builds.append(path.name)
+        return real_build(path, root=root)
+
+    monkeypatch.setattr(search_mod, "build_doc", counting_build)
+    with TestClient(create_app(kb)) as client:
+        client.get("/api/search", params={"q": "沉淀"})  # 首搜：冷建全部页
+        first = len(builds)
+        assert first >= 2  # Backfill + Alice 至少两页被建
+        builds.clear()
+        client.get("/api/search", params={"q": "沉淀"})  # 二搜：未变 → 零重建
+        assert builds == []
+        # 改一页正文（含新词）→ 只该页 mtime 变 → 只它重建，新词可召回
+        write_page(kb, "wiki/entities/Alice.md", type="entity", body="Alice 也讲沉淀了。")
+        builds.clear()
+        body = client.get("/api/search", params={"q": "沉淀"}).json()
+        assert builds == ["Alice.md"]  # 只改动页重建
+        assert "wiki/entities/Alice.md" in [r["page"] for r in body["results"]]
+
+
+def test_search_concurrent_no_crash(kb) -> None:
+    """并发两个 /api/search 不损坏 cache、不抛竞态错误（CorpusCache 内部自持锁，§3.3）。"""
+    import concurrent.futures as cf
+
+    _seed_searchable(kb)
+    with TestClient(create_app(kb)) as client:
+        def hit():
+            return client.get("/api/search", params={"q": "沉淀"}).status_code
+
+        with cf.ThreadPoolExecutor(max_workers=4) as ex:
+            codes = list(ex.map(lambda _: hit(), range(12)))
+    assert all(c == 200 for c in codes)
+
+
+def test_reader_search_available_and_zero_write(kb) -> None:
+    """reader 下 /api/search 仍可用（非写端点，决策P5.1-7）、且不写 KB。"""
+    _seed_searchable(kb)
+
+    def snapshot():
+        return {
+            p: p.stat().st_mtime_ns
+            for p in kb.rglob("*")
+            if p.is_file()
+        }
+
+    with _reader_client(kb) as client:
+        before = snapshot()
+        resp = client.get("/api/search", params={"q": "沉淀"})
+        assert resp.status_code == 200 and resp.json()["ok"] is True
+        # 不新增 .agentao/search-cache 之类盘上派生；现有文件 mtime 不变（纯读）。
+        after = snapshot()
+    assert after == before, "reader /api/search 不得写 KB"
+
+
+# ── guanlan_search 宿主工具（嵌入会话，§5）──────────────────────────────────────
+
+
+def test_guanlan_search_tool_is_readonly_and_returns_str(kb) -> None:
+    """工具 `is_read_only=True`、`execute` 返回 **JSON 字符串**、字段与 /api/search 同形（§5）。"""
+    from guanlan.search import CorpusCache
+
+    _seed_searchable(kb)
+    cache = CorpusCache()
+    tool = make_guanlan_search_tool(cache, wiki=kb / "wiki")
+    assert tool.name == "guanlan_search"
+    assert tool.is_read_only is True  # 硬要求：只读姿态不被 DENY
+    out = tool.execute(query="沉淀", limit=10)
+    assert isinstance(out, str)  # 契约 execute() -> str，不是 dict
+    parsed = json.loads(out)
+    assert parsed["ok"] is True
+    assert parsed == _srd(search_pages(kb / "wiki", "沉淀", limit=10))  # 同 search_result_dict 归口
+
+
+@pytest.mark.parametrize("bad_limit", [0, -3, "x", None])
+def test_guanlan_search_tool_limit_clamped(kb, bad_limit) -> None:
+    """工具路径 `limit<1`/坏类型被 clamp（不让 score 的 ValueError 冒泡成工具崩溃，决策P5.0-15）。"""
+    from guanlan.search import CorpusCache
+
+    _seed_searchable(kb)
+    tool = make_guanlan_search_tool(CorpusCache(), wiki=kb / "wiki")
+    out = tool.execute(query="沉淀", limit=bad_limit)  # 不抛
+    assert json.loads(out)["ok"] is True
+
+
+@pytest.mark.parametrize("bad_query", [123, ["沉淀"], None, 3.5])
+def test_guanlan_search_tool_query_type_coerced(kb, bad_query) -> None:
+    """工具对坏类型 query（LLM 填 number/array/null）一律 str() 归一、不抛 TypeError（code-review 修复）。"""
+    from guanlan.search import CorpusCache
+
+    _seed_searchable(kb)
+    tool = make_guanlan_search_tool(CorpusCache(), wiki=kb / "wiki")
+    out = tool.execute(query=bad_query, limit=10)  # 不抛 TypeError
+    assert json.loads(out)["ok"] is True
+
+
+def test_chat_registers_guanlan_search_tool(chat_client, kb) -> None:
+    """新建会话构造期注入 guanlan_search 到 extra_tools（is_read_only=True，§3.1/§5）。"""
+    client, captured = chat_client
+    _chat(client, "问一句")  # 触发一次新建会话
+    extra = captured["kwargs"][0].get("extra_tools")
+    assert extra and len(extra) == 1
+    assert extra[0].name == "guanlan_search" and extra[0].is_read_only is True
+
+
+def test_chat_shares_cache_distinct_tool_instances(chat_client) -> None:
+    """两会话共享同一 CorpusCache、但 Tool 实例相异（避免 agentao per-agent 绑定互相覆盖，§5）。"""
+    client, captured = chat_client
+    _, done1, _ = _chat(client, "第一问")  # 会话 A
+    _chat(client, "第二问")  # 会话 B（省略 conversation_id → 另起）
+    tool_a = captured["kwargs"][0]["extra_tools"][0]
+    tool_b = captured["kwargs"][1]["extra_tools"][0]
+    assert tool_a is not tool_b  # 每会话新实例
+    assert tool_a._search_cache is tool_b._search_cache  # 只共享同一个 cache
+
+
+def test_guanlan_search_in_tools_introspection(chat_client) -> None:
+    """guanlan_search 出现在 /api/chat/{id}/info 的 tools 列表，且 read-only 下 blocked=False（P4.4 自省）。"""
+    client, _ = chat_client
+    _, done, _ = _chat(client, "问一句")
+    cid = done["conversation_id"]
+    info = client.get(f"/api/chat/{cid}/info").json()
+    hit = next((t for t in info["tools"] if t["name"] == "guanlan_search"), None)
+    assert hit is not None
+    assert hit["blocked"] is False  # is_read_only → 只读姿态不拦（镜像 _blocked_in_readonly）
+
+
+def test_query_prompt_transport_neutral() -> None:
+    """召回措辞传输中立（决策P5.1-6）：QUERY_PROMPT 不再硬编码「先用 `guanlan search` CLI」死指令。"""
+    from guanlan.query import QUERY_PROMPT
+
+    assert "guanlan_search" in QUERY_PROMPT  # 提宿主工具
+    assert "可用的 search 入口" in QUERY_PROMPT  # 传输中立措辞
+    assert "先用 `guanlan search" not in QUERY_PROMPT  # 不再硬编码 CLI-only 死指令

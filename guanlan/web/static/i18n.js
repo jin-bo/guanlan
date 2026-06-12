@@ -46,6 +46,10 @@ window.I18N = {
     "wiki.loadFail": "加载页面失败：{0}（请重试或检查服务端）",
     "wiki.emptyAll": "暂无页面",
     "wiki.emptyMatch": "无匹配页面",
+    "search.searching": "检索中…",
+    "search.head": "命中 {0} 页 · 检索 {1} 页",
+    "search.empty": "无命中：{0}",
+    "search.fail": "搜索失败：{0}",
     // —— composer ——
     "composer.placeholder": "向 agent 提问（只读，跨轮保留上下文）… 回车发送，Shift-Enter 换行，输入 / 看命令",
     "tip.attach": "上传文件作附件：以 <attachment> 标签随消息发给 agent；图像直接给模型看（不支持视觉时自动降级为文本引用）",
@@ -291,6 +295,10 @@ window.I18N = {
     "wiki.loadFail": "Failed to load pages: {0} (retry or check the server)",
     "wiki.emptyAll": "No pages yet",
     "wiki.emptyMatch": "No matching pages",
+    "search.searching": "Searching…",
+    "search.head": "{0} hits · {1} pages searched",
+    "search.empty": "No hits: {0}",
+    "search.fail": "Search failed: {0}",
     // —— composer ——
     "composer.placeholder": "Ask the agent (read-only, context kept across turns)… Enter to send, Shift-Enter for newline, type / for commands",
     "tip.attach": "Upload files as attachments: sent with your message as an <attachment> tag; images go straight to the model (auto-downgraded to a text reference when vision is unsupported)",
