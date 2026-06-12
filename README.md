@@ -29,7 +29,9 @@ P3 三个零-LLM 维护工具（advisory）：
 
 P4 之上已落地一批 **Web 宿主半相位**（仍在 P4 边界内，不引入新退出码）：缺失实体物化 `guanlan heal`（[P3.2](docs/P3.2-缺失实体物化.md)/[P3.3](docs/P3.3-规范标题页与别名收编.md)）、索引回填 `guanlan reindex`（[P3.4](docs/P3.4-索引回填.md)）、Web 投喂 `POST /api/raw`（[P4.1](docs/P4.1-Web投喂.md)）、会话落盘与恢复（[P4.2](docs/P4.2-会话落盘.md)）、Web-heal（[P4.3](docs/P4.3-Web-heal.md)）、Web 斜杠命令与只读自省（[P4.4](docs/P4.4-Web斜杠命令.md)）、可写 Web 工作会话（[P4.5](docs/P4.5-可写Web工作会话.md)）、Web 文件上传与派生物晋级为源（[P4.6](docs/P4.6-Web上传与晋级.md)）、界面中英双语切换（[P4.7](docs/P4.7-中英双语.md)）、Web 端问答回填 `query --backfill`（[P4.8](docs/P4.8-Web回填.md)）、只读多会话部署 `guanlan web --reader`（[P4.9](docs/P4.9-只读多会话.md)：多用户各持能力 UUID 各聊各的、KB 全共享只读、无用户管理，作 E2 会话分租前哨）。
 
-多格式自动 ingest 留待 P5（见 DESIGN §8 与 `docs/P4-Web宿主.md` §10）。别名自动物化建页（`heal`）、同义词表、向量检索按需驱动、另开方案。
+**P5「语料规模化：多格式 + 检索」**里程碑的检索部分已落地：**检索层 `guanlan search`**（[P5.0](docs/P5.0-检索层.md)：零-LLM 确定性 BM25 + CJK-2-gram 全页召回，title/alias 字段加权，无持久化派生物；作 query/skill 召回前端、E1 检索升级的零基建先行片）与 **Web 检索接入**（[P5.1](docs/P5.1-Web检索接入.md)：把 P5.0 内核接入长驻 Web 进程——只读 `GET /api/search` 端点 + 嵌入式聊天的只读 `guanlan_search` 宿主工具 + 共享长驻 `CorpusCache`）。
+
+多格式自动 ingest 仍留待 P5 后续（见 DESIGN §8 与 `docs/P4-Web宿主.md` §10）。向量 / 重排 / 持久化索引留 E1，别名自动物化建页（`heal`）、同义词表按需驱动、另开方案。
 
 ## 安装
 
