@@ -245,7 +245,7 @@ P4 给同一文件库加一个**可选的本地 Web 图形入口**。**实现级
 | **P2 — 最小闭环** | wrapper + ingest + query + 基础校验 | `guanlan ingest/query/check`；`.md` ingest；source/entity/concept 页生成；wikilink + frontmatter + `sources` + 断链校验 + `raw/` 快照比对（见 §4.7）；query 带引用；纯 CLI。**实现级细化见 [`P2-最小闭环.md`](P2-最小闭环.md)** |
 | **P3 — 健康与图谱** | health + 结构 lint + 确定性 graph | `guanlan health/lint/graph`：结构健康检查（桩页/index 同步）、结构 lint（孤儿/断链/缺失实体，零 LLM）、确定性 wikilink graph + 自包含 `graph.html`。**实现级细化见 [`P3-健康与图谱.md`](P3-健康与图谱.md)**；半阶段 P3.1–P3.4 已落（别名/heal/规范标题/reindex）。**P3.5 图谱分析**（确定性 Louvain 社区 + hub/bridge/silo 拓扑 lint，零 LLM；*设计文档已出、待实现*）见 [`P3.5-图谱分析.md`](P3.5-图谱分析.md) |
 | **P4 — 可选宿主层（Web + MCP）** | 复用同一文件库的本地宿主入口（浏览器 / Agent） | `guanlan web`：浏览 wiki + 触发 `ingest` + **与 agent 单轮/多轮问答** + 跑 check/health/lint + 看 graph；FastAPI/uvicorn 薄表现层，写作业走子进程、所有问答走只读进程内嵌入（默认只读、token 流式）。**实现级细化见 [`P4-Web宿主.md`](P4-Web宿主.md)**；半阶段 P4.1–P4.9 已落。**P4.10 MCP 宿主**（第二种传输：只读 stdio，把只读核心暴露给任意 Agent；*设计文档已出、待实现*）见 [`P4.10-MCP宿主.md`](P4.10-MCP宿主.md) |
-| **P5 — 语料规模化与自动化（多格式 + 检索）** | 多格式摄入、检索、定时同步 | **P5.0 检索层** `guanlan search`（确定性 BM25 + CJK 2-gram，零 LLM；E1 检索升级的零基建先行片；*设计文档已出、待实现*）见 [`P5.0-检索层.md`](P5.0-检索层.md)；多格式转换 adapter（markitdown 兜底，评估更高质量 PDF backend）；docx/web clip 等摄入；nightly health/lint |
+| **P5 — 语料规模化与自动化（多格式 + 检索）** | 多格式摄入、检索、定时同步 | **P5.0 检索层** `guanlan search`（确定性 BM25 + CJK 2-gram，零 LLM；E1 检索升级的零基建先行片；**已实现**）见 [`P5.0-检索层.md`](P5.0-检索层.md)；**P5.1 Web 检索接入**（P5.0 内核接入长驻 Web 进程：`GET /api/search` + 只读 `guanlan_search` 宿主工具 + 长驻 `CorpusCache`；**已实现**）见 [`P5.1-Web检索接入.md`](P5.1-Web检索接入.md)；多格式转换 adapter（markitdown 兜底，评估更高质量 PDF backend）；docx/web clip 等摄入；nightly health/lint |
 
 **企业版（E，方向；个人版跑通后另立设计文档详述，见 §6）**
 
