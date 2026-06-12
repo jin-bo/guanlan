@@ -174,7 +174,9 @@ def test_json_sorted_and_idempotent(tmp_path: Path):
     data = json.loads(dump_json(g1))
     assert [n["id"] for n in data["nodes"]] == ["alpha", "zeta"]  # 节点按 id 排序
     assert data["edges"] == sorted(data["edges"], key=lambda e: (e["source"], e["target"]))
-    assert data["stats"] == {"nodes": 2, "edges": 2, "broken": 1, "orphans": 0}
+    # P3.5 additive：stats 多 communities（Alpha↔Zeta 互链 → 1 社区）、每节点多 community。
+    assert data["stats"] == {"nodes": 2, "edges": 2, "broken": 1, "orphans": 0, "communities": 1}
+    assert all("community" in n for n in data["nodes"])
 
 
 # ---------- graph.html 自包含 ----------
