@@ -319,7 +319,8 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .overlay-head h3 { margin: 0; color: var(--lan-deep); }
 #overlay-close { background: transparent; border: 0; font-size: 1.4rem; cursor: pointer; color: var(--lan-ink-soft); }
 .overlay-body { overflow-y: auto; padding: 1rem 1.1rem; }
-.overlay-body pre { white-space: pre-wrap; word-break: break-word; font-size: .85rem; }
+/* 作业日志/回执：等宽字体（进度条 |███| 与数字才对齐）+ 更小字号。 */
+.overlay-body pre { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .72rem; line-height: 1.45; }
 .report-ok { color: #1b6e3a; font-weight: 600; }
 .report-bad { color: #8a1f1f; font-weight: 600; }
 .finding { padding: .35rem .5rem; border-left: 3px solid var(--lan-mist); margin: .3rem 0; font-size: .85rem; background: var(--lan-foam); }
@@ -329,6 +330,9 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 /* 文件名即预览入口：还原成可点正文（左对齐、无底色、悬停下划线），与右侧 ingest 按钮区分。 */
 .raw-pick button.raw-name { flex: 1; min-width: 0; overflow-wrap: anywhere; background: none; color: var(--lan-deep); padding: .2rem 0; text-align: left; font-size: inherit; }
 .raw-pick button.raw-name:hover { text-decoration: underline; }
+/* ingest 选单过滤切换条（未收录 ⇄ 已收录）+「已收录」角标 */
+.raw-filter { display: flex; justify-content: flex-end; padding: .2rem .4rem .4rem; }
+.raw-badge { flex: 0 0 auto; margin: 0 .5rem; padding: .05rem .4rem; border-radius: 4px; background: var(--lan-mist); color: var(--lan-ink-soft); font-size: .72rem; white-space: nowrap; }
 
 /* 投喂浮层（P4.1）：文件名输入 + 正文 textarea + 存盘 + 状态行（成功/409/失败）。 */
 .feed-name { width: 100%; box-sizing: border-box; padding: .4rem .55rem; margin-bottom: .5rem;
@@ -382,10 +386,14 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 /* 历史会话行（P4.2）：标题 + live/落盘徽标 + 打开/删除。 */
 .conv-row { display: flex; align-items: center; gap: .5rem; padding: .35rem .4rem; border-bottom: 1px solid var(--lan-mist); font-size: .9rem; }
 .conv-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
-.conv-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--lan-ink); }
 .conv-tag { color: var(--lan-ink-soft); font-size: .75rem; }
 .conv-row button { background: var(--lan-ripple); color: #fff; border: 0; border-radius: 4px; padding: .2rem .7rem; cursor: pointer; }
-.conv-row button.conv-del { background: transparent; color: #8a1f1f; border: 1px solid #f3c4c4; }
+/* 标题即打开入口：还原成可点正文（左对齐、无底色、悬停下划线、超长省略号）。 */
+.conv-row button.conv-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; background: none; color: var(--lan-ink); padding: 0; text-align: left; font-size: inherit; }
+.conv-row button.conv-title:hover { text-decoration: underline; }
+/* 删除图标按钮：紧凑方形、透明底，仅 hover 时显红框。 */
+.conv-row button.conv-del { flex: 0 0 auto; background: transparent; color: #8a1f1f; border: 1px solid transparent; padding: .15rem .35rem; line-height: 1; font-size: 1rem; }
+.conv-row button.conv-del:hover { border-color: #f3c4c4; background: #fbedea; }
 
 /* 载入历史会话时的系统提示气泡（既非用户也非模型答案）。 */
 .msg.note { align-self: stretch; background: var(--lan-foam); color: var(--lan-ink-soft); border: 1px dashed var(--lan-mist); font-size: .85rem; }
@@ -401,6 +409,9 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .stage-size { flex: none; font-size: .78rem; }
 .stage-act { background: var(--lan-ripple); color: #fff; border: 0; border-radius: 4px; padding: .2rem .6rem; cursor: pointer; font-size: .8rem; }
 .stage-act:disabled { opacity: .5; cursor: default; }
+/* 图标化的行内动作按钮（预览/修订/断链检查/晋级/解析）：方形、图标居中，名称走 title。 */
+.stage-act.stage-iconbtn { display: inline-flex; align-items: center; justify-content: center; padding: .3rem .4rem; }
+.stage-act.stage-iconbtn .ico { width: 1rem; height: 1rem; }
 .stage-trash { background: transparent; border: 0; cursor: pointer; font-size: .95rem; padding: .1rem .3rem; }
 .stage-trash:disabled { opacity: .4; cursor: default; }
 /* 目录导航：面包屑（返回上一级 + 当前路径）。 */

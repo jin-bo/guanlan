@@ -470,6 +470,20 @@ def test_api_raw_lists_only(client, kb) -> None:
     names = {f["name"] for f in resp.json()["files"]}
     assert names == {"a.md", "b.md"}  # 只列 *.md
     assert all(isinstance(f["size"], int) for f in resp.json()["files"])
+    assert all(f["ingested"] is False for f in resp.json()["files"])  # 无对应 source 页 → 未收录
+
+
+def test_api_raw_marks_ingested(client, kb) -> None:
+    """`ingested` 派生信号：raw/<x>.md 有同 slug 的 wiki/sources/<x>.md → 已收录，否则未收录。
+
+    纯读派生、不落盘；前端据此默认只显未收录、按钮切看已收录（不从磁盘删任何源）。
+    """
+    (kb / "raw" / "标准体系-20240531.md").write_text("# 标准\n", encoding="utf-8")
+    (kb / "raw" / "数据获取-20240531.md").write_text("# 数据\n", encoding="utf-8")
+    write_page(kb, "wiki/sources/标准体系-20240531.md", type="source")  # 仅前者有摘要页
+
+    files = {f["name"]: f["ingested"] for f in client.get("/api/raw").json()["files"]}
+    assert files == {"标准体系-20240531.md": True, "数据获取-20240531.md": False}
 
 
 def test_api_raw_file_renders_markdown(client, kb) -> None:
