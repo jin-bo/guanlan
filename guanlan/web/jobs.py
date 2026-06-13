@@ -27,6 +27,11 @@ from ..errors import EXIT_AGENT_ERROR
 
 JobState = Literal["queued", "running", "done"]
 
+# 进度 sink（决策P4.6.1-11）：作业 thunk 收到一个 `emit(line)` 回调，把一行人读进度**实时**累加进
+# `job.output`（running 期即可被 `/api/jobs/{id}` 轮询看见，不必等 done）。既有 thunk 忽略它、仍靠
+# `print()` 经 redirect 进 buf（行为不变）；仅 parse thunk 用它把转换内核的 stderr 行实时推上去。
+Emit = Callable[[str], None]
+
 
 class WriteGate:
     """进程级单写者协调（P4.5 §5 决策P4.5-6/10）：一把 `write_lock` + `active_writable_turns` 计数。
@@ -122,6 +127,10 @@ class Job:
     output: str = ""
     result: object | None = None  # 进程内结构化结果（heal 的 HealRun）；ingest/投喂为 None。
     done_event: threading.Event = field(default_factory=threading.Event)
+    # 进度写锁（决策P4.6.1-14）：parse 内核 `progress=` 经 Popen 两条并发 drain 线程调 emit，emit 写
+    # 非线程安全的 `StringIO buf` + `job.output`、又与 worker finally 的 `job.output` 赋值竞态。故 emit
+    # 的 buf.write+getvalue+赋值 与 finally 的 getvalue 全取这把锁。非流式作业单线程、不触锁外并发。
+    output_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class JobQueue:
@@ -132,7 +141,7 @@ class JobQueue:
         write_lock: threading.Lock | None = None,
         on_job_done: Callable[[str], None] | None = None,
     ) -> None:
-        self._queue: queue.Queue[tuple[Job, Callable[[], object]]] = queue.Queue()
+        self._queue: queue.Queue[tuple[Job, Callable[[Emit], object]]] = queue.Queue()
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()  # 仅护 _jobs / _counter；worker 改 job 字段无并发读写竞态点
         self._counter = 0
@@ -146,8 +155,13 @@ class JobQueue:
         self._worker = threading.Thread(target=self._run, name="guanlan-jobs", daemon=True)
         self._worker.start()
 
-    def _register(self, kind: str, fn: Callable[[], object]) -> Job:
-        """建表 + 入队的内部归口，返回 Job 本体（enqueue / submit_and_wait 共用）。"""
+    def _register(self, kind: str, fn: Callable[[Emit], object]) -> Job:
+        """建表 + 入队的内部归口，返回 Job 本体（enqueue / submit_and_wait 共用）。
+
+        `fn` 统一收一个 `emit(line)` 进度 sink（决策P4.6.1-11）：既有 thunk 忽略它、仅 parse 用之。
+        签名升 `Callable[[Emit], object]` **须在本归口统一**——它同服务 `enqueue`（异步）与
+        `submit_and_wait`（同步），只改 enqueue 会漏掉同步作业（raw_write/upload/delete）。
+        """
         with self._lock:
             self._counter += 1
             job = Job(id=str(self._counter), kind=kind)
@@ -155,16 +169,16 @@ class JobQueue:
         self._queue.put((job, fn))
         return job
 
-    def enqueue(self, kind: str, fn: Callable[[], object]) -> str:
+    def enqueue(self, kind: str, fn: Callable[[Emit], object]) -> str:
         """登记一个作业并入队，立即返回 `job_id`（不阻塞）。
 
-        `fn` 返回**退出码 `int`**（ingest/投喂）**或**带 `.exit_code` 的结构化结果（heal 的
-        `HealRun`）——worker 鸭子分流（见 `_run`）。异步作业（ingest/heal）用：入队即返回
-        job_id，前端轮询 `/api/jobs/{id}`。
+        `fn(emit)` 返回**退出码 `int`**（ingest/投喂）**或**带 `.exit_code` 的结构化结果（heal 的
+        `HealRun`）——worker 鸭子分流（见 `_run`）。异步作业（ingest/heal/parse）用：入队即返回
+        job_id，前端轮询 `/api/jobs/{id}`（parse 期间即可见 emit 推上的增量 backend 日志）。
         """
         return self._register(kind, fn).id
 
-    def submit_and_wait(self, kind: str, fn: Callable[[], object]) -> Job:
+    def submit_and_wait(self, kind: str, fn: Callable[[Emit], object]) -> Job:
         """入队一个作业并**阻塞到它完成**，返回 Job 本体（直接持 Job，无 Optional）。
 
         同步作业（P4.1 投喂）用：作业自身极快（一次文件写），单独起轮询体验割裂；故入队后
@@ -186,7 +200,16 @@ class JobQueue:
             job, fn = self._queue.get()
             job.state = "running"
             buf = io.StringIO()
-            # 单写者写锁（P4.5）：包住真正的写执行 `fn()`，与可写 chat turn / 撤销 / GET /graph
+
+            # 增量进度 sink（决策P4.6.1-11/14）：thunk 经它把一行进度实时累加进 job.output，running
+            # 期即可被轮询看见。buf 写 + 整串赋值在 job.output_lock 内（parse 的 drain 线程并发调时
+            # 不撕裂、不与 finally 竞态）。既有 thunk 不调它（仍 print() 经 redirect）；仅 parse 用。
+            def emit(line: str, _job: Job = job, _buf: io.StringIO = buf) -> None:
+                with _job.output_lock:
+                    _buf.write(line + "\n")
+                    _job.output = _buf.getvalue()
+
+            # 单写者写锁（P4.5）：包住真正的写执行 `fn(emit)`，与可写 chat turn / 撤销 / GET /graph
             # 串行。在 worker 线程上阻塞 acquire 无碍（非事件循环线程）；None 时退回无锁（P4 行为）。
             if self._write_lock is not None:
                 self._write_lock.acquire()
@@ -194,7 +217,7 @@ class JobQueue:
                 # 进程级 redirect：捕获 run_ingest 的人读 stdout/stderr。只在此单 worker 串行
                 # 发生，故无跨线程竞态（读/问答路径都不打印，见模块 docstring 红线）。
                 with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                    outcome = fn()
+                    outcome = fn(emit)
                 # 鸭子分流（决策P4.3-1）：int → 退出码（ingest/投喂，口径不变）；否则为带
                 # `.exit_code` 的结构化结果（heal 的 HealRun），整体存进 result、再取退出码。
                 # worker 仍**域无关**——只碰 `.exit_code`，不 import heal 类型；result 的序列化
@@ -213,8 +236,11 @@ class JobQueue:
                 # 顺序要紧：先写 output、再翻 state="done"，最后 set()。轮询读者只在见到
                 # state=="done" 后读 output（同线程程序序 + GIL 原子赋值保证"见 done 必见完整
                 # output"，无锁可行）；submit_and_wait 的等待者由 done_event 唤醒、醒来即见完整
-                # output/exit_code/state（决策P4.1-2）。
-                job.output = buf.getvalue()
+                # output/exit_code/state（决策P4.1-2）。终态 getvalue 取 output_lock：与 parse 的
+                # drain 线程若有迟到 emit 不撕裂（决策P4.6.1-14；fn 返回后 drain 线程通常已 join，
+                # 取锁仅作纵深防御、与最后一次 emit 幂等）。
+                with job.output_lock:
+                    job.output = buf.getvalue()
                 job.state = "done"
                 job.done_event.set()
             # 完工回调在 write_lock 释放后调（不在临界区内做额外工作）；best-effort：异常不能
