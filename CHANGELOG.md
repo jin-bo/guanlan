@@ -3,11 +3,14 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
-## [Unreleased]
+## [0.1.8] - 2026-06-13
 
-在 P3「健康与图谱」主题内深化 `graph`/`lint`——把图从「看一眼的邻接列表」升级成**维护仪表**。
-**纯零 LLM、零新依赖、确定性、字节稳定**：不加子命令、不加旗标、不加退出码、不动门禁、不碰
-`raw/`/`log.md`。
+三条线并进、均落在既有里程碑边界内：① **图谱深化（P3.5/P3.6）**——把 `graph`/`lint` 从「看一眼的
+邻接列表」升级成**维护仪表**（确定性 Louvain 社区 + 图论割边/割点），纯零 LLM、确定性、字节稳定；
+② **多格式摄入（P5.2/P5.2.1）**——新增 `guanlan convert` 补上 CLI 的 `PDF/DOCX → raw → ingest`
+缺口，转换图片随源落盘且引用自洽；③ **Web 上传与暂存（P4.6/P4.6.1）**——打通「上传 → 暂存 →
+解析 → 人审 → 晋级为源」端到端流，附 raw 源预览与暂存区 UX 优化。外加**中英双语用户指南**与
+`docs/` 索引。仍不引入新退出码、不动门禁、`raw/` 对 Agent 只读不破。
 
 ### 新增
 
@@ -24,6 +27,15 @@
     （决策P3.5-12）；`thin_intercommunity_link` 命名取代 `fragile_bridge`，明确**非图论 bridge**
     （不判删边断连，决策P3.5-13）。LLM 推断边明确排除（破坏 graph 可重建性）。
   - 落地小设计见 [`docs/P3.5-图谱分析.md`](docs/P3.5-图谱分析.md)。
+
+- **图论桥与割点（P3.6）** —— 在 P3.5 同一份 `undirected_adjacency` 上加 `graphstats.fragile_topology`：
+  **一趟确定性迭代 Tarjan 低链 DFS**（显式栈、长链不爆递归）算出**割边（bridge）与割点（cut vertex）**——
+  「删之即断」的单点故障，是 `thin_intercommunity_link`（只数单条跨社区边）看不见的**正交补强**
+  （bridge 判真断连，二者不去重）。噪声控制：均以「删后次大连通分量 ≥ 阈值」过滤，近树叶边/星形辐条
+  保持静默（星心是 `hub_node` 但非 `cut_vertex`）。**additive** 多两条建议非门禁 `lint` finding
+  （`lint.bridge_edge` 全局 / `lint.cut_vertex` 逐页）与 `graph.json` 的 `stats.bridges`/
+  `stats.cut_vertices` 计数（镜像 `stats.orphans`，节点/边字典字节不变）+ `graph.html` 两段拓扑提示。
+  仍排除 LLM 推断边、零新命令/退出码。落地小设计见 [`docs/P3.6-图论桥与割点.md`](docs/P3.6-图论桥与割点.md)。
 
 - **多格式摄入（P5.2）** —— 新增 `guanlan convert <file>`：把 PDF/DOCX/PPTX/XLSX/HTML/图片… 经
   **既有 `pdf-to-markdown` skill**（MinerU→marker→pypdf 分层兜底、随 wheel 全局安装）转成 markdown、
@@ -43,6 +55,40 @@
     409/500 分流逐字不变（决策P5.2-6）。无新退出码。
   - `ingest` 对非-`.md` 的报错文案改为指向 `guanlan convert`；落地小设计见
     [`docs/P5.2-多格式摄入.md`](docs/P5.2-多格式摄入.md)。
+
+- **转换图片随源落盘（P5.2.1）** —— 补 P5.2 的漏：此前 `convert_to_markdown` 只取产物 `.md` 文本、
+  把转换器抽出的图片连同 temp 树丢弃 → `raw/<slug>.md` 的 `![](…)` 全部悬空。现让图片**随转换文件
+  一并落** `raw/images/<slug>/<slug>-N.ext`（按 md 内首次出现序编号、ext 取原后缀小写），并**重写
+  markdown 图片引用**指向落盘新相对路径,使 `raw/<slug>.md` 自洽。**引擎无关收集**（mineru 子目录 /
+  marker 平级统一按「相对产物 md 父目录解析」）；内核返回从 `str` 升为 `ConvertResult`。**图片引用准入
+  是安全边界**（`_admit_image_ref` 五条 AND：拒 scheme/绝对/`~`/协议相对、`realpath` 解 symlink 后须
+  落在 tmp_root 内、须真实普通文件、后缀白名单），挡越界/symlink 逃逸；**容量三道闸**（单图 20 MiB /
+  累计 200 MiB / 张数 500，超限报错非静默丢图）；落盘「图先换、md 末步提交」+ 失败回滚,故任何成功落盘
+  的新 md 永不指向缺失图片。`--dry-run` 连图零落盘、`--overwrite` 整盘替换该 slug 图目录。仍零 LLM
+  宿主写、只写 `raw/`、`rawio.py` 一字不改。落地小设计见 [`docs/P5.2.1-图片落盘.md`](docs/P5.2.1-图片落盘.md)。
+
+- **Web 文件上传与晋级（P4.6）** —— `POST /api/upload` 把文件落 `workspace/uploads/` 暂存，**一次落盘、
+  双重用途**：①当聊天 `<attachment>`/图像视觉（Agent 当场读、不成源）②走「解析 → 人审 → 晋级为源 →
+  ingest」成永久可追溯的 `raw/` 源；外加 `workspace/` 浏览/预览/删除端点与 **raw 源渲染预览**（点文件名
+  看正文，含 `raw/images/` 嵌图与复杂 HTML 表格）。配套 **`pdf-to-markdown` skill**（force-include 进
+  wheel、随包全局安装）。落地小设计见 [`docs/P4.6-Web上传与晋级.md`](docs/P4.6-Web上传与晋级.md)。
+
+- **Web 暂存区确定性解析 + 图片晋级（P4.6.1）** —— 抽出 `guanlan/imageio.py` 图片归口（`collect_for_promotion`
+  含 SHA256 指纹、`_admit_image_ref` 等从 `convert.py` 抽出，`rawio.py` 一字不改），落地暂存区
+  「解析作业 → 断链检查 → 重整提交（含全局零引用图片 GC）→ 人审晋级」流：`parse_upload`/`image_lint`/
+  `relocalize_commit`（`web/parsefeed.py`）+ `prepare_promotion`/`commit_promotion`（`web/promote.py`），
+  并给 Job 加**流式进度**（`convert_to_markdown(progress=)` + `Emit` sink + 每 Job `output_lock`）。
+  前端配 Web 暂存区/历史/日志 **UX 优化**（图标化 + 已收录过滤 + 进度条折叠）。落地小设计见
+  [`docs/P4.6.1-暂存区确定性解析与图片晋级.md`](docs/P4.6.1-暂存区确定性解析与图片晋级.md)。
+
+### 文档
+
+- **中英双语用户指南 `docs/guide/`** —— 面向使用者的操作指南（`zh/` `en/` 各 7 篇 + 入口 README）：
+  安装 / 快速上手 / CLI 命令 / 维护（体检·图谱）/ Web 宿主 / MCP 宿主 / 多格式转换；命令签名、flag、
+  退出码核对自 `guanlan/cli.py` 与 `errors.py`。
+- **`docs/README.md` 文档索引** —— 26 个 `P*.md` 按 P2/P3/P4/P5 里程碑分组、显眼指向 `guide/`（零链接破坏）。
+- **README 改用户向 + 双语** —— 砍开发者向里程碑罗列、改「能做什么」命令表 + 状态 badge + logo + 中英切换，
+  新增 `README.en.md` 镜像版。
 
 由 `tests/test_convert.py`（定位 skill / 不带 LLM·不改 env / 无 --model·不透传 model / cwd=root
 保 `.env` / temp 防污染 / 转换落源 / 全后端耗尽 degrade / 文本准入 / provenance·默认 origin 钉口径 /
