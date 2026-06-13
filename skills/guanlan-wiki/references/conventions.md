@@ -47,6 +47,20 @@ last_updated: YYYY-MM-DD
   - **命令或混合文本里的引用**（如 `` `cat x.md` ``、`` `cat [[X]]` ``、`` `git status` ``——整段不等于单条页面引用）；
   - **围栏代码块 / 缩进代码块**——代码块字面语义不破（决策P4-3）。注：路径/stem 兜底**只看整段是否忠实等于某现有页**，故含空格的合法页名（如 `` `Stable Diffusion 模型` ``）也能成链。
 
+## 图片引用（嵌图）
+
+`guanlan convert`（P5.2.1）把 PDF/DOCX 等抽出的插图随源落到 `raw/images/<slug>/<slug>-N.ext`，并把 `raw/<slug>.md` 里的引用重写成相对 `raw/` 的 `![](images/<slug>/…)`——**`raw/` 内自洽**。ingest 把源编译进 `wiki/` 时，按下列口径处理这些嵌图：
+
+- **选择性保留（编译非搬运）**：只保留**承载知识**的图——流程图/架构图/数据流图、示意图、关键表格或图表截图等；**装饰性图**（页眉 logo、分隔线、扫描噪点、纯版式件）一律丢弃。wiki 是摘要层，不是图床。
+- **只引用、不拷贝**：图片是 `raw/` 源的组成部分，受 `raw/` 只读约束。wiki 页**只链过去**，**绝不把图片字节拷进 `wiki/`**（拷贝=派生物，违反「markdown 是唯一事实、派生物可重建」，且把图落进 wiki 会被 `raw/` 快照外的写集视作越权）。
+- **路径口径（统一二级深度）**：所有 wiki 内容页都在 `wiki/<dir>/`（`sources/`·`entities/`·`concepts/`·`syntheses/`），到 `raw/images/` 的相对路径**恒为** `../../raw/images/<slug>/<文件名>`：
+  - 摘要页 `wiki/sources/技术报告.md` 引用：`![Transformer架构图](../../raw/images/技术报告/技术报告-3.png)` ✅
+  - **切勿**照抄源里的 `![](images/技术报告/技术报告-3.png)`——它相对 `raw/`，搬进 `wiki/sources/` 会解析成不存在的 `wiki/sources/images/…`、悬空。
+- **`alt` 文本**：给有意义的 `alt`（如 `![编码器-解码器结构图](…)`），便于检索与无图降级阅读。**若本次 ingest 模型支持图像（vision）**，打开 `raw/images/<slug>/<文件名>` 看图后写 `alt`；**不支持 vision 时**据图周围正文/图注推断；源里已有可用 `alt` 则沿用。看图摘要由 ingest Agent 经 Agentao 运行时完成（LLM 只在 ingest/query 经 Agentao，**convert 仍零 LLM、不生成 `alt`**），且**只写进 wiki 页引用、绝不回写 `raw/`**（`raw/` 是逐字源、非派生物）。
+- 嵌图引用与 `[[wikilink]]` 互不影响：`![]()` 是图片、`[[]]` 是页面互链，各走各的解析，别混写。
+
+> Web 端 wiki 页**当前不渲染**这种 `../../raw/images/` 引用（图片改写仅在 raw 预览开启，见 `render.py`）；本节只保证 markdown/Obsidian 层引用不悬空、知识不丢。让 wiki 页也显示嵌图属 P4.6 机会性优化（同 P5.2.1 决策-12），与本约定正交。
+
 ## 别名（aliases）
 
 entity/concept 页可在 frontmatter 声明 `aliases`，把「同义不同名」的变体收敛到同一页（AI 领域高发：「大模型」/「LLM」/「大语言模型」、「自注意力」/「self-attention」、中英缩写混用）。**别名进入 `[[wikilink]]` 解析命名空间**（与页面 stem 同口径、大小写不敏感、零 LLM）：
