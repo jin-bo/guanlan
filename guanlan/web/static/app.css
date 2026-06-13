@@ -326,6 +326,9 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .finding .kind { color: var(--lan-deep); font-weight: 600; }
 .raw-pick { display: flex; align-items: center; justify-content: space-between; padding: .3rem .4rem; border-bottom: 1px solid var(--lan-mist); font-size: .9rem; }
 .raw-pick button { background: var(--lan-ripple); color: #fff; border: 0; border-radius: 4px; padding: .2rem .7rem; cursor: pointer; }
+/* 文件名即预览入口：还原成可点正文（左对齐、无底色、悬停下划线），与右侧 ingest 按钮区分。 */
+.raw-pick button.raw-name { flex: 1; min-width: 0; overflow-wrap: anywhere; background: none; color: var(--lan-deep); padding: .2rem 0; text-align: left; font-size: inherit; }
+.raw-pick button.raw-name:hover { text-decoration: underline; }
 
 /* 投喂浮层（P4.1）：文件名输入 + 正文 textarea + 存盘 + 状态行（成功/409/失败）。 */
 .feed-name { width: 100%; box-sizing: border-box; padding: .4rem .55rem; margin-bottom: .5rem;
@@ -420,6 +423,11 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .stage-promote-form input { flex: 1; min-width: 8rem; padding: .3rem .45rem; border: 1px solid var(--lan-mist); border-radius: 5px; font-size: .82rem; }
 .stage-promote-status { flex-basis: 100%; font-size: .82rem; display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
 .stage-preview { margin-top: .5rem; padding: .6rem .8rem; background: var(--lan-foam); border-radius: 6px; }
+/* 预览「Markdown ⇄ 源码」切换条：当前态按钮高亮，源码视图按 <pre><code> 等宽显示原始 md。 */
+.stage-preview-toggle { display: flex; gap: .4rem; margin-top: .5rem; }
+.stage-act.active { background: var(--lan-deep); }
+.stage-preview.source pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+.stage-preview.source code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; }
 
 .muted { color: var(--lan-ink-soft); font-size: .85rem; }
 .hidden { display: none; }

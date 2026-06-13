@@ -391,15 +391,14 @@ function renderRawPicker(files) {
   for (const f of files) {
     const row = document.createElement("div");
     row.className = "raw-pick";
-    const name = document.createElement("span");
-    name.textContent = `${f.name} (${f.size}B)`; // textContent：文件名按字面显示，无注入
-    const preview = document.createElement("button");
-    preview.textContent = t("ingest.preview");
-    preview.addEventListener("click", () => previewRawFile(f.name, files));
+    const name = document.createElement("button"); // 文件名即预览入口：点名预览，省去独立按钮
+    name.className = "raw-name";
+    name.textContent = `${f.name} (${(f.size / 1024).toFixed(1)} KB)`; // textContent：文件名按字面显示，无注入；体积按 KB
+    name.addEventListener("click", () => previewRawFile(f.name, files));
     const btn = document.createElement("button");
     btn.textContent = "ingest"; // 命令名，不译
     btn.addEventListener("click", () => triggerIngest(`raw/${f.name}`));
-    row.append(name, preview, btn);
+    row.append(name, btn);
     box.appendChild(row);
   }
 }
@@ -451,6 +450,54 @@ async function triggerIngest(target) {
   }
 }
 
+// 确定性解析（P4.6.1，决策P4.6.1-1/7）：上传文件 → POST /api/parse → 进度窗口（pollJob running 态渲染
+// emit 推上的 backend 分级日志）→ 完成显回执 + 返回暂存区。区别于旧「问 agent 解析」（不再回填 composer）。
+async function triggerParse(uploadPath) {
+  showOverlay("parse", `<p class="muted">${escapeHtml(t("staging.parseSubmitted", uploadPath))}</p>`);
+  stagingOpen = false; // 进度窗期间暂停自动刷新（避免并发 turn 收尾把进度刷掉）
+  try {
+    // 裸 fetch 以特判 423（可写 turn 活跃）；其余非 2xx → parseFail。
+    const res = await fetch("/api/parse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ upload: uploadPath }),
+    });
+    if (res.status === 423) {
+      $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.writableRetryDot"))}</p>`;
+      return;
+    }
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.detail || `HTTP ${res.status}`);
+    }
+    const { job_id } = await res.json();
+    await pollJob(job_id, t("staging.parsing"), renderParseDone);
+  } catch (e) {
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.parseFail", e.message))}</p>`;
+  }
+}
+
+function renderParseDone(job) {
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  const ok = job.exit_code === 0;
+  const badge = document.createElement("p");
+  badge.innerHTML = ok
+    ? `<span class="report-ok">${escapeHtml(t("common.passed"))}</span>`
+    : `<span class="report-bad">${escapeHtml(t("common.exitCode", job.exit_code))}</span>`;
+  box.appendChild(badge);
+  if (job.output) {
+    const pre = document.createElement("pre");
+    pre.textContent = job.output; // backend 分级日志 + 回执（同 ingest，纯 textContent 无注入）
+    box.appendChild(pre);
+  }
+  const back = document.createElement("button");
+  back.className = "stage-act";
+  back.textContent = t("staging.backToStaging");
+  back.addEventListener("click", () => { stagingPath = null; stagingOpen = true; loadStaging(); });
+  box.appendChild(back);
+}
+
 // 通用作业轮询骨架（ingest / heal 共用）。`renderDone(job)` 可选：heal 有结构化 result，传入
 // 自定义渲染；省略则走 ingest 默认（退出码徽标 + output 文本）。完成后统一 loadPages 刷新。
 async function pollJob(jobId, label, renderDone) {
@@ -469,7 +516,12 @@ async function pollJob(jobId, label, renderDone) {
       await loadPages(); // 写后刷新 wiki 搜索列表（heal 新建了页）
       return;
     }
-    $("#overlay-body").innerHTML = `<p class="muted">${escapeHtml(t("job.running", label, job.state))}</p>`;
+    // running 态：渲染已累加的增量 output（决策P4.6.1-7③/-11）——解析作业的 backend 分级日志在此
+    // 实时可见（emit 推上）；ingest/heal/backfill 顺带受益。无 output 时仍只显运行徽标。
+    const running = `<p class="muted">${escapeHtml(t("job.running", label, job.state))}</p>`;
+    $("#overlay-body").innerHTML = job.output
+      ? `${running}<pre>${escapeHtml(job.output)}</pre>`
+      : running;
     await sleep(400);
   }
 }
@@ -1082,10 +1134,11 @@ function renderUploadRow(it, blocked) {
   sz.textContent = fmtBytes(it.bytes);
   const parse = document.createElement("button");
   parse.className = "stage-act";
-  parse.textContent = t("staging.parse");
-  parse.addEventListener("click", () =>
-    fillComposer(t("staging.parseCmd", it.path), { needWritable: true })
-  );
+  parse.textContent = t("staging.parse");  // P4.6.1：宿主确定性解析（非「问 agent」），点击即建解析作业
+  parse.title = t("tip.parse");
+  parse.disabled = blocked;
+  if (blocked) parse.title = t("staging.writeBusy");
+  parse.addEventListener("click", () => triggerParse(it.path));
   row.append(ico, nm, sz, parse);
   // 退化路径（§6 / §7.2 ①）：uploads/*.md 也可直接晋级（source 校验只需 workspace/ + .md + 存在）。
   if (it.kind === "text" && /\.md$/i.test(it.name)) {
@@ -1129,8 +1182,87 @@ function renderParsedRow(it, blocked, selected, updateMerge) {
     if (what === null || !what.trim()) return;
     fillComposer(t("staging.reviseCmd", it.path, what.trim()), { needWritable: true });
   });
-  row.append(cb, ico, nm, preview, revise, promoteButton(it, blocked), trashButton(it.path, row, blocked));
+  // 断链检查（P4.6.1，决策P4.6.1-5）：拆分/合并后图片可能悬空/错位，一键检查 + 重整（确定性、宿主写）。
+  const relink = document.createElement("button");
+  relink.className = "stage-act";
+  relink.textContent = t("staging.relink");
+  relink.title = t("tip.relink");
+  relink.addEventListener("click", () => checkRelink(it, relink));
+  row.append(cb, ico, nm, preview, revise, relink, promoteButton(it, blocked), trashButton(it.path, row, blocked));
   return row;
+}
+
+// 断链检查（决策P4.6.1-5）：GET image-lint → 行内显示悬空/错位计数；可重整时给「重整图片」按钮。
+// 再点收起（与晋级表单同 toggle 行为）。
+async function checkRelink(it, anchorBtn) {
+  const row = anchorBtn.parentElement;
+  const existing = row.querySelector(".stage-relink-status");
+  if (existing) { existing.remove(); return; } // 再点收起
+  const status = document.createElement("div");
+  status.className = "stage-relink-status stage-promote-status";
+  status.textContent = t("staging.relinkChecking");
+  row.appendChild(status);
+  let data;
+  try {
+    data = await getJSON(`/api/workspace/image-lint?file=${encodeURIComponent(it.path)}`);
+  } catch (e) {
+    status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.relinkFail", e.message))}</span>`;
+    return;
+  }
+  status.innerHTML = "";
+  const dangling = (data.dangling || []).length;
+  const misplaced = (data.misplaced || []).length;
+  if (!dangling && !misplaced) {
+    status.innerHTML = `<span class="report-ok">${escapeHtml(t("staging.relinkClean"))}</span>`;
+    return;
+  }
+  if (misplaced) {
+    const m = document.createElement("span");
+    m.className = "muted";
+    m.textContent = t("staging.relinkMisplaced", misplaced) + " ";
+    status.appendChild(m);
+  }
+  if (dangling) {
+    const d = document.createElement("span");
+    d.className = "report-bad";
+    d.textContent = t("staging.relinkDangling", dangling) + " ";
+    status.appendChild(d);
+  }
+  if (data.needs_relocalize) { // 仅错位可自动修；悬空（文件缺失）重整无能为力，只提示
+    const go = document.createElement("button");
+    go.className = "stage-act";
+    go.textContent = t("staging.relinkGo");
+    go.disabled = hostWriteBlocked();
+    if (go.disabled) go.title = t("staging.writeBusy");
+    go.addEventListener("click", () => runRelocalize(it, go, status));
+    status.appendChild(go);
+  }
+}
+
+async function runRelocalize(it, go, status) {
+  go.disabled = true;
+  go.textContent = t("staging.relinking");
+  try {
+    const res = await fetch("/api/workspace/relocalize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: it.path }),
+    });
+    if (res.status === 423) {
+      go.disabled = false; go.textContent = t("staging.relinkGo");
+      status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.writableRetryDot"))}</span>`;
+      return;
+    }
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.detail || `HTTP ${res.status}`);
+    }
+    status.innerHTML = `<span class="report-ok">${escapeHtml(t("staging.relinkDone"))}</span>`;
+    setTimeout(loadStaging, 600); // 重整改了 md/图目录 → 刷新暂存区
+  } catch (e) {
+    go.disabled = false; go.textContent = t("staging.relinkGo");
+    status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.relinkFail", e.message))}</span>`;
+  }
 }
 
 // 「晋级为源」按钮：点开行内晋级表单（名/出处 + 确认）；复用投喂 slug-409 交互。
@@ -1192,10 +1324,38 @@ async function previewWorkspaceFile(path) {
   const title = document.createElement("div");
   title.className = "stage-head";
   title.textContent = path; // textContent：路径按字面显示
+  // Markdown ⇄ 源码 切换条：默认 Markdown 富渲染；源码视图按 textContent 转义显示原始 md（无注入）。
+  const toggle = document.createElement("div");
+  toggle.className = "stage-preview-toggle";
+  const mdBtn = document.createElement("button");
+  mdBtn.className = "stage-act";
+  mdBtn.textContent = t("staging.viewMd");
+  const srcBtn = document.createElement("button");
+  srcBtn.className = "stage-act";
+  srcBtn.textContent = t("staging.viewSrc");
+  toggle.append(mdBtn, srcBtn);
   const view = document.createElement("div");
-  view.className = "stage-preview rendered";
-  view.innerHTML = data.html; // render_page 已 sanitize（同 /api/page）
-  box.append(back, title, view);
+  let mode = "markdown";
+  const paint = () => {
+    mdBtn.classList.toggle("active", mode === "markdown");
+    srcBtn.classList.toggle("active", mode === "source");
+    if (mode === "markdown") {
+      view.className = "stage-preview rendered";
+      view.innerHTML = data.html; // render_page 已 sanitize（同 /api/page）
+    } else {
+      view.className = "stage-preview source";
+      view.innerHTML = "";
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.textContent = data.source || ""; // textContent：原始 md 逐字、转义、无注入
+      pre.appendChild(code);
+      view.appendChild(pre);
+    }
+  };
+  mdBtn.addEventListener("click", () => { mode = "markdown"; paint(); });
+  srcBtn.addEventListener("click", () => { mode = "source"; paint(); });
+  box.append(back, title, toggle, view);
+  paint();
 }
 
 // 行内晋级表单：名（slug 预填 stem）+ 出处（可选，空则后端回退 source）+ 确认；409 引导改名/覆盖（失真告警）。
