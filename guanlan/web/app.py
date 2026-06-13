@@ -53,10 +53,17 @@ from ..runtime import AgentRunner
 from ..search import CorpusCache, score, search_result_dict, tokenize
 from .chat import IDLE_TTL_SECONDS, MAX_CONVERSATIONS, ConversationStore
 from .jobs import JobQueue, WriteGate
+from .parsefeed import (
+    _BACKENDS,
+    image_lint,
+    parse_target,
+    parse_upload,
+    relocalize_commit,
+)
+from .promote import commit_promotion, prepare_promotion
 from .rawfeed import (
     _atomic_write_raw,
     _check_text_admission,
-    _prepare_promotion,
     _safe_raw_target,
 )
 from .render import render_markdown, render_page
@@ -66,6 +73,7 @@ from .uploads import (
     _atomic_write_upload,
     _augment_with_attachments,
     _classify_upload,
+    _safe_upload_file,
     _safe_workspace_target,
 )
 from .workspace import (
@@ -142,6 +150,33 @@ class RawBody(BaseModel):
     source: str | None = None
     origin: str | None = None
     overwrite: bool = False
+
+
+class ParseBody(BaseModel):
+    """`POST /api/parse` 请求体（P4.6.1，决策P4.6.1-1/7）。
+
+    `upload` = `POST /api/upload` 回传的 `workspace/uploads/<名>` 路径；宿主确定性解析（直调
+    `convert_to_markdown`）成 `workspace/parsed/<slug>.md` + 随源图片。`backend` 透传 skill 转换后端
+    （`auto`/`mineru`/`marker`/`python`），非法值 → 422。"""
+
+    upload: str
+    backend: str = "auto"
+
+    @field_validator("backend")
+    @classmethod
+    def _backend_known(cls, v: str) -> str:
+        if v not in _BACKENDS:
+            raise ValueError(f"未知 backend：{v}（须 ∈ {_BACKENDS}）。")
+        return v
+
+
+class RelocalizeBody(BaseModel):
+    """`POST /api/workspace/relocalize` 请求体（P4.6.1，决策P4.6.1-5/6）。
+
+    `file` = `workspace/parsed/` 内一个 `.md` 路径；把它引用的图 copy 到 `images/<file_stem>/`、
+    改名编号、重写引用、全局零引用 GC 原图。仅作用于 parsed/（拆分/合并断链修复场景）。"""
+
+    file: str
 
 
 class ModeBody(BaseModel):
@@ -245,6 +280,35 @@ _RAW_IMAGE_EXT_TO_MIME = {
 }
 
 
+def _image_file_response(target: Path) -> FileResponse:
+    """按 `_RAW_IMAGE_EXT_TO_MIME` 白名单发图像原字节；非表内一律 404（杜绝把任意文件 inline 出去）。
+
+    两处只读图像端点（`/api/raw/image` raw 嵌图、`/api/workspace/raw` parsed 缩略图）**共用一份白名单**，
+    覆盖 convert/`IMAGE_EXTS` 全部落盘扩展名（png/jpg/gif/webp/bmp/tif/tiff/svg）——否则 parsed 预览会对
+    bmp/tiff/svg 等已收集图片显示断图。
+
+    SVG 是**活跃内容**（可内嵌 `<script>`/事件处理）：以 `image/svg+xml` 从本源 inline 直发会带来同源
+    脚本执行风险——直接导航/新标签打开该 URL 即以「文档」身份渲染并执行脚本、进而调用本地 Web API。故 svg
+    不以可执行文档身份交付：① `Content-Disposition: attachment` 让**直接导航变下载**（`<img src>` 等子资源
+    加载**不受**该头影响、缩略图预览仍正常渲染，且 `<img>` 上下文本就不执行脚本）；② `CSP: default-src
+    'none'; sandbox` + `nosniff` 双保险关死脚本与 MIME 嗅探。栅格图无活跃内容、按常规 inline 直发。
+    """
+    mime = _RAW_IMAGE_EXT_TO_MIME.get(target.suffix.lower())
+    if mime is None:
+        raise HTTPException(status_code=404, detail="仅供图像：非图像扩展名不经本端点提供。")
+    if target.suffix.lower() == ".svg":
+        return FileResponse(
+            target,
+            media_type=mime,
+            headers={
+                "Content-Disposition": "attachment",
+                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+    return FileResponse(target, media_type=mime)
+
+
 def _safe_raw_image(root: Path, rel: str) -> Path:
     """把 raw 预览的图片 `rel` 解析为 `raw/images/` 内存在的文件；越界 409、缺失 404（只读，穿越防御）。
 
@@ -263,6 +327,49 @@ def _safe_raw_image(root: Path, rel: str) -> Path:
     if not candidate.is_file():
         raise HTTPException(status_code=404, detail=f"raw 图片不存在：{rel}")
     return candidate
+
+
+def _wiki_image_src(root: Path, page_file: Path):
+    """供 wiki 页渲染把 `../../raw/images/<slug>/…` 相对嵌图改写为只读 `/api/raw/image` 端点 URL。
+
+    ingest（按 skill 约定）在 wiki 页里用 `../../raw/images/<slug>/<文件名>` 引用随源落盘的嵌图——
+    浏览器无法解析这种库内相对路径（页在 `wiki/<类型>/`、图在 `raw/images/`），不改写就渲染成裂图。
+    解析 src **相对页文件父目录**、`resolve()` 后须落在 `raw/images/` 子树内才改写（路径穿越防御，
+    `/api/raw/image` 的 `_safe_raw_image` 再校验一次）；不指向 raw/images/ 的相对图原样保留（不裂得更糟）。
+    """
+    raw = (root / "raw").resolve()
+    raw_images = (root / "raw" / "images").resolve()
+
+    def _src(rel: str) -> str:
+        candidate = (page_file.parent / rel).resolve()
+        try:
+            candidate.relative_to(raw_images)
+        except ValueError:
+            return rel  # 不在 raw/images/ 内（外链已被 _is_relative_local 排除）→ 原样
+        return "/api/raw/image?path=" + quote(candidate.relative_to(raw).as_posix())
+
+    return _src
+
+
+def _workspace_image_src(root: Path, page_file: Path):
+    """供 parsed/uploads 预览把 `images/<slug>/…` 相对嵌图改写为只读 `/api/workspace/raw` 端点 URL。
+
+    P4.6.1 解析把图落 `workspace/parsed/images/<slug>/`、引用写 `images/<slug>/…`（相对 parsed md）。
+    预览渲染须把这些相对图改写到 scratch 图片端点才能显示。解析 src 相对页文件父目录、`resolve()` 后须
+    落在 `workspace/` 子树内才改写（`/api/workspace/raw` 的 `_safe_workspace_scratch` 再校验白名单子目录
+    + 图像扩展名）；否则原样保留。
+    """
+    workspace = (root / "workspace").resolve()
+
+    def _src(rel: str) -> str:
+        candidate = (page_file.parent / rel).resolve()
+        try:
+            candidate.relative_to(workspace)
+        except ValueError:
+            return rel
+        return "/api/workspace/raw?path=" + quote(candidate.relative_to(root).as_posix())
+
+    return _src
 
 
 def _list_pages(root: Path) -> list[dict]:
@@ -485,7 +592,14 @@ def create_app(
     @app.get("/api/page")
     async def api_page(path: str = Query(..., description="相对知识库根的页面路径")) -> dict:
         page_file = _safe_wiki_file(root, path)  # 同步、廉价；越界/缺失即抛 HTTPException。
-        return await anyio.to_thread.run_sync(render_page, root / "wiki", page_file)
+        # 把 wiki 页里 `../../raw/images/<slug>/…` 嵌图改写为只读 /api/raw/image 端点，使浏览器可显示
+        # ingest 随源保留的嵌图（决策P5.2.1 / SKILL.md 约定）；阻塞读盘/渲染卸到线程（决策P4-2）。
+        image_src = _wiki_image_src(root, page_file)
+
+        def _render():
+            return render_page(root / "wiki", page_file, image_src=image_src)
+
+        return await anyio.to_thread.run_sync(_render)
 
     @app.get("/api/raw")
     async def api_raw() -> dict:
@@ -519,10 +633,7 @@ def create_app(
         path: str = Query(..., description="raw/images/ 内的图像文件相对路径"),
     ) -> FileResponse:
         target = _safe_raw_image(root, path)  # 越界 409 / 缺失 404
-        mime = _RAW_IMAGE_EXT_TO_MIME.get(target.suffix.lower())
-        if mime is None:
-            raise HTTPException(status_code=404, detail="仅供 raw 嵌图：非图像扩展名不经本端点提供。")
-        return FileResponse(target, media_type=mime)
+        return _image_file_response(target)  # 白名单 404 + svg 安全交付（共用归口）
 
     # 检索（读，P5.1 决策P5.1-1/7）：直接调 P5.0 内核 `score(search_cache.corpus(wiki), …)`，
     # **不** shell out `guanlan search`、不入 JobQueue、不取快照、不 bump 代际——纯读 `wiki/`，与
@@ -554,38 +665,56 @@ def create_app(
             raise HTTPException(
                 status_code=400, detail="content 与 source 二选一（互斥且必选其一）。"
             )
-        if body.source is not None:
-            # 晋级（P4.6）：读 source、过文本准入、按 provenance 归一 frontmatter（含读盘，卸到线程）。
-            # 非 UTF-8 / 超限 / 控制字符 / 坏 frontmatter / 越界 / 非 md / 缺失 → 直接转 4xx（不进队列）。
-            content = await anyio.to_thread.run_sync(
-                _prepare_promotion, root, body.source, body.origin
-            )
-        else:
-            # 投喂（P4.1）：粘贴正文过同一道文本闸。
-            content = body.content
-            _check_text_admission(content)
-        payload = content.encode("utf-8")
-        target = _safe_raw_target(root, body.name)  # 400/越界即抛，无需进队列
-        if target.exists() and not body.overwrite:
-            raise HTTPException(
-                status_code=409, detail=f"raw/{target.name} 已存在；改名或传 overwrite=true。"
-            )
-        # 入队写盘作业 + 同步等完成；阻塞经 to_thread 卸离事件循环（决策P4.1-2）。
+        target = _safe_raw_target(root, body.name)  # 400/越界即抛，无需进队列（其 stem = target_stem）
         # `abandon_on_cancel=True`：等待在**前序写作业**（如在飞 ingest）后排队，可能数十秒甚至——
         # 若该 ingest 子进程挂死——无限久。设为可取消，使客户端断开 / 服务器关停能立即回收**请求
         # 协程**（worker 线程仍跑完作业、文件照常落盘，但请求不再被无限期钉死，关停不被拖住）。
-        job = await anyio.to_thread.run_sync(
-            jobs.submit_and_wait,
-            "raw_write",
-            lambda: _atomic_write_raw(target, content, body.overwrite),
-            abandon_on_cancel=True,
-        )
+        if body.source is not None:
+            # 晋级（P4.6.1，决策P4.6.1-12）：**入队前**读 source + 引用驱动收图 + 归一重写 +
+            # provenance + 文本准入 + 记 SHA256 指纹（坏处直接 4xx，不进队列）；thunk 在**同一写
+            # 临界区**做指纹复检 + 图 staging-swap + md 末步提交 + 失败回滚（图 + md 原子提交）。
+            plan = await anyio.to_thread.run_sync(
+                prepare_promotion, root, body.source, target, body.origin
+            )
+            if target.exists() and not body.overwrite:
+                raise HTTPException(
+                    status_code=409, detail=f"raw/{target.name} 已存在；改名或传 overwrite=true。"
+                )
+            payload_bytes = len(plan.content.encode("utf-8"))
+            job = await anyio.to_thread.run_sync(
+                jobs.submit_and_wait,
+                "promote",
+                lambda emit: commit_promotion(plan, body.overwrite),
+                abandon_on_cancel=True,
+            )
+            nimg: int | None = len(plan.images)
+        else:
+            # 投喂（P4.1）：粘贴正文过同一道文本闸；worker thunk 仅原子写 md（无图）。
+            content = body.content
+            _check_text_admission(content)
+            if target.exists() and not body.overwrite:
+                raise HTTPException(
+                    status_code=409, detail=f"raw/{target.name} 已存在；改名或传 overwrite=true。"
+                )
+            payload_bytes = len(content.encode("utf-8"))
+            job = await anyio.to_thread.run_sync(
+                jobs.submit_and_wait,
+                "raw_write",
+                lambda emit: _atomic_write_raw(target, content, body.overwrite),
+                abandon_on_cancel=True,
+            )
+            nimg = None  # 投喂无图概念：返回体不带 images 键（保 P4.1 字节）
         # 退出码 → HTTP 分流（对齐 §2，**不可**一律塌缩成 409，否则"磁盘满"被误报"已存在"）。
-        if job.exit_code == EXIT_USAGE:  # worker 复检撞同名（并发抢占）
+        # 晋级的 EXIT_USAGE 含两类 409：同名冲突（atomic_write_raw）或指纹复检失败（source 已变），
+        # 两者 detail 取自 job.output、均为合法 409 冲突（决策P4.6.1-16）。
+        if job.exit_code == EXIT_USAGE:
             raise HTTPException(status_code=409, detail=job.output or "raw/ 同名文件已存在。")
         if job.exit_code != EXIT_OK:  # 落盘 IO 失败 → 归一为 EXIT_AGENT_ERROR
             raise HTTPException(status_code=500, detail=job.output or "写盘失败。")
-        return {"saved": f"raw/{target.name}", "bytes": len(payload)}
+        out = {"saved": f"raw/{target.name}", "bytes": payload_bytes}
+        if nimg is not None:  # 晋级额外回报随源搬的图片数（投喂不带，保 P4.1 字节）
+            out["images"] = nimg
+        return out
 
     # 文件上传（决策P4.6-3）：multipart 文件 → workspace/uploads/<安全名>（多格式、保留原扩展名）。
     # 网络接收不持锁；收齐后把原子写**提交单写者 JobQueue**，与投喂/ingest/可写 turn 同写者串行。
@@ -606,7 +735,7 @@ def create_app(
         job = await anyio.to_thread.run_sync(
             jobs.submit_and_wait,
             "upload",
-            lambda: _atomic_write_upload(target, data),
+            lambda emit: _atomic_write_upload(target, data),  # thunk 收 emit、此处忽略（决策P4.6.1-11）
             abandon_on_cancel=True,
         )
         if job.exit_code != EXIT_OK:  # 落盘 IO 失败 → 归一为 EXIT_AGENT_ERROR
@@ -631,7 +760,17 @@ def create_app(
         path: str = Query(..., description="相对知识库根的 workspace 内 .md 路径"),
     ) -> dict:
         page_file = _safe_workspace_md(root, path)  # 越界 409 / 非 md/缺失 404
-        return await anyio.to_thread.run_sync(render_page, root / "wiki", page_file)
+        # parsed 预览：把 `images/<slug>/…` 嵌图改写到 /api/workspace/raw（P4.6.1 解析随源落的图，§2.1）。
+        image_src = _workspace_image_src(root, page_file)
+
+        def _render():
+            # 额外回传原始 md 文本（含 frontmatter）供前端「Markdown ⇄ 源码」切换；前端按 textContent
+            # 转义显示，无注入。读盘已在本线程内、复用一次 stat 路径，单文件预览代价可忽略。
+            rendered = render_page(root / "wiki", page_file, image_src=image_src)
+            rendered["source"] = page_file.read_text(encoding="utf-8", errors="replace")
+            return rendered
+
+        return await anyio.to_thread.run_sync(_render)
 
     # 图像原字节（仅供「暂存区」缩略图）：path-contained 到 uploads/parsed scratch 两子目录，且
     # **只服务图像扩展名**（与视觉白名单同口径）——非图一律 404，杜绝把任意 scratch 文件 inline 出去。
@@ -640,10 +779,9 @@ def create_app(
         path: str = Query(..., description="workspace/uploads|parsed 内的图像文件"),
     ) -> FileResponse:
         target = _safe_workspace_scratch(root, path)  # 白名单外 400 / 缺失 404
-        mime = _IMAGE_EXT_TO_MIME.get(target.suffix.lower())
-        if mime is None:
-            raise HTTPException(status_code=404, detail="仅供图像缩略图：非图像文件不经本端点提供。")
-        return FileResponse(target, media_type=mime)
+        # 与 `/api/raw/image` 共用扩展名白名单 + svg 安全交付：覆盖 convert 落盘的 bmp/tif/tiff/svg，
+        # 否则 parsed 预览对这些已收集图片显示断图（决策P5.2.1：parsed 与 raw/ 图目录两处同形）。
+        return _image_file_response(target)
 
     @_writer_only(app.delete("/api/workspace/file"))  # reader 下不注册（删除是写，决策P4.9-2）
     async def workspace_delete(
@@ -655,7 +793,7 @@ def create_app(
         job = await anyio.to_thread.run_sync(
             jobs.submit_and_wait,
             "workspace-delete",
-            lambda: _delete_workspace_scratch(target),
+            lambda emit: _delete_workspace_scratch(target),  # thunk 收 emit、此处忽略
             abandon_on_cancel=True,
         )
         if job.exit_code != EXIT_OK:  # 删除 IO 失败 → 归一为 EXIT_AGENT_ERROR
@@ -673,12 +811,73 @@ def create_app(
         job = await anyio.to_thread.run_sync(
             jobs.submit_and_wait,
             "workspace-delete",
-            lambda: _rmtree_workspace_dir(target),
+            lambda emit: _rmtree_workspace_dir(target),  # thunk 收 emit、此处忽略
             abandon_on_cancel=True,
         )
         if job.exit_code != EXIT_OK:
             raise HTTPException(status_code=500, detail=job.output or "删除失败。")
         return {"deleted": path}
+
+    # 确定性解析（P4.6.1，决策P4.6.1-1/2/7）：把 workspace/uploads/<名> 直调 convert_to_markdown 内核
+    # 转成 workspace/parsed/<slug>.md + 随源图片（**不落 raw/**）。慢（marker/mineru 分钟级）→ 入单写者
+    # FIFO 异步队列、即时返回 job_id、前端轮询 /api/jobs/{id}（running 期即见 emit 推上的 backend 分级
+    # 日志，决策P4.6.1-10/11，不新开 SSE）。upload 路径**入队前**校验（缺失即 404，快反馈）。
+    @_writer_only(app.post("/api/parse"))  # reader 下不注册（解析写 workspace/parsed，决策P4.9-2）
+    async def parse(body: ParseBody) -> dict:
+        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
+        upload_path = _safe_upload_file(root, body.upload)  # 越界 400 / 缺失 404
+        target = parse_target(root, upload_path)
+        backend = body.backend
+        return {
+            "job_id": jobs.enqueue(
+                "parse",
+                lambda emit: parse_upload(
+                    upload_path, target, root=root, backend=backend, emit=emit
+                ),
+            )
+        }
+
+    # 解析根（parsed/）归口：image-lint / relocalize 共用，且强制目标落在 parsed/ 子树内。
+    parsed_root = (root / "workspace" / "parsed").resolve()
+
+    def _require_parsed_md(file_rel: str) -> Path:
+        """把 `file` 解析为 parsed/ 内存在的 `.md`；越界/非 parsed 409、非 md/缺失 404（断链检查/重整专用）。"""
+        page = _safe_workspace_md(root, file_rel)  # workspace/uploads|parsed 内 .md（越界 409/缺失 404）
+        try:
+            page.relative_to(parsed_root)
+        except ValueError:
+            raise HTTPException(
+                status_code=409, detail=f"断链检查/重整仅作用于 workspace/parsed/：{file_rel}"
+            ) from None
+        return page
+
+    # 图片断链检查（只读，决策P4.6.1-5）：扫一个 parsed .md 的图片引用，分类悬空/错位。reader 下仍
+    # 注册（纯读），但 reader 无 parsed 文件、自然 404/不被触达。阻塞读盘卸到线程（决策P4-2）。
+    @app.get("/api/workspace/image-lint")
+    async def workspace_image_lint(
+        file: str = Query(..., description="workspace/parsed/ 内待检查的 .md 路径"),
+    ) -> dict:
+        page = _require_parsed_md(file)
+        result = await anyio.to_thread.run_sync(image_lint, page, parsed_root)
+        return {"file": page.relative_to(root).as_posix(), **result}
+
+    # 图片重整（写，决策P4.6.1-5/6）：把该文件引用图 copy 到 images/<file_stem>/ + 改名编号 + 重写引用
+    # + 全局零引用 GC。入单写者 FIFO + 层③ 423（与删除/晋级同写者串行）。file 入队前校验落 parsed/。
+    @_writer_only(app.post("/api/workspace/relocalize"))  # reader 下不注册（重整是写，决策P4.9-2）
+    async def workspace_relocalize(body: RelocalizeBody) -> dict:
+        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
+        page = _require_parsed_md(body.file)
+        job = await anyio.to_thread.run_sync(
+            jobs.submit_and_wait,
+            "relocalize",
+            lambda emit: relocalize_commit(page, parsed_root),
+            abandon_on_cancel=True,
+        )
+        if job.exit_code == EXIT_USAGE:  # 罕见 TOCTOU 写冲突 → 409
+            raise HTTPException(status_code=409, detail=job.output or "重整冲突。")
+        if job.exit_code != EXIT_OK:  # 落盘 IO 失败 → 500
+            raise HTTPException(status_code=500, detail=job.output or "重整失败。")
+        return {"file": page.relative_to(root).as_posix(), "output": job.output}
 
     # 零 LLM 报告（决策P4-7）：只序列化既有 *Report，与 CLI `--json` 字节对齐；阻塞跑 to_thread。
     wiki = root / "wiki"
@@ -751,7 +950,7 @@ def create_app(
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
         # target 不在此预校验：run_ingest 内部 _resolve_raw_target 是单一归口（须在 raw/、是 .md、
         # 存在），Web 不旁路 P2 入口校验；非法 target → 作业以 EXIT_USAGE 完成，轮询可见。
-        def _job() -> int:
+        def _job(emit) -> int:  # thunk 收 emit（决策P4.6.1-11）；ingest 仍靠 print() 经 redirect
             return run_ingest(
                 body.target,
                 root=root,
@@ -777,7 +976,7 @@ def create_app(
     async def heal(body: HealBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
 
-        def _job() -> HealRun:  # 返回结构化结果（非 int）→ worker 走鸭子分流存 job.result
+        def _job(emit) -> HealRun:  # 收 emit、忽略；返回结构化结果（非 int）→ worker 鸭子分流存 result
             run = run_heal_result(
                 root=root,
                 limit=body.limit,
@@ -799,7 +998,7 @@ def create_app(
     async def backfill(body: BackfillBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10 / P4.8-5）
 
-        def _job() -> int:  # 返回退出码 int（与 ingest 同形）→ worker 鸭子分流走 int 分支、result 恒 None
+        def _job(emit) -> int:  # 收 emit、忽略；返回退出码 int（与 ingest 同形）→ result 恒 None
             return run_query(
                 body.question,
                 root=root,
