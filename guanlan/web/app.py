@@ -16,6 +16,7 @@ import json
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
+from urllib.parse import quote
 
 import anyio
 from agentao.cancellation import AgentCancelledError
@@ -230,6 +231,37 @@ def _safe_raw_file(root: Path, name: str) -> Path:
         raise HTTPException(status_code=409, detail=f"路径越界（须在 raw/ 内）：{name}") from None
     if candidate.suffix.lower() != ".md" or not candidate.is_file():
         raise HTTPException(status_code=404, detail=f"raw 文件不存在或非 .md：{name}")
+    return candidate
+
+
+# raw 嵌图扩展名→MIME 白名单（与 convert 的 `IMAGE_EXTS` 对齐，P5.2.1）；非表内一律 404，杜绝把
+# 任意 raw/ 文件 inline 出去。复用上传通道的图像表再补 convert 也落的 bmp/tiff/svg。
+_RAW_IMAGE_EXT_TO_MIME = {
+    **_IMAGE_EXT_TO_MIME,
+    ".bmp": "image/bmp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".svg": "image/svg+xml",
+}
+
+
+def _safe_raw_image(root: Path, rel: str) -> Path:
+    """把 raw 预览的图片 `rel` 解析为 `raw/images/` 内存在的文件；越界 409、缺失 404（只读，穿越防御）。
+
+    `rel` 是 raw md 内重写后的相对路径（如 `images/<slug>/<slug>-1.jpg`，相对 `raw/`）。**夹在
+    `raw/images/` 子树**（而非整个 `raw/`）——只服务 convert 随源落盘的嵌图，绝不经本端点漏出
+    `raw/*.md` 源文本或其它文件。扩展名白名单在端点再判（镜像 `/api/workspace/raw`）。
+    """
+    images = (root / "raw" / "images").resolve()
+    candidate = (root / "raw" / rel).resolve()
+    try:
+        candidate.relative_to(images)
+    except ValueError:
+        raise HTTPException(
+            status_code=409, detail=f"路径越界（须在 raw/images/ 内）：{rel}"
+        ) from None
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail=f"raw 图片不存在：{rel}")
     return candidate
 
 
@@ -468,7 +500,29 @@ def create_app(
         name: str = Query(..., description="raw/ 内的 .md 文件名"),
     ) -> dict:
         raw_file = _safe_raw_file(root, name)  # 越界 409 / 非 md·缺失 404
-        return await anyio.to_thread.run_sync(render_page, root / "wiki", raw_file)
+        # 库内相对 `<img src>`（P5.2.1 落的 images/<slug>/…）改写指向只读图片端点，使预览能显示嵌图;
+        # `allow_tables` 放行 mineru/marker emit 的复杂 `<table>` HTML（allowlist 消毒后还原）。
+        image_src = lambda rel: "/api/raw/image?path=" + quote(rel)  # noqa: E731
+
+        def _render():
+            return render_page(
+                root / "wiki", raw_file, image_src=image_src, allow_tables=True
+            )
+
+        return await anyio.to_thread.run_sync(_render)
+
+    # raw 嵌图原字节（只读，配合 /api/raw/file 预览显示 P5.2.1 随源落盘的 raw/images/ 图）：path-contained
+    # 到 raw/images/ 子树、且只服务图像扩展名（_RAW_IMAGE_EXT_TO_MIME）——非图/越界一律 4xx，绝不漏出
+    # raw/*.md 源或它处文件。纯读、不入队/不取快照，reader 下仍注册（非写，与 /api/raw/file 同读线）。
+    @app.get("/api/raw/image")
+    async def api_raw_image(
+        path: str = Query(..., description="raw/images/ 内的图像文件相对路径"),
+    ) -> FileResponse:
+        target = _safe_raw_image(root, path)  # 越界 409 / 缺失 404
+        mime = _RAW_IMAGE_EXT_TO_MIME.get(target.suffix.lower())
+        if mime is None:
+            raise HTTPException(status_code=404, detail="仅供 raw 嵌图：非图像扩展名不经本端点提供。")
+        return FileResponse(target, media_type=mime)
 
     # 检索（读，P5.1 决策P5.1-1/7）：直接调 P5.0 内核 `score(search_cache.corpus(wiki), …)`，
     # **不** shell out `guanlan search`、不入 JobQueue、不取快照、不 bump 代际——纯读 `wiki/`，与

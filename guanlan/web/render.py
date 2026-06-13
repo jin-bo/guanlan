@@ -15,6 +15,7 @@ from __future__ import annotations
 import html as html_lib
 import re
 import xml.etree.ElementTree as _etree  # stdlib，始终可用；只有 markdown 是可选 extra。
+from html.parser import HTMLParser as _HTMLParser
 from pathlib import Path
 
 from ..pages import WIKILINK_RE, link_resolution_index, link_stem, load_page
@@ -23,6 +24,7 @@ try:  # markdown 是 web extra 的一部分；缺失时回退 <pre> 源码视图
     import markdown as _markdown
     from markdown.extensions import Extension as _Extension
     from markdown.inlinepatterns import InlineProcessor as _InlineProcessor
+    from markdown.preprocessors import Preprocessor as _Preprocessor
     from markdown.treeprocessors import Treeprocessor as _Treeprocessor
 
     _HAS_MARKDOWN = True
@@ -46,6 +48,109 @@ def _is_safe_url(url: str) -> bool:
     cleaned = re.sub(r"[\x00-\x20]", "", decoded)
     match = _URL_SCHEME_RE.match(cleaned)
     return match is None or match.group(1).lower() in _ALLOWED_URL_SCHEMES
+
+
+def _is_relative_local(url: str) -> bool:
+    """`url` 是**库内相对路径**（可被改写指向本地图片端点）才 True：无协议、非绝对(`/`)、非协议相对
+    (`//`)、非锚点(`#`)、非空。`data:`/`http(s):` 等带协议的（含被 safelink 失活成空串的）一律 False。
+    """
+    cleaned = re.sub(r"[\x00-\x20]", "", html_lib.unescape(url))
+    if not cleaned or cleaned.startswith(("/", "#")):
+        return False
+    return _URL_SCHEME_RE.match(cleaned) is None
+
+
+# ── HTML 表格白名单消毒（仅 raw 预览启用）─────────────────────────────────────────────
+# mineru/marker 把合并单元格/多级表头的复杂表常emit成**原始 `<table>` HTML**（markdown pipe 表
+# 表达不了）。默认 `_EscapeHtmlExtension` 把一切原始 HTML 转义成文本（决策P4-4 防 XSS），故这类表在
+# 预览里成 `&lt;table&gt;…` 文本汤。这里**只对 `<table>…</table>` 片段**破例：用 stdlib `html.parser`
+# 按 allowlist 重建——仅放行表格标签子集 + 经校验的安全属性，`script`/`style`/`on*`/`style=`/任意其它
+# 标签一律剥除或转义（**不引第三方 sanitizer**，零新依赖）。其余原始 HTML 仍全转义、姿态不变。
+_TABLE_BLOCK_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
+_TABLE_ALLOWED_TAGS = frozenset(
+    {"table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup", "col"}
+)
+_TABLE_VOID_TAGS = frozenset({"col"})  # 自闭合、无 </col>
+_TABLE_DROP_SUBTREE = frozenset({"script", "style", "template"})  # 标签+其文本全丢
+_TABLE_ATTR_ENUM = {  # 枚举型属性的合法值（其余值整条丢弃）
+    "align": frozenset({"left", "right", "center", "justify", "char"}),
+    "valign": frozenset({"top", "middle", "bottom", "baseline"}),
+    "scope": frozenset({"row", "col", "rowgroup", "colgroup"}),
+}
+_TABLE_ATTR_NUM = frozenset({"colspan", "rowspan"})  # 仅数字
+_TABLE_ALLOWED_ATTRS = frozenset(_TABLE_ATTR_ENUM) | _TABLE_ATTR_NUM
+
+
+class _TableSanitizer(_HTMLParser):
+    """把一段 `<table>` HTML 按 allowlist 重建为安全 HTML 串（丢弃一切非表格标签/危险属性）。"""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)  # charref 自动解码进 data，由本类统一转义输出
+        self.parts: list[str] = []
+        self._drop_depth = 0  # >0 → 处于 script/style/template 子树，丢弃其 data
+        self.emitted_table = False
+
+    def _safe_attrs(self, attrs) -> str:
+        out = []
+        for key, value in attrs:
+            key = key.lower()
+            if value is None or key not in _TABLE_ALLOWED_ATTRS:
+                continue  # 剥 on*/style/任意其它属性
+            value = value.strip()
+            if key in _TABLE_ATTR_NUM:
+                if not value.isdigit():
+                    continue
+            elif value.lower() not in _TABLE_ATTR_ENUM[key]:
+                continue
+            out.append(f' {key}="{html_lib.escape(value, quote=True)}"')
+        return "".join(out)
+
+    def handle_starttag(self, tag, attrs) -> None:
+        tag = tag.lower()
+        if self._drop_depth:
+            if tag in _TABLE_DROP_SUBTREE:
+                self._drop_depth += 1
+            return
+        if tag in _TABLE_DROP_SUBTREE:
+            self._drop_depth = 1
+            return
+        if tag in _TABLE_ALLOWED_TAGS:
+            self.parts.append(f"<{tag}{self._safe_attrs(attrs)}>")
+            if tag == "table":
+                self.emitted_table = True
+        # 其它标签（含 <img>/<a>/<b>…）：丢弃标签本身、保留其子文本（递归继续）。
+
+    def handle_startendtag(self, tag, attrs) -> None:
+        tag = tag.lower()
+        if not self._drop_depth and tag in _TABLE_ALLOWED_TAGS:
+            self.parts.append(f"<{tag}{self._safe_attrs(attrs)}>")
+
+    def handle_endtag(self, tag) -> None:
+        tag = tag.lower()
+        if self._drop_depth:
+            if tag in _TABLE_DROP_SUBTREE:
+                self._drop_depth -= 1
+            return
+        if tag in _TABLE_ALLOWED_TAGS and tag not in _TABLE_VOID_TAGS:
+            self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data) -> None:
+        if not self._drop_depth:
+            self.parts.append(html_lib.escape(data))
+
+    def handle_comment(self, data) -> None:
+        pass  # 丢弃注释（杜绝 `<!--[if]>` 条件注释等绕过）
+
+
+def _sanitize_table_html(raw: str) -> str | None:
+    """把一段原始 `<table>` HTML 消毒为安全串；非法/未含 `<table>` → None（调用方原样保留→被转义）。"""
+    parser = _TableSanitizer()
+    try:
+        parser.feed(raw)
+        parser.close()
+    except Exception:  # html.parser 极少抛；防御性兜底，坏输入退回转义
+        return None
+    return "".join(parser.parts) if parser.emitted_table else None
 
 
 def _wikilink_display(raw: str) -> str:
@@ -141,6 +246,58 @@ if _HAS_MARKDOWN:
             # 优先级低 → 在内联/wikilink 处理之后跑，覆盖所有已生成的 a/img。
             md.treeprocessors.register(_SafeLinkTreeprocessor(md), "guanlan_safelink", 5)
 
+    class _RawImageTreeprocessor(_Treeprocessor):
+        """把**库内相对** `<img src>` 改写为本地图片端点 URL（供 raw 预览显示 `raw/images/` 嵌图）。
+
+        仅作用于相对路径（`_is_relative_local`）：`http(s):` 外链原样保留、`data:`/`javascript:` 已被
+        safelink 失活成空串而被跳过。改写后是根相对 URL（无协议），safelink 复跑也视为安全。
+        """
+
+        def __init__(self, md, image_src) -> None:
+            super().__init__(md)
+            self._image_src = image_src
+
+        def run(self, root):  # noqa: N802 (markdown API 命名)
+            for el in root.iter("img"):
+                src = el.get("src")
+                if src and _is_relative_local(src):
+                    el.set("src", self._image_src(src))
+            return None
+
+    class _RawImageExtension(_Extension):
+        def __init__(self, image_src) -> None:
+            super().__init__()
+            self._image_src = image_src
+
+        def extendMarkdown(self, md) -> None:  # noqa: N802 (markdown API 命名)
+            # 优先级 4 < safelink(5)：safelink 先失活危险 src（→ 空串被本处跳过），本处再改写相对图。
+            md.treeprocessors.register(
+                _RawImageTreeprocessor(md, self._image_src), "guanlan_rawimage", 4
+            )
+
+    class _TableHtmlPreprocessor(_Preprocessor):
+        """把原始 `<table>…</table>` 片段消毒后存入 `htmlStash`，使其绕过转义、以安全 HTML 还原。
+
+        `_EscapeHtmlExtension` 只注销了 `html_block`/`html`，**未动 `raw_html` 后处理器**——故
+        stash 里的占位符仍会在末尾被原样还原。本预处理器据此只把**消毒后**的表格 HTML 存进 stash，
+        其余原始 HTML 仍因 `html_block` 缺席而被转义。优先级 < `fenced_code`(25)：围栏代码已先被
+        stash 成占位符，故 `<table>` 写在 ```…``` 内时不会被误渲染（保字面，决策P4-3 一致）。
+        """
+
+        def run(self, lines):  # noqa: N802 (markdown API 命名)
+            def repl(m):
+                clean = _sanitize_table_html(m.group(0))
+                if clean is None:
+                    return m.group(0)  # 非法/无 table → 原样（后续被转义）
+                # 独立成块（前后空行）→ raw_html 后处理器按块级还原、不裹进 <p>。
+                return "\n\n" + self.md.htmlStash.store(clean) + "\n\n"
+
+            return _TABLE_BLOCK_RE.sub(repl, "\n".join(lines)).split("\n")
+
+    class _TableHtmlExtension(_Extension):
+        def extendMarkdown(self, md) -> None:  # noqa: N802 (markdown API 命名)
+            md.preprocessors.register(_TableHtmlPreprocessor(md), "guanlan_table_html", 24)
+
     class _WikiLinkInlineProcessor(_InlineProcessor):
         """把 `[[…]]` 渲染为站内锚链（resolved）或标灰 span（断链）。"""
 
@@ -225,13 +382,18 @@ if _HAS_MARKDOWN:
             )
 
 
-def render_markdown(text: str, wiki: Path | None = None) -> str:
+def render_markdown(
+    text: str, wiki: Path | None = None, *, image_src=None, allow_tables: bool = False
+) -> str:
     """把 markdown 文本渲染为**安全** HTML（供单页与对话输出共用）。
 
     始终带两道安全闸：`_EscapeHtmlExtension`（关原始 HTML 透传）+ `_SafeLinkExtension`
     （中和 javascript:/data: 链接）。给了 `wiki` 才挂 `[[wikilink]]` 重写（解析到该库页面），
     并对【整段精确解析到现有页】的行内 `<code>` 破例联链（兜底 LLM 把源出处写成路径+反引号）。
-    缺 markdown extra 时回退转义 `<pre>` 源码视图。
+    给了 `image_src`（`(相对路径) -> URL` 可调用）才挂库内相对 `<img>` 改写——供 raw 预览把
+    `images/<slug>/…` 指向本地图片端点。`allow_tables=True` 才对原始 `<table>` HTML 破例
+    （allowlist 消毒后还原，供 raw 预览显示 mineru/marker 的复杂表）——两者都默认关，wiki/chat
+    渲染姿态不变（原始 HTML 仍全转义）。缺 markdown extra 时回退转义 `<pre>` 源码视图。
     """
     if not _HAS_MARKDOWN:
         return "<pre>" + html_lib.escape(text) + "</pre>"
@@ -245,14 +407,22 @@ def render_markdown(text: str, wiki: Path | None = None) -> str:
         stem_map = _stem_to_path(wiki)  # 单次扫库，两个扩展共享（避免重复 rglob）。
         extensions.append(_WikiLinkExtension(stem_map))
         extensions.append(_CodePathLinkExtension(stem_map))
+    if image_src is not None:
+        extensions.append(_RawImageExtension(image_src))
+    if allow_tables:
+        extensions.append(_TableHtmlExtension())  # 仅放行消毒后的 <table> HTML（raw 预览）。
     return _markdown.Markdown(extensions=extensions).convert(text)
 
 
-def render_page(wiki: Path, page_path: Path) -> dict:
+def render_page(wiki: Path, page_path: Path, *, image_src=None, allow_tables: bool = False) -> dict:
     """渲染单页：返回 `{meta, html}`。
 
     坏/缺 frontmatter 时 `meta=None` 仍渲染正文（容错档，同 P3 决策P3-8）。装了 markdown 走
-    富渲染 + `[[wikilink]]` 重写；否则回退转义 `<pre>` 源码视图。
+    富渲染 + `[[wikilink]]` 重写；否则回退转义 `<pre>` 源码视图。`image_src`/`allow_tables` 透传给
+    `render_markdown`（raw 预览传入以显示 `raw/images/` 嵌图 + 复杂 `<table>`，其余调用默认关、行为不变）。
     """
     meta, body = load_page(page_path)
-    return {"meta": meta, "html": render_markdown(body, wiki)}
+    return {
+        "meta": meta,
+        "html": render_markdown(body, wiki, image_src=image_src, allow_tables=allow_tables),
+    }
