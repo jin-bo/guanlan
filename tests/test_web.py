@@ -573,6 +573,17 @@ def test_api_raw_image_rejects_non_image_and_missing(client, kb) -> None:
     ).status_code == 404
 
 
+def test_api_raw_image_svg_served_as_safe_download(client, kb) -> None:
+    """svg 是活跃内容：仍可经 <img> 预览，但**下载式 + CSP/nosniff** 交付，杜绝直接导航同源脚本执行。"""
+    _land_raw_image(kb, ext=".svg", data=b"<svg xmlns='http://www.w3.org/2000/svg'></svg>")
+    resp = client.get("/api/raw/image", params={"path": "images/报告/报告-1.svg"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("image/svg+xml")
+    assert resp.headers["content-disposition"] == "attachment"
+    assert "sandbox" in resp.headers["content-security-policy"]
+    assert resp.headers["x-content-type-options"] == "nosniff"
+
+
 def test_api_raw_image_available_in_reader(kb) -> None:
     """图片端点是纯读 → reader 模式仍注册可用（与 /api/raw/file 同读线）。"""
     _land_raw_image(kb, data=b"R")
@@ -1051,7 +1062,7 @@ def test_jobqueue_submit_and_wait_is_fifo_behind_prior(kb) -> None:
     order: list[str] = []
     gate = threading.Event()
 
-    def slow() -> int:
+    def slow(emit) -> int:  # thunk 收 emit（决策P4.6.1-11），此处忽略
         order.append("ingest-start")
         gate.wait(timeout=3)
         order.append("ingest-end")
@@ -1061,7 +1072,7 @@ def test_jobqueue_submit_and_wait_is_fifo_behind_prior(kb) -> None:
     result: dict = {}
 
     def submit() -> None:
-        result["job"] = jq.submit_and_wait("raw_write", lambda: order.append("raw") or 0)
+        result["job"] = jq.submit_and_wait("raw_write", lambda emit: order.append("raw") or 0)
 
     t = threading.Thread(target=submit)
     t.start()
@@ -1418,11 +1429,13 @@ def test_workspace_empty_dirs_ok(client, kb) -> None:
 
 
 def test_workspace_file_preview_renders_md(client, kb) -> None:
-    """GET /api/workspace/file 预览 .md（复用 render_page，含 meta/html）。"""
-    src = _put_workspace(kb, "parsed", "p.md", "---\ntitle: T\n---\n正文段落。\n")
+    """GET /api/workspace/file 预览 .md（复用 render_page，含 meta/html + 原始 source 供源码切换）。"""
+    raw = "---\ntitle: T\n---\n正文段落。\n"
+    src = _put_workspace(kb, "parsed", "p.md", raw)
     data = client.get(f"/api/workspace/file?path={src}").json()
     assert data["meta"]["title"] == "T"
     assert "正文段落" in data["html"]
+    assert data["source"] == raw  # 源码视图：原始 md 文本（含 frontmatter）逐字回传
 
 
 def test_workspace_file_preview_out_of_bounds_409(client, kb) -> None:
@@ -1452,6 +1465,26 @@ def test_workspace_raw_serves_image_bytes(client, kb) -> None:
     assert resp.status_code == 200
     assert resp.content == png
     assert resp.headers["content-type"].startswith("image/png")
+
+
+def test_workspace_raw_serves_extended_image_exts(client, kb) -> None:
+    """parsed 预览须服务 convert 落盘的全部扩展名（bmp/tif/tiff/svg）——否则已收集图显示断图。"""
+    for name, ctype in [
+        ("a.bmp", "image/bmp"),
+        ("a.tif", "image/tiff"),
+        ("a.tiff", "image/tiff"),
+    ]:
+        p = _put_workspace(kb, "parsed", "x.md")  # 先建 parsed 目录
+        (kb / "workspace" / "parsed" / name).write_bytes(b"PIX")
+        resp = client.get(f"/api/workspace/raw?path=workspace/parsed/{name}")
+        assert resp.status_code == 200, name
+        assert resp.headers["content-type"].startswith(ctype), name
+    # svg 同 raw 端点：下载式 + CSP/nosniff 安全交付。
+    (kb / "workspace" / "parsed" / "a.svg").write_bytes(b"<svg/>")
+    rsvg = client.get("/api/workspace/raw?path=workspace/parsed/a.svg")
+    assert rsvg.status_code == 200
+    assert rsvg.headers["content-disposition"] == "attachment"
+    assert "sandbox" in rsvg.headers["content-security-policy"]
 
 
 def test_workspace_raw_non_image_404(client, kb) -> None:
@@ -3544,7 +3577,7 @@ def test_jobqueue_serializes_under_write_lock() -> None:
     jq = JobQueue(write_lock=lock)
     lock.acquire()
     done: list[int] = []
-    jid = jq.enqueue("t", lambda: (done.append(1), 0)[1])
+    jid = jq.enqueue("t", lambda emit: (done.append(1), 0)[1])
     job = jq.get_job(jid)
     assert not job.done_event.wait(0.3)  # 锁被持 → 卡住
     assert done == []
@@ -3559,7 +3592,7 @@ def test_jobqueue_lock_separate_from_job_table() -> None:
     jq = JobQueue(write_lock=lock)
     lock.acquire()
     try:
-        jid = jq.enqueue("t", lambda: 0)  # 入队即返回（不被 write_lock 卡）
+        jid = jq.enqueue("t", lambda emit: 0)  # 入队即返回（不被 write_lock 卡）
         assert jq.get_job(jid) is not None  # 查表即时返回
     finally:
         lock.release()
@@ -4481,3 +4514,345 @@ def test_query_prompt_transport_neutral() -> None:
     assert "guanlan_search" in QUERY_PROMPT  # 提宿主工具
     assert "可用的 search 入口" in QUERY_PROMPT  # 传输中立措辞
     assert "先用 `guanlan search" not in QUERY_PROMPT  # 不再硬编码 CLI-only 死指令
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P4.6.1 暂存区确定性解析 + 图片随源晋级 / 断链重整
+#   见 docs/P4.6.1-暂存区确定性解析与图片晋级.md §6
+# ══════════════════════════════════════════════════════════════════════════════
+from guanlan.imageio import ConvertedImage, ConvertResult  # noqa: E402
+
+
+def _put_parsed_image(kb, slug, name, data=b"IMG"):
+    """在 workspace/parsed/images/<slug>/ 落一张图，返回其绝对路径。"""
+    d = kb / "workspace" / "parsed" / "images" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_bytes(data)
+    return d / name
+
+
+# ── 解析作业（决策P4.6.1-1/2/7）──────────────────────────────────────────────────
+def test_parse_endpoint_lands_parsed_with_images(kb, monkeypatch) -> None:
+    """POST /api/parse → 宿主确定性解析落 workspace/parsed/<slug>.md + 图片，引用重写、不落 raw/。"""
+    from guanlan.web import parsefeed
+
+    def fake_convert(src, *, stem, backend, cwd, progress=None):
+        if progress:
+            progress("[mineru] 尝试")  # 经 emit 推上 job.output（决策P4.6.1-10/11）
+        return ConvertResult(
+            markdown=f"# 解析\n![](images/{stem}/{stem}-1.png)\n",
+            images=(ConvertedImage(name=f"{stem}-1.png", data=b"IMG1"),),
+        )
+
+    monkeypatch.setattr(parsefeed, "convert_to_markdown", fake_convert)
+    with TestClient(create_app(kb)) as client:
+        client.post("/api/upload", files={"file": ("报告.pdf", b"%PDF fake", "application/pdf")})
+        r = client.post("/api/parse", json={"upload": "workspace/uploads/报告.pdf"})
+        assert r.status_code == 200
+        job = _wait_job(client, r.json()["job_id"])
+        assert job["exit_code"] == 0
+        assert "[mineru] 尝试" in job["output"]  # backend 日志经 emit 进 output
+    parsed = kb / "workspace" / "parsed" / "报告.md"
+    assert parsed.is_file()
+    assert "images/报告/报告-1.png" in parsed.read_text("utf-8")
+    assert (kb / "workspace" / "parsed" / "images" / "报告" / "报告-1.png").read_bytes() == b"IMG1"
+    assert not (kb / "raw" / "报告.md").exists()  # 解析不落 raw/
+
+
+def test_parse_backend_invalid_422(client, kb) -> None:
+    """未知 backend → 422（ParseBody field_validator）。"""
+    r = client.post("/api/parse", json={"upload": "workspace/uploads/x.pdf", "backend": "gpt"})
+    assert r.status_code == 422
+
+
+def test_parse_missing_upload_404(client, kb) -> None:
+    """upload 不存在 → 入队前 404（快反馈）。"""
+    r = client.post("/api/parse", json={"upload": "workspace/uploads/nope.pdf"})
+    assert r.status_code == 404
+
+
+# ── 晋级连图（决策P4.6.1-3/13/15）─────────────────────────────────────────────────
+def test_promote_with_images_lands_raw_images(client, kb) -> None:
+    """晋级 parsed → raw/：连图一起搬到 raw/images/<slug>/，md 引用同形、回执含 images。"""
+    _put_parsed_image(kb, "报告", "报告-1.png", b"IMG1")
+    src = _put_workspace(kb, "parsed", "报告.md", "# 标题\n![](images/报告/报告-1.png)\n")
+    r = client.post("/api/raw", json={"name": "报告", "source": src})
+    assert r.status_code == 200
+    assert r.json()["images"] == 1
+    assert (kb / "raw" / "images" / "报告" / "报告-1.png").read_bytes() == b"IMG1"
+    assert "images/报告/报告-1.png" in (kb / "raw" / "报告.md").read_text("utf-8")
+
+
+def test_promote_rename_normalizes_to_target_stem(client, kb) -> None:
+    """改名晋级（parsed x.md → raw y.md）：图归一为 y-N.ext 落 raw/images/y/，引用重写（决策P4.6.1-13）。"""
+    _put_parsed_image(kb, "x", "x-1.png", b"X1")
+    src = _put_workspace(kb, "parsed", "x.md", "![](images/x/x-1.png)\n")
+    r = client.post("/api/raw", json={"name": "y", "source": src})
+    assert r.status_code == 200
+    assert (kb / "raw" / "images" / "y" / "y-1.png").read_bytes() == b"X1"
+    assert not (kb / "raw" / "images" / "x").exists()  # 不残留 source stem 目录
+    assert "images/y/y-1.png" in (kb / "raw" / "y.md").read_text("utf-8")
+
+
+def test_promote_dangling_image_ref_400(client, kb) -> None:
+    """晋级时相对图片引用悬空（文件缺失）→ 400（先 relocalize），不落 raw/（决策P4.6.1-15）。"""
+    src = _put_workspace(kb, "parsed", "报告.md", "![](images/报告/missing.png)\n")
+    r = client.post("/api/raw", json={"name": "报告", "source": src})
+    assert r.status_code == 400
+    assert not (kb / "raw" / "报告.md").exists()
+
+
+def test_promote_external_image_preserved(client, kb) -> None:
+    """晋级时外链图（https://）原样保留、不报错、不搬（决策P4.6.1-15）。"""
+    src = _put_workspace(kb, "parsed", "报告.md", "# t\n![](https://x/a.png)\n")
+    r = client.post("/api/raw", json={"name": "报告", "source": src})
+    assert r.status_code == 200
+    assert "https://x/a.png" in (kb / "raw" / "报告.md").read_text("utf-8")
+    assert not (kb / "raw" / "images").exists()
+
+
+# ── 晋级 TOCTOU 指纹复检（决策P4.6.1-16，单元级，确定性）─────────────────────────────
+def test_promote_fingerprint_toctou_fail_closed(kb) -> None:
+    """入队后、提交前 source 被改 → commit_promotion 复检 SHA256 不符 → EXIT_USAGE，不提交旧快照。"""
+    from guanlan.errors import EXIT_OK, EXIT_USAGE
+    from guanlan.rawio import safe_raw_target
+    from guanlan.web.promote import commit_promotion, prepare_promotion
+
+    d = kb / "workspace" / "parsed"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "报告.md").write_text("# t\n原始正文\n", encoding="utf-8")
+    target = safe_raw_target(kb, "报告")
+    plan = prepare_promotion(kb, "workspace/parsed/报告.md", target, None)
+    # 模拟入队后、写锁内提交前 source 被改（同尺寸原位替换也须被 SHA256 抓到）。
+    (d / "报告.md").write_text("# t\n改后正文\n", encoding="utf-8")
+    assert commit_promotion(plan, False) == EXIT_USAGE
+    assert not (kb / "raw" / "报告.md").exists()  # fail-closed：不提交旧快照
+    # 未改时正常提交（对照）。
+    (d / "稳.md").write_text("# t\n稳定\n", encoding="utf-8")
+    target2 = safe_raw_target(kb, "稳")
+    plan2 = prepare_promotion(kb, "workspace/parsed/稳.md", target2, None)
+    assert commit_promotion(plan2, False) == EXIT_OK
+    assert (kb / "raw" / "稳.md").is_file()
+
+
+def test_promote_image_fingerprint_toctou_fail_closed(kb) -> None:
+    """入队后某收集图被改 → 复检图 SHA256 不符 → EXIT_USAGE（图字节也绑入一致性，决策P4.6.1-16）。"""
+    from guanlan.errors import EXIT_USAGE
+    from guanlan.rawio import safe_raw_target
+    from guanlan.web.promote import commit_promotion, prepare_promotion
+
+    img = _put_parsed_image(kb, "报告", "报告-1.png", b"IMG1")
+    d = kb / "workspace" / "parsed"
+    (d / "报告.md").write_text("![](images/报告/报告-1.png)\n", encoding="utf-8")
+    target = safe_raw_target(kb, "报告")
+    plan = prepare_promotion(kb, "workspace/parsed/报告.md", target, None)
+    img.write_bytes(b"CHANGED!")  # 图被改
+    assert commit_promotion(plan, False) == EXIT_USAGE
+    assert not (kb / "raw" / "报告.md").exists()
+
+
+# ── 断链检查 + 重整（决策P4.6.1-5/6）─────────────────────────────────────────────────
+def test_image_lint_detects_misplaced_and_dangling(client, kb) -> None:
+    """image-lint：错位引用（指他文件图目录）+ 悬空引用（缺失）正确分类，needs_relocalize 由错位驱动。"""
+    _put_parsed_image(kb, "orig", "a.png", b"A")
+    _put_workspace(
+        kb, "parsed", "x-1.md",
+        "![](images/orig/a.png)\n![](images/x-1/missing.png)\n",
+    )
+    r = client.get("/api/workspace/image-lint", params={"file": "workspace/parsed/x-1.md"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["misplaced"] == ["images/orig/a.png"]
+    assert data["dangling"] == ["images/x-1/missing.png"]
+    assert data["needs_relocalize"] is True
+
+
+def test_image_lint_clean(client, kb) -> None:
+    """引用本文件名下图目录 → 无错位无悬空，needs_relocalize=False。"""
+    _put_parsed_image(kb, "x", "x-1.png", b"A")
+    _put_workspace(kb, "parsed", "x.md", "![](images/x/x-1.png)\n")
+    data = client.get("/api/workspace/image-lint", params={"file": "workspace/parsed/x.md"}).json()
+    assert data == {"file": "workspace/parsed/x.md", "dangling": [], "misplaced": [], "needs_relocalize": False}
+
+
+def test_image_lint_rejects_non_parsed(client, kb) -> None:
+    """断链检查仅作用于 parsed/：uploads/ 内文件 → 409。"""
+    _put_workspace(kb, "uploads", "x.md", "正文\n")
+    r = client.get("/api/workspace/image-lint", params={"file": "workspace/uploads/x.md"})
+    assert r.status_code == 409
+
+
+def test_relocalize_copies_to_own_dir_and_keeps_shared(client, kb) -> None:
+    """重整 x-1.md：把错位图 copy 到 images/x-1/、改名编号；原图仍被 x.md 引用 → 全局 GC 保留（Q3 安全边界）。"""
+    _put_parsed_image(kb, "orig", "a.png", b"A")
+    _put_workspace(kb, "parsed", "x.md", "![](images/orig/a.png)\n")  # sibling 仍引原图
+    _put_workspace(kb, "parsed", "x-1.md", "![](images/orig/a.png)\n")
+    r = client.post("/api/workspace/relocalize", json={"file": "workspace/parsed/x-1.md"})
+    assert r.status_code == 200
+    d = kb / "workspace" / "parsed"
+    assert (d / "images" / "x-1" / "x-1-1.png").read_bytes() == b"A"  # copy 到本文件目录
+    assert "images/x-1/x-1-1.png" in (d / "x-1.md").read_text("utf-8")  # 引用重写
+    assert (d / "images" / "orig" / "a.png").exists()  # 仍被 x.md 引用 → 不删（copy-first + 全局 GC）
+
+
+def test_relocalize_gc_removes_global_orphan(client, kb) -> None:
+    """重整后某原图全局零引用 → GC 回收（把 move 安全降为 copy + 全局 GC，决策P4.6.1-5）。"""
+    _put_parsed_image(kb, "orig", "a.png", b"A")
+    _put_workspace(kb, "parsed", "x-1.md", "![](images/orig/a.png)\n")  # 唯一引用者
+    r = client.post("/api/workspace/relocalize", json={"file": "workspace/parsed/x-1.md"})
+    assert r.status_code == 200
+    d = kb / "workspace" / "parsed"
+    assert (d / "images" / "x-1" / "x-1-1.png").read_bytes() == b"A"  # copy 成功
+    assert not (d / "images" / "orig" / "a.png").exists()  # 全局零引用 → GC
+
+
+def test_commit_md_with_images_empty_overwrite_clears_stale(kb) -> None:
+    """imageio 归口（parse/promote/relocalize 共用）：无图覆盖须整盘清掉旧 images/<slug>/——
+    否则旧图悬空、仍被端点服务/列出、且 raw/ 下会被后续快照/ingest 收入。"""
+    from guanlan.errors import EXIT_OK
+    from guanlan.imageio import commit_md_with_images
+
+    base = kb / "raw"
+    (base / "images" / "报告").mkdir(parents=True)
+    (base / "images" / "报告" / "报告-9.png").write_bytes(b"STALE")
+    target = base / "报告.md"
+    target.write_text("旧\n", encoding="utf-8")
+    code = commit_md_with_images(target, "新正文、无图。\n", (), overwrite=True)
+    assert code == EXIT_OK
+    assert not (base / "images" / "报告").exists()  # 旧图目录整盘清掉、不留空目录
+    assert target.read_text("utf-8") == "新正文、无图。\n"
+
+
+def test_relocalize_enforces_image_caps(client, kb, monkeypatch) -> None:
+    """重整按 convert/晋级同口径容量三闸：超大图先 stat 拒收、不整盘读入 Web 进程内存 → 409、不落盘。"""
+    import guanlan.imageio as imgmod
+
+    monkeypatch.setattr(imgmod, "MAX_IMAGE_BYTES", 4)
+    _put_parsed_image(kb, "orig", "a.png", b"toolong")  # 7B > 4B 上限
+    _put_workspace(kb, "parsed", "x-1.md", "![](images/orig/a.png)\n")
+    r = client.post("/api/workspace/relocalize", json={"file": "workspace/parsed/x-1.md"})
+    assert r.status_code == 409
+    assert "单图" in r.json()["detail"]
+    d = kb / "workspace" / "parsed"
+    assert not (d / "images" / "x-1").exists()  # 未落盘
+    assert (d / "images" / "orig" / "a.png").exists()  # 原图未动（copy-first、超限前不碰）
+
+
+# ── JobQueue emit 增量 output（决策P4.6.1-11/14）─────────────────────────────────────
+def test_jobqueue_emit_incremental_output() -> None:
+    """thunk 经 emit 推的行在 running 期即可见、终态保留、不被 finally 覆盖。"""
+    from guanlan.web.jobs import JobQueue
+
+    jq = JobQueue()
+    gate = threading.Event()
+
+    def thunk(emit) -> int:
+        emit("行一")
+        emit("行二")
+        gate.wait(timeout=3)  # 卡在 running，证 output 在 done 前就可见
+        return 0
+
+    jid = jq.enqueue("parse", thunk)
+    deadline = time.monotonic() + 3
+    job = jq.get_job(jid)
+    while time.monotonic() < deadline and not job.output:
+        time.sleep(0.01)
+    assert "行一" in job.output and "行二" in job.output  # running 期增量可见
+    assert job.state == "running"
+    gate.set()
+    assert job.done_event.wait(2.0)
+    final = jq.get_job(jid)
+    assert final.exit_code == 0
+    assert "行一" in final.output and "行二" in final.output  # 终态保留、不被 finally 覆盖
+
+
+# ── reader 裁剪解析/重整写端点（沿 P4.9，决策P4.6.1-8 §5）─────────────────────────────
+def test_reader_trims_parse_and_relocalize(kb) -> None:
+    """reader 下不注册 parse / relocalize 写端点（404/405）。"""
+    with TestClient(create_app(kb, reader=True)) as c:
+        assert c.post("/api/parse", json={"upload": "workspace/uploads/x.pdf"}).status_code in (404, 405)
+        assert c.post(
+            "/api/workspace/relocalize", json={"file": "workspace/parsed/x.md"}
+        ).status_code in (404, 405)
+
+
+# ── wiki/parsed 页嵌图渲染改写（修复：../../raw/images 与 images/<slug>/ 相对图裂图）─────────
+def test_wiki_page_rewrites_raw_image_to_endpoint(client, kb) -> None:
+    """wiki 页里 `../../raw/images/<slug>/x.jpg` 嵌图 → 改写为 /api/raw/image 端点、浏览器可显示。"""
+    img = kb / "raw" / "images" / "报告" / "报告-1.jpg"
+    img.parent.mkdir(parents=True)
+    img.write_bytes(b"\x89PNG\r\n\x1a\nXX")
+    write_page(
+        kb, "wiki/sources/报告.md", type="source",
+        body="![图](../../raw/images/报告/报告-1.jpg)",
+    )
+    data = client.get("/api/page", params={"path": "wiki/sources/报告.md"}).json()
+    assert "/api/raw/image?path=" in data["html"]
+    assert "../../raw/images" not in data["html"]  # 库内相对路径已改写、不再裸留
+    r = client.get("/api/raw/image", params={"path": "images/报告/报告-1.jpg"})
+    assert r.status_code == 200 and r.content == b"\x89PNG\r\n\x1a\nXX"
+
+
+def test_wiki_page_leaves_external_image_untouched(client, kb) -> None:
+    """wiki 页里外链图（https://）不被改写（仅库内相对图改写）。"""
+    write_page(kb, "wiki/sources/x.md", type="source", body="![](https://example.com/a.png)")
+    data = client.get("/api/page", params={"path": "wiki/sources/x.md"}).json()
+    assert "https://example.com/a.png" in data["html"]
+    assert "/api/raw/image" not in data["html"]
+
+
+def test_parsed_preview_rewrites_image_to_endpoint(client, kb) -> None:
+    """parsed 预览里 `images/<slug>/x.png` 嵌图 → 改写为 /api/workspace/raw 端点、可显示。"""
+    _put_parsed_image(kb, "报告", "报告-1.png", b"IMG1")
+    _put_workspace(kb, "parsed", "报告.md", "![图](images/报告/报告-1.png)\n")
+    data = client.get("/api/workspace/file", params={"path": "workspace/parsed/报告.md"}).json()
+    assert "/api/workspace/raw?path=" in data["html"]
+    r = client.get("/api/workspace/raw", params={"path": "workspace/parsed/images/报告/报告-1.png"})
+    assert r.status_code == 200 and r.content == b"IMG1"
+
+
+# ── 拆分断链恢复（按 basename 从源文件图目录唯一恢复，决策P4.6.1-5）─────────────────────
+def test_image_lint_recovers_split_basename(client, kb) -> None:
+    """拆分子文件引用「目录错、basename 对」→ lint 判可重整（非悬空），因源图在原文件图目录唯一可寻。"""
+    _put_parsed_image(kb, "4.数据检验-20240531", "4.数据检验-20240531-7.jpg", b"FIG")
+    _put_workspace(
+        kb, "parsed", "4b.数据检验.md",
+        "正文\n![](images/4b.数据检验/4.数据检验-20240531-7.jpg)\n",  # 目录错、basename 对
+    )
+    data = client.get(
+        "/api/workspace/image-lint", params={"file": "workspace/parsed/4b.数据检验.md"}
+    ).json()
+    assert data["dangling"] == []  # 不再误判悬空（源图可按 basename 唯一恢复）
+    assert data["misplaced"] == ["images/4b.数据检验/4.数据检验-20240531-7.jpg"]
+    assert data["needs_relocalize"] is True
+
+
+def test_relocalize_recovers_split_image(client, kb) -> None:
+    """重整：把拆分子文件引用的源图（basename 唯一）copy 到本文件目录、改名编号、重写引用（用户诉求）。"""
+    _put_parsed_image(kb, "4.数据检验-20240531", "4.数据检验-20240531-7.jpg", b"FIG")
+    _put_workspace(
+        kb, "parsed", "4b.数据检验.md",
+        "正文\n![图](images/4b.数据检验/4.数据检验-20240531-7.jpg)\n",
+    )
+    r = client.post("/api/workspace/relocalize", json={"file": "workspace/parsed/4b.数据检验.md"})
+    assert r.status_code == 200
+    d = kb / "workspace" / "parsed"
+    assert (d / "images" / "4b.数据检验" / "4b.数据检验-1.jpg").read_bytes() == b"FIG"  # 复制到本文件目录
+    assert "images/4b.数据检验/4b.数据检验-1.jpg" in (d / "4b.数据检验.md").read_text("utf-8")  # 链接已更新
+
+
+def test_image_lint_truly_missing_stays_dangling(client, kb) -> None:
+    """basename 在 parsed/images/** 无物理源 → 仍判悬空（重整无法修复，如实上报）。"""
+    _put_workspace(kb, "parsed", "x.md", "![](images/x/真缺失.png)\n")
+    data = client.get("/api/workspace/image-lint", params={"file": "workspace/parsed/x.md"}).json()
+    assert data["dangling"] == ["images/x/真缺失.png"]
+    assert data["needs_relocalize"] is False
+
+
+def test_image_lint_ambiguous_basename_stays_dangling(client, kb) -> None:
+    """basename 在两个目录都有（歧义）→ 不猜、判悬空（绝不复制错图，决策P4.6.1-5）。"""
+    _put_parsed_image(kb, "a", "dup.png", b"A")
+    _put_parsed_image(kb, "b", "dup.png", b"B")
+    _put_workspace(kb, "parsed", "c.md", "![](images/c/dup.png)\n")
+    data = client.get("/api/workspace/image-lint", params={"file": "workspace/parsed/c.md"}).json()
+    assert data["dangling"] == ["images/c/dup.png"]  # 歧义 → 不恢复

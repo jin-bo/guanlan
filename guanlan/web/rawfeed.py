@@ -7,8 +7,11 @@ P5.2 把无状态的 slug / 文本准入 / provenance / 原子写原语抽到 tr
 字节行为与 P4.6 完全一致（同 detail 文案、同状态码）。`_atomic_write_raw` 是**返回退出码**的
 原子写，**原样透传** rawio 实现（worker 据 exit_code 分流 409/500，绝不能改 raise）。
 
-仍 web-coupled、未下沉的两个 helper（`_safe_promotion_source` / `_prepare_promotion`）留在
-本模块：它们引用 `workspace/`、直接抛 `HTTPException`（含 404），与 web 端点强耦合。
+仍 web-coupled、未下沉的 helper（`_safe_promotion_source` 等）留在本模块：它们引用 `workspace/`、
+直接抛 `HTTPException`（含 404），与 web 端点强耦合。P4.6.1 把「读 source + 收图 + 重写 +
+provenance + 指纹」的晋级准备整体上移到 `web/promote.py`（连图一起搬，决策P4.6.1-12），旧的
+`_prepare_promotion`（只读文本、不搬图）已退役；`promote.prepare_promotion` 复用本模块的
+`_safe_promotion_source` / `_apply_origin` / `_check_text_admission`。
 """
 
 from __future__ import annotations
@@ -36,7 +39,6 @@ __all__ = [
     "_apply_origin",
     "_atomic_write_raw",
     "_safe_promotion_source",
-    "_prepare_promotion",
 ]
 
 
@@ -86,24 +88,3 @@ def _safe_promotion_source(root: Path, rel: str) -> Path:
     if not candidate.is_file():
         raise HTTPException(status_code=404, detail=f"source 不存在：{rel}")
     return candidate
-
-
-def _prepare_promotion(root: Path, source: str, origin: str | None) -> str:
-    """读 `source`、过文本准入、按 provenance 归一 frontmatter，返回待写 `raw/` 的最终内容。
-
-    在端点的 `to_thread` 里跑（含读盘，阻塞）——读发生在原子写**之前**而非单写者作业内：
-    这样非 UTF-8 / 超限 / 坏 frontmatter 能直接转 `400`（作业只回退出码、映射 409/500，无 400），
-    与投喂 `content` 分支「端点校验、只把写入队」同构。层③ 423 已挡可写 turn 活跃期的并发改写，
-    `source` 读后随即原子写、TOCTOU 窗口极小（决策P4.6-4）。
-    """
-    path = _safe_promotion_source(root, source)
-    try:
-        content = path.read_bytes().decode("utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(
-            status_code=400, detail="source 不是 UTF-8 文本，无法晋级为 raw/ 源。"
-        ) from None
-    _check_text_admission(content)  # 与投喂同闸：空 / 超 MAX_RAW_BYTES / 控制字符 → 400
-    # provenance（决策P4.6-10）：origin 先 strip；省略 / 空白 → 回退 source 路径（绝不写空 provenance）。
-    origin_value = (origin or "").strip() or source
-    return _apply_origin(content, origin_value)
