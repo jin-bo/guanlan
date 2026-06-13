@@ -1474,7 +1474,7 @@ def test_workspace_raw_serves_extended_image_exts(client, kb) -> None:
         ("a.tif", "image/tiff"),
         ("a.tiff", "image/tiff"),
     ]:
-        p = _put_workspace(kb, "parsed", "x.md")  # 先建 parsed 目录
+        _put_workspace(kb, "parsed", "x.md")  # 先建 parsed 目录
         (kb / "workspace" / "parsed" / name).write_bytes(b"PIX")
         resp = client.get(f"/api/workspace/raw?path=workspace/parsed/{name}")
         assert resp.status_code == 200, name
