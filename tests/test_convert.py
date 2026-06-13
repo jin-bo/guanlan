@@ -460,21 +460,25 @@ def test_admit_image_ref_rejects_schemes(tmp_path):
 
 
 # ── 容量上限三道闸（决策P5.2.1-11）──────────────────────────────────────────────────
+# 容量常量与闸归口在 imageio（P4.6.1-4 抽出）；monkeypatch 须指 imageio 模块（闸读其全局）。
+import guanlan.imageio as imgmod  # noqa: E402
+
+
 def test_capacity_single_image_over_limit(tmp_path, monkeypatch):
-    monkeypatch.setattr(convmod, "MAX_IMAGE_BYTES", 4)
+    monkeypatch.setattr(imgmod, "MAX_IMAGE_BYTES", 4)
     with pytest.raises(ConvertError, match="单图"):
         _collect(tmp_path, "报告/报告.md", "![](big.png)\n", {"big.png": b"toolong"})
 
 
 def test_capacity_total_over_limit(tmp_path, monkeypatch):
-    monkeypatch.setattr(convmod, "MAX_IMAGES_TOTAL_BYTES", 6)
+    monkeypatch.setattr(imgmod, "MAX_IMAGES_TOTAL_BYTES", 6)
     with pytest.raises(ConvertError, match="累计"):
         _collect(tmp_path, "报告/报告.md", "![](a.png)\n\n![](b.png)\n",
                  {"a.png": b"aaaa", "b.png": b"bbbb"})
 
 
 def test_capacity_count_over_limit(tmp_path, monkeypatch):
-    monkeypatch.setattr(convmod, "MAX_IMAGE_COUNT", 1)
+    monkeypatch.setattr(imgmod, "MAX_IMAGE_COUNT", 1)
     with pytest.raises(ConvertError, match="张数"):
         _collect(tmp_path, "报告/报告.md", "![](a.png)\n\n![](b.png)\n",
                  {"a.png": b"a", "b.png": b"b"})
@@ -561,6 +565,22 @@ def test_overwrite_replaces_whole_image_dir(tmp_path, monkeypatch, kb):
     names = sorted(p.name for p in (kb / "raw" / "images" / "报告").iterdir())
     assert names == ["报告-1.png", "报告-2.png"]
     assert not stale.exists()
+
+
+def test_overwrite_with_no_images_clears_stale_dir(tmp_path, monkeypatch, kb):
+    """旧版有本地图，新版转出**零图** + --overwrite → 旧 images/报告/ 整盘清掉、不留悬空旧图/空目录。"""
+    src = _src(tmp_path)
+    stale = kb / "raw" / "images" / "报告" / "报告-9.png"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"STALE")
+    (kb / "raw" / "报告.md").write_text("旧\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "guanlan.convert.convert_to_markdown", _mock_convert("纯文本、无图。\n")
+    )
+    assert run_convert(src, root=kb, overwrite=True) == EXIT_OK
+    assert not stale.exists()  # 旧图清掉、不再被服务/进快照
+    assert not (kb / "raw" / "images" / "报告").exists()  # 不留空目录
+    assert "纯文本、无图。" in (kb / "raw" / "报告.md").read_text("utf-8")  # 新 md 已落（带 origin 头）
 
 
 # ── 落盘顺序 = 图先换、md 末提交 + 失败一致性（决策P5.2.1-9，硬门）────────────────────
@@ -665,3 +685,92 @@ def test_receipt_includes_image_count(tmp_path, monkeypatch, kb, capsys):
     )
     run_convert(src, root=kb)
     assert "2 张图片 → raw/images/报告/" in capsys.readouterr().out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P4.6.1 转换内核 progress= 流式契约（决策P4.6.1-10）
+# ══════════════════════════════════════════════════════════════════════════════
+def test_run_converter_none_uses_subprocess_run(monkeypatch):
+    """progress=None（CLI）走 subprocess.run、行为字节不变（不起 Popen）。"""
+    calls = {"run": 0, "popen": 0}
+
+    def fake_run(cmd, cwd=None, capture_output=False, text=False, **k):
+        calls["run"] += 1
+        return subprocess.CompletedProcess(cmd, 0, stdout="o\n", stderr="e\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: calls.__setitem__("popen", 1))
+    rc, out, err = convmod._run_converter(["x"], cwd=".", progress=None)
+    assert (rc, out, err) == (0, "o\n", "e\n")
+    assert calls == {"run": 1, "popen": 0}  # 只走 run、绝不起 Popen
+
+
+def test_run_converter_progress_streams_stderr_lines(monkeypatch):
+    """progress 给定 → Popen 两管道并发 drain，stderr 行实时回调；stdout 末行 = 产物路径。"""
+
+    class FakePopen:
+        def __init__(self, *a, **k):
+            self.stdout = iter(["不重要\n", "/tmp/产物.md\n"])
+            self.stderr = iter(["[mineru] 尝试\n", "[marker] 回退\n"])
+            self.returncode = 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    seen: list[str] = []
+    rc, out, err = convmod._run_converter(["x"], cwd=".", progress=seen.append)
+    assert rc == 0
+    assert out.splitlines()[-1] == "/tmp/产物.md"  # 末行取产物路径不变
+    assert seen == ["[mineru] 尝试", "[marker] 回退"]  # 每条 stderr 行实时回调（去尾换行）
+    assert "回退" in err  # 同时整体累计
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P4.6.1 collect_for_promotion（严格收集 + 指纹，决策P4.6.1-15/16）
+# ══════════════════════════════════════════════════════════════════════════════
+def test_collect_for_promotion_relative_collected_with_fingerprint(tmp_path):
+    """相对引用准入+存在 → 收集、按 target stem 归一重写、记 SHA256 指纹。"""
+    root = tmp_path.resolve()
+    (root / "images" / "x").mkdir(parents=True)
+    (root / "images" / "x" / "a.png").write_bytes(b"A")
+    src = root / "x.md"
+    body = "![](images/x/a.png)\n"
+    src.write_text(body, encoding="utf-8")
+    res = imgmod.collect_for_promotion(body, source_md=src, root=root, stem="y")
+    assert [i.name for i in res.images] == ["y-1.png"]
+    assert "images/y/y-1.png" in res.markdown
+    assert res.images[0].sha256 == hashlib.sha256(b"A").hexdigest()
+    assert res.images[0].source == (root / "images" / "x" / "a.png")
+
+
+def test_collect_for_promotion_external_preserved(tmp_path):
+    """外链（带 scheme）原样保留、计 skipped、不报错（决策P4.6.1-15）。"""
+    root = tmp_path.resolve()
+    src = root / "x.md"
+    body = "![](https://x/a.png)\n\n![](data:image/png;base64,QQ==)\n"
+    src.write_text(body, encoding="utf-8")
+    res = imgmod.collect_for_promotion(body, source_md=src, root=root, stem="y")
+    assert res.images == () and res.skipped == 2 and res.markdown == body
+
+
+def test_collect_for_promotion_dangling_raises(tmp_path):
+    """相对引用悬空（文件缺失）→ ValueError（端点转 400「先 relocalize」，决策P4.6.1-15）。"""
+    root = tmp_path.resolve()
+    src = root / "x.md"
+    body = "![](images/x/missing.png)\n"
+    src.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError, match="无法解析或越界"):
+        imgmod.collect_for_promotion(body, source_md=src, root=root, stem="y")
+
+
+def test_collect_for_promotion_traversal_raises(tmp_path):
+    """相对引用越界（穿越出 root）→ ValueError（安全闸，决策P4.6.1-8/15）。"""
+    root = (tmp_path / "ws").resolve()
+    root.mkdir()
+    (tmp_path / "secret.png").write_bytes(b"SECRET")
+    src = root / "x.md"
+    body = "![](../secret.png)\n"
+    src.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError):
+        imgmod.collect_for_promotion(body, source_md=src, root=root, stem="y")

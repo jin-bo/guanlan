@@ -23,18 +23,29 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import os
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.parse
-import uuid
-from dataclasses import dataclass
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
+from .imageio import (
+    IMAGE_EXTS,  # noqa: F401 — 历史 re-export（测试 / 文档对齐口径）
+    MAX_IMAGE_BYTES,  # noqa: F401
+    MAX_IMAGE_COUNT,  # noqa: F401
+    MAX_IMAGES_TOTAL_BYTES,  # noqa: F401
+    ConvertedImage,  # noqa: F401 — 历史 re-export（tests/test_convert 直接 import）
+    ConvertError,
+    ConvertResult,
+    _admit_image_ref,  # noqa: F401 — 历史 re-export（tests 直接 import）
+    _images_dir,  # noqa: F401
+    _rollback_images,
+    _stage_and_swap_images,
+    collect_and_rewrite,
+)
 from .ingest import run_ingest
 from .paths import require_kb_root
 from .rawio import apply_origin, atomic_write_raw, check_text_admission, safe_raw_target
@@ -46,39 +57,16 @@ _BACKENDS = ("auto", "mineru", "marker", "python")
 # 同名已存在文案归口（早预检 + atomic_write_raw TOCTOU 回退两处共用，免改一处漏一处）。
 _RAW_EXISTS_MSG = "raw/{name} 已存在；改名（`--name`）或加 `--overwrite` 覆盖。"
 
-# 图片扩展白名单（与 skill `SUPPORTED_EXTENSIONS` 的图片子集对齐，决策P5.2.1-5(e)）。
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg"}
-# 容量上限（决策P5.2.1-11）——护 convert 入内存 + 下游 ingest 的 snapshot_raw 递归 hash 整个 raw/。
-MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 单图 ≤ 20 MiB
-MAX_IMAGES_TOTAL_BYTES = 200 * 1024 * 1024  # 单次累计 ≤ 200 MiB
-MAX_IMAGE_COUNT = 500  # 单次张数 ≤ 500
 
-# markdown 图片语法 `![alt](pre url post)`：url 取到空白或 `)` 为止；分组用于「只换 url、保 alt/title」。
-# 仅匹配 markdown 图片语法——HTML `<img>` 不在范围（mineru/marker 产物用 markdown，§0.1 实测）。
-_MD_IMAGE = re.compile(r"(?P<head>!\[[^\]]*\]\()(?P<pre>\s*)(?P<url>[^)\s]+)(?P<post>[^)]*)\)")
-# scheme（`http:`/`https:`/`file:`/`data:`/Windows 盘符 `C:` 等）：拒一切带 scheme 的 url（决策P5.2.1-5(a)）。
-_URL_SCHEME = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*:")
+def _collect_and_rewrite_images(
+    markdown: str, *, produced_md: Path, tmp_root: Path, stem: str
+) -> ConvertResult:
+    """历史名 + 历史签名（`tmp_root=`）的薄壳，委派 `imageio.collect_and_rewrite`（决策P4.6.1-4）。
 
-
-class ConvertError(Exception):
-    """转换失败（skill 缺失 / 不支持的格式 / 全后端耗尽 / 图片超容量）。命令层映射 `EXIT_USAGE`。"""
-
-
-@dataclass(frozen=True)
-class ConvertedImage:
-    """一张随转换文件落盘的图片（决策P5.2.1-4）。"""
-
-    name: str  # 落盘后文件名 <stem>-<n>.<ext>（n 从 1，ext 取原图后缀小写）
-    data: bytes  # 图片字节，逐字拷贝、不重编码（决策P5.2.1-8）
-
-
-@dataclass(frozen=True)
-class ConvertResult:
-    """转换内核产物：重写后 markdown + 收集到的图片（决策P5.2.1-4）。"""
-
-    markdown: str  # 引用已重写为 images/<stem>/<stem>-<n>.<ext>
-    images: tuple[ConvertedImage, ...] = ()  # 按 md 内首次出现序；无图 → 空 tuple
-    skipped: int = 0  # 未准入/未搬运的图片引用数（原样保留），供命令壳 stderr 计数
+    P4.6.1 把图片原语抽到 `guanlan/imageio.py` 归口；本壳保留旧名/旧关键字供 `tests/test_convert`
+    与转换内核原样调用，行为字节不变。
+    """
+    return collect_and_rewrite(markdown, produced_md=produced_md, root=tmp_root, stem=stem)
 
 
 def _skill_convert_script() -> Path:
@@ -101,88 +89,61 @@ def _skill_convert_script() -> Path:
     return script
 
 
-def _admit_image_ref(url: str, md_parent: Path, tmp_root: Path) -> Path | None:
-    """图片引用准入安全闸（决策P5.2.1-5，**安全敏感**，五条 AND）。命中 → 返回解析后 realpath；否则 None。
+def _run_converter(
+    cmd: list[str], *, cwd: str, progress: Callable[[str], None] | None
+) -> tuple[int, str, str]:
+    """跑 skill 转换子进程，返回 `(returncode, stdout, stderr)`（决策P4.6.1-10）。
 
-    (a) 仅相对路径：拒一切带 scheme（`http(s):`/`file:`/`data:`/Windows `C:`）/协议相对 `//`/绝对 `/`/`~`；
-    (b) `urllib.parse.unquote` 解码（挡 `%2e%2e` 等编码穿越）后按相对 `md_parent` 解析；
-    (c) `os.path.realpath`（解 symlink）后必须 `relative_to(tmp_root)`——越界/symlink-逃逸一律拒收；
-    (d) 落点须是真实普通文件（`is_file()` 且非 symlink 自身、非目录/FIFO/设备）；
-    (e) 后缀（小写）∈ `IMAGE_EXTS` 白名单。
+    `progress` 为 None（CLI convert）时走 `subprocess.run(capture_output=True)`——**与原实现字节
+    等价**（决策P5.2-4 向后兼容）。给定时（Web 解析）改 `Popen`：**两条管道各起一条 drain 线程
+    并发读**（避免一管道写满阻塞另一管道造成死锁），stderr 行实时回调 `progress(line)`（marker/
+    mineru 分级回退日志在 stderr）、同时整体累计，stdout 累计到末行取产物路径。stdout 不回调
+    （只末行有用），但仍 drain 以防满管道阻塞。
     """
-    if _URL_SCHEME.match(url) or url.startswith(("//", "/", "~")):  # (a)
-        return None
-    decoded = urllib.parse.unquote(url)  # (b)
-    candidate = Path(os.path.realpath(md_parent / decoded))  # (c) 解 symlink
-    try:
-        candidate.relative_to(tmp_root)
-    except ValueError:
-        return None
-    if candidate.is_symlink() or not candidate.is_file():  # (d)
-        return None
-    if candidate.suffix.lower() not in IMAGE_EXTS:  # (e)
-        return None
-    return candidate
+    if progress is None:
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+        return proc.returncode, proc.stdout, proc.stderr
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    out_lines: list[str] = []
+    err_lines: list[str] = []
 
+    def _drain_stdout() -> None:
+        for line in proc.stdout:  # type: ignore[union-attr]
+            out_lines.append(line)
 
-def _collect_and_rewrite_images(
-    markdown: str, *, produced_md: Path, tmp_root: Path, stem: str
-) -> ConvertResult:
-    """在 temp 销毁前扫描 markdown 图片引用、收集字节、按首次出现序编号、重写引用（决策P5.2.1-3/5）。
+    def _drain_stderr() -> None:
+        for line in proc.stderr:  # type: ignore[union-attr]
+            err_lines.append(line)
+            with contextlib.suppress(Exception):  # 回调失败绝不拖垮 drain / 子进程收尾
+                progress(line.rstrip("\n"))
 
-    引擎无关：mineru 与 marker 的引用**都相对产物 md 自身目录**（§0.1 实测），故统一按相对
-    `produced_md.parent` 解析（叠加 `_admit_image_ref` 安全闸），不写引擎分支。按解析后 realpath
-    去重（同图多引复用同号）；逐张累计校验容量三上限，任一超限 → `ConvertError`（非静默丢弃）。
-    """
-    md_parent = produced_md.parent
-    collected: dict[str, ConvertedImage] = {}  # realpath -> 已收集图片（去重）
-    order: list[ConvertedImage] = []  # 按首次出现序
-    stats = {"skipped": 0, "total_bytes": 0}
-
-    def repl(m: re.Match[str]) -> str:
-        resolved = _admit_image_ref(m.group("url"), md_parent, tmp_root)
-        if resolved is None:  # 未准入 → 原样保留引用、不编号
-            stats["skipped"] += 1
-            return m.group(0)
-        key = str(resolved)
-        img = collected.get(key)
-        if img is None:
-            n = len(order) + 1
-            if n > MAX_IMAGE_COUNT:
-                raise ConvertError(
-                    f"图片张数超过上限 {MAX_IMAGE_COUNT}；请拆分文档或用 --dry-run 排查。"
-                )
-            # 先 stat 校验单图/累计上限，**再** read_bytes：否则一张超大图会先被整盘读入内存、
-            # 才被拒，§2.1 容量闸的「护 convert 入内存」承诺落空（决策P5.2.1-11）。
-            size = resolved.stat().st_size
-            if size > MAX_IMAGE_BYTES:
-                raise ConvertError(
-                    f"单图 {resolved.name} 超过上限 {MAX_IMAGE_BYTES} 字节；请降分辨率后重转。"
-                )
-            if stats["total_bytes"] + size > MAX_IMAGES_TOTAL_BYTES:
-                raise ConvertError(
-                    f"图片累计超过上限 {MAX_IMAGES_TOTAL_BYTES} 字节；请拆分文档后重转。"
-                )
-            data = resolved.read_bytes()
-            stats["total_bytes"] += len(data)
-            img = ConvertedImage(name=f"{stem}-{n}{resolved.suffix.lower()}", data=data)
-            collected[key] = img
-            order.append(img)
-        new_url = f"images/{stem}/{img.name}"  # raw/<slug>.md → raw/images/<slug>/ 的正确相对路径
-        return f"{m.group('head')}{m.group('pre')}{new_url}{m.group('post')})"
-
-    rewritten = _MD_IMAGE.sub(repl, markdown)
-    return ConvertResult(markdown=rewritten, images=tuple(order), skipped=stats["skipped"])
+    t_out = threading.Thread(target=_drain_stdout, daemon=True)
+    t_err = threading.Thread(target=_drain_stderr, daemon=True)
+    t_out.start()
+    t_err.start()
+    proc.wait()
+    t_out.join()
+    t_err.join()
+    return proc.returncode, "".join(out_lines), "".join(err_lines)
 
 
 def convert_to_markdown(
-    src: Path, *, stem: str, backend: str = "auto", cwd: Path | None = None
+    src: Path,
+    *,
+    stem: str,
+    backend: str = "auto",
+    cwd: Path | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> ConvertResult:
     """**转换内核**：把一个多格式文件转成 markdown + 随源图片，零 LLM。复用 skill `convert.py` 当引擎。
 
     `stem` = 最终 raw slug（命令壳传 `target.stem`），用于图片重命名与引用重写口径对齐 md 文件名
     （决策P5.2.1-4）。`cwd` = 子进程工作目录 / skill `.env` 发现锚点（`run_convert` 传 **KB root**；
-    None → 回退 `Path.cwd()`）：
+    None → 回退 `Path.cwd()`）。`progress`（决策P4.6.1-10）：None=CLI，走 `subprocess.run`、行为字节
+    不变；给定=Web 解析，走 `Popen` 边读 stderr 行边回调（分级回退日志流式可见，两管道并发 drain
+    防死锁）——见 `_run_converter`。
 
     1. **temp 暂存**：把 src 复制进 `tempfile.TemporaryDirectory`、得**绝对路径** `staged`
        （skill `convert.py` 把产物写在*输入文件同目录*、无 `--output_dir`——`staged` 在 tmpdir 内，
@@ -207,15 +168,14 @@ def convert_to_markdown(
         tmp_root = Path(tmp).resolve()
         staged = tmp_root / src.name  # 绝对路径；产物落 tmp（决策P5.2-10）。
         shutil.copyfile(src, staged)
-        proc = subprocess.run(
+        returncode, stdout, stderr = _run_converter(
             [sys.executable, str(script), str(staged), "--backend", backend],
             cwd=run_cwd,  # KB root，绝非 tmpdir（决策P5.2-12）；透传环境、不透传 model（决策P5.2-4）。
-            capture_output=True,
-            text=True,
+            progress=progress,
         )
-        if proc.returncode != 0:
-            raise ConvertError((proc.stderr or "").strip() or "skill convert.py 非零退出。")
-        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        if returncode != 0:
+            raise ConvertError((stderr or "").strip() or "skill convert.py 非零退出。")
+        lines = [ln for ln in stdout.splitlines() if ln.strip()]
         if not lines:
             raise ConvertError("skill convert.py 成功退出但未输出产物路径。")
         produced = Path(lines[-1].strip())
@@ -239,60 +199,6 @@ def _default_origin(src: Path, root: Path) -> str:
         return resolved.relative_to(root).as_posix()
     except ValueError:
         return str(resolved)
-
-
-def _images_dir(target: Path) -> Path:
-    """图片落点归口（决策P5.2.1-2）：锚在 **md 目标的父目录**。
-
-    `target` = `<kb>/raw/<slug>.md` → `target.parent` = `<kb>/raw/` → 落点恒为
-    `<kb>/raw/images/<slug>/`，与 md 内 `images/<slug>/…` 相对引用对齐。**绝不**写成
-    `root/"images"/stem`（那会落到 `<kb>/images/<slug>/`、与引用断裂）。
-    """
-    return target.parent / "images" / target.stem
-
-
-def _stage_and_swap_images(
-    target: Path, images: tuple[ConvertedImage, ...]
-) -> Path | None:
-    """落 images 到 `raw/images/<slug>/`（决策P5.2.1-9）：写 staging → rename 换图目录（旧图存 `.bak`）。
-
-    返回 `bak`（overwrite 时旧图目录的暂存路径，否则 None）供 md 提交后清理 / 失败回滚。可失败的
-    字节写**全隔离在 sibling staging**（ENOSPC/权限只可能在此，real 与旧 md 未被碰）；随后两次
-    `rename` 是同 fs 不分配空间的元数据操作、近乎不可失败。`OSError` 向上抛由命令壳处理。
-    """
-    real = _images_dir(target)  # raw/images/<slug>/
-    images_root = real.parent  # raw/images/
-    images_root.mkdir(parents=True, exist_ok=True)
-    staging = images_root / f".{real.name}.staging-{uuid.uuid4().hex[:8]}"
-    staging.mkdir()
-    try:
-        for img in images:
-            (staging / img.name).write_bytes(img.data)  # 唯一可能 ENOSPC/权限失败处
-    except OSError:
-        shutil.rmtree(staging, ignore_errors=True)  # real 与旧 md 原封不动
-        raise
-    bak: Path | None = None
-    try:
-        if real.exists():  # overwrite：旧图整盘存 .bak（决策P5.2.1-6）
-            bak = images_root / f".{real.name}.bak-{uuid.uuid4().hex[:8]}"
-            os.rename(real, bak)
-        os.rename(staging, real)
-    except OSError:
-        shutil.rmtree(staging, ignore_errors=True)
-        if bak is not None and not real.exists():  # staging→real 失败 → 复位旧图
-            with contextlib.suppress(OSError):
-                os.rename(bak, real)
-        raise
-    return bak
-
-
-def _rollback_images(target: Path, bak: Path | None) -> None:
-    """md 提交失败时回滚图目录（决策P5.2.1-9）：删本次新换上的 real；overwrite 则从 `.bak` 复位旧图。"""
-    real = _images_dir(target)
-    shutil.rmtree(real, ignore_errors=True)
-    if bak is not None:
-        with contextlib.suppress(OSError):
-            os.rename(bak, real)
 
 
 def run_convert(
@@ -379,9 +285,13 @@ def run_convert(
             print(f"另有 {result.skipped} 处图片引用未准入、原样保留。", file=sys.stderr)
         return EXIT_OK
 
-    # 落图（staging-swap），随后 md 末步提交（决策P5.2.1-9）。
+    # 落图（staging-swap），随后 md 末步提交（决策P5.2.1-9）。须动图目录 = 有新图，或 overwrite 且旧图
+    # 目录残留——后者是**无图覆盖**：新 md 不再引用本地图，旧 images/<slug>/ 必须一并清掉，否则旧图仍被
+    # 服务/进后续快照/ingest（决策P5.2.1-6 整盘替换语义补全）。
+    real = _images_dir(target)
+    need_swap = bool(result.images) or (overwrite and real.exists())
     bak: Path | None = None
-    if result.images:
+    if need_swap:
         try:
             bak = _stage_and_swap_images(target, result.images)
         except OSError as exc:  # 写 staging 字节失败 → real/旧 md 原封不动（决策P5.2.1-10）。
@@ -391,12 +301,12 @@ def run_convert(
     try:
         code = atomic_write_raw(target, content, overwrite)  # 末步提交 md（权威写 + 不覆盖门禁）。
     except OSError as exc:  # 落盘 IO 失败 → 回滚图目录、EXIT_USAGE，不外抛 traceback（镜像 graph）。
-        if result.images:
+        if need_swap:
             _rollback_images(target, bak)
         print(f"写 raw/ 失败：{exc}", file=sys.stderr)
         return EXIT_USAGE
     if code != EXIT_OK:  # 罕见 TOCTOU 抢建（早预检已挡常态）→ 回滚图目录，旧态完整复位。
-        if result.images:
+        if need_swap:
             _rollback_images(target, bak)
         if code == EXIT_USAGE:
             print(
@@ -406,6 +316,9 @@ def run_convert(
         return code
     if bak is not None:  # 提交成功 → 清旧图 .bak。
         shutil.rmtree(bak, ignore_errors=True)
+    if need_swap and not result.images:  # 无图覆盖：不留空的 images/<slug>/（仅当确为空才删）。
+        with contextlib.suppress(OSError):
+            real.rmdir()
 
     nbytes = target.stat().st_size  # 实际落盘字节（UTF-8），免二次 encode 大字符串。
     receipt = f"✓ 已写 raw/{target.name}（origin: {origin_value}，{nbytes} 字节"
