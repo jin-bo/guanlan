@@ -3,6 +3,8 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [Unreleased]
+
 ## [0.1.8] - 2026-06-13
 
 三条线并进、均落在既有里程碑边界内：① **图谱深化（P3.5/P3.6）**——把 `graph`/`lint` 从「看一眼的
