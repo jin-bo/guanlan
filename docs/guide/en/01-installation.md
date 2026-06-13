@@ -18,7 +18,7 @@ pip install guanlan-wiki
 Verify:
 
 ```bash
-guanlan --version     # prints the current version (e.g. 0.1.8.dev0)
+guanlan --version     # prints the current version (e.g. 0.1.9)
 guanlan --help
 ```
 
