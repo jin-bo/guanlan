@@ -58,6 +58,7 @@ mcp = [
 [project.urls]
 Homepage = "https://github.com/jin-bo/guanlan"
 Repository = "https://github.com/jin-bo/guanlan"
+Documentation = "https://github.com/jin-bo/guanlan/tree/main/docs/guide"
 Issues = "https://github.com/jin-bo/guanlan/issues"
 
 [project.scripts]
