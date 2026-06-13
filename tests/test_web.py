@@ -7,6 +7,7 @@
 import asyncio
 import base64
 import json
+import re
 import socket
 import sys
 import threading
@@ -499,6 +500,130 @@ def test_api_raw_file_available_in_reader(kb) -> None:
     (kb / "raw" / "r.md").write_text("# R\n", encoding="utf-8")
     with TestClient(create_app(kb, reader=True)) as c:
         assert c.get("/api/raw/file", params={"name": "r.md"}).status_code == 200
+
+
+# ── raw 嵌图（P5.2.1 raw/images/ Web 显示）─────────────────────────────────────────
+def _land_raw_image(kb, slug="报告", n=1, ext=".jpg", data=b"IMGBYTES"):
+    """落一张 P5.2.1 形态的随源图片到 raw/images/<slug>/<slug>-N.ext。"""
+    p = kb / "raw" / "images" / slug / f"{slug}-{n}{ext}"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+    return p
+
+
+def test_api_raw_file_rewrites_relative_image_src(client, kb) -> None:
+    """raw 预览：库内相对 ![](images/<slug>/…) → <img src> 指向 /api/raw/image 端点。"""
+    _land_raw_image(kb)
+    (kb / "raw" / "报告.md").write_text("# 报告\n\n![图](images/报告/报告-1.jpg)\n", encoding="utf-8")
+    html = client.get("/api/raw/file", params={"name": "报告.md"}).json()["html"]
+    assert "/api/raw/image?path=" in html
+    assert "src=\"images/报告" not in html  # 原相对路径已被改写
+
+
+def test_api_raw_file_keeps_external_image_src(client, kb) -> None:
+    """外链 http(s) 图片原样保留（只改写库内相对图）。"""
+    (kb / "raw" / "ext.md").write_text("![x](https://example.com/a.png)\n", encoding="utf-8")
+    html = client.get("/api/raw/file", params={"name": "ext.md"}).json()["html"]
+    assert "https://example.com/a.png" in html
+    assert "/api/raw/image" not in html
+
+
+def test_api_raw_image_serves_bytes(client, kb) -> None:
+    """/api/raw/image 回原字节 + 正确 MIME（逐字、不重编码）。"""
+    _land_raw_image(kb, data=b"\x89PNG-raw", ext=".png")
+    resp = client.get("/api/raw/image", params={"path": "images/报告/报告-1.png"})
+    assert resp.status_code == 200
+    assert resp.content == b"\x89PNG-raw"
+    assert resp.headers["content-type"] == "image/png"
+
+
+def test_api_raw_image_end_to_end(client, kb) -> None:
+    """端到端：预览改写出的 URL 直接可取到图字节。"""
+    _land_raw_image(kb, data=b"ABCDEF")
+    (kb / "raw" / "报告.md").write_text("![](images/报告/报告-1.jpg)\n", encoding="utf-8")
+    html = client.get("/api/raw/file", params={"name": "报告.md"}).json()["html"]
+    m = re.search(r'src="(/api/raw/image\?path=[^"]+)"', html)
+    assert m, html
+    resp = client.get(m.group(1))
+    assert resp.status_code == 200 and resp.content == b"ABCDEF"
+
+
+def test_api_raw_image_traversal_and_containment(client, kb) -> None:
+    """越界 raw/images/ → 409；借端点读 raw/*.md 源 → 409（夹在 images/ 子树外）。"""
+    assert client.get(
+        "/api/raw/image", params={"path": "../../wiki/index.md"}
+    ).status_code == 409
+    (kb / "raw" / "secret.md").write_text("机密\n", encoding="utf-8")
+    # secret.md 在 raw/ 但不在 raw/images/ → 越界 409，绝不漏源文本。
+    assert client.get(
+        "/api/raw/image", params={"path": "../secret.md"}
+    ).status_code == 409
+
+
+def test_api_raw_image_rejects_non_image_and_missing(client, kb) -> None:
+    """raw/images/ 内非图像扩展名 → 404；缺失 → 404。"""
+    bad = kb / "raw" / "images" / "报告" / "报告-1.txt"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_bytes(b"not an image")
+    assert client.get(
+        "/api/raw/image", params={"path": "images/报告/报告-1.txt"}
+    ).status_code == 404
+    assert client.get(
+        "/api/raw/image", params={"path": "images/报告/缺失.png"}
+    ).status_code == 404
+
+
+def test_api_raw_image_available_in_reader(kb) -> None:
+    """图片端点是纯读 → reader 模式仍注册可用（与 /api/raw/file 同读线）。"""
+    _land_raw_image(kb, data=b"R")
+    with TestClient(create_app(kb, reader=True)) as c:
+        resp = c.get("/api/raw/image", params={"path": "images/报告/报告-1.jpg"})
+        assert resp.status_code == 200 and resp.content == b"R"
+
+
+# ── raw 预览 HTML 表格白名单渲染（mineru/marker 复杂表）─────────────────────────────
+def test_api_raw_file_renders_html_table(client, kb) -> None:
+    """raw 预览：原始 <table> HTML（复杂表）经 allowlist 消毒后渲染为真表（含 colspan/scope）。"""
+    (kb / "raw" / "t.md").write_text(
+        "正文\n\n<table><thead><tr><th scope=\"col\">列</th></tr></thead>"
+        "<tbody><tr><td colspan=\"2\">合并</td></tr></tbody></table>\n",
+        encoding="utf-8",
+    )
+    html = client.get("/api/raw/file", params={"name": "t.md"}).json()["html"]
+    assert "<table>" in html and "<td colspan=\"2\">合并</td>" in html
+    assert "scope=\"col\"" in html
+    assert "&lt;table&gt;" not in html  # 未被转义成文本
+
+
+def test_api_raw_file_table_strips_xss(client, kb) -> None:
+    """表格消毒：on*/style=/<script>/<img onerror> 一律剥除或丢弃，内层文本保留。"""
+    (kb / "raw" / "evil.md").write_text(
+        "<table onclick=\"bad()\" style=\"x\"><tr>"
+        "<td onmouseover=\"hack()\">单元<script>steal()</script>"
+        "<img src=x onerror=alert(1)>尾</td></tr></table>\n",
+        encoding="utf-8",
+    )
+    html = client.get("/api/raw/file", params={"name": "evil.md"}).json()["html"]
+    assert "<table>" in html
+    for bad in ("onclick", "style=", "onmouseover", "onerror", "steal(", "alert(1)", "<script"):
+        assert bad not in html, bad
+    assert "单元" in html and "尾" in html  # 危险标签剥除但子文本保留
+
+
+def test_api_raw_file_table_in_fenced_code_stays_literal(client, kb) -> None:
+    """围栏代码里的 <table> 保字面（不渲染）——表格放行优先级低于 fenced_code（决策P4-3 一致）。"""
+    (kb / "raw" / "code.md").write_text(
+        "```html\n<table><tr><td>literal</td></tr></table>\n```\n", encoding="utf-8"
+    )
+    html = client.get("/api/raw/file", params={"name": "code.md"}).json()["html"]
+    assert "&lt;table&gt;" in html  # 转义、未渲染成真表
+
+
+def test_api_page_still_escapes_html_table(client, kb) -> None:
+    """wiki 页（/api/page）默认不放行 HTML 表格 → 仍全转义（allow_tables 仅 raw 预览开）。"""
+    write_page(kb, "wiki/concepts/x.md", body="<table><tr><td>x</td></tr></table>")
+    resp = client.get("/api/page", params={"path": "wiki/concepts/x.md"})
+    assert "&lt;table&gt;" in resp.json()["html"]
 
 
 # ───────────────────────── ingest 写作业（C4） ─────────────────────────
