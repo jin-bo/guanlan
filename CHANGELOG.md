@@ -3,6 +3,8 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [Unreleased]
+
 ## [0.1.9] - 2026-06-13
 
 Web 宿主界面双语收尾（P4.7）：把入库/补全/回填/解析以及 check/health/lint 报告等弹层窗口标题接入
