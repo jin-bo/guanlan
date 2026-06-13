@@ -27,6 +27,20 @@ function escapeHtml(s) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 终端进度条（tqdm，如 ingest/convert 解析）用回车 `\r` 原地刷新同一行；浏览器 `<pre>` 不识别
+// `\r`，会把每次刷新堆成一行，进度日志爆成几十行。还原"原地刷新"：按 `\n` 切行，每行只保留
+// 最后一个 `\r` 之后的片段（= 该行进度条的最终/当前态）。纯展示层处理，不动 job.output 原文。
+function collapseCR(text) {
+  return String(text)
+    .replace(/\r\n/g, "\n") // 先归一 CRLF：否则行尾单个 \r 会把整行误清空
+    .split("\n")
+    .map((line) => {
+      const i = line.lastIndexOf("\r");
+      return i === -1 ? line : line.slice(i + 1);
+    })
+    .join("\n");
+}
+
 // ── 界面双语（P4.7，见 docs/P4.7-中英双语.md）──────────────────────────────────
 //
 // 只翻界面 chrome（按钮/tooltip/占位符/弹层标题/前端生成的提示·错误），内容真相（wiki 正文 /
@@ -367,7 +381,10 @@ $("#graph-btn").addEventListener("click", () => window.open("/graph", "_blank"))
 
 $("#ingest-btn").addEventListener("click", openIngestPicker);
 
+let rawShowIngested = false; // ingest 选单过滤态：默认只看未收录，按钮可切看已收录
+
 async function openIngestPicker() {
+  rawShowIngested = false; // 每次开选单复位到默认「未收录」视图
   showOverlay("ingest", `<p class="muted">${escapeHtml(t("ingest.loadingRaw"))}</p>`);
   let files;
   try {
@@ -377,10 +394,12 @@ async function openIngestPicker() {
     return;
   }
   renderRawPicker(files);
-  overlayRepaint = () => renderRawPicker(files); // 语言切换纯重渲染（吃缓存 files）
+  overlayRepaint = () => renderRawPicker(files); // 语言切换纯重渲染（吃缓存 files + 当前过滤态）
 }
 
-// 纯渲染 raw/ 选单（文件名是内容、按字面显示；空态/按钮是 chrome）。
+// 纯渲染 raw/ 选单（文件名是内容、按字面显示；过滤条/空态/角标/按钮是 chrome）。
+// 默认只显未收录（`ingested:false`），顶部一颗按钮在 未收录 ⇄ 已收录 间切换（非破坏：
+// 已收录文件不从磁盘删、仍可预览/重投，只是默认收起）。
 function renderRawPicker(files) {
   const box = $("#overlay-body");
   box.innerHTML = "";
@@ -388,17 +407,49 @@ function renderRawPicker(files) {
     box.innerHTML = `<p class="muted">${escapeHtml(t("ingest.rawEmpty"))}</p>`;
     return;
   }
-  for (const f of files) {
+  const pending = files.filter((f) => !f.ingested);
+  const done = files.filter((f) => f.ingested);
+
+  const bar = document.createElement("div"); // 过滤切换条：左计数、右切换按钮
+  bar.className = "raw-filter";
+  const toggle = document.createElement("button");
+  toggle.className = "stage-act";
+  toggle.textContent = rawShowIngested
+    ? t("ingest.showPending", pending.length)
+    : t("ingest.showIngested", done.length);
+  toggle.addEventListener("click", () => {
+    rawShowIngested = !rawShowIngested;
+    renderRawPicker(files);
+  });
+  bar.appendChild(toggle);
+  box.appendChild(bar);
+
+  const shown = rawShowIngested ? done : pending;
+  if (!shown.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = rawShowIngested ? t("ingest.noIngested") : t("ingest.allIngested");
+    box.appendChild(empty);
+    return;
+  }
+  for (const f of shown) {
     const row = document.createElement("div");
     row.className = "raw-pick";
     const name = document.createElement("button"); // 文件名即预览入口：点名预览，省去独立按钮
     name.className = "raw-name";
     name.textContent = `${f.name} (${(f.size / 1024).toFixed(1)} KB)`; // textContent：文件名按字面显示，无注入；体积按 KB
     name.addEventListener("click", () => previewRawFile(f.name, files));
+    row.appendChild(name);
+    if (f.ingested) {
+      const badge = document.createElement("span"); // 「已收录」角标（已收录视图下标注）
+      badge.className = "raw-badge";
+      badge.textContent = t("ingest.ingestedBadge");
+      row.appendChild(badge);
+    }
     const btn = document.createElement("button");
     btn.textContent = "ingest"; // 命令名，不译
     btn.addEventListener("click", () => triggerIngest(`raw/${f.name}`));
-    row.append(name, btn);
+    row.appendChild(btn);
     box.appendChild(row);
   }
 }
@@ -488,7 +539,7 @@ function renderParseDone(job) {
   box.appendChild(badge);
   if (job.output) {
     const pre = document.createElement("pre");
-    pre.textContent = job.output; // backend 分级日志 + 回执（同 ingest，纯 textContent 无注入）
+    pre.textContent = collapseCR(job.output); // backend 分级日志 + 回执（折叠 \r 进度条，纯 textContent 无注入）
     box.appendChild(pre);
   }
   const back = document.createElement("button");
@@ -511,7 +562,7 @@ async function pollJob(jobId, label, renderDone) {
         const badge = ok
           ? `<span class="report-ok">${escapeHtml(t("common.passed"))}</span>`
           : `<span class="report-bad">${escapeHtml(t("common.exitCode", job.exit_code))}</span>`;
-        $("#overlay-body").innerHTML = `<p>${escapeHtml(label)} ${badge}</p><pre>${escapeHtml(job.output || t("common.noOutput"))}</pre>`;
+        $("#overlay-body").innerHTML = `<p>${escapeHtml(label)} ${badge}</p><pre>${escapeHtml(collapseCR(job.output || t("common.noOutput")))}</pre>`;
       }
       await loadPages(); // 写后刷新 wiki 搜索列表（heal 新建了页）
       return;
@@ -520,7 +571,7 @@ async function pollJob(jobId, label, renderDone) {
     // 实时可见（emit 推上）；ingest/heal/backfill 顺带受益。无 output 时仍只显运行徽标。
     const running = `<p class="muted">${escapeHtml(t("job.running", label, job.state))}</p>`;
     $("#overlay-body").innerHTML = job.output
-      ? `${running}<pre>${escapeHtml(job.output)}</pre>`
+      ? `${running}<pre>${escapeHtml(collapseCR(job.output))}</pre>`
       : running;
     await sleep(400);
   }
@@ -719,7 +770,7 @@ function renderHealDone(job) {
 
   if (job.output) {
     const pre = document.createElement("pre");
-    pre.textContent = job.output; // agent 散文（同 ingest）
+    pre.textContent = collapseCR(job.output); // agent 散文（折叠 \r 进度条，同 ingest）
     box.appendChild(pre);
   }
 }
@@ -1115,6 +1166,16 @@ function stagingEmpty(text) {
   return p;
 }
 
+// 暂存区行内动作按钮图标化：填 svg 图标，`desc` 一句说明走原生 title（hover 悬停显示，
+// 浏览器自动定位、不被 .overlay-body 滚动容器裁切）；`label` 短名走 aria-label（无障碍可读名）。
+// `blocked` 时把「写作业进行中」并进 title，仍保留说明（满足 hover 显说明的诉求）。
+function setStageIcon(btn, iconId, label, desc, blocked) {
+  btn.classList.add("stage-iconbtn");
+  btn.innerHTML = `<svg class="ico" aria-hidden="true"><use href="#${iconId}"/></svg>`;
+  btn.title = blocked ? `${desc}（${t("staging.writeBusy")}）` : desc;
+  btn.setAttribute("aria-label", label);
+}
+
 // uploads/ 行：徽章 + 文件名 + [问 agent 解析]（+ .md 额外 [晋级为源]）+ 🗑。
 function renderUploadRow(it, blocked) {
   const row = document.createElement("div");
@@ -1133,11 +1194,9 @@ function renderUploadRow(it, blocked) {
   sz.className = "stage-size muted";
   sz.textContent = fmtBytes(it.bytes);
   const parse = document.createElement("button");
-  parse.className = "stage-act";
-  parse.textContent = t("staging.parse");  // P4.6.1：宿主确定性解析（非「问 agent」），点击即建解析作业
-  parse.title = t("tip.parse");
+  parse.className = "stage-act";  // P4.6.1：宿主确定性解析（非「问 agent」），点击即建解析作业
+  setStageIcon(parse, "i-play", t("staging.parse"), t("tip.parse"), blocked);
   parse.disabled = blocked;
-  if (blocked) parse.title = t("staging.writeBusy");
   parse.addEventListener("click", () => triggerParse(it.path));
   row.append(ico, nm, sz, parse);
   // 退化路径（§6 / §7.2 ①）：uploads/*.md 也可直接晋级（source 校验只需 workspace/ + .md + 存在）。
@@ -1172,11 +1231,11 @@ function renderParsedRow(it, blocked, selected, updateMerge) {
   nm.title = it.name;
   const preview = document.createElement("button");
   preview.className = "stage-act";
-  preview.textContent = t("staging.preview");
+  setStageIcon(preview, "i-eye", t("staging.preview"), t("tip.preview"));
   preview.addEventListener("click", () => previewWorkspaceFile(it.path));
   const revise = document.createElement("button");
   revise.className = "stage-act";
-  revise.textContent = t("staging.revise");
+  setStageIcon(revise, "i-pencil", t("staging.revise"), t("tip.revise"));
   revise.addEventListener("click", () => {
     const what = window.prompt(t("staging.revisePrompt", it.name), "");
     if (what === null || !what.trim()) return;
@@ -1185,8 +1244,7 @@ function renderParsedRow(it, blocked, selected, updateMerge) {
   // 断链检查（P4.6.1，决策P4.6.1-5）：拆分/合并后图片可能悬空/错位，一键检查 + 重整（确定性、宿主写）。
   const relink = document.createElement("button");
   relink.className = "stage-act";
-  relink.textContent = t("staging.relink");
-  relink.title = t("tip.relink");
+  setStageIcon(relink, "i-link", t("staging.relink"), t("tip.relink"));
   relink.addEventListener("click", () => checkRelink(it, relink));
   row.append(cb, ico, nm, preview, revise, relink, promoteButton(it, blocked), trashButton(it.path, row, blocked));
   return row;
@@ -1269,9 +1327,8 @@ async function runRelocalize(it, go, status) {
 function promoteButton(it, blocked) {
   const btn = document.createElement("button");
   btn.className = "stage-act stage-promote";
-  btn.textContent = t("staging.promote");
+  setStageIcon(btn, "i-arrow-right", t("staging.promote"), t("tip.promote"), blocked);
   btn.disabled = blocked;
-  if (blocked) btn.title = t("staging.writeBusy");
   btn.addEventListener("click", () => openPromoteForm(it, btn));
   return btn;
 }
@@ -1541,23 +1598,23 @@ function renderHistory(conversations) {
     row.className = "conv-row";
     const meta = document.createElement("div");
     meta.className = "conv-meta";
-    const title = document.createElement("span");
+    const title = document.createElement("button"); // 标题即打开入口：点标题续聊，省去独立「打开」按钮
     title.className = "conv-title";
     title.textContent = c.title || t("history.untitled"); // textContent：标题按字面显示，无注入
+    title.addEventListener("click", () => openConversation(c));
     const tag = document.createElement("span");
     tag.className = "conv-tag";
     // live 条目报真实轮次，冷条目报消息总数（list_sessions 给 message_count，非轮次）。
     const count = c.live ? t("history.turns", c.turns ?? 0) : t("history.messages", c.messages ?? 0);
     tag.textContent = c.live ? t("history.live", count) : t("history.cold", count);
     meta.append(title, tag);
-    const open = document.createElement("button");
-    open.textContent = t("history.open");
-    open.addEventListener("click", () => openConversation(c));
     const del = document.createElement("button");
     del.className = "conv-del";
-    del.textContent = t("history.delete");
+    del.textContent = "🗑"; // 图标化：删除该会话（图标不译，title 提示走 i18n）
+    del.title = t("history.delete");
+    del.setAttribute("aria-label", t("history.delete"));
     del.addEventListener("click", () => deleteConversation(c.id, row));
-    row.append(meta, open, del);
+    row.append(meta, del);
     box.appendChild(row);
   }
 }
