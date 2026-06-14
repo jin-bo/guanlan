@@ -18,6 +18,7 @@
 ### P2 —— 最小闭环
 
 - [P2-最小闭环](P2-最小闭环.md) —— `init` / `ingest` / `query` / `check` / `install-skill`,确定性写门禁 + `raw/` 快照
+- [P2.1-摄入写入纪律](P2.1-摄入写入纪律.md) —— 写门禁既有页只增不毁:源不回退 `sources.dropped`(阻断+自愈) + 正文骤缩 `body.shrank`(警告)
 
 ### P3 —— 健康与图谱(零-LLM 维护)
 
