@@ -88,7 +88,7 @@ description: >
 
    读召回到的候选页 + `wiki/index.md` 综合。
 2. 读相关页，**综合出带 `[[页]]` 引用的答案**；无可靠来源时明说，不编造。引用页面**一律裸 `[[stem]]`**（从 `index.md` 目录行取材时把 `[标题](dir/stem.md)` 改写成 `[[stem]]`、勿照抄——否则不走站内导航，详见 conventions §wikilink）。
-3. **默认只读**。仅当显式 `--backfill` 时把好答案回填 `wiki/syntheses/<slug>.md`（`type: synthesis`），并走与 ingest 同一套门禁。
+3. **默认只读**。仅当显式 `--backfill` 时把好答案回填 `wiki/syntheses/<slug>.md`（`type: synthesis`），并走与 ingest 同一套门禁。**synthesis 是时点快照**：它存档某次提问在当时的答案，ingest 不级联改写其知识内容（活体综述是 `overview.md` 的活儿）；知识变了就重新 `query --backfill` 一篇新页或显式覆盖，别去改旧答案。详见 conventions §页面模板 synthesis 节。
 
 ### heal（P3.2）— `guanlan heal`
 
