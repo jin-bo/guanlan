@@ -27,12 +27,19 @@ from .errors import (
     EXIT_OK,
     EXIT_RAW_MUTATED,
 )
+from .pages import iter_pages, load_page
 from .runtime import AgentRunner, AgentRunResult, run_agent_task
 
 # 写入口门禁失败后的有界自愈轮数（决策7，见 docs/P2-最小闭环.md §10）。
 # 仅对**新引入的阻断性**违规（frontmatter/sources）自愈——把违规回喂同一 agent 就地修；
 # `raw_mutated`（完整性破坏）与 `agent_error`（运行时失败）不自愈，直接判死。
 MAX_REPAIR_ATTEMPTS = 2
+
+# **正文骤缩告警阈值（P2.1 决策P2.1-3，见 docs/P2.1-摄入写入纪律.md §3.2）。**
+# 比 llm_wiki 的 0.7 更宽松以压噪——只抓「腰斩级」骤缩（after < 0.5×before），且 before 正文须达
+# SHRINK_FLOOR 才判（桩页→桩页的微缩不触发）。常数具名便于按真实库调。
+SHRINK_RATIO = 0.5
+SHRINK_FLOOR = 200  # 字符
 
 # **断链 = 警告，不阻断写入（决策8，见 docs/P2-最小闭环.md §10）。**
 # Karpathy wiki 模式建库期，正文常先出现 `[[X]]` 而 X 的页面尚未建——这些前向引用会随后续
@@ -49,7 +56,10 @@ REPAIR_PROMPT = (
     "值内出现单引号时翻倍为 `''`，**切勿在双引号里再套双引号**）、"
     "必备键 `title/type/tags/sources/last_updated` 齐全且类型正确；"
     "`sources` 列的每个 slug 必须对应存在的 `wiki/sources/<slug>.md`；"
-    "若有 `aliases`，须为非空字符串列表、全局唯一、且不与任何页面名（stem）同名。"
+    "若有 `aliases`，须为非空字符串列表、全局唯一、且不与任何页面名（stem）同名；"
+    "若门禁指出某**既有页丢失了原有 `sources` slug**（`sources.dropped`），"
+    "请把该 slug **并回**（union 并集、不是覆盖）该页 frontmatter `sources`——ingest 只增不减来源；"
+    "若你本次确实重写了该页，把旧来源补齐即可，不要动正文。"
     "**不要运行 shell 命令或 `guanlan check`；读写文件只用内置文件工具。** "
     "修完用一句话说明改了什么。"
 )
@@ -195,11 +205,97 @@ def diff_raw(before: dict[str, str], after: dict[str, str]) -> list[RawChange]:
     return changes
 
 
+@dataclass(frozen=True)
+class PageMetaFingerprint:
+    """写操作前/后单页的轻量指纹，仅供源不回退/骤缩比对（P2.1，决策P2.1-7/11）。
+
+    **不参与 `raw/` 完整性**（那是 `snapshot_raw` 的事）。比 heal 的 `_snapshot_wiki` 更轻：只取
+    `sources` 集 + `body` 长度，不存正文/frontmatter 全文。
+    """
+
+    sources: frozenset[str] | None  # 可信解析的 slug 集；frontmatter 坏/缺、或 sources 缺/类型非法 → None
+    body_len: int  # split_frontmatter 后正文字符数（总可算，body.shrank 用）
+
+
+def _trusted_sources(meta: dict | None) -> frozenset[str] | None:
+    """从容错解析的 `meta` 取**可信** `sources` 集，否则 None（决策P2.1-11，去重 check）。
+
+    `meta=None`（坏/缺 frontmatter 块）、无 `sources` 键、或 `sources` 非字符串列表 → **None**。
+    这三类「不可信」恰好都已是 `check` 的阻断违规（unparsable / missing_key / bad_type），记 None
+    让 `_check_source_regression` 跳过该页 dropped 检测，frontmatter 错误单独留给 check、不重复记账。
+    合法字符串列表（**含空 `[]`**）→ `frozenset(slug)`（空 `[]` 是可信的 `frozenset()`，非 None）。
+    """
+    if not isinstance(meta, dict):
+        return None
+    sources = meta.get("sources")
+    if not isinstance(sources, list) or not all(isinstance(s, str) for s in sources):
+        return None
+    return frozenset(sources)
+
+
+def snapshot_page_meta(root: Path) -> dict[str, PageMetaFingerprint]:
+    """写操作前/后的每页指纹（`{wiki/... posix 路径: PageMetaFingerprint}`）。**绝不抛**（决策P3-8）。
+
+    - 只扫 content 页：复用 `pages.iter_pages`（排除 index/log/overview，与 check/graph 同口径）。
+    - 容错解析：复用 `pages.load_page`。`body_len` 总可算（坏块时 split_frontmatter 把全文当 body）；
+      `sources` 仅在可信时记 frozenset，否则 None（见 `_trusted_sources`）。
+    - `wiki/` 缺失（agent 删/改名）→ 返回空 dict；该硬错误由 `raw/`/check 兜底，本快照不另判。
+    """
+    wiki = Path(root) / "wiki"
+    out: dict[str, PageMetaFingerprint] = {}
+    if not wiki.is_dir():
+        return out
+    for path in iter_pages(wiki):
+        meta, body = load_page(path)
+        rel = path.relative_to(Path(root)).as_posix()
+        out[rel] = PageMetaFingerprint(sources=_trusted_sources(meta), body_len=len(body))
+    return out
+
+
+def _check_source_regression(
+    before: dict[str, PageMetaFingerprint], after: dict[str, PageMetaFingerprint]
+) -> tuple[list[Violation], list[Violation]]:
+    """对 before∩after（写前写后**都在**的页）逐页比对，返回 `(blocking, warnings)`（P2.1）。
+
+    - blocking（`sources.dropped`，决策P2.1-2/11）：仅当 `before.sources` 与 `after.sources` **都非
+      None**（两侧均可信解析）才比；`before.sources - after.sources` 非空 → 每丢一 slug 一条。任一侧
+      None → 跳过（after 坏 frontmatter 已被 check 阻断；before 已坏则无可信基线）。空 `[]` 是可信的
+      `frozenset()`：`[a,b]`→`[]` 仍判 a、b 两条 dropped（真回退，区别于 None-跳过）。
+    - warning（`body.shrank`，决策P2.1-3）：`before.body_len >= SHRINK_FLOOR and after.body_len <
+      SHRINK_RATIO * before.body_len` → 一条（与 sources 可信度**无关**，body_len 总可算）。
+
+    输出按 (page, slug) 稳定排序，确定可重建。**只比 before∩after**：新页/删页都不在此判（决策P2.1-8）。
+    """
+    blocking: list[Violation] = []
+    warnings: list[Violation] = []
+    for page in sorted(before.keys() & after.keys()):
+        b, a = before[page], after[page]
+        if b.sources is not None and a.sources is not None:
+            for slug in sorted(b.sources - a.sources):
+                blocking.append(
+                    Violation(
+                        page,
+                        "sources.dropped",
+                        f"既有页丢失原有来源 {slug!r}（ingest 只增不减来源，须并回）",
+                    )
+                )
+        if b.body_len >= SHRINK_FLOOR and a.body_len < SHRINK_RATIO * b.body_len:
+            warnings.append(
+                Violation(
+                    page,
+                    "body.shrank",
+                    f"正文从 {b.body_len} 字骤缩到 {a.body_len} 字（疑似覆盖重写，自查是否误删旧内容）",
+                )
+            )
+    return blocking, warnings
+
+
 @dataclass
 class GateResult:
     """门禁结论。`kind`: None=通过 / "raw_mutated" / "check_failed" / "agent_error"。
 
-    `warnings` 携带非阻断的断链（`wikilink.broken`），通过/失败都可能非空，仅供报告。
+    `warnings` 携带非阻断告警（断链 `wikilink.broken` + P2.1 正文骤缩 `body.shrank`），
+    通过/失败都可能非空，仅供报告、不影响退出码。
     """
 
     ok: bool
@@ -242,6 +338,7 @@ def enforce(
     root: Path,
     snapshot_before: dict[str, str],
     *,
+    page_before: dict[str, PageMetaFingerprint] | None = None,
     baseline: frozenset[tuple[str, str, str]] = frozenset(),
 ) -> GateResult:
     """完整门禁：先判 `raw/` 完整性（更严重），再跑 `guanlan check`。
@@ -249,12 +346,21 @@ def enforce(
     断链（`_WARNING_KINDS`）只作警告、不阻断（决策8）；其余 kind 为阻断性。
     `baseline` 给出写操作前**已存在**的阻断性违规（决策7 的增量门禁）——只追究不在基线里的
     **新引入**违规，历史欠债不连累本次写入。默认空基线 = 全量阻断（独立 `enforce` 调用语义不变）。
+
+    `page_before`（P2.1，决策P2.1-10）：写前的每页指纹快照。**缺省 None → 逐字节保持原行为**（独立
+    `enforce`、heal 不传则源不回退/骤缩检测完全不参与）；非 None 时额外比对既有页**源不回退**
+    （`sources.dropped`，阻断、进增量门禁 → 自愈）与**正文骤缩**（`body.shrank`，警告非阻断）。
+    `sources.dropped` 非 `run_check` 产物，必不在 `baseline` 里，故增量过滤永不误压制它（决策P2.1-2）。
     """
     raw_changes = diff_raw(snapshot_before, snapshot_raw(root))
     if raw_changes:
         return GateResult.raw_mutated(raw_changes)
     check = run_check(Path(root) / "wiki")
     blocking, warnings = partition_violations(check.violations)
+    if page_before is not None:  # P2.1：源不回退（阻断）+ 正文骤缩（警告）
+        dropped, shrank = _check_source_regression(page_before, snapshot_page_meta(root))
+        blocking = blocking + dropped
+        warnings = warnings + shrank
     new_blocking = [v for v in blocking if _vkey(v) not in baseline]
     if new_blocking:
         return GateResult.check_failed(new_blocking, warnings=warnings)
@@ -266,6 +372,7 @@ def enforce_write_result(
     snapshot_before: dict[str, str],
     run_result: AgentRunResult,
     *,
+    page_before: dict[str, PageMetaFingerprint] | None = None,
     baseline: frozenset[tuple[str, str, str]] = frozenset(),
 ) -> GateResult:
     """写入口（ingest、query --backfill）收尾的统一裁决。
@@ -273,13 +380,16 @@ def enforce_write_result(
     - `run_result.ok` 为 False：agent 失败，**仍兜底 `raw/` 完整性**——变了 → raw_mutated，
       否则 → agent_error（不跑 check：半成品 wiki/ 无意义）。
     - `run_result.ok` 为 True：走完整 `enforce`（先 raw 后 check，断链作警告、阻断性增量判定）。
+
+    `page_before`（P2.1，缺省 None）仅透传给**成功路径**的 `enforce`——agent 失败路径不跑 check、
+    不算源回退（半成品 wiki 无意义，`gate.py` 失败语义不动，决策P2.1-10）。
     """
     if not run_result.ok:
         raw_changes = diff_raw(snapshot_before, snapshot_raw(root))
         if raw_changes:
             return GateResult.raw_mutated(raw_changes)
         return GateResult.agent_error(run_result.error_type)
-    return enforce(root, snapshot_before, baseline=baseline)
+    return enforce(root, snapshot_before, page_before=page_before, baseline=baseline)
 
 
 @dataclass(frozen=True)
@@ -310,6 +420,7 @@ def run_guarded_write_result(
     model: str | None = None,
     runner: AgentRunner | None = None,
     max_repair: int = MAX_REPAIR_ATTEMPTS,
+    page_guard: bool = False,
 ) -> GuardedWriteResult:
     """写入口的统一编排核心，**不向 stdout 打印门禁报告**（决策P3.2-13）。
 
@@ -323,8 +434,14 @@ def run_guarded_write_result(
     **有界自愈（决策7）**：首轮门禁若 `check_failed`（即出现**新的阻断性**违规），把这些违规
     回喂同一 agent 就地修，最多 `max_repair` 轮。`raw_mutated`/`agent_error` 不自愈（完整性/运行时
     问题该硬失败）。成功后展示**首轮**的实质摘要（自愈轮只动元数据）；失败/报错展示最后一轮的结果。
+
+    **`page_guard`（P2.1，默认 False，决策P2.1-10）**：核心**默认关** → heal（直调本核心）逐字节
+    不变；薄壳 `run_guarded_write` 默认开 → ingest/backfill 自动守护。为真时写前多取一份**每页指纹**
+    `page_before`，**写前取一次、贯穿所有自愈轮**（自愈本身不该再丢源），透传给 `enforce` 比对
+    既有页源不回退（阻断→自愈）与正文骤缩（警告非阻断）。
     """
     before = snapshot_raw(root)
+    page_before = snapshot_page_meta(root) if page_guard else None  # P2.1：仅守护时取写前每页指纹
     baseline = check_baseline(root)  # 写前已存在的阻断性违规：增量门禁的基线
     first_result = run_agent_task(
         prompt,
@@ -334,7 +451,9 @@ def run_guarded_write_result(
         runner=runner,
     )
     last_result = first_result
-    gate = enforce_write_result(root, before, first_result, baseline=baseline)
+    gate = enforce_write_result(
+        root, before, first_result, page_before=page_before, baseline=baseline
+    )
 
     attempt = 0
     while gate.kind == "check_failed" and attempt < max_repair:
@@ -350,7 +469,9 @@ def run_guarded_write_result(
             model=model,
             runner=runner,
         )
-        gate = enforce_write_result(root, before, last_result, baseline=baseline)
+        gate = enforce_write_result(
+            root, before, last_result, page_before=page_before, baseline=baseline
+        )
 
     # 成功时优先展示首轮摘要（实质内容）；失败/报错时展示最后一轮（错误来源）。
     return GuardedWriteResult(gate=gate, run_result=first_result if gate.ok else last_result)
@@ -363,13 +484,17 @@ def run_guarded_write(
     model: str | None = None,
     runner: AgentRunner | None = None,
     max_repair: int = MAX_REPAIR_ATTEMPTS,
+    page_guard: bool = True,
 ) -> int:
     """写入口（ingest、query --backfill）：调编排核心 → `report_outcome` 打印 → 退出码。
 
     薄壳，行为/输出与重构前**逐字节一致**（ingest 路径不回归）；结构化消费走 `run_guarded_write_result`。
+
+    `page_guard`（P2.1，**默认 True**，决策P2.1-10）：薄壳默认开 → 其唯一两个调用方
+    `ingest`/`query --backfill` 自动获得「既有页源不回退 + 正文骤缩」守护，**call site 不改**。
     """
     result = run_guarded_write_result(
-        root, prompt, model=model, runner=runner, max_repair=max_repair
+        root, prompt, model=model, runner=runner, max_repair=max_repair, page_guard=page_guard
     )
     report_outcome(result.gate, result.run_result)
     return result.exit_code
@@ -395,7 +520,7 @@ def report_outcome(
         if run_result.final_text:
             print(run_result.final_text, file=out)
         print("✓ 门禁通过（frontmatter + sources + raw/ 快照）。", file=out)
-        _report_dangling(gate.warnings, file=out)
+        _report_warnings(gate.warnings, file=out)
         return
 
     err = sys.stderr
@@ -411,16 +536,24 @@ def report_outcome(
         for v in gate.violations:
             print(f"    [{v.kind}] {v.page}: {v.detail}", file=err)
         print("  wiki/ 改动已留在磁盘，供人工修正后重跑。", file=err)
-        _report_dangling(gate.warnings, file=err)
+        _report_warnings(gate.warnings, file=err)
 
 
-def _report_dangling(warnings: list[Violation], *, file: IO[str]) -> None:
-    """把非阻断的断链汇成一行提示（建库期正常，随新页加入自然消除，不阻断写入）。"""
-    if not warnings:
-        return
-    pages = len({w.page for w in warnings})
-    print(
-        f"ℹ 另有 {len(warnings)} 处断链（{pages} 页，警告非阻断）：建库期正常，"
-        "随后续资料加入会自我消除；如需排查可跑 `guanlan check`。",
-        file=file,
-    )
+def _report_warnings(warnings: list[Violation], *, file: IO[str]) -> None:
+    """把非阻断告警**按 kind 分别**汇成一行（断链 / 正文骤缩并列，决策P2.1-3）。"""
+    dangling = [w for w in warnings if w.kind == "wikilink.broken"]
+    shrank = [w for w in warnings if w.kind == "body.shrank"]
+    if dangling:
+        pages = len({w.page for w in dangling})
+        print(
+            f"ℹ 另有 {len(dangling)} 处断链（{pages} 页，警告非阻断）：建库期正常，"
+            "随后续资料加入会自我消除；如需排查可跑 `guanlan check`。",
+            file=file,
+        )
+    if shrank:
+        pages = len({w.page for w in shrank})
+        print(
+            f"ℹ 另有 {pages} 页正文骤缩（警告非阻断）：疑似覆盖重写而非增补合并，"
+            "请自查是否误删旧论断（确属有意精简则忽略）。",
+            file=file,
+        )
