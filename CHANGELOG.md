@@ -5,6 +5,28 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **摄入写入纪律（P2.1）** —— 写门禁新增**既有页只增不毁**的确定性兜底，补「既有页被 ingest 静默
+  腐蚀」这个洞（源回退损毁 provenance / 正文整段覆盖丢旧论断）。复用写门禁已有的 `raw/` 写前快照点，
+  额外取一份**每页轻量指纹**（`sources` 集 + 正文长度）写后比对，**仅覆盖 ingest 与 `query --backfill`**
+  （`run_guarded_write` 薄壳 `page_guard` 默认 True；核心默认 False，故 **heal 逐字节不变**）：
+  - **`sources.dropped`（阻断 + 自愈）** —— 写前写后都在的既有页若丢失原有 `sources` slug（覆盖而非
+    并集）→ 进 `check_failed` 既有有界自愈环、回喂 Agent 并回（2 轮未修 → `EXIT_CHECK_FAILED`）；与
+    `sources.unresolved` 同级互补。坏/缺 frontmatter 的页记 None-跳过，frontmatter 错误单独留给 `check`
+    不重复记账；空 `[]` 是可信回退（仍抓「洗光来源」）。
+  - **`body.shrank`（警告非阻断）** —— 既有页正文从 ≥200 字腰斩到 < 0.5× → 与断链同通道报警告，
+    不阻断、不自愈、不影响退出码（合法精简由人/Agent 自判，宁漏不误杀）。
+  - **工具只验证不变量、合并仍归 Agent**：`gate.py` 只判「源没了/正文腰斩」纯结构事实，**不**把
+    union/substitution 搬进工具（守第一铁律）；正向合并纪律写入 `SKILL.md`（ingest step 3「合并不
+    覆盖」+ 收尾速查两条）与 `conventions.md`（`sources` 取并集）。
+  - **零新增**：无新命令/参数/退出码/依赖/SSE；机器 JSON 契约不变（heal `--json`、独立
+    `check`/`lint`/`health`、`raw/` 快照、退出码全逐字节不变；新 kind 仅现于人读门禁报告）。
+    守于 `tests/test_gate.py`（源回退阻断+自愈 / 多 slug / 空 `[]` 真回退 / 新建·删页不误判 / 基线不误压 /
+    骤缩警告+边界+正交 / 坏 frontmatter None-跳过去重 / `page_guard` 范围签名+行为双断言 / 失败路径 /
+    raw 优先级）+ `tests/test_ingest.py`（端到端 re-ingest 守 sources 并集）。
+    设计见 [`docs/P2.1-摄入写入纪律.md`](docs/P2.1-摄入写入纪律.md)。
+
 ## [0.1.9] - 2026-06-13
 
 Web 宿主界面双语收尾（P4.7）：把入库/补全/回填/解析以及 check/health/lint 报告等弹层窗口标题接入
