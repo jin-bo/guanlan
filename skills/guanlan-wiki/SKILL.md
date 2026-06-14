@@ -58,9 +58,7 @@ description: >
    - 读 `wiki/index.md` 与 `wiki/overview.md`。
    - **先查根级 `SCHEMA.md`**：本库若定义了自定义页面类型或目录（如 `论文/` `模型/` `数据集/`），按它路由；未给更具体去处时才回落默认 `entities/` `concepts/`。SCHEMA.md 是路由权威。
 2. 在 `wiki/sources/<slug>.md` 写**摘要页**（slug = 同源文件名 kebab-case；`type: source`）。
-   - **保留承载知识的嵌图**：源 `.md`（尤其 `guanlan convert` 落的 PDF/DOCX）正文里的 `![alt](images/<slug>/…)` 引用，若该图**承载知识**（流程图/架构图/示意图/关键表格或图表截图），在摘要页对应要点处保留这条引用；**装饰性图**（页眉 logo、分隔线、扫描噪点、纯版式）丢弃即可。这是「编译非全量搬运」的选择性保留，不是把图照单全收。
-   - **路径口径**：wiki 内容页都在 `wiki/<dir>/` 二级，引用 `raw/images/` 须用 `../../raw/images/<slug>/<文件名>`（如摘要页写 `![Transformer架构图](../../raw/images/技术报告/技术报告-3.png)`）；**不要照抄**源里相对 `raw/` 的 `images/…`（那会指向不存在的 `wiki/sources/images/…`）。**只引用、不拷贝**：图是 `raw/` 源的一部分，wiki 侧只链过去，**绝不把图片文件拷进 `wiki/`**（拷贝即派生物、且触发 `raw/` 只读快照外的越权写）。实体/概念页同理（同为 `wiki/<dir>/` 二级，同一 `../../raw/images/…` 口径）。
-   - **`alt` 文本**：为保留的图写一句承载信息的 `alt`，便于检索与无图降级阅读。**若本次 ingest 模型支持图像（vision）**，打开 `raw/images/<slug>/<文件名>` 看图后写 `alt`（如 `![编码器-解码器数据流：输入嵌入→多头注意力→输出](…)`）；**不支持 vision 时**据图周围正文/图注推断 `alt`。**两种情况都只写进 wiki 页引用、绝不回写 `raw/`**（`raw/` 是逐字源，看图摘要是编译产物）。
+   - **选择性保留承载知识的嵌图**（流程图/架构图/数据流图、关键表格或图表截图等），丢弃装饰图（logo/分隔线/版式件）——编译而非全量搬运。**只引不拷**、`../../raw/images/<slug>/<文件名>` 路径口径、`alt` 写法（vision 看图 / 无 vision 据上下文推断）详见 conventions §图片引用。实体/概念页同理。
 3. **抽取实体/概念，建或更新页**（正文术语一律转 `[[wikilink]]`）。建页前按决定树走：
 
    ```
@@ -72,22 +70,24 @@ description: >
    ```
    - 别名须全局唯一、不与任何页名同名（`check` 阻断撞名/重复）。
    - 偶现术语暂留断链是对的：随后续资料达到「被 ≥2 页引用」会由 `lint.missing_entity` 提示补页。**宁可暂留断链，不可造空页。**
+   - **实质修改既有页（含追加 aliases）务必把 `last_updated` 改成当天**——否则页面新鲜度失真，后续过期论断复检无从判断。
 
-> **frontmatter 必须是合法 YAML**：字符串值（尤其 `title`）**一律用单引号**包裹，值内单引号翻倍为 `''`；**绝不在双引号里再套双引号**（标题含 `"…"` 时 `title: "…"` 会解析失败——见 conventions §frontmatter）。这是写门禁**会阻断**的硬错误，务必避免。
-> **断链不必强求**：尽量为重要术语建页，但正文里指向尚未建页的 `[[X]]` 是建库期的正常前向引用，会随后续资料加入自然消除——写门禁把断链当**警告**、不阻断，不要为了消链接而提前造空桩页或删链接。
+> **两条建库期高频错误，记牢即可**（机制详见 conventions）：① frontmatter 字符串值（尤其 `title`）**一律用单引号**、**绝不双引号套双引号**——这是写门禁**会阻断**的硬错误（§frontmatter）；② 正文指向未建页的 `[[X]]` 是正常前向引用，写门禁只当**警告**不阻断——**别为消链接而提前造空桩页或删链接**（§wikilink）。
 
 4. 更新 `wiki/index.md`（对应分区追加/修订一行）。`wiki/overview.md`（活体综述）**仅当本次引入新角度、新论断或新矛盾时才改**；纯增量细节由 entity/concept 页吸收，不必动 overview。
 5. 若新资料与既有页**冲突**，就地在相关页维护 `## ⚠️ 矛盾与存疑` 节（格式见 conventions）。
 6. 向 `wiki/log.md` 追加一条：`## [YYYY-MM-DD] ingest | <title>`。
-7. **收尾**：
-   - 不自行运行 shell 命令或 `guanlan check`；读写文件只用内置文件工具；只返回简短完成说明。
-   - wrapper 会强制门禁：比对 `raw/` 前后快照（任何改动即失败）+ 跑 `guanlan check`，但只追究**本次新引入**的阻断性违规（frontmatter / `sources`；断链只记警告）。
-   - 有新阻断违规时 wrapper 把清单回喂你自动修复（最多两轮）——把 frontmatter 一次写对最省事。
+7. **收尾**：见〈写工作流收尾（共用）〉——不自行跑 shell/check，wrapper 强制门禁 + 有界自愈。
 
 ### query（P2）— `guanlan query "…"` / `--backfill`
 
-1. **先用可用的 search 入口拿 top-N 候选页路径**——宿主 `guanlan_search` 工具（只读 Web 会话用它召回，无 shell 也能调）或 `guanlan search "<关键词>"` CLI（有 shell 时），二者同一确定性整页 BM25 召回（CJK 走 2-gram、**别名已纳入匹配面**——同义不同名时命中声明该别名的页）；读这些候选页 + `wiki/index.md` 综合。search 入口都不可用或空手而回（生僻/跨义）时**退回**原路径：扫 `index.md` / 相关目录 / 现有页 `aliases`，或请用户补关键词（graceful fallback，原行为保留）。
-2. 读相关页，**综合出带 `[[页]]` 引用的答案**；无可靠来源时明说，不编造。引用页面**一律裸 `[[stem]]`**——从 `index.md` 目录行取材时把 `[标题](dir/stem.md)` 改写成 `[[stem]]`，勿照抄目录行的 markdown 链接（否则渲染成不走站内导航的普通相对链接；详见 conventions §wikilink）。
+1. **先用可用的 search 入口拿 top-N 候选页路径**——都是同一确定性整页 BM25 召回（CJK 走 2-gram、**别名已纳入匹配面**，同义不同名时命中声明该别名的页），按手头能力择一：
+   - 只读 Web 会话 → 宿主 `guanlan_search` 工具（无 shell 也能调）；
+   - 有 shell → `guanlan search "<关键词>"` CLI；
+   - 都不可用或空手而回（生僻/跨义）→ **退回**扫 `index.md` / 相关目录 / 现有页 `aliases`，或请用户补关键词（graceful fallback，原行为保留）。
+
+   读召回到的候选页 + `wiki/index.md` 综合。
+2. 读相关页，**综合出带 `[[页]]` 引用的答案**；无可靠来源时明说，不编造。引用页面**一律裸 `[[stem]]`**（从 `index.md` 目录行取材时把 `[标题](dir/stem.md)` 改写成 `[[stem]]`、勿照抄——否则不走站内导航，详见 conventions §wikilink）。
 3. **默认只读**。仅当显式 `--backfill` 时把好答案回填 `wiki/syntheses/<slug>.md`（`type: synthesis`），并走与 ingest 同一套门禁。
 
 ### heal（P3.2）— `guanlan heal`
@@ -113,12 +113,30 @@ description: >
 5. 向 `wiki/log.md` 追加一条 `## [YYYY-MM-DD] heal | <目标>`。
 6. **只准从引用上下文合成，不臆造引用页里没有的事实**；`sources` 列引用页有出处可顺延、否则留空（合法）。上下文不足、目标更像主题页、或无法判定时，**跳过该目标**并用一句话说明（无需特定格式——wrapper 重算图判定成败，不解析你的状态文本）。
 
-> **永不删除或覆盖重写已有页正文、永不修改 `raw/`**：heal 只**新建** `entities/`/`concepts/` 页、**向既有页纯追加别名收编本批目标**、编辑 `index.md`、追加 `log.md`。其余越界写（建到 `entities/`∪`concepts/` 之外 / 改正文 / 改非 aliases 字段 / 删页 / 在收编里夹带无关别名 / 把页换成符号链接）会被 wrapper 的写集审计标为 `unexpected_write`。其余收尾同 ingest（不运行 shell / `guanlan check`，wrapper 强制门禁 + 有界自愈）。
+> **永不删除或覆盖重写已有页正文、永不修改 `raw/`**：heal 只**新建** `entities/`/`concepts/` 页、**向既有页纯追加别名收编本批目标**、编辑 `index.md`、追加 `log.md`。其余越界写（建到 `entities/`∪`concepts/` 之外 / 改正文 / 改非 aliases 字段 / 删页 / 在收编里夹带无关别名 / 把页换成符号链接）会被 wrapper 的写集审计标为 `unexpected_write`。其余收尾见〈写工作流收尾（共用）〉。
+
+### 写工作流收尾（共用）
+
+ingest / heal / `query --backfill` 等会写 `wiki/` 的工作流，收尾一致，记三条即可：
+
+- **不自行运行 shell 或 `guanlan check`**；读写文件只用内置文件工具；只返回简短完成说明。
+- wrapper 会**强制门禁**：比对 `raw/` 前后快照（任何改动即失败）+ 跑 `guanlan check`，但只追究**本次新引入**的阻断性违规（frontmatter / `sources`；断链只记警告）。
+- 有新阻断违规时 wrapper 把清单回喂你**自动修复（最多两轮）**——把 frontmatter 一次写对最省事。
+
+**会让本轮失败的硬错误（速查，每条都有原因）**：
+
+- **frontmatter 非法 YAML**（双引号套双引号 / 字符串没用单引号）→ `check` 阻断：YAML 解析失败，页面无法入库。
+- **`sources` 缺失或写错 slug** → `check` 阻断：知识失去可追溯来源，违反「query 必引来源」。
+- **`aliases` 撞页名 / 库内重复** → `check` 阻断：`[[wikilink]]` 解析出现歧义（确定性危害，须即时修，不同于断链的警告）。
+- **改动 `raw/` 任何字节**（含用 `mv`/`rm`/脚本绕过文件工具）→ `raw/` 前后快照失败：事实来源必须逐字不变。
+- **heal 越界写**（建到 `entities/`∪`concepts/` 之外 / 改已有页正文 / 改非 `aliases` 字段 / 删页 / 用 symlink 换页）→ 写集审计标 `unexpected_write`：heal 只准新建+纯追加别名。
+- 反面提醒：**断链只是警告、不阻断**——别为消链接而造空桩页或删 `[[X]]`，那才是真错误（前向引用会随后续资料自然消除）。
 
 ### 确定性脚本（零 LLM）
 
 - `guanlan check`（P2）— 基础校验：frontmatter 合规 + wikilink 断链 + `sources` 解析。ingest / `--backfill` 收尾**强制**运行；亦可独立 shell 调用。实现在 `guanlan` 包内（`guanlan/check.py`），无 `scripts/`。
 - `guanlan health`（P3）— 结构检查：空页/桩页、index 与磁盘同步。
+- `guanlan reindex`（P3.4）— 与 `health.index_missing_page` 配对的零-LLM 修复器：把磁盘上漏登记进 `index.md` 的内容页自动补登记（`--dry-run` 预览 / `--prune` 清理悬空行）。只写 `index.md`，不碰 `raw/`、不调 LLM。
 - `guanlan lint`（P3）— 图感知结构 lint：孤儿页、断链、缺失实体页。
 - `guanlan graph`（P3）— 解析 `[[wikilink]]` → 边，输出 `graph.json` + 自包含静态 `graph.html`。
 
