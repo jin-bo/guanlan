@@ -1,9 +1,6 @@
 # SCHEMA — 本库约定
 
-> `guanlan init` 生成的模板。这是 Karpathy 三层中的 **Schema 层**，与 `raw/`、`wiki/` 平级。
-> 描述**本库**的领域/主题、启用的页面类型、自定义规则与演进论点；人与 Agent 共同演进，随 markdown 文件走。
-> 通用默认约定（frontmatter/命名/index·log 格式/模板）在 `guanlan-wiki` skill 的 `references/conventions.md`，本文件可**覆盖**之。
-> 本文件与 `index.md`/`log.md`/`overview.md` 一样**排除出 index/graph/lint 扫描**（config 非 content）。
+> 本库的领域约定，**覆盖** `guanlan-wiki` skill 的通用默认（`references/conventions.md`）；人与 Agent 共同演进、随 markdown 走。按下列各节填写，删掉占位与示例。
 
 ## 领域 / 主题
 
