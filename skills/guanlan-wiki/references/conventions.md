@@ -10,7 +10,7 @@
 | `source` | 单篇原始资料的摘要页 | `wiki/sources/` | `kebab-case`（同源文件名） |
 | `entity` | 人物/组织/模型/系统等实体 | `wiki/entities/` | `TitleCase.md` |
 | `concept` | 方法/理论/术语等概念 | `wiki/concepts/` | `TitleCase.md` |
-| `synthesis` | query 回填的跨资料综述 | `wiki/syntheses/` | `kebab-case` |
+| `synthesis` | query 回填的跨资料综述（**时点快照**，ingest 不级联改写其知识内容，详见〈页面模板〉synthesis 节） | `wiki/syntheses/` | `kebab-case` |
 
 子目录在首次写入对应类型页面时**自动创建**；空库 init 只生成 `index.md` / `log.md` / `overview.md`。
 
@@ -201,6 +201,11 @@ last_updated: YYYY-MM-DD
 
 <带 [[页]] 引用的综合答案>
 ```
+
+> **synthesis 是时点快照，ingest 不级联改写其知识内容。** 它锚的是**某次提问在当时的答案**（基于当时的页面综合而成），不是一个有持续身份、供新资料累积的主题。
+> - **职责分工**：活体综述是 `overview.md` 的活儿（"仅当引入新角度/新论断/新矛盾时才改"）；`syntheses/` 是它的**存档对偶**。两者若都做成活体就会抢同一职责、都声称"当前认知"，故 syntheses **冻结**。
+> - **知识变了怎么办**：耐久知识活在上游 `entities/`·`concepts/`·`sources/` 页里，那些页 ingest 照常更新。要当前答案就**重新 `query` 再 `--backfill` 一篇新页（或显式覆盖）**——即"重建派生物"，而非让 ingest 在背后悄悄改写旧答案（那等于替没人重问的问题重新作答、并伪造历史记录）。
+> - **范围只限知识内容**：**机械性维护照常适用**——`[[链接]]` 指向的页改名/删除时 `lint`/`heal`/`reindex` 照样修断链、`index.md` 照常登记。冻结的是**知识内容**，不是字节永冻（不要一个挂满悬空链接的快照）。
 
 ## CJK 检索
 
