@@ -14,6 +14,7 @@
 | **llm-wiki-agent**（个人版蓝本） | 确定性 Python 脚本 | 报告 + **高频断链 LLM 自动建页** | ✅ `heal.py` 物化 | **积极补页**：断链 = 该建页 |
 | **nashsu/llm_wiki**（桌面应用） | 前端 TS `lint.ts` + Rust | 图里**直接忽略**；Lint UI 列警告 + 人工选项 | ⚠️ 仅 orphan 自动加 index 链接 | **图洁净**：不污染图，交人决策 |
 | **gbrain**（企业版蓝本） | 确定性解析器 + **DB 外键约束** | **插入时即拒绝**悬空边；记 `unresolved` 审计 | ❌ 只报不修 | **严格保守**：宁缺勿悬空 |
+| **OpenKB**（PageIndex 出品） | 确定性 `lint.py` | `fix_broken_links` 模糊归一→改写规范形；无匹配则**去括号留文本** | ✅ NFKC+小写+`_`→`-` rewrite/strip | **事后修复**：归一改写正文 |
 | **观澜（现状）** | 确定性脚本 check/lint/graph | 报告但不阻断；≥2 页引用 → 建议建页 | ❌ 交 Agent 在 ingest 时自然补 | **建议非门禁** |
 
 共性：**检测全部是确定性零 LLM**（正则提 `[[…]]` + 名称→页面解析）；分歧只在「发现后」。
@@ -46,6 +47,17 @@
 - **unresolved 审计**（`src/core/link-extraction.ts:1052-1056`）：frontmatter 引用解析失败的名字记入 `unresolved[]` 上报，不建边。
 - **dream cycle 不自动修**（`src/core/cycle.ts`）：backlinks 阶段是 `action:'check'` 非 `'fix'`；orphans 阶段只计数报警（>50% warn / >80% fail）；dangling alias 只给手工 GC SQL。**全靠人工/显式命令收尾**。
 
+## 4.5 OpenKB —— 模糊归一改写（事后修复），观澜在解析期已非破坏地做了
+
+**反向评审新增的第四个参考项目（PageIndex 出品）。** 立场是"事后归一修复"，详见 [`openkb-反向评审结论.md`](openkb-反向评审结论.md) §4。
+
+- **检测**（`openkb/lint.py:find_broken_links`）：逐页提 `[[…]]`，名称→页面解析为空即断链。纯确定性，同其余三家。
+- **模糊修复**（`openkb/lint.py:fix_broken_links` + `_normalize_target`）：对断链 target 做 **NFKC + 小写 + `_`→`-` + 折叠连字符 + 剥首尾连字符**归一，命中既有页 → **改写成规范形**；无匹配 → **去括号留文本**（别名优先，否则 stem 把 `_` 换空格）。`restrict_to` 限定只修本次触达页，不扫别处既存悬链。
+- **对观澜的两点结论**（只读 `pages.py`/`gate.py` 可见）：
+  1. **改写半冗余**：OpenKB 在*修复期*做的归一，观澜 `link_stem`（`pages.py:180`，小写+剥 `|#.md`）+ P3.1 别名（`link_target_stems`）已在**解析期非破坏地**做了——`[[Attention]]`/`[[页.md]]` 全程不改字即命中。残余真缺口仅 `_`↔`-`、NFKC 变体（`link_stem` 未折叠）。
+  2. **strip 半违反教义**：无匹配去括号留文本 = 删前向引用占位，与决策8「断链是会自我消除的生长信号、警告非阻断」对撞。**绝不借。**
+- **只借形状的落法**：把 `_normalize_target` 的**归一**借进观澜**解析归口**（扩 `link_stem` 折叠 `_`→`-`+NFKC），让变体像别名一样解析期命中——零正文改写、守 markdown 唯一真相、无"谁写内容页"张力。⚠️ 须加 stem 撞名守护（`foo_bar` vs `foo-bar` 两真实独立页）。
+
 ## 5. 观澜现状（对照，非本笔记改动）
 
 观澜立场最接近「gbrain 的报告不阻断」叠加「llm-wiki-agent 的 ≥N 页引用 → 建议建页」，但**刻意不自动修复**：
@@ -63,7 +75,8 @@
 1. **`heal` 类工具（参考 llm-wiki-agent `heal.py`）** —— 把 `lint.missing_entity`（≥2 页引用）从「建议」升级为「LLM 自动物化实体页」。这正是观澜有意推迟的写/读分离边界：自动建页是**写**操作，需走 P2 子进程 + 单写者门禁，不能塞进读路径。落地前另开实现方案文档。
 2. **别名解析消解假断链** —— 与 `cjk-retrieval-enhancements.md` 第 1 条耦合：entity/concept 页加 `aliases` frontmatter 后，`[[别名]]` 不再误报断链。属断链「降噪」而非「修复」。
 3. **向量检索补语义召回** —— nashsu/gbrain 均用向量 + 混合检索；断链中相当一部分是「同义不同名」，向量检索可在解析层先消解一批，再谈物化。
-4. **不采纳的方向**：gbrain 的 DB 外键「宁缺勿悬空」**不适用**观澜——纯 markdown 无存储约束层，且 Karpathy 模式明确要让前向引用断链作为生长信号存在，强一致会扼杀生长。
+4. **解析期归一消变体（反向评审新增，参考 OpenKB `_normalize_target`，见 §4.5）** —— 扩 `link_stem` 折叠 `_`→`-`+NFKC，让 `[[multi_head_attention]]`→`multi-head-attention` 解析期非破坏命中（同别名机制）。属断链「降噪」、**非**改写正文；须加 stem 撞名守护。落法见 [`openkb-反向评审结论.md`](openkb-反向评审结论.md) §4。
+5. **不采纳的方向**：gbrain 的 DB 外键「宁缺勿悬空」**不适用**观澜——纯 markdown 无存储约束层，且 Karpathy 模式明确要让前向引用断链作为生长信号存在，强一致会扼杀生长。OpenKB 的 strip-无匹配-链接同理不采纳（删前向引用占位，见 §4.5）。
 
 ## 7. 代码位置速查
 
@@ -80,6 +93,8 @@
 | gbrain | JOIN 式拒绝悬空边 | `src/core/pglite-engine.ts:2403-2470` |
 | gbrain | unresolved 审计 | `src/core/link-extraction.ts:1052-1056` |
 | gbrain | dream cycle 只检不修 | `src/core/cycle.ts` |
+| OpenKB | 断链检测 | `openkb/lint.py:find_broken_links` |
+| OpenKB | 模糊归一改写/strip | `openkb/lint.py:fix_broken_links` / `_normalize_target` |
 | 观澜 | 断链检测（check） | `guanlan/check.py:90-100` |
 | 观澜 | 断链 + 缺失实体（lint） | `guanlan/lint.py:54-74` |
 | 观澜 | 建图分类断链 | `guanlan/graph.py:72-134` |
