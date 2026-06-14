@@ -154,3 +154,35 @@ def test_ingest_passes_workspace_write(kb: Path):
     run_ingest(target, root=kb, runner=runner)
     assert runner.calls[0]["permission_mode"] == "workspace-write"
     assert "raw/doc.md" in runner.calls[0]["prompt"]
+
+
+def test_ingest_reingest_guards_sources_union(kb: Path):
+    """P2.1 端到端：re-ingest 第二个源时，Agent 若把既有页 sources 覆盖成只含本次源，
+
+    门禁 `sources.dropped` 阻断并自愈、把既有页 sources 守为并集（只增不减，决策P2.1-2）。
+    """
+    from guanlan.pages import load_page
+    from guanlan.runtime import AgentRunResult
+
+    # 库里已有源 a 与引用它的实体 X（sources:[a]）
+    write_page(kb, "wiki/sources/a.md", type="source")
+    write_page(kb, "wiki/entities/X.md", type="entity", sources='["a"]')
+    target = _put_raw(kb, "b.md")  # 本次摄入第二个源 raw/b.md
+
+    calls = {"n": 0}
+
+    def runner(prompt, **kwargs):
+        root = kwargs["working_directory"]
+        calls["n"] += 1
+        write_page(root, "wiki/sources/b.md", type="source")  # 建本次源页
+        if calls["n"] == 1:
+            write_page(root, "wiki/entities/X.md", type="entity", sources='["b"]')  # 覆盖丢 a
+        else:
+            write_page(root, "wiki/entities/X.md", type="entity", sources='["a", "b"]')  # 自愈并回
+        return AgentRunResult(ok=True, final_text="done")
+
+    rc = run_ingest(target, root=kb, runner=runner)
+    assert rc == EXIT_OK
+    assert calls["n"] == 2  # 首轮覆盖丢 a → 门禁阻断 → 1 次自愈并回
+    meta, _ = load_page(kb / "wiki" / "entities" / "X.md")
+    assert set(meta["sources"]) == {"a", "b"}  # 末态守为并集

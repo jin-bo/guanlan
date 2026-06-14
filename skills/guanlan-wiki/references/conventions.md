@@ -31,7 +31,7 @@ last_updated: YYYY-MM-DD
   - `title: '"涌现"能力与规模定律'` ✅（双引号原样保留）
   - 值内出现**单引号**时翻倍转义：`title: 'it''s a case'` ✅
   - **切勿在双引号里再套双引号**（`title: ""涌现"能力…"` 会让 YAML 在第二个 `"` 处断裂解析失败）。
-- `sources` 列 source 页的 slug（不含路径/扩展名），用于追溯与 `guanlan check` 校验。
+- `sources` 列 source 页的 slug（不含路径/扩展名），用于追溯与 `guanlan check` 校验。**re-ingest 既有页时 `sources` 取并集**（保留原有 slug、追加本次新增）——只增不减；覆盖丢源会被写门禁 `sources.dropped` 阻断并回喂自愈（同理 `tags`/`aliases` 也取并集，正文增补不整段重写）。
 - `aliases`（可选，仅 entity/concept 常用）列本页的常用别名/变体名（见下「别名」节）；缺省即可。
 - `last_updated` 每次实质修改时更新为当天日期（ISO `YYYY-MM-DD`）。
 
