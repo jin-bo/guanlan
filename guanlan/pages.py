@@ -38,6 +38,8 @@ __all__ = [
     "load_page_text",
     "page_title",
     "page_type",
+    "DIR_TO_TYPE",
+    "VALID_TYPES",
     "link_stem",
     "fold_stem",
     "link_fold_stem",
@@ -56,6 +58,18 @@ __all__ = [
 # config 页（非 content）：仅 wiki/ 顶层的这三个文件；子目录里的同名文件不算 config。
 # SCHEMA.md 在根、不在 wiki/ 下，天然不被扫。排除出 frontmatter/断链/graph/lint。
 _CONFIG_PAGES = frozenset({"index.md", "log.md", "overview.md"})
+
+# 规范页型分类法：wiki/ 一级目录 → frontmatter `type`。`health` 的页型↔目录一致性体检
+# （docs/P3.10）取此归口；`VALID_TYPES` 是合法 type 集（`check` 可改引为零-behavior-change 一行）。
+# 注意：这只是 health/check 所需的最小公共常量，**不**是「目录↔type↔index 分区」三元的大一统归口
+# （决策P3.10-3）——reindex 的目录↔分区映射仍各管各的。
+DIR_TO_TYPE = {
+    "sources": "source",
+    "entities": "entity",
+    "concepts": "concept",
+    "syntheses": "synthesis",
+}
+VALID_TYPES = frozenset(DIR_TO_TYPE.values())
 
 # 非贪婪提取 [[…]]；目标里不含 ] 或换行。
 WIKILINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]")

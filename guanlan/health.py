@@ -4,6 +4,8 @@
 
 - **桩页 / 空页**（`health.stub_page`）：正文几乎没有内容的建库残留空壳。
 - **index 与磁盘双向同步**（`health.index_missing_page` / `health.index_dangling`）。
+- **页型↔目录一致性**（`health.type_dir_mismatch` / `health.uncharted_page`，docs/P3.10）：合法
+  `type` 落错目录、或内容页游离于四规范目录之外——schema 漂移的零-LLM advisory。
 
 findings 是**建议性**（决策P3-4）：默认退 0，`--strict` 下有 findings → `EXIT_LINT_FINDINGS(6)`。
 frontmatter 走容错档（`pages.load_page`），坏数据不中断体检——正确性归口 `check`（决策P3-8）。
@@ -18,7 +20,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import EXIT_LINT_FINDINGS, EXIT_OK, GuanlanError
-from .pages import Finding, index_sync_state, iter_pages, load_page, report_json
+from .pages import (
+    DIR_TO_TYPE,
+    VALID_TYPES,
+    Finding,
+    index_sync_state,
+    iter_pages,
+    load_page,
+    report_json,
+)
 from .paths import require_kb_root
 
 __all__ = ["HealthReport", "run_health", "format_report", "health_entrypoint", "main"]
@@ -62,6 +72,48 @@ def _check_stub(page: str, body: str) -> Finding | None:
     return Finding(page, "health.stub_page", detail)
 
 
+def _check_uncharted(page: str, dir_name: str | None) -> Finding | None:
+    """游离目录检查（`health.uncharted_page`，决策P3.10-5）：内容页不在四规范目录之一。
+
+    含直接躺 `wiki/` 根的非 config 页（`dir_name=None`）与 `wiki/misc/…` 这类杂目录。
+    这正是 `reindex` 静默跳过的那批页——`health` 把它们显式列出，让人决定归位还是扩约定。
+    """
+    if dir_name is not None and dir_name in DIR_TO_TYPE:
+        return None
+    return Finding(
+        page,
+        "health.uncharted_page",
+        "页不在 sources/entities/concepts/syntheses 任一目录，无法按约定归类",
+    )
+
+
+def _check_type_dir(page: str, dir_name: str | None, meta: dict | None) -> Finding | None:
+    """页型↔目录一致性检查（`health.type_dir_mismatch`，决策P3.10-4/6）。
+
+    **仅当** type 合法（∈ `VALID_TYPES`）且与目录约定不符才报。坏/缺 frontmatter（`meta=None`）、
+    缺失/非法/非字符串 `type` 一律跳过、交 `check` 阻断（`missing_key`/`bad_type`）——不重复其职责。
+    **直接读 `meta["type"]`**：`pages.page_type` 对非法字符串原样返回，拿来比对会把非法 type 误报成
+    mismatch。游离目录（`dir_name` 非规范目录）的活归 `_check_uncharted`，此处放行。
+    """
+    if dir_name is None:
+        return None
+    expected = DIR_TO_TYPE.get(dir_name)
+    if expected is None:
+        return None  # 非规范目录 → uncharted 的活，不在此报。
+    if not isinstance(meta, dict):
+        return None  # 坏/缺 frontmatter 交 check。
+    type_ = meta.get("type")
+    if not isinstance(type_, str) or type_ not in VALID_TYPES:
+        return None  # 缺失/非法/非字符串 type 交 check。
+    if type_ == expected:
+        return None
+    return Finding(
+        page,
+        "health.type_dir_mismatch",
+        f"页在 {dir_name}/ 目录但 type={type_}，与目录约定 type={expected} 不符",
+    )
+
+
 def _check_index_sync(wiki: Path, root: Path, content_pages: list[Path]) -> list[Finding]:
     """index 与磁盘双向存在性同步（§4.2），把 `pages.index_sync_state` 的结果包成 `Finding`。
 
@@ -102,10 +154,21 @@ def run_health(wiki: Path) -> HealthReport:
     findings: list[Finding] = []
     for path in content_pages:
         page = path.relative_to(root).as_posix()
-        _meta, body = load_page(path)  # 容错档：坏 frontmatter 不抛。
+        meta, body = load_page(path)  # 容错档：坏 frontmatter 不抛。
+        # 一级目录名；不足两段（直接躺 wiki/ 根）→ None，交 uncharted 检查。
+        parts = path.relative_to(wiki).parts
+        dir_name = parts[0] if len(parts) >= 2 else None
         stub = _check_stub(page, body)
         if stub is not None:
             findings.append(stub)
+        # uncharted 与 type_dir_mismatch 互斥：前者只在非规范目录报、后者只在规范目录报。
+        uncharted = _check_uncharted(page, dir_name)
+        if uncharted is not None:
+            findings.append(uncharted)
+        else:
+            mismatch = _check_type_dir(page, dir_name, meta)
+            if mismatch is not None:
+                findings.append(mismatch)
     findings.extend(_check_index_sync(wiki, root, content_pages))
 
     return HealthReport(ok=not findings, pages_checked=len(content_pages), findings=findings)

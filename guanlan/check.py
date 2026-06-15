@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .errors import EXIT_CHECK_FAILED, EXIT_OK, GuanlanError
 from .pages import (
+    VALID_TYPES,
     Violation,
     WIKILINK_RE,
     iter_pages,
@@ -39,7 +40,9 @@ from .paths import require_kb_root
 # import Violation` 与 gate.py 的 `from .check import Violation` 不变。
 __all__ = ["CheckResult", "Violation", "run_check", "format_report", "check_entrypoint", "main"]
 
-_VALID_TYPES = frozenset({"source", "entity", "concept", "synthesis"})
+# 合法页型集自 P3.10 起归口 pages.VALID_TYPES（check/health 共用、不分叉）；保留 `_VALID_TYPES`
+# 别名使本文件内既有引用零-behavior-change（决策P3.10-3 的机会性清理）。
+_VALID_TYPES = VALID_TYPES
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 

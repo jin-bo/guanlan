@@ -132,6 +132,110 @@ def test_config_pages_excluded_from_stub_but_index_is_reference(tmp_path: Path):
     assert "health.index_dangling" not in _kinds(report)  # overview.md 存在，非悬空
 
 
+# ---------- 页型↔目录一致性（P3.10） ----------
+
+
+def _raw(wiki: Path, rel: str, content: str) -> None:
+    """直写一张页面（绕过 `_page` 的固定 frontmatter，用于坏/缺 type 用例）。"""
+    p = wiki / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+
+
+def test_type_matches_dir_no_mismatch(tmp_path: Path):
+    """四规范目录各放一张 type 相符的页 → 无 type_dir_mismatch。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "sources/A.md", type="source", body="实质内容" * 10)
+    _page(wiki, "entities/B.md", type="entity", body="实质内容" * 10)
+    _page(wiki, "concepts/C.md", type="concept", body="实质内容" * 10)
+    _page(wiki, "syntheses/D.md", type="synthesis", body="实质内容" * 10)
+
+    report = run_health(wiki)
+    assert "health.type_dir_mismatch" not in _kinds(report)
+    assert "health.uncharted_page" not in _kinds(report)  # 四目录内页不报 uncharted
+
+
+def test_type_dir_mismatch_detected(tmp_path: Path):
+    """entities/ 目录配 type=source → 一条 type_dir_mismatch，detail 含两侧 type。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "entities/Foo.md", type="source", body="实质内容" * 10)
+
+    report = run_health(wiki)
+    hits = [f for f in report.findings if f.kind == "health.type_dir_mismatch"]
+    assert len(hits) == 1
+    assert "entities/Foo.md" in hits[0].page
+    assert "type=source" in hits[0].detail and "entity" in hits[0].detail
+
+
+def test_uncharted_pages_flagged(tmp_path: Path):
+    """杂目录页与根级非 config 页 → uncharted_page；四目录内页不报。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "misc/Y.md", body="实质内容" * 10)  # 杂目录
+    _page(wiki, "Z.md", body="实质内容" * 10)  # 直接躺 wiki/ 根（非 config）
+    _page(wiki, "concepts/Charted.md", body="实质内容" * 10)  # 规范目录
+
+    report = run_health(wiki)
+    uncharted = {f.page for f in report.findings if f.kind == "health.uncharted_page"}
+    assert any("misc/Y.md" in p for p in uncharted)
+    assert any(p.endswith("wiki/Z.md") for p in uncharted)
+    assert not any("Charted.md" in p for p in uncharted)
+
+
+def test_uncharted_not_also_type_mismatch(tmp_path: Path):
+    """游离目录页只报 uncharted、不顺带报 type_dir_mismatch（两者互斥）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "misc/Y.md", type="entity", body="实质内容" * 10)
+
+    report = run_health(wiki)
+    page_kinds = {f.kind for f in report.findings if "misc/Y.md" in f.page}
+    assert "health.uncharted_page" in page_kinds
+    assert "health.type_dir_mismatch" not in page_kinds
+
+
+def test_bad_or_missing_type_not_mismatch(tmp_path: Path):
+    """缺 type / 非法 type / 非字符串 type 一律不报 type_dir_mismatch（交 check 阻断）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    # 缺 type（check 报 missing_key）。
+    _raw(
+        wiki,
+        "entities/NoType.md",
+        "---\ntitle: 'NoType'\ntags: []\nsources: []\nlast_updated: 2026-06-03\n---\n\n"
+        + "实质内容" * 10
+        + "\n",
+    )
+    # 非法 type 字符串（check 报 bad_type）。
+    _page(wiki, "entities/Bogus.md", type="bogus", body="实质内容" * 10)
+    # 非字符串 type（YAML list；check 报 bad_type）。
+    _raw(
+        wiki,
+        "entities/ListType.md",
+        "---\ntitle: 'ListType'\ntype: [a, b]\ntags: []\nsources: []\nlast_updated: 2026-06-03\n---\n\n"
+        + "实质内容" * 10
+        + "\n",
+    )
+
+    report = run_health(wiki)
+    assert "health.type_dir_mismatch" not in _kinds(report)
+
+
+def test_schema_drift_strict_exit_six(tmp_path: Path):
+    """仅 schema 漂移 finding 时，--strict 也退 6、默认退 0。"""
+    wiki = tmp_path / "wiki"
+    # 收录该页避免 index_missing 噪声——隔离出 type_dir_mismatch 单一 finding。
+    _seed_config(wiki, index="# 索引\n\n## Entities\n- [Foo](entities/Foo.md) — 一句话\n")
+    _page(wiki, "entities/Foo.md", type="source", body="实质内容" * 10)
+
+    report = run_health(wiki)
+    assert _kinds(report) == ["health.type_dir_mismatch"]  # 别无他噪
+    assert health_entrypoint(tmp_path, json_output=False, strict=False) == 0
+    assert health_entrypoint(tmp_path, json_output=False, strict=True) == 6
+
+
 # ---------- 退出码 / JSON ----------
 
 
