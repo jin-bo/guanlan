@@ -31,13 +31,14 @@ guanlan -C my-wiki web --port 9000 --no-browser # different port / no browser
 - **Full-text search** (`/api/search`), debounced recall from the input box
 - **Feed / upload / promote**: paste-to-save (`POST /api/raw`), upload files to a staging area, parse → human review → promote into a `raw/` source
 - **Backfill** (`query --backfill`): persist Q&A into the wiki (gated)
+- **Semantic audit** (`audit`): re-review drifted sources whose `raw/` changed but wiki wasn't re-synthesized (top-bar "Audit" button: preview drifted-source groups → review in one click → poll the structured receipt; gated)
 - **Slash commands + read-only introspection**: `/status` `/context` `/skills` `/tools` `/mode`, stop button
 - **Writable work-session** `/mode workspace-write`: the Agent may write `workspace/` (`raw/` stays hard read-only), with a three-layer write guard + single-writer + undo
 - **Bilingual UI**: a top-right 中文 ⇄ English toggle (pure-frontend i18n; only translates interface chrome — wiki content / agent answers / report bodies stay in their source language)
 
 ## Read/write split
 
-- The only write job `ingest` (and heal/backfill/raw-write) reuses the **P2 subprocess + single-writer gate** (one background worker, FIFO).
+- The only write job `ingest` (and heal/backfill/audit/raw-write) reuses the **P2 subprocess + single-writer gate** (one background worker, FIFO).
 - All Q&A (one-shot + multi-turn) goes through a **read-only in-process embedded Agentao** (read-only by default, no gate, memory-only).
 
 ## Read-only multi-conversation deployment `--reader`
@@ -48,7 +49,7 @@ guanlan -C my-wiki web --reader
 
 Opens the single-user host as a **read-only multi-user deployment**:
 
-- **Registers no write routes** (raw/upload/ingest/heal/backfill/workspace-delete/graph-rebuild/undo → 404/405)
+- **Registers no write routes** (raw/upload/ingest/heal/backfill/audit/workspace-delete/graph-rebuild/undo → 404/405)
 - **Internally forces** `session_persist=False` + `mode=read-only` (zero-write for any caller)
 - **Zero-byte KB writes by default** (persistence off, agent_log off)
 - Conversation isolation rides the existing 122-bit capability UUID (`?c=<conversation_id>`): closing the enumeration endpoint makes others' ids undiscoverable (capability-URL model)

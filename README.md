@@ -34,7 +34,7 @@
 | `guanlan web` | 在浏览器里浏览、问答、维护(可选叠加层) | 部分 |
 | `guanlan mcp` | 把 wiki 只读暴露给 MCP 客户端(可选叠加层) | 部分 |
 
-> 还有 `reindex`(索引回填)、`heal`(缺失实体物化)、`convert`(PDF/DOCX/… 转 markdown)等。逐命令细节见 **[用户指南](docs/guide/)**。
+> 还有 `reindex`(索引回填)、`heal`(缺失实体物化)、`audit`(语义审计:复核 `raw/` 已变但 wiki 未重综合的漂移源)、`remove`(源撤回:把误摄/已撤稿源移入 `.trash/`)、`convert`(PDF/DOCX/… 转 markdown)等。逐命令细节见 **[用户指南](docs/guide/)**。
 
 ## 安装
 
@@ -77,7 +77,7 @@ pip install 'guanlan-wiki[web]'
 guanlan -C my-wiki web       # 起本地 Web 宿主,仅监听 127.0.0.1,默认开浏览器
 ```
 
-浏览器里可:浏览 wiki 并跟随 `[[wikilink]]` 导航、跑 check·health·lint 看报告、看 graph、从 `raw/` 触发 ingest、与 agent 只读多轮对话。**仅供本机单用户——绝不要把端口暴露到网络。**
+浏览器里可:浏览 wiki 并跟随 `[[wikilink]]` 导航、跑 check·health·lint 看报告、看 graph、从 `raw/` 触发 ingest 等写作业(含 heal 补全、audit 漂移复核、backfill 回填)、与 agent 只读多轮对话。**仅供本机单用户——绝不要把端口暴露到网络。**
 
 完整上手见 **[用户指南 → 快速上手](docs/guide/zh/02-快速上手.md)**。
 

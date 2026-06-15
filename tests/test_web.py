@@ -3053,6 +3053,183 @@ def test_heal_no_sse_no_path_param(client) -> None:
     assert client.post("/api/heal", json={"limit": 0}).status_code == 422
 
 
+# ═══════════════════════ P4.12 Web 语义审计 audit（C1） ═══════════════════════
+#
+# 见 docs/P4.12-Web语义审计.md §7。POST /api/audit 只是 run_audit_result 的薄 adapter——P2/P3.7 的
+# 门禁/page_guard/逐组回执判定/log 行判据已由 test_audit.py（38 例）证过，Web 测试**只聚焦 adapter
+# 本身**：preview、入队、result 序列化、旧 job 兼容、FIFO 烟测、reader 修剪、423、model 透传、形态。
+# drift 夹具与 runner-action 直接复用 test_audit 的归口（不重写）。
+
+from test_audit import cite, drift_raw, log_action, source_with_digest  # noqa: E402
+
+# 一个漂移源组 rep 的逐成员复核留痕（source 摘要页 + 引用页 X，全留痕 → 整组刷新）。
+_REP_REVIEWS = [
+    ("wiki/sources/rep.md", ["rep"], "confirmed"),
+    ("wiki/entities/X.md", ["rep"], "confirmed"),
+]
+
+
+def _drift_one(kb) -> None:
+    """构造一个漂移源组 rep：source 摘要页 + 引用页 X，drift 其 raw（指纹不再匹配）。"""
+    source_with_digest(kb, "rep")
+    cite(kb, "X", "rep")
+    drift_raw(kb, "rep.md")
+
+
+def test_audit_preview_matches_audit_preview(kb) -> None:
+    """GET /api/audit/preview 与同库 audit.audit_preview 逐项一致；零 LLM、不入队、不触 runner。"""
+    from guanlan.audit import audit_preview
+
+    _drift_one(kb)
+    runner = make_runner(lambda root: None)
+    with TestClient(create_app(kb, runner=runner)) as client:
+        resp = client.get("/api/audit/preview")
+        assert resp.status_code == 200
+        data = resp.json()
+
+    assert data == audit_preview(kb / "wiki")  # CLI/Web 共用 audit_preview 单一归口（决策P4.12-1/4）
+    assert {g["slug"] for g in data["groups"]} == {"rep"}
+    assert data["groups"][0]["members"] == ["wiki/entities/X.md", "wiki/sources/rep.md"]
+    assert runner.calls == []  # 纯读：未触 Agentao
+
+
+def test_audit_preview_limit_pushes_to_postponed(kb) -> None:
+    """limit 把超额漂移源组按 slug 升序推进 postponed。"""
+    for slug, page in (("aaa", "Xa"), ("bbb", "Xb")):
+        source_with_digest(kb, slug)
+        cite(kb, page, slug)
+        drift_raw(kb, f"{slug}.md")
+    with TestClient(create_app(kb)) as client:
+        data = client.get("/api/audit/preview", params={"limit": 1}).json()
+    assert [g["slug"] for g in data["groups"]] == ["aaa"]
+    assert [g["slug"] for g in data["postponed"]] == ["bbb"]
+
+
+@pytest.mark.parametrize("params", [{"limit": 0}, {"limit": -1}])
+def test_audit_preview_out_of_range_is_422(client, params) -> None:
+    """limit < 1 → 422（Query ge=1，对齐 CLI positive_int）。"""
+    assert client.get("/api/audit/preview", params=params).status_code == 422
+
+
+def test_audit_post_enqueues_and_serializes_result(kb) -> None:
+    """POST /api/audit 即时返回 job_id（非阻塞）→ 轮询至 done：exit_code==0、result 为四字段机器
+    回执（receipts 报 refreshed、refreshed 含 rep）、**散文在 output 不在 result**（决策P4.12-1）。"""
+    _drift_one(kb)
+    runner = make_runner(log_action(_REP_REVIEWS), final_text="已复核 rep 组")
+    with TestClient(create_app(kb, runner=runner)) as client:
+        resp = client.post("/api/audit", json={})
+        assert resp.status_code == 200
+        data = _wait_job(client, resp.json()["job_id"])
+
+    assert data["kind"] == "audit"
+    assert data["exit_code"] == 0
+    result = data["result"]
+    # 四字段机器回执（区别 heal 六字段 / ingest null）——证 worker 对 AuditRun 鸭子分流序列化正确。
+    assert set(result) == {"refreshed", "postponed", "receipts", "exit_code"}
+    assert result["refreshed"] == ["rep"]
+    assert result["receipts"][0]["slug"] == "rep"
+    assert result["receipts"][0]["status"] == "refreshed"
+    # 散文进 output、不掺 result（决策P4.12-1 / P4.3-1）。
+    assert "已复核 rep 组" in data["output"]
+    assert "已复核 rep 组" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_audit_empty_worklist_job(kb) -> None:
+    """无漂移源 → audit 作业空批次：exit_code==0、result 四字段（空 receipts）、runner 零调用。"""
+    source_with_digest(kb, "rep")
+    cite(kb, "X", "rep")  # 未 drift → 无漂移
+    runner = make_runner(log_action(_REP_REVIEWS))
+    with TestClient(create_app(kb, runner=runner)) as client:
+        data = _wait_job(client, client.post("/api/audit", json={}).json()["job_id"])
+    assert data["exit_code"] == 0
+    assert data["result"]["receipts"] == []
+    assert runner.calls == []  # 空 worklist 短路、未触 Agentao
+
+
+def test_audit_model_passthrough(kb) -> None:
+    """省略 model → 用 app 级 model；给 model → 透传进 run_audit_result（含 None，走子进程无嵌入坑）。"""
+    _drift_one(kb)
+    runner = make_runner(log_action(_REP_REVIEWS))
+    with TestClient(create_app(kb, model="app-model", runner=runner)) as client:
+        _wait_job(client, client.post("/api/audit", json={"model": "req-model"}).json()["job_id"])
+    assert runner.calls[0]["model"] == "req-model"
+
+    # 省略 model：回落 app 级 model（新建另一漂移组 two，避开已刷新的 rep）。
+    source_with_digest(kb, "two")
+    cite(kb, "Y", "two")
+    drift_raw(kb, "two.md")
+    reviews2 = [
+        ("wiki/sources/two.md", ["two"], "confirmed"),
+        ("wiki/entities/Y.md", ["two"], "confirmed"),
+    ]
+    runner2 = make_runner(log_action(reviews2))
+    with TestClient(create_app(kb, model="app-model", runner=runner2)) as client:
+        _wait_job(client, client.post("/api/audit", json={}).json()["job_id"])
+    assert runner2.calls[0]["model"] == "app-model"
+
+
+def test_audit_serial_behind_ingest(kb) -> None:
+    """单写者 FIFO 烟测：先入队卡住的 ingest，再 POST /api/audit → audit 在 ingest 之后完成，
+    两者皆 done、ingest 不被冤判 raw_mutated（同 worker 串行，决策P4.12-2）。"""
+    _put_raw(kb, "src.md")
+    _drift_one(kb)
+    gate = threading.Event()
+    order: list[str] = []
+
+    def runner(prompt, **kwargs):
+        wd = kwargs["working_directory"]
+        if "rep" in prompt:  # audit prompt 含 target 行（page/slug 均含 "rep"）
+            order.append("audit")
+            log_action(_REP_REVIEWS)(wd)
+        else:
+            order.append("ingest")
+            gate.wait(timeout=3)
+            write_page(wd, "wiki/concepts/N.md")
+        return AgentRunResult(ok=True, final_text="done")
+
+    with TestClient(create_app(kb, runner=runner)) as client:
+        ing_id = client.post("/api/ingest", json={"target": "raw/src.md"}).json()["job_id"]
+        aud_id = client.post("/api/audit", json={}).json()["job_id"]
+        time.sleep(0.1)
+        assert order == ["ingest"]  # audit 被挡在在飞 ingest 之后（同 FIFO worker）
+        gate.set()
+        ing = _wait_job(client, ing_id)
+        aud = _wait_job(client, aud_id)
+
+    assert order == ["ingest", "audit"]  # FIFO：audit 在 ingest 之后才跑
+    assert ing["exit_code"] == 0  # ingest 没被 audit 的写冤判 EXIT_RAW_MUTATED
+    assert aud["exit_code"] == 0
+    assert aud["result"]["refreshed"] == ["rep"]
+
+
+def test_audit_reader_trims_post_keeps_preview(kb) -> None:
+    """reader：GET /api/audit/preview 仍可（只读）；POST /api/audit → 404（写端点不注册，决策P4.9-2）。"""
+    _drift_one(kb)
+    with TestClient(create_app(kb, reader=True)) as client:
+        assert client.get("/api/audit/preview").status_code == 200
+        assert client.post("/api/audit", json={}).status_code == 404
+
+
+def test_audit_frontend_wired(client) -> None:
+    """前端接线（C2）：顶栏有 audit 按钮，app.js 拉 preview/POST audit 并按 result 渲染回执。"""
+    index = client.get("/").text
+    assert 'id="audit-btn"' in index
+    js = client.get("/static/app.js").text
+    assert "/api/audit/preview" in js
+    assert '"/api/audit"' in js  # POST 审计
+    assert "renderAuditDone" in js and "job.result" in js  # 按结构化 result 渲染
+    # reader 部署须隐藏 audit 写按钮（与 feed/ingest/heal/backfill 同列，决策P4.9-9）：
+    # 字面 "audit-btn"（带引号、无 #）只命中 applyReaderMode 的 hideIds 项，不命中 $("#audit-btn") 监听器。
+    assert '"audit-btn"' in js
+
+
+def test_audit_no_sse_no_path_param(client) -> None:
+    """形态红线：无 audit SSE（/api/audit/{id}/events → 404/405）；端点无 path/slug 入参（无穿越面）。"""
+    assert client.get("/api/audit/1/events").status_code in (404, 405)
+    # POST /api/audit 不接受 path/slug（只 limit/model）：传非法 limit 才 422。
+    assert client.post("/api/audit", json={"limit": 0}).status_code == 422
+
+
 # ═══════════════════════ P4.8 Web 回填 backfill（C1） ═══════════════════════
 #
 # 见 docs/P4.8-Web回填.md §7。POST /api/backfill 只是 run_query(backfill=True) 的薄 adapter——
@@ -3535,6 +3712,7 @@ def test_layer3_423_when_writable_active(kb) -> None:
             assert client.post("/api/raw", json={"name": "a", "content": "x\n"}).status_code == 423
             assert client.post("/api/ingest", json={"target": "raw/foo.md"}).status_code == 423
             assert client.post("/api/heal", json={}).status_code == 423
+            assert client.post("/api/audit", json={}).status_code == 423
         finally:
             app.state.write_gate.exit_writable()
         # 计数归 0 → 端点恢复（投喂 200）。
@@ -3996,6 +4174,7 @@ def _reader_client(kb):
         ("POST", "/api/ingest", {"target": "raw/x.md"}, 404),
         ("POST", "/api/backfill", {"question": "q"}, 404),
         ("POST", "/api/heal", {}, 404),
+        ("POST", "/api/audit", {}, 404),
         ("DELETE", "/api/workspace/dir", None, 404),
         ("GET", "/graph", None, 404),
         # 与只读端点**共用路径**的写方法 → 405（路径仍在但该方法 handler 未注册）：POST /api/raw

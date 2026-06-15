@@ -31,6 +31,15 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from ..audit import (
+    DEFAULT_LIMIT as AUDIT_DEFAULT_LIMIT,
+)
+from ..audit import (
+    AuditRun,
+    audit_preview,
+    audit_result_dict,
+    run_audit_result,
+)
 from ..check import format_report as _format_check
 from ..check import run_check
 from ..errors import EXIT_OK, EXIT_USAGE, GuanlanError
@@ -210,6 +219,17 @@ class HealBody(BaseModel):
     limit: int = Field(default=WEB_HEAL_DEFAULT_LIMIT, ge=1)
     min_refs: int = Field(default=MISSING_ENTITY_MIN_REFS, ge=1)
     targets: list[str] | None = None
+    model: str | None = None
+
+
+class AuditBody(BaseModel):
+    """`POST /api/audit` 请求体（P4.12）。`limit` 默认 **import 自 CLI 的 `audit.DEFAULT_LIMIT`**
+    （按漂移源**组**计，不另设 Web 专属值——组数通常远小于 heal 缺页数，无需像 heal 那样压小，决策P4.12-1）；
+    `ge=1` 对齐 CLI `positive_int`，越界 → 422。`model` 含 `None` 直接透传子进程 runner（audit 走
+    `run_guarded_write` 子进程、非嵌入会话、无 P4-8 模型坑，决策P4.12-5）。一期不收 `slugs` 子集
+    过滤器（决策P4.12-3：audit 唯一旋钮是 `--limit`，子集过滤需改 core）。"""
+
+    limit: int = Field(default=AUDIT_DEFAULT_LIMIT, ge=1)
     model: str | None = None
 
 
@@ -408,6 +428,15 @@ def _heal_preview(root: Path, limit: int, min_refs: int) -> dict:
     }
 
 
+def _audit_preview(root: Path, limit: int) -> dict:
+    """零-LLM 算 audit 预览（== `audit --dry-run --json` 体），返回 `{groups, postponed}`。
+
+    复用 `audit.audit_preview` 单一归口（决策P4.12-1/4：预览序列化 CLI/Web 共口径，宿主不重写）；
+    纯读 `wiki/`、不取 `raw/` 快照、不触 Agentao、不入队。经 `anyio.to_thread.run_sync` 卸离事件循环（决策P4-2）。
+    """
+    return audit_preview(root / "wiki", limit=limit)
+
+
 def _report_response(json_text: str) -> Response:
     """把既有序列化器输出的 JSON 文本**原样**作为响应体。
 
@@ -509,14 +538,15 @@ def create_app(
     # （可写 turn 异步取 write_lock + 计数）；写端点经 app.state.write_gate 查计数。
     write_gate = WriteGate()
     app.state.write_gate = write_gate
-    # 单写者作业队列（ingest/heal/backfill/投喂走它，FIFO 串行；决策P4-5）：worker 跑 fn() 包 write_lock。
-    # on_job_done：ingest/heal/backfill 写 wiki/ → bump 代际，使可写会话缓存的 check 基线失效、下轮重拍
-    # （投喂/上传写 raw//workspace、不动 wiki，不 bump，P4.5-4 缓存基线；backfill 写 syntheses/，决策P4.8-5）。
+    # 单写者作业队列（ingest/heal/backfill/audit/投喂走它，FIFO 串行；决策P4-5）：worker 跑 fn() 包 write_lock。
+    # on_job_done：ingest/heal/backfill/audit 写 wiki/ → bump 代际，使可写会话缓存的 check 基线失效、下轮重拍
+    # （投喂/上传写 raw//workspace、不动 wiki，不 bump，P4.5-4 缓存基线；backfill 写 syntheses/，决策P4.8-5；
+    # audit 刷 source 页 raw_digest + LLM 可能重写正文，改 wiki/，决策P4.12-6）。
     jobs = JobQueue(
         write_lock=write_gate.write_lock,
         on_job_done=lambda kind: (
             write_gate.bump_wiki_generation()
-            if kind in ("ingest", "heal", "backfill")
+            if kind in ("ingest", "heal", "backfill", "audit")
             else None
         ),
     )
@@ -1024,18 +1054,47 @@ def create_app(
 
         return {"job_id": jobs.enqueue("backfill", _job)}
 
+    # audit 预览（零 LLM 读，决策P4.12-4）：只算漂移源组（== audit --dry-run），不入队、不触 Agentao、
+    # 不取 raw/ 快照；阻塞跑 to_thread。limit 默认 import 自 CLI 的 audit.DEFAULT_LIMIT、越界 422（Query ge=1）。
+    @app.get("/api/audit/preview")
+    async def audit_preview_route(
+        limit: int = Query(AUDIT_DEFAULT_LIMIT, ge=1),
+    ) -> dict:
+        return await anyio.to_thread.run_sync(_audit_preview, root, limit)
+
+    # audit 审计（写，决策P4.12-2）：入单写者 FIFO 队列、即时返回 job_id、前端轮询（与 heal 同构）。
+    # 走子进程 runner、过 P2 写门禁 + P2.1 源不回退闸（page_guard=True 由 core 内写死，决策P3.7-4）；
+    # 返回结构化 AuditRun → worker 鸭子分流存 job.result（决策P4.12-1，零 jobs.py 改动）。
+    @_writer_only(app.post("/api/audit"))  # reader 下不注册（审计是 gated 写，决策P4.9-2）
+    async def audit(body: AuditBody) -> dict:
+        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10 / P4.12-6）
+
+        def _job(emit) -> AuditRun:  # 收 emit、忽略；返回结构化结果（非 int）→ worker 鸭子分流存 result
+            run = run_audit_result(
+                root=root,
+                limit=body.limit,
+                model=body.model or model,
+                runner=runner,
+            )
+            if run.final_text:  # agent 散文 → worker 的 redirect 捕获进 job.output（与 heal 同口径）
+                print(run.final_text)
+            return run
+
+        return {"job_id": jobs.enqueue("audit", _job)}
+
     @app.get("/api/jobs/{job_id}")
     async def job_status(job_id: str) -> dict:
         job = jobs.get_job(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"未知作业：{job_id}")
-        # heal 作业多回一个 `result`（六字段机器回执，经既有序列化器）；ingest/投喂为 null、前端
-        # 忽略（决策P4.3-1）。agent 散文一律在 `output`，不进 `result`。
-        result = (
-            heal_result_dict(job.result.result, job.result.postponed)
-            if isinstance(job.result, HealRun)
-            else None
-        )
+        # heal / audit 作业多回一个 `result`（机器回执，经既有序列化器）；ingest/投喂/backfill 为 null、
+        # 前端忽略（决策P4.3-1 / P4.12-1）。agent 散文一律在 `output`，不进 `result`。
+        if isinstance(job.result, HealRun):
+            result = heal_result_dict(job.result.result, job.result.postponed)
+        elif isinstance(job.result, AuditRun):
+            result = audit_result_dict(job.result.result, list(job.result.postponed))
+        else:
+            result = None
         return {
             "id": job.id,
             "kind": job.kind,

@@ -1,6 +1,6 @@
 # Maintenance
 
-Keeping a knowledge base fresh relies on a set of **zero-LLM deterministic maintenance tools**. `health` / `lint` are **advisory (non-blocking by default)**; `graph` / `reindex` write derivatives / fix the index; `heal` is the only LLM-backed materializing write (gated).
+Keeping a knowledge base fresh relies on a set of **zero-LLM deterministic maintenance tools**. `health` / `lint` are **advisory (non-blocking by default)**; `graph` / `reindex` / `remove` write derivatives / fix the index / retract sources deterministically; `heal` / `audit` are LLM-backed writes (gated).
 
 ---
 
@@ -101,6 +101,46 @@ Use `--dry-run` to see what would be built before deciding. Materialization is a
 
 ---
 
+## `guanlan audit`
+
+Semantic audit: deterministically pre-filter **drifted sources** (a `raw/` file was replaced/re-converted, but the wiki pages citing it haven't been re-synthesized) → have the LLM re-review whether those pages' claims are now stale. After review, the host refreshes that source's new fingerprint back into the source page's `raw_digest` (a managed field — don't hand-edit). **Goes through the P2 write gate. Needs a model.**
+
+```bash
+guanlan -C my-wiki audit --dry-run           # print the drifted-source groups only (read-only, zero-LLM)
+guanlan -C my-wiki audit                      # review (default limit)
+guanlan -C my-wiki audit --limit 3
+```
+
+| Arg | Meaning |
+|---|---|
+| `--limit` | Max **drifted-source groups** to review this batch (by ascending slug; each group is reviewed + refreshed atomically; must be ≥ 1) |
+| `--dry-run` | Print the drifted-source groups only; read-only, zero-LLM, does not touch Agentao |
+| `--model` | Override the Agentao model |
+| `--json` | Structured JSON for the groups / receipts |
+
+Typical use: overwrite an old `raw/` with an updated PDF via `convert --overwrite`, then run `audit` to find which wiki pages should be re-ingested. If a base's `raw/` files are never overwritten, `audit` always runs empty — which is **correct** (no drift, no candidates).
+
+---
+
+## `guanlan remove`
+
+Source retraction: move a **mis-ingested / retracted** source's own on-disk artifacts into the recycle area `<base>/.trash/<slug>@timestamp/` (a soft delete, not `rm`, with a `manifest.json` for the record); `[[references]]` to that source in multi-source derived pages are deterministically stripped (provenance only — the body is untouched), and any orphans/broken links left behind are reported as advisories only. **Human-initiated, zero-LLM, no Agentao, no gate.**
+
+```bash
+guanlan -C my-wiki remove old-report               # preview the worklist only (no disk write)
+guanlan -C my-wiki remove raw/old-report.md --yes  # confirm and execute (move into .trash/)
+```
+
+| Arg | Meaning |
+|---|---|
+| `src` | Source id: `<slug>` / `raw/<slug>.md` / `wiki/sources/<slug>.md` |
+| `--yes` | Confirm and execute (without it, only prints the worklist with zero disk write — more conservative than `reindex`/`convert`) |
+| `--json` | JSON contract |
+
+A **human-initiated correction path**, symmetric with feeding (a human adding a source) — just the opposite direction. Re-synthesizing a page that lost a source is an LLM job that `remove` does **not** do; it's left to a later `ingest`/human (an advisory is emitted). The recycle area is the audit trail; to undo, recover manually from `.trash/`.
+
+---
+
 ## Exit codes
 
 | Code | Name | Meaning |
@@ -114,4 +154,4 @@ Use `--dry-run` to see what would be built before deciding. Materialization is a
 
 **Advisory-not-gate**: `health`/`lint` exit `0` by default and only fail with `6` under `--strict` — use them to read reports day-to-day, use `--strict` as a gate in CI/nightly.
 
-See: repo [`docs/P3-健康与图谱.md`](../../P3-健康与图谱.md), [`docs/P3.4-索引回填.md`](../../P3.4-索引回填.md), [`docs/P3.5-图谱分析.md`](../../P3.5-图谱分析.md).
+See: repo [`docs/P3-健康与图谱.md`](../../P3-健康与图谱.md), [`docs/P3.4-索引回填.md`](../../P3.4-索引回填.md), [`docs/P3.5-图谱分析.md`](../../P3.5-图谱分析.md), [`docs/P3.7-语义审计.md`](../../P3.7-语义审计.md), [`docs/P3.9-源撤回.md`](../../P3.9-源撤回.md).

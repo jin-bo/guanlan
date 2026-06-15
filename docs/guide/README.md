@@ -11,7 +11,7 @@
 1. [安装](zh/01-安装.md)
 2. [快速上手](zh/02-快速上手.md)
 3. [CLI 命令](zh/03-cli-命令.md) — `init` / `ingest` / `query` / `check`
-4. [维护：体检与图谱](zh/04-维护-体检-图谱.md) — `health` / `lint` / `graph` / `reindex` / `heal`
+4. [维护：体检与图谱](zh/04-维护-体检-图谱.md) — `health` / `lint` / `graph` / `reindex` / `heal` / `audit` / `remove`
 5. [Web 宿主](zh/05-web-宿主.md) — `guanlan web`（含 `--reader`）
 6. [MCP 宿主](zh/06-mcp-宿主.md) — `guanlan mcp`
 7. [多格式转换](zh/07-多格式转换.md) — `guanlan convert`
@@ -21,7 +21,7 @@
 1. [Installation](en/01-installation.md)
 2. [Quickstart](en/02-quickstart.md)
 3. [CLI commands](en/03-cli-commands.md) — `init` / `ingest` / `query` / `check`
-4. [Maintenance](en/04-maintenance.md) — `health` / `lint` / `graph` / `reindex` / `heal`
+4. [Maintenance](en/04-maintenance.md) — `health` / `lint` / `graph` / `reindex` / `heal` / `audit` / `remove`
 5. [Web host](en/05-web-host.md) — `guanlan web` (incl. `--reader`)
 6. [MCP host](en/06-mcp-host.md) — `guanlan mcp`
 7. [Convert](en/07-convert.md) — `guanlan convert`
