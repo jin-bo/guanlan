@@ -15,7 +15,7 @@ gbrain 与观澜**同源不同量级**（同 Karpathy LLM Wiki 模式，但 gbra
 | **doctor 因果排序**（根因先于症状，`top_issues[]`） | 🟢 **小强借**（纯展示层，零-LLM） | 本笔记 §3 → `lint`/`health` finding 排序归口 |
 | **`schema detect` 漂移侦测**（盘面页型聚类 vs `SCHEMA.md`） | 🟡 **窄借**（只借零-LLM detect 半，弃 LLM-suggest/mutate/migration） | 本笔记 §4 → 并入 health/lint 家族 advisory |
 | **软删 + 恢复窗**（72h soft-delete → `purge` 硬删） | 🟡 **形状借**（佐证并加固源撤回） | 本笔记 §5 → 喂候选 `docs/P3.9-源撤回.md`（见 [openkb §5](openkb-反向评审结论.md)） |
-| **检索质量回放评测**（录真实 query+结果 → replay 测代码回归） | 🟡 **借纪律**（落成 test fixture，非运行时命令） | 本笔记 §6 → P5 检索成熟后的 `tests/` 回归闸 |
+| **检索质量回放评测**（录真实 query+结果 → replay 测代码回归） | 🟡 **借纪律**（落成 test fixture，非运行时命令）→ **已实现** | 本笔记 §6 → `tests/test_search_quality.py`（黄金集 P@k 回归闸） |
 | **wrapper 侧成本闸**（`--max-usd`，超预算 abort） | 🟡 **存疑借**（需 1 行确认 agentao 是否已托底） | 本笔记 §6 → `ingest`/`query`/`backfill` |
 | **矛盾检测**（LLM judge 配对 + 持久缓存，入 dream cycle） | 🔵 **已在路上** = P3.7；gbrain 仅佐证 + 加"缓存已判对"实现点 | 本笔记 §7 → [`P3.7-语义审计-草案.md`](../../P3.7-语义审计-草案.md) |
 | **autopilot / 夜间富化**（daemon 多相位维护） | 🔵 **已 park** = DESIGN §8 / E3；gbrain 是带刺的反面参照 | 本笔记 §7 → E3 选型 |
@@ -58,7 +58,7 @@ gbrain 与观澜**同源不同量级**（同 Karpathy LLM Wiki 模式，但 gbra
 
 ## 6. 🟡 检索质量回放 + 成本闸（借纪律 / 存疑借）
 
-- **检索质量回放评测**（借纪律，非运行时命令）：gbrain `eval capture` 录真实 query+结果到 ndjson、`eval replay --against base` 用来 A/B 测代码改动是否回退检索质量（配 P@k / nDCG）。观澜现有 `tests/test_search.py` 是单测、**无检索质量回归闸**。待 P5 检索随多格式语料放大、§2 重排等改动累积后，一组**确定性 query→期望命中页 fixture + P@k 回归断言**能挡住"重排把对的页挤下去"。**只借纪律**:落成 `tests/` fixture（确定性、零-LLM、可 CI），**不**做 gbrain 那套运行时 `eval` 子命令 + 持久 capture（过重）。低优先，P5 检索成熟后再说。
+- **检索质量回放评测**（借纪律，非运行时命令）→ **已实现** `tests/test_search_quality.py`：gbrain `eval capture` 录真实 query+结果到 ndjson、`eval replay --against base` 用来 A/B 测代码改动是否回退检索质量（配 P@k / nDCG）。观澜现有 `tests/test_search.py` 是单测、**无检索质量回归闸**。落地形态：一个 16 页大语言模型领域微 wiki（committed `CORPUS`，页间真实 `[[wikilink]]` 喂 backlink、aliases 喂字段加权）+「query→期望命中页」黄金集（`GOLDEN`），跑产线冷算 `search_pages`（**带 P5.3 backlink 重排**），断言**确定性 P@1/recall@3/MRR 不回退** + 枢纽页 boost 上浮 + 「重排不把对的页挤下去」聚合护栏（boost 路径 primary-rank-1 命中数 ≥ 纯 BM25）+ 字节稳定 + 语料/黄金集自洽体检。**只借纪律**:确定性、零-LLM、零写盘、可 CI，**不**做 gbrain 那套运行时 `eval` 子命令 + 持久 capture（过重）。
 - **wrapper 侧成本闸**（存疑借）：gbrain 每个 minion job 带 per-job USD `budget_cap`，超预算 abort（`--max-usd`、`--target-score` 配套）。观澜 `ingest`/`query`/`backfill` 走 agentao 子进程**无成本上限**。一道 wrapper 侧预算闸有用，但**成本归 agentao 托管**——**须先 1 行确认** agentao 是否已暴露 budget cap（同 [openkb §7](openkb-反向评审结论.md) invalid-YAML 那种"待 1 行确认"）：若已有则别重复；若无，wrapper 侧 `--max-usd` 是合法零-LLM 加固。低优先。
 
 ## 7. 🔵 已在路上 / 已 park（gbrain 仅佐证）

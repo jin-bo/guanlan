@@ -196,3 +196,82 @@ def test_index_md_links_two_level_nesting_skips_rather_than_wrong_target():
     # 双层嵌套括号（极罕见）：整体不匹配（跳过），而非截出错目标 `dir/A(B(C)` 造成假悬挂。
     assert index_md_links("- [x](dir/A(B(C)).md)\n") == set()
 
+
+# ---------- order_findings：finding 因果排序归口（gbrain §3，纯展示层） ----------
+
+
+def test_order_findings_root_cause_before_effect():
+    from guanlan.pages import Finding, order_findings
+
+    # 乱序输入：果在前、因在后。
+    inp = [
+        Finding("a.md", "lint.broken_link", "x"),
+        Finding("", "lint.missing_entity", "y"),
+        Finding("b.md", "lint.orphan", "z"),
+    ]
+    out = [f.kind for f in order_findings(inp)]
+    assert out == ["lint.missing_entity", "lint.broken_link", "lint.orphan"]
+
+
+def test_order_findings_topology_sinks_last():
+    from guanlan.pages import Finding, order_findings
+
+    inp = [
+        Finding("h.md", "lint.cut_vertex", ""),
+        Finding("a.md", "lint.broken_link", ""),
+        Finding("h.md", "lint.hub_node", ""),
+    ]
+    out = [f.kind for f in order_findings(inp)]
+    assert out.index("lint.broken_link") < out.index("lint.hub_node") < out.index(
+        "lint.cut_vertex"
+    )
+
+
+def test_order_findings_stable_within_kind_and_unknown_sinks():
+    from guanlan.pages import Finding, order_findings
+
+    # 同 kind 的相对顺序（A 前 B）须保留；未登记 kind 取末档、稳定排在已登记之后。
+    inp = [
+        Finding("B.md", "lint.broken_link", ""),
+        Finding("x.md", "lint.unknown_future", ""),
+        Finding("A.md", "lint.broken_link", ""),
+        Finding("", "lint.missing_entity", ""),
+    ]
+    out = order_findings(inp)
+    kinds = [f.kind for f in out]
+    assert kinds[0] == "lint.missing_entity"
+    # 两条 broken_link 保持输入相对序（B 在 A 前）。
+    broken = [f.page for f in out if f.kind == "lint.broken_link"]
+    assert broken == ["B.md", "A.md"]
+    # 未登记 kind 排在所有已登记之后。
+    assert kinds[-1] == "lint.unknown_future"
+
+
+def test_order_findings_does_not_mutate_input():
+    from guanlan.pages import Finding, order_findings
+
+    inp = [
+        Finding("a.md", "lint.broken_link", ""),
+        Finding("", "lint.missing_entity", ""),
+    ]
+    snapshot = list(inp)
+    order_findings(inp)
+    assert inp == snapshot  # 返回新列表、不就地改
+
+
+def test_order_findings_preserves_multiset():
+    """核心不变量：重排只换序、**不增不减不去重**——输出是输入的一个排列（含重复项）。"""
+    from collections import Counter
+
+    from guanlan.pages import Finding, order_findings
+
+    inp = [
+        Finding("a.md", "lint.broken_link", "x"),
+        Finding("", "lint.missing_entity", "y"),
+        Finding("z.md", "lint.unknown_future", "u"),  # 未登记 kind 也须保留
+        Finding("a.md", "lint.broken_link", "x"),  # 完全相同的重复项不得被去重
+    ]
+    out = order_findings(inp)
+    assert Counter(out) == Counter(inp)  # 多重集相等（Finding 是 frozen dataclass、可哈希）
+    assert len(out) == len(inp)
+

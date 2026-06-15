@@ -17,6 +17,10 @@ P3.6 在同一份图上再加两类**确定性图论割边/割点**建议（零 
 
 findings 是**建议性**（决策P3-4）：默认退 0，`--strict` 下有 findings → `EXIT_LINT_FINDINGS(6)`。
 只做结构 lint，语义 lint（矛盾复检/过期论断/资料缺口，需 LLM）属 P3 之后。
+
+输出按 `pages.order_findings` 做**因果排序**（纯展示层、零 LLM、确定性）：根因 `lint.missing_entity`
+排在其果 `lint.broken_link` 之前、拓扑优化建议沉底——不改 finding 集合/退出码，只改顺序
+（gbrain 反向评审 §3 借形状，见 docs/finding-因果排序.md）。
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ from .graphstats import (
     thin_intercommunity_links,
     undirected_adjacency,
 )
-from .pages import Finding, report_json
+from .pages import Finding, order_findings, report_json
 from .paths import require_kb_root
 
 __all__ = [
@@ -138,7 +142,11 @@ def run_lint(wiki: Path) -> LintReport:
     # 确定性社区与拓扑特征，三类建议同走 lint「建议非门禁」语义（决策P3.5-7）。
     findings.extend(_topology_findings(g, node_path))
 
-    return LintReport(ok=not findings, pages_checked=len(g.nodes), findings=findings)
+    # finding 因果排序（纯展示层、零 LLM）：把根因（missing_entity）排在其果（broken_link）之前、
+    # 拓扑优化建议沉底。稳定排序保各 kind 内既有确定性次序不变（gbrain §3，见 pages.order_findings）。
+    return LintReport(
+        ok=not findings, pages_checked=len(g.nodes), findings=order_findings(findings)
+    )
 
 
 def _topology_findings(g: Graph, node_path: dict[str, str]) -> list[Finding]:
