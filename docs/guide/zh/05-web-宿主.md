@@ -31,13 +31,14 @@ guanlan -C my-wiki web --port 9000 --no-browser # 换端口 / 不开浏览器
 - **全文检索**(`/api/search`),输入框防抖召回
 - **投喂 / 上传 / 晋级**:粘贴存稿(`POST /api/raw`)、文件上传到暂存区、解析→人审→晋级为 `raw/` 源
 - **回填**(`query --backfill`):把问答沉淀回 wiki(走门禁)
+- **语义审计**(`audit`):复核 `raw/` 已变但 wiki 未重综合的漂移源(顶栏「审计」按钮:预览漂移源组 → 一键复核 → 轮询结构化回执;走门禁)
 - **斜杠命令与只读自省**:`/status` `/context` `/skills` `/tools` `/mode`,停止按钮
 - **可写工作会话** `/mode workspace-write`:Agent 可写 `workspace/`(`raw/` 仍硬只读),带三层写守卫 + 单写者 + undo
 - **界面中英双语**:右上角 中文 ⇄ English 切换(纯前端 i18n,只翻界面 chrome;wiki 内容/agent 回答/报告体保持源语言)
 
 ## 读写分线
 
-- 唯一写作业 `ingest`(及 heal/backfill/raw-write)复用 **P2 子进程 + 单写者门禁**(一个后台 worker,FIFO 串行)。
+- 唯一写作业 `ingest`(及 heal/backfill/audit/raw-write)复用 **P2 子进程 + 单写者门禁**(一个后台 worker,FIFO 串行)。
 - 所有问答(单轮 + 多轮)走**只读进程内嵌入 Agentao**(默认只读、不过门禁、仅内存)。
 
 ## 只读多会话部署 `--reader`
@@ -48,7 +49,7 @@ guanlan -C my-wiki web --reader
 
 把单用户宿主开成**只读多用户部署**:
 
-- **不注册任何写路由**(raw/upload/ingest/heal/backfill/workspace-delete/graph 重建/undo → 404/405)
+- **不注册任何写路由**(raw/upload/ingest/heal/backfill/audit/workspace-delete/graph 重建/undo → 404/405)
 - **内部强制** `session_persist=False` + `mode=read-only`(任何调用方都零写)
 - **默认 KB 零字节写入**(持久化关、agent_log 默认关)
 - 会话隔离靠现有 122-bit 能力 UUID(`?c=<conversation_id>`):关闭会话枚举端点 → 他人 id 不可发现(能力 URL 模型)

@@ -50,6 +50,8 @@ __all__ = [
     "AuditResult",
     "AuditRun",
     "audit_candidates",
+    "audit_preview",
+    "audit_preview_dict",
     "audit_result_dict",
     "run_audit",
     "run_audit_result",
@@ -566,6 +568,29 @@ def _group_dict(g: AuditGroup) -> dict:
     }
 
 
+def audit_preview_dict(
+    batch: Sequence[AuditGroup], postponed: Sequence[AuditGroup]
+) -> dict:
+    """audit **预览**（dry-run）的 wire 契约（CLI `--dry-run --json` / Web `GET /api/audit/preview`
+    共用，仿 `audit_result_dict`）：本批将复核的漂移源组 + 因 `--limit` 推迟的组。"""
+    return {
+        "groups": [_group_dict(g) for g in batch],
+        "postponed": [_group_dict(g) for g in postponed],
+    }
+
+
+def audit_preview(wiki: str | Path, *, limit: int = DEFAULT_LIMIT) -> dict:
+    """零-LLM 预览漂移源组（== `audit --dry-run`），返回 `{groups, postponed}`。
+
+    单一归口：`_compute` → `_build_groups` → 按 `limit` 切分 → `audit_preview_dict`。CLI dry-run 与
+    Web `GET /api/audit/preview` 共用此口径（决策P4.12-1：预览序列化不再宿主侧重写）。纯读 `wiki/`、
+    不取 `raw/` 快照、不触 Agentao、不入队。
+    """
+    candidates, slug_to_raw = _compute(Path(wiki))
+    groups = _build_groups(candidates, slug_to_raw)
+    return audit_preview_dict(groups[:limit], groups[limit:])
+
+
 def audit_result_dict(result: AuditResult, postponed: Sequence[AuditGroup]) -> dict:
     """audit 批次回执的 wire 契约（CLI `--json` / 未来 Web 共用，仿 `heal_result_dict`）。"""
     return {
@@ -580,14 +605,7 @@ def _print_preview(
     batch: list[AuditGroup], postponed: list[AuditGroup], *, json_output: bool
 ) -> None:
     if json_output:
-        print(
-            _dumps(
-                {
-                    "groups": [_group_dict(g) for g in batch],
-                    "postponed": [_group_dict(g) for g in postponed],
-                }
-            )
-        )
+        print(_dumps(audit_preview_dict(batch, postponed)))
         return
     if not batch and not postponed:
         print("✓ 无漂移源（raw 指纹与建页时一致，或无带 raw_digest 的 source 页）。")

@@ -34,7 +34,7 @@ This is an implementation of the [Karpathy LLM Wiki pattern](https://gist.github
 | `guanlan web` | Browse, ask, and maintain in a browser (optional add-on) | partly |
 | `guanlan mcp` | Expose the wiki read-only to MCP clients (optional add-on) | partly |
 
-> There are also `reindex` (index backfill), `heal` (missing-entity materialization), `convert` (PDF/DOCX/… → markdown), etc. Per-command detail is in the **[User Guide](docs/guide/)**.
+> There are also `reindex` (index backfill), `heal` (missing-entity materialization), `audit` (semantic audit: re-review drifted sources whose `raw/` changed but the wiki wasn't re-synthesized), `remove` (source retraction: move a mis-ingested/retracted source into `.trash/`), `convert` (PDF/DOCX/… → markdown), etc. Per-command detail is in the **[User Guide](docs/guide/)**.
 
 ## Installation
 
@@ -77,7 +77,7 @@ pip install 'guanlan-wiki[web]'
 guanlan -C my-wiki web       # local Web host, 127.0.0.1 only, opens a browser by default
 ```
 
-In the browser: browse the wiki and follow `[[wikilink]]` navigation, run check·health·lint reports, view the graph, trigger ingest from `raw/`, and chat read-only with the agent. **Single-user, local only — never expose the port to a network.**
+In the browser: browse the wiki and follow `[[wikilink]]` navigation, run check·health·lint reports, view the graph, trigger ingest and other write jobs from `raw/` (incl. heal, audit drift-review, backfill), and chat read-only with the agent. **Single-user, local only — never expose the port to a network.**
 
 For a full walkthrough see the **[User Guide → Quickstart](docs/guide/en/02-quickstart.md)**.
 

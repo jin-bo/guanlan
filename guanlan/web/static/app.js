@@ -779,6 +779,156 @@ function renderHealDone(job) {
   }
 }
 
+// ── audit：语义审计（预览漂移源组 → 一键复核 → 轮询结构化回执，P4.12）──────────────
+//
+// 顶栏「审计」→ 浮层先拉零-LLM 预览（可调 limit），列本批将复核的漂移源组（raw 已变但 wiki 未重综合）
+// + 推迟项；「审计」→ POST /api/audit（入单写者队列，与 ingest/heal/backfill 同 worker 串行）→ 复用
+// pollJob 骨架，因 audit 有结构化 result，完成分支按 job.result 渲染回执（已刷新指纹 / 未完成 / 推迟 /
+// 退出码徽标），agent 散文取自 job.output（同 heal）。无子集勾选（决策P4.12-3，唯一旋钮是 limit）；
+// 复用 heal-* 样式类（决策P4-3 克制，不引新 CSS）。
+$("#audit-btn").addEventListener("click", () => openAuditPreview());
+
+async function openAuditPreview(limit) {
+  showOverlay("overlay.audit", `<p class="muted">${escapeHtml(t("audit.computing"))}</p>`);
+  const suffix = limit ? `?limit=${encodeURIComponent(limit)}` : "";
+  let data;
+  try {
+    data = await getJSON(`/api/audit/preview${suffix}`);
+  } catch (e) {
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("audit.previewFail", e.message))}</p>`;
+    return;
+  }
+  renderAuditPreview(data, limit);
+  overlayRepaint = () => renderAuditPreview(data, limit); // 语言切换纯重渲染（吃缓存 data）
+}
+
+function renderAuditPreview(data, limit) {
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  const groups = data.groups || [];
+  const postponed = data.postponed || [];
+
+  // 顶部一行：左「审计 N 个漂移源」（仅 groups 非空），右「limit + 预览」微调控件。
+  const top = document.createElement("div");
+  top.className = "heal-top";
+  if (groups.length) {
+    const go = document.createElement("button");
+    go.className = "heal-go";
+    go.textContent = t("audit.auditN", groups.length);
+    // 用**本次预览所用的** limit（renderAuditPreview 入参），而非输入框现值（同 heal 决策P4.3-3 的口径）。
+    go.addEventListener("click", () => triggerAudit(limit || ""));
+    top.appendChild(go);
+  }
+  const ctrl = document.createElement("div");
+  ctrl.className = "heal-ctrl";
+  const limitIn = document.createElement("input");
+  limitIn.type = "number"; limitIn.min = "1"; limitIn.className = "heal-num";
+  limitIn.placeholder = "limit"; if (limit) limitIn.value = limit;
+  const refresh = document.createElement("button");
+  refresh.textContent = t("audit.preview");
+  refresh.addEventListener("click", () => openAuditPreview(limitIn.value || ""));
+  ctrl.append(limitIn, refresh);
+  top.appendChild(ctrl);
+  box.appendChild(top);
+
+  if (!groups.length) {
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = postponed.length ? t("audit.batchEmpty", postponed.length) : t("audit.none");
+    box.appendChild(note);
+    if (!postponed.length) return;
+  } else {
+    const head = document.createElement("p");
+    head.textContent = t("audit.head", groups.length);
+    box.appendChild(head);
+    for (const g of groups) {
+      const row = document.createElement("div");
+      row.className = "heal-item";
+      const bodyEl = document.createElement("span");
+      bodyEl.className = "heal-item-body";
+      const tgt = document.createElement("span");
+      tgt.className = "heal-target";
+      tgt.textContent = `⚠ ${g.slug}`; // textContent：slug/文件名按字面显示，无注入
+      const meta = document.createElement("span");
+      meta.className = "heal-meta";
+      meta.textContent = t("audit.groupMeta", g.raw_path, (g.members || []).length, (g.members || []).join("、"));
+      bodyEl.append(tgt, meta);
+      row.appendChild(bodyEl);
+      box.appendChild(row);
+    }
+  }
+
+  if (postponed.length) {
+    const ph = document.createElement("p");
+    ph.className = "muted";
+    ph.textContent = t("audit.postponedHead", postponed.length);
+    box.appendChild(ph);
+    for (const g of postponed) {
+      const row = document.createElement("div");
+      row.className = "heal-item postponed";
+      row.textContent = t("audit.postponedItem", g.slug, (g.members || []).length);
+      box.appendChild(row);
+    }
+  }
+}
+
+async function triggerAudit(limit) {
+  showOverlay("overlay.audit", `<p class="muted">${escapeHtml(t("audit.submitted"))}</p>`);
+  const body = {};
+  if (limit) body.limit = Number(limit);
+  try {
+    const { job_id } = await postJSON("/api/audit", body);
+    await pollJob(job_id, "audit", renderAuditDone);
+  } catch (e) {
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.submitFail", e.message))}</p>`;
+  }
+}
+
+function renderAuditDone(job) {
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  const ok = job.exit_code === 0;
+  const badge = document.createElement("p");
+  badge.innerHTML = ok
+    ? `<span class="report-ok">${escapeHtml(t("common.passed"))}</span>`
+    : `<span class="report-bad">${escapeHtml(t("common.exitCode", job.exit_code))}</span>`;
+  box.appendChild(badge);
+
+  const result = job.result;
+  if (result) {
+    const receipts = result.receipts || [];
+    const refreshed = receipts.filter((r) => r.status === "refreshed");
+    const incomplete = receipts.filter((r) => r.status === "incomplete");
+    const summary = document.createElement("p");
+    summary.textContent = t("audit.doneSummary", receipts.length, refreshed.length, incomplete.length);
+    box.appendChild(summary);
+    for (const r of refreshed) {
+      const div = document.createElement("div");
+      div.className = "heal-receipt resolved";
+      div.textContent = t("audit.refreshed", r.slug, (r.members || []).length); // slug 是内容、按字面显示
+      box.appendChild(div);
+    }
+    for (const r of incomplete) {
+      const div = document.createElement("div");
+      div.className = "heal-receipt broken";
+      div.textContent = t("audit.incomplete", r.slug, r.reason);
+      box.appendChild(div);
+    }
+    if ((result.postponed || []).length) {
+      const d = document.createElement("div");
+      d.className = "muted";
+      d.textContent = t("audit.donePostponed", result.postponed.length);
+      box.appendChild(d);
+    }
+  }
+
+  if (job.output) {
+    const pre = document.createElement("pre");
+    pre.textContent = collapseCR(job.output); // agent 散文（折叠 \r 进度条，同 heal）
+    box.appendChild(pre);
+  }
+}
+
 // ── backfill：把一次好问答沉淀为 wiki/syntheses/ 综合页（P4.8）─────────────────────
 //
 // 顶栏「回填」或问答气泡的「沉淀」小按钮 → 同一浮层（问题文本域 + 「沉淀」提交）→ POST /api/backfill
@@ -1546,7 +1696,7 @@ function setModeBadge(mode) {
 function applyReaderMode() {
   const hideIds = [
     "history-btn",                                          // 枚举他人会话 → 破隔离（决策P4.9-3）
-    "feed-btn", "ingest-btn", "heal-btn", "backfill-btn", "staging-btn", // 写端点（reader 下 404）
+    "feed-btn", "ingest-btn", "heal-btn", "backfill-btn", "audit-btn", "staging-btn", // 写端点（reader 下 404）
     "attach-btn",                                           // 上传是写（404）
     "graph-btn",                                            // 重建是写者（404）；不给死链（决策P4.9-11）
     "mode-badge",                                           // 姿态恒只读、/mode 已禁可写 → 冻结隐藏（决策P4.9-4）
