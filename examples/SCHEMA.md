@@ -18,6 +18,8 @@
 
 <!-- 删掉本库用不到的类型；新增类型也在此声明。 -->
 
+> `source` 页 frontmatter 上的 `raw_digest`（`'raw/<原文件名>@sha256:<hex>'`）是 **wrapper 托管的 provenance 字段**（P3.7）：ingest 后自动写、`guanlan audit` 复核后刷新，用于检测 source-drift（源被替换但 wiki 未重综合）。**人与 Agent 都勿手改**；`check` 对它不可见。
+
 ## 本库自定义规则
 
 <!-- 覆盖或补充 skill 默认约定的地方。例： -->

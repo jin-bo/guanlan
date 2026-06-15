@@ -34,6 +34,7 @@ last_updated: YYYY-MM-DD
 - `sources` 列 source 页的 slug（不含路径/扩展名），用于追溯与 `guanlan check` 校验。**re-ingest 既有页时 `sources` 取并集**（保留原有 slug、追加本次新增）——只增不减；覆盖丢源会被写门禁 `sources.dropped` 阻断并回喂自愈（同理 `tags`/`aliases` 也取并集，正文增补不整段重写）。
 - `aliases`（可选，仅 entity/concept 常用）列本页的常用别名/变体名（见下「别名」节）；缺省即可。
 - `last_updated` 每次实质修改时更新为当天日期（ISO `YYYY-MM-DD`）。
+- `raw_digest`（**仅 source 页、wrapper 托管、请勿手改**，P3.7）：单标量 `'raw/<原文件名>@sha256:<hex>'`，记本摘要页建自该 raw 的**这个版本**的内容指纹。由 wrapper 在 ingest 过完门禁后确定性写入、由 `guanlan audit` 复核后刷新——**Agent 知其存在但永不写、不读它做判断，更不在答复里抄它**（LLM 抄不准 64 位 hex）。`check` 对它不可见、不校验。它是 source-drift（源变了但 wiki 未重综合）检测的拱心石。
 
 ## wikilink
 
@@ -161,6 +162,8 @@ last_updated: YYYY-MM-DD
 - 实体：[[…]]
 - 概念：[[…]]
 ```
+
+> source 页落盘后，wrapper 会自动在其 frontmatter 补一条 `raw_digest`（建页时的 raw 内容指纹，供 `audit` 检测 source-drift）。**你不写、不改、不读它**——它是 wrapper 托管的 provenance 字段（见上「frontmatter」节）。
 
 **entity / concept**
 

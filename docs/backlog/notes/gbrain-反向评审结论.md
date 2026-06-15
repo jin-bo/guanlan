@@ -1,7 +1,7 @@
 # gbrain 反向评审结论（backlog）
 
 > 状态：**反向评审结论，非排期项**。记录对 `../llm-wiki/gbrain`（v0.42.42、TypeScript/Bun、Postgres/PGLite、~146K 页的生产级"第二大脑"，CLI + MCP/HTTP 宿主）逐条款的"借不借/怎么落"研判，供后续排期参照。**本笔记不改变现状**。
-> 关联：[`openkb-反向评审结论.md`](openkb-反向评审结论.md)（同类反向评审先例）、[`next-milestone-and-graph-viz.md`](next-milestone-and-graph-viz.md)（反向评审收口先例）、[`cjk-retrieval-enhancements.md`](cjk-retrieval-enhancements.md)（检索增强线，§3 借点并入此线）、[`../../P5.0-检索层.md`](../../P5.0-检索层.md)、[`../../P3.7-语义审计-草案.md`](../../P3.7-语义审计-草案.md)、[`p3.7-语义审计-raw_digest写入主体未决.md`](p3.7-语义审计-raw_digest写入主体未决.md)、[`../../P6-技能蒸馏-草案.md`](../../P6-技能蒸馏-草案.md)、DESIGN §8（语义维护 / CJK 检索 / graph 增强）/ §7（路线表 E1·E2·E3）。
+> 关联：[`openkb-反向评审结论.md`](openkb-反向评审结论.md)（同类反向评审先例）、[`next-milestone-and-graph-viz.md`](next-milestone-and-graph-viz.md)（反向评审收口先例）、[`cjk-retrieval-enhancements.md`](cjk-retrieval-enhancements.md)（检索增强线，§3 借点并入此线）、[`../../P5.0-检索层.md`](../../P5.0-检索层.md)、[`../../P3.7-语义审计.md`](../../P3.7-语义审计.md)、[`p3.7-语义审计-raw_digest写入主体未决.md`](p3.7-语义审计-raw_digest写入主体未决.md)、[`../../P6-技能蒸馏-草案.md`](../../P6-技能蒸馏-草案.md)、DESIGN §8（语义维护 / CJK 检索 / graph 增强）/ §7（路线表 E1·E2·E3）。
 
 ## 0. 一句话 / 为什么记
 
@@ -17,7 +17,7 @@ gbrain 与观澜**同源不同量级**（同 Karpathy LLM Wiki 模式，但 gbra
 | **软删 + 恢复窗**（72h soft-delete → `purge` 硬删） | 🟡 **形状借**（佐证并加固源撤回） | 本笔记 §5 → 喂候选 `docs/P3.9-源撤回.md`（见 [openkb §5](openkb-反向评审结论.md)） |
 | **检索质量回放评测**（录真实 query+结果 → replay 测代码回归） | 🟡 **借纪律**（落成 test fixture，非运行时命令）→ **已实现** | 本笔记 §6 → `tests/test_search_quality.py`（黄金集 P@k 回归闸） |
 | **wrapper 侧成本闸**（`--max-usd`，超预算 abort） | 🟡 **存疑借**（需 1 行确认 agentao 是否已托底） | 本笔记 §6 → `ingest`/`query`/`backfill` |
-| **矛盾检测**（LLM judge 配对 + 持久缓存，入 dream cycle） | 🔵 **已在路上** = P3.7；gbrain 仅佐证 + 加"缓存已判对"实现点 | 本笔记 §7 → [`P3.7-语义审计-草案.md`](../../P3.7-语义审计-草案.md) |
+| **矛盾检测**（LLM judge 配对 + 持久缓存，入 dream cycle） | 🔵 **已在路上** = P3.7；gbrain 仅佐证 + 加"缓存已判对"实现点 | 本笔记 §7 → [`P3.7-语义审计.md`](../../P3.7-语义审计.md) |
 | **autopilot / 夜间富化**（daemon 多相位维护） | 🔵 **已 park** = DESIGN §8 / E3；gbrain 是带刺的反面参照 | 本笔记 §7 → E3 选型 |
 | **SkillOpt**（把 `SKILL.md` 当可训练参数、按 eval 自变异） | 🔵 **关联 P6**（方向相反、自变异有风险，借 propose-only 安全形状） | 本笔记 §7 → [`P6-技能蒸馏-草案.md`](../../P6-技能蒸馏-草案.md) |
 | Postgres/PGLite DB · 持久向量索引 · hybrid 向量检索 · query cache · RRF 融合 | 🅴 **E1，别借** | 本笔记 §8；DESIGN §8 检索增强 |
@@ -63,7 +63,7 @@ gbrain 与观澜**同源不同量级**（同 Karpathy LLM Wiki 模式，但 gbra
 
 ## 7. 🔵 已在路上 / 已 park（gbrain 仅佐证）
 
-- **矛盾检测 → P3.7**：gbrain `eval suspected-contradictions` 用 LLM judge 扫页对、**持久缓存判过的对**（不重判）、并入每日 dream。这正是观澜 [`P3.7-语义审计-草案.md`](../../P3.7-语义审计-草案.md)（借自 swarmvault 双层分诊）。gbrain 唯一可加的实现点：**缓存已判页对**省重复 LLM 花费——记进 P3.7.x。其余（gbrain 单 LLM agent 自由漫游、报告 only 不写回）同 OpenKB linter，**再次佐证 P3.7"确定性 worklist → 门禁内复核 → 就地标注"更克制的方向**。
+- **矛盾检测 → P3.7**：gbrain `eval suspected-contradictions` 用 LLM judge 扫页对、**持久缓存判过的对**（不重判）、并入每日 dream。这正是观澜 [`P3.7-语义审计.md`](../../P3.7-语义审计.md)（借自 swarmvault 双层分诊）。gbrain 唯一可加的实现点：**缓存已判页对**省重复 LLM 花费——记进 P3.7.x。其余（gbrain 单 LLM agent 自由漫游、报告 only 不写回）同 OpenKB linter，**再次佐证 P3.7"确定性 worklist → 门禁内复核 → 就地标注"更克制的方向**。
 - **autopilot / 夜间富化 → E3**：gbrain autopilot daemon + 22 相位 dream cycle，是观澜 DESIGN §8 "nightly enrichment remain post-P5"的样板。但它也是**带刺的反面参照**：把零-LLM 结构修复（lint --fix / extract）和 LLM 合成（synthesize / consolidate / propose_takes）**揉进同一相位链**，正是观澜要避免的（零-LLM/LLM 干净分档）。E3 排期时参照其相位编排（"先修文件后建索引"的依赖序），但**保持分档**。
 - **SkillOpt → P6**：gbrain SkillOpt 把 `SKILL.md` 当**可训练参数**、按 eval benchmark **自变异** skill markdown；bundled skill 安全：**propose-only、绝不自动变异**。与观澜 [`P6-技能蒸馏-草案.md`](../../P6-技能蒸馏-草案.md) **方向相反**（P6 = 把 wiki 子集蒸馏成可分发 skill；SkillOpt = 优化维护 skill 自身）。自变异有风险，**只值得借那条 propose-only 安全纪律**（自动改 skill 前先产 propose 供人审）。其余 park，记一笔。
 

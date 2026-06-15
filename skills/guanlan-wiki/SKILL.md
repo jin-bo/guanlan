@@ -121,6 +121,28 @@ description: >
 
 > **永不删除或覆盖重写已有页正文、永不修改 `raw/`**：heal 只**新建** `entities/`/`concepts/` 页、**向既有页纯追加别名收编本批目标**、编辑 `index.md`、追加 `log.md`。其余越界写（建到 `entities/`∪`concepts/` 之外 / 改正文 / 改非 aliases 字段 / 删页 / 在收编里夹带无关别名 / 把页换成符号链接）会被 wrapper 的写集审计标为 `unexpected_write`。其余收尾见〈写工作流收尾（共用）〉。
 
+### audit（P3.7）— `guanlan audit`
+
+**语义审计：复核「源变了、但 wiki 页还没重新综合」的过期论断（source-drift）。** 与 heal 平级（同走 P2 写门禁），但触发信号是语义的。wrapper 已做完确定性粗筛——比对每张 source 摘要页 frontmatter 的 `raw_digest`（建页时记的 raw 内容指纹，**wrapper 托管、你勿手改**）与 raw 现字节，圈出漂移源及沿 `sources:` 传播到的引用页，并把本批目标钉成逐行 `page | reason | drifted_slugs | raw_paths` 喂进 prompt。你**只做语义判断**，不必自己找漂移源或解析 hash。
+
+对 prompt 里的**每个目标页**：
+
+1. 读该页正文 + 该行 `raw_paths` 列出的 `raw/` 源**现版本**，判断页中论断是否仍被现源支持。
+   - `reason=source-drift`（该行就是 source 摘要页自身，raw 在它自己的 `raw_digest` 里、不在 `sources:`）：对照本页摘要与其 raw 现版本。
+   - `reason=cites-drifted-source`：对照本页跨这些源的综合是否仍成立。
+2. 据判断处置正文：
+   - **仍准** → 无需改正文（`raw_digest` 刷新由 wrapper 在你返回后自动处理，**你绝不碰 `raw_digest`**）。
+   - **已过期 / 现源与页冲突** → 就地按 conventions 标 `## ⚠️ 矛盾与存疑`，或**最小化更新**该论断（其余正文一字不动，绝不整段重写）。
+3. **逐页留痕（强制、唯一凭据）**：在**唯一一条** `## [YYYY-MM-DD] audit | <一句话批次说明>` 标题下，对**每个目标页**追加一行**单行 JSON**：
+
+   ```
+   - {"page":"<相对库根 posix>","drifted_slugs":["…"],"status":"confirmed|flagged|updated"}
+   ```
+
+   `drifted_slugs` **照抄该 target 行给你的那串、不增不删**；`status`：仍准=`confirmed`、标存疑=`flagged`、改了论断=`updated`。这是 wrapper 判定「整组复核完、可刷新源指纹」的**唯一依据**——**漏写某页 / slugs 写错 / 写成多段 audit 标题 / 写成非合法 JSON** 都会让该页所在的整组不刷新、下次重审。本次**只新增这一段 audit 标题**，不要改历史 log。
+
+> **永不碰 `raw_digest`、永不修改 `raw/`、绝不整段重写正文**：audit 只**就地标注/最小更新** `wiki/` 内容页 + 追加一段 `log.md`。`raw_digest` 是 wrapper 确定性算的指纹（LLM 抄不准 64 位 hex），刷新归 wrapper；既有 `sources` 只增不减（`sources.dropped` 阻断）。其余收尾见〈写工作流收尾（共用）〉。
+
 ### 写工作流收尾（共用）
 
 ingest / heal / `query --backfill` 等会写 `wiki/` 的工作流，收尾一致，记三条即可：
@@ -150,4 +172,4 @@ ingest / heal / `query --backfill` 等会写 `wiki/` 的工作流，收尾一致
 - `guanlan graph`（P3）— 解析 `[[wikilink]]` → 边，输出 `graph.json` + 自包含静态 `graph.html`。
 
 > `index.md` / `log.md` / `overview.md` / `SCHEMA.md` 是 config 非 content，**排除出 index/graph/lint 扫描**。
-> LLM 只用于 ingest / query；其余工作流全部零 LLM。语义 lint（矛盾复检/过期论断/资料缺口）属 P3 之后。
+> LLM 只用于 ingest / query / heal / **audit**；其余工作流（check/health/reindex/lint/graph + audit 的 Layer-1 粗筛）全部零 LLM。`audit`（P3.7）跑通了语义 lint 的「过期论断 / source-drift」一类；矛盾复检/资料缺口仍属 P3.7 之后。
