@@ -24,6 +24,7 @@ from .init import run_init
 from .lint import MISSING_ENTITY_MIN_REFS, lint_entrypoint
 from .query import run_query
 from .reindex import reindex_entrypoint
+from .remove import remove_entrypoint
 from .search import search_entrypoint
 from .skill import install_skill
 
@@ -100,6 +101,10 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
     return reindex_entrypoint(
         args.dir, prune=args.prune, dry_run=args.dry_run, json_output=args.json
     )
+
+
+def _cmd_remove(args: argparse.Namespace) -> int:
+    return remove_entrypoint(args.dir, src=args.src, yes=args.yes, json_output=args.json)
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
@@ -315,6 +320,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_reindex.add_argument("--json", action="store_true", help="输出 JSON 契约")
     p_reindex.set_defaults(func=_cmd_reindex)
+
+    # remove（P3.9）：人发起的零-LLM 源撤回——移源自身落盘物入 .trash/ + 摘多源页引用 + 修 index。
+    # 默认预览、显式 --yes 才写（比 reindex/convert 默认即写更保守，因删内容页破坏性更大）。
+    p_remove = sub.add_parser(
+        "remove",
+        parents=[dir_parent],
+        help="源撤回：把误摄/已撤稿源移入 .trash/ + 摘多源页引用 + 修 index（零 LLM、人发起，默认预览）",
+    )
+    p_remove.add_argument("src", help="源标识：<slug> / raw/<slug>.md / wiki/sources/<slug>.md")
+    p_remove.add_argument(
+        "--yes", action="store_true", help="确认执行（不带则只打印 worklist、零写盘）"
+    )
+    p_remove.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p_remove.set_defaults(func=_cmd_remove)
 
     p_search = sub.add_parser(
         "search",
