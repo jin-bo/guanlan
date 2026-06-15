@@ -51,6 +51,8 @@ __all__ = [
     "resolve_owner",
     "index_md_links",
     "index_sync_state",
+    "FINDING_CAUSAL_ORDER",
+    "order_findings",
     "report_dict",
     "report_json",
 ]
@@ -351,6 +353,49 @@ def resolve_owner(raw: str, idx: Mapping[str, str]) -> str | None:
     if fk in idx:
         return idx[fk]  # fold variant 兜底
     return None
+
+
+# finding 因果排序（gbrain 反向评审 §3「doctor-cause-rank」借形状；纯展示层、零 LLM、确定性）。
+# `health`/`lint` 默认平铺输出 findings，让人/Agent 可能先去手修**症状**而非**根因**。这里按
+# 「根因/数据完整性 → 内容质量 → 拓扑优化」三档给每个 kind 一个稳定 rank，输出时据此重排——
+# **不改 finding 集合、不改退出码**（仍 riding `EXIT_LINT_FINDINGS`），只改顺序。
+#
+# 唯一**机械因果**对是 `lint.missing_entity → lint.broken_link`：缺失实体是同一未解析目标被 ≥N 页
+# 引用的聚合，建页即消解它聚合的那几条 broken_link（决策P3.2-1 同源），故因排在果前。其余为
+# 「先修对的那个」的优先序（数据完整性 > 内容/组织 > 拓扑 nice-to-have），非机械因果。
+# 注：gbrain 例「index_missing → orphan/broken」跨 health/lint 两条命令、无法在单份报告里合并，
+# 故只在**各命令报告内**排序、并守住命令内那对真因果。
+FINDING_CAUSAL_ORDER: tuple[str, ...] = (
+    # 第一档 · 根因 / 数据完整性（修之即消解下游症状）
+    "lint.missing_entity",  # 根因：建页即消解其聚合的多条 broken_link（机械因果）
+    "lint.broken_link",  # 断链（missing_entity 之果 + 零散单引）
+    "health.index_missing_page",  # 磁盘有页未入 index（结构未接好）
+    "health.index_dangling",  # index 悬挂链接
+    "lint.orphan",  # 无入链（待接入）
+    # 第二档 · 内容 / 组织质量
+    "health.stub_page",
+    "health.type_dir_mismatch",
+    "health.uncharted_page",
+    # 第三档 · 拓扑优化建议（结构 nice-to-have，非坏数据）
+    "lint.hub_node",
+    "lint.thin_intercommunity_link",
+    "lint.isolated_community",
+    "lint.bridge_edge",
+    "lint.cut_vertex",
+)
+_FINDING_RANK = {kind: i for i, kind in enumerate(FINDING_CAUSAL_ORDER)}
+# 未登记 kind 的兜底 rank：排在所有已登记 kind 之后（恒大于任一已登记 rank）。
+_FINDING_RANK_FALLBACK = len(FINDING_CAUSAL_ORDER)
+
+
+def order_findings(findings: list[Finding]) -> list[Finding]:
+    """按因果/优先级对 findings 做**纯展示层稳定重排**：上游因排在下游果之前（gbrain §3 借形状）。
+
+    零-LLM、确定性；**不改 finding 集合、不改退出码**——只改输出顺序。`sorted` 稳定，故各 kind
+    内既有的确定性次序（如 broken_link 的 `(source,target)` 升序）原样保留；未登记的 kind 取末档
+    rank、稳定地排在已登记 kind 之后。新返回列表，不就地改入参。
+    """
+    return sorted(findings, key=lambda f: _FINDING_RANK.get(f.kind, _FINDING_RANK_FALLBACK))
 
 
 def report_dict(*, ok: bool, pages_checked: int, items_key: str, items: list) -> dict:

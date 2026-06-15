@@ -161,3 +161,82 @@ def test_json_contract(tmp_path: Path, capsys):
 
 def test_non_kb_root_fails(tmp_path: Path):
     assert lint_entrypoint(tmp_path, json_output=False, strict=False) == 1
+
+
+# ---------- finding 因果排序（gbrain §3，纯展示层） ----------
+
+
+def test_missing_entity_ordered_before_broken_link(tmp_path: Path):
+    """根因 missing_entity 排在其果 broken_link 之前（机械因果：建页即消解聚合断链）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    # [[Baz]] 被三页引用（> MISSING_ENTITY_MIN_REFS=2，留余量）→ missing_entity，
+    # 且每条引用本身也是 broken_link。
+    for n in "ABC":
+        _page(wiki, f"concepts/{n}.md", body="见 [[Baz]]")
+
+    kinds = _kinds(run_lint(wiki))
+    assert "lint.missing_entity" in kinds and "lint.broken_link" in kinds
+    assert kinds.index("lint.missing_entity") < kinds.index("lint.broken_link")
+
+
+def test_topology_findings_sink_below_data_integrity(tmp_path: Path):
+    """拓扑优化建议（hub/cut_vertex/…）沉底于数据完整性类（broken_link/orphan）之后。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    # 八辐星形枢纽（度 8 > HUB_MIN_DEGREE=5，留余量、不卡在度地板上）+ 一条断链：
+    # 既出 hub_node 又出 broken_link。
+    spokes = "ABCDEFGH"
+    body = " ".join(f"[[{n}]]" for n in spokes) + " 断链 [[Ghost]]"
+    _page(wiki, "concepts/Hub.md", body=body)
+    for n in spokes:
+        _page(wiki, f"concepts/{n}.md", body="回链 [[Hub]]")
+
+    kinds = _kinds(run_lint(wiki))
+    topo = {
+        "lint.hub_node",
+        "lint.cut_vertex",
+        "lint.thin_intercommunity_link",
+        "lint.isolated_community",
+        "lint.bridge_edge",
+    }
+    present_topo = [k for k in kinds if k in topo]
+    assert present_topo, "本用例应至少触发一类拓扑建议"
+    first_topo = min(kinds.index(k) for k in present_topo)
+    # broken_link 是数据完整性类，必须排在任何拓扑建议之前。
+    assert kinds.index("lint.broken_link") < first_topo
+
+
+def test_ordering_preserves_intra_kind_order_and_is_stable(tmp_path: Path):
+    """稳定排序：各 kind 内既有确定性次序（broken_link 按 (source,target)）不变，且可重放。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/A.md", body="断链 [[zzz]]")
+    _page(wiki, "concepts/B.md", body="断链 [[aaa]]")
+
+    findings1 = run_lint(wiki).findings
+    findings2 = run_lint(wiki).findings
+    # 同库同跑两次完全一致（确定性、字节稳定）。
+    assert [(f.page, f.kind, f.detail) for f in findings1] == [
+        (f.page, f.kind, f.detail) for f in findings2
+    ]
+    # broken_link 内部仍按源页路径升序（A.md 在 B.md 前），重排不打乱 kind 内次序。
+    broken_pages = [f.page for f in findings1 if f.kind == "lint.broken_link"]
+    assert broken_pages == sorted(broken_pages)
+
+
+def test_ordering_does_not_change_finding_set_or_exit_code(tmp_path: Path):
+    """因果排序只改顺序：finding 集合、计数、退出码（建议非门禁）全不变。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/Lonely.md", body="孤儿 + 断链 [[Ghost]]")
+
+    report = run_lint(wiki)
+    # 集合（与顺序无关）即检测所得，逐项核对——确认重排不增不减、不去重。
+    # Lonely.md 无入链 → orphan；[[Ghost]] 单引 → broken_link（未达 missing_entity 阈值）。
+    assert {(f.page, f.kind) for f in report.findings} == {
+        ("wiki/concepts/Lonely.md", "lint.orphan"),
+        ("wiki/concepts/Lonely.md", "lint.broken_link"),
+    }
+    assert lint_entrypoint(tmp_path, json_output=False, strict=False) == 0
+    assert lint_entrypoint(tmp_path, json_output=False, strict=True) == 6

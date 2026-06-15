@@ -9,6 +9,10 @@
 
 findings 是**建议性**（决策P3-4）：默认退 0，`--strict` 下有 findings → `EXIT_LINT_FINDINGS(6)`。
 frontmatter 走容错档（`pages.load_page`），坏数据不中断体检——正确性归口 `check`（决策P3-8）。
+
+输出按 `pages.order_findings` 做**因果排序**（纯展示层、零 LLM、确定性）：数据完整性/结构同步类
+（index 同步）先于内容/组织建议（桩页/页型漂移）——不改 finding 集合/退出码，只改顺序
+（gbrain 反向评审 §3 借形状，见 docs/finding-因果排序.md）。
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from .pages import (
     index_sync_state,
     iter_pages,
     load_page,
+    order_findings,
     report_json,
 )
 from .paths import require_kb_root
@@ -171,7 +176,13 @@ def run_health(wiki: Path) -> HealthReport:
                 findings.append(mismatch)
     findings.extend(_check_index_sync(wiki, root, content_pages))
 
-    return HealthReport(ok=not findings, pages_checked=len(content_pages), findings=findings)
+    # finding 因果排序（纯展示层、零 LLM）：数据完整性/结构同步类先于内容/组织建议。稳定排序保
+    # 既有逐页/逐项确定性次序不变（gbrain §3，见 pages.order_findings）。
+    return HealthReport(
+        ok=not findings,
+        pages_checked=len(content_pages),
+        findings=order_findings(findings),
+    )
 
 
 def format_report(report: HealthReport, *, json_output: bool) -> str:

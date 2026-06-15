@@ -272,3 +272,39 @@ def test_json_contract(tmp_path: Path, capsys):
 
 def test_non_kb_root_fails(tmp_path: Path):
     assert health_entrypoint(tmp_path, json_output=False, strict=False) == 1  # 无 wiki/
+
+
+# ---------- finding 因果排序（gbrain §3，纯展示层） ----------
+
+
+def test_index_sync_ordered_before_content_quality(tmp_path: Path):
+    """数据完整性/结构同步类（index_missing_page）排在内容/组织建议（stub_page）之前。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki, index="# 索引\n\n## Concepts\n")  # 不收录任何页 → index_missing
+    _page(wiki, "entities/Stub.md", type="entity", body="短")  # 桩页 + 未收录
+
+    kinds = _kinds(run_health(wiki))
+    assert "health.index_missing_page" in kinds and "health.stub_page" in kinds
+    assert kinds.index("health.index_missing_page") < kinds.index("health.stub_page")
+
+
+def test_health_ordering_deterministic_and_set_preserved(tmp_path: Path):
+    """因果排序确定性可重放；finding 集合与退出码不变（建议非门禁）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki, index="# 索引\n\n## Concepts\n")
+    _page(wiki, "concepts/Stub.md", body="短")  # 桩页 + 未收录
+    _page(wiki, "entities/Empty.md", type="entity", body="  \n")  # 空桩页 + 未收录
+
+    r1, r2 = run_health(wiki), run_health(wiki)
+    assert [(f.page, f.kind, f.detail) for f in r1.findings] == [
+        (f.page, f.kind, f.detail) for f in r2.findings
+    ]
+    # 集合（与顺序无关）逐项核对：两页各出 stub_page + index_missing_page，重排不增不减。
+    assert {(f.page, f.kind) for f in r1.findings} == {
+        ("wiki/concepts/Stub.md", "health.stub_page"),
+        ("wiki/entities/Empty.md", "health.stub_page"),
+        ("wiki/concepts/Stub.md", "health.index_missing_page"),
+        ("wiki/entities/Empty.md", "health.index_missing_page"),
+    }
+    assert health_entrypoint(tmp_path, json_output=False, strict=False) == 0
+    assert health_entrypoint(tmp_path, json_output=False, strict=True) == 6
