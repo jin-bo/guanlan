@@ -4365,6 +4365,22 @@ def test_search_field_parity_with_cli(client, kb) -> None:
     assert web == cli  # 解析后相等（同一 search_result_dict 归口；非字节级，二者序列化参数不同）
 
 
+def test_search_applies_backlink_rerank_through_endpoint(client, kb) -> None:
+    """P5.3：/api/search 经 `CorpusCache.search` 应用反链重排（transport 级覆盖——挡端点漏传 inlinks）。
+
+    同 BM25 两页（Aaa/Zzz 正文标题全同），Ref 给 Zzz 一条入链、自身不命中 query。若端点漏接反链先验，
+    两页同分按 path 升序 → Aaa 在前、本断言失败；正确接入则有入链的 Zzz 上浮到前。
+    """
+    write_page(kb, "wiki/entities/Aaa.md", type="entity", body="区块链 技术 内容。")
+    write_page(kb, "wiki/entities/Zzz.md", type="entity", body="区块链 技术 内容。")
+    write_page(kb, "wiki/concepts/Ref.md", type="concept", body="见 [[Zzz]]")
+    body = client.get("/api/search", params={"q": "区块链", "limit": 10}).json()
+    pages = [r["page"] for r in body["results"]]
+    assert pages[:2] == ["wiki/entities/Zzz.md", "wiki/entities/Aaa.md"]
+    # 与冷算 `search_pages`（同样带 boost）逐字段一致——四处接入名次同口径（决策P5.3-4）。
+    assert body == _srd(search_pages(kb / "wiki", "区块链", limit=10))
+
+
 @pytest.mark.parametrize("q", ["", "   ", "！？。", "  -- … "])
 def test_search_blank_or_punct_422(client, q) -> None:
     """空/纯空白/纯标点 query → 422 + HTTP 原生 `{"detail":…}`（非 CLI 的 `{"ok":false,…}`，决策P5.1-4/5）。"""

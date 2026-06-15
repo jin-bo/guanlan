@@ -57,6 +57,9 @@ B = 0.75
 # 字段 boost：title/alias 命中按倍数计入 tf，但**不**进 dl/avgdl（决策P5.0-17）。
 TITLE_BOOST = 3
 ALIAS_BOOST = 2
+# 反链文档先验权重（P5.3，决策P5.3-2）：命中页按入链数温和乘性上浮，因子 `1 + W·ln(1+c)`——
+# c=0 时因子恰 1.0，零反链页 BM25 分原样保留、绝不被归零挤出。
+BACKLINK_WEIGHT = 0.5
 # 片段窗口宽度（约 140 字符，决策内 §3.4）。
 SNIPPET_WIDTH = 140
 
@@ -291,12 +294,25 @@ def _snippet(body: str, query_tokens: list[str]) -> str:
     return " ".join(body[start : start + SNIPPET_WIDTH].split())
 
 
-def score(docs: list[DocBag], query: str, *, limit: int) -> SearchResult:
+def score(
+    docs: list[DocBag],
+    query: str,
+    *,
+    limit: int,
+    inlinks: dict[str, int] | None = None,
+) -> SearchResult:
     """BM25 + 字段加权打分 + 稳定排序 + 片段（**廉价**部分）。
 
     内核契约：`limit < 1` → `ValueError`（决策P5.0-15，web/mcp 直接复用、不靠 CLI 兜底）。
     零除守卫（决策P5.0-12）：N=0 与零-query-token 硬短路；`avgdl=0` 不短路而把长度归一化比值定义
     为 0（保字段召回），绝不除零。
+
+    **P5.3 反链文档先验**（决策P5.3-1/2/4）：`inlinks` 缺省 `None` → 纯 BM25（向后兼容、零扰动）；
+    若给（`{相对库根 posix → 入链数}`，由 `compute_backlinks(build_graph(...))` 出，键基同 `DocBag.page`），
+    则按入链数 `c` 乘 `1 + BACKLINK_WEIGHT·ln(1+c)`——c=0 因子 1.0（零反链不归零、分数 == 纯 BM25）、
+    有反链温和上浮。**收录门槛判在 boost 之前**：先用未加 boost 的 `round(s,6)>0` 决定是否召回，boost
+    只重排**已召回**页、绝不把低于显示地板的弱命中页捞回（守"不改收录门槛、绝不凭空召回"，决策P5.3-7）；
+    `(-score, page)` tie-break 与确定性/字节稳定不变（乘后仍单点 `round`）。
     """
     if limit < 1:
         raise ValueError(f"limit 必须 ≥ 1：{limit}")
@@ -328,11 +344,19 @@ def score(docs: list[DocBag], query: str, *, limit: int) -> SearchResult:
             ratio = d.dl / avgdl if avgdl > 0 else 0.0
             norm = 1 - B + B * ratio
             s += idf[t] * (tf * (K1 + 1)) / (tf + K1 * norm)
-        # 用**舍入后**的分数做收录门槛，与排序/输出同口径——避免极小正分（<5e-7）被收录却显示
-        # 为 [0.000000]/score:0.0（决策P5.0-20 的"定点舍入"贯穿收录与呈现）。
+        # 收录门槛用**未加 boost** 的 BM25 原始分舍入判定（决策P5.0-20）——boost **不参与收录**，
+        # 故仅重排已召回页、绝不把低于显示地板（<5e-7 → round 到 0）的弱命中页捞回（守 §1「不改收录
+        # 门槛、绝不凭空召回」；s=0 无命中页同样恒被滤掉）。
         rounded = round(s, 6)
-        if rounded > 0:
-            scored.append((d, rounded))
+        if rounded <= 0:
+            continue
+        # P5.3 反链文档先验：仅对**已收录**页按入链数乘 `1 + W·ln(1+c)` 重排（决策P5.3-2）。c=0 因子 1.0
+        # → 跳过（零反链页分数 == 纯 BM25，字节不变）；乘后再 round 存为排序/输出分，量化仍确定、稳定。
+        if inlinks is not None:
+            c = inlinks.get(d.page, 0)  # d.page = 相对库根 posix，与 graph node.path 同基（决策P5.3-3）。
+            if c:
+                rounded = round(s * (1.0 + BACKLINK_WEIGHT * math.log1p(c)), 6)
+        scored.append((d, rounded))
 
     scored.sort(key=lambda ds: (-ds[1], ds[0].page))  # 分数降序、path 升序 tie-break。
     hits = [
@@ -349,8 +373,18 @@ def score(docs: list[DocBag], query: str, *, limit: int) -> SearchResult:
 
 
 def search_pages(wiki: Path, query: str, *, limit: int = 10) -> SearchResult:
-    """无状态冷算（CLI 路径、恒为等价权威）：建语料 → 打分。limit 校验归口在 `score`。"""
-    return score(build_corpus(Path(wiki)), query, limit=limit)
+    """无状态冷算（CLI 路径、恒为等价权威）：建语料 + 算反链 → 打分。limit 校验归口在 `score`。
+
+    P5.3：冷路额外建一次图算反链文档先验（决策P5.3-6，CLI 接受这次双全库扫描——本就是一次性冷算
+    权威、无长驻 cache 可吃）。`compute_backlinks`/`build_graph` 在此**函数级导入**，保 `score` 与
+    `DocBag` 的 import 面 graph-free（决策P5.3-3）。建图纯内存只读、确定性、不落盘（守 P5.0 stateless）。
+    """
+    from .graph import build_graph, compute_backlinks  # 函数级导入：保核 import 面 graph-free。
+
+    wiki = Path(wiki)
+    docs = build_corpus(wiki)
+    inlinks = compute_backlinks(build_graph(wiki))
+    return score(docs, query, limit=limit, inlinks=inlinks)
 
 
 def search_result_dict(result: SearchResult) -> dict:
@@ -398,6 +432,9 @@ class CorpusCache:
     def __init__(self) -> None:
         # root posix → {相对库根 posix → DocBag}：按库根分桶，避免跨库串用/误剪（见类 docstring）。
         self._caches: dict[str, dict[str, DocBag]] = {}
+        # P5.3 反链 memo（与 DocBag memo **并列的独立槽**，不纠缠，决策P5.3-5）：root posix →
+        # (语料签名, {相对库根 posix → 入链数})。签名变才重算图，签名命中直接返回。
+        self._backlinks: dict[str, tuple[tuple, dict[str, int]]] = {}
         self._lock = threading.Lock()
 
     def corpus(self, wiki: Path) -> list[DocBag]:
@@ -466,6 +503,55 @@ class CorpusCache:
             for stale in set(snapshot) - seen:
                 cache.pop(stale, None)
         return docs
+
+    def backlinks(self, wiki: Path, docs: list[DocBag]) -> dict[str, int]:
+        """长驻进程的反链文档先验 memo（P5.3，决策P5.3-5）：签名命中直接返回缓存、签名变才重算图。
+
+        **契约**：`docs` 必须来自**同一次 `self.corpus(wiki)`** 调用——它按 `iter_pages` 稳定排序返回
+        （content 页、不含 config），故签名由这份 docs **顺序聚合**即可、**无须再排序**（零额外 stat 扫描 +
+        零额外排序）。传入乱序 docs 至多触发一次多余重算（安全降级），绝不误命中致陈旧。
+
+        **失效信号 = content 页 `(mtime_ns,size)`**（与 DocBag memo 同源、同级）：`docs` 仅 content 页，
+        `build_graph` 的解析表虽含 config，但全库 stem 唯一下 config 永不是图节点、指向 config 的链接一律
+        丢弃，故 config 改动不改 content→content 入链数——content-only 失效面 near-lossless（决策P5.3-5）。
+
+        重活（`build_graph` + `compute_backlinks`）放**锁外**并发跑，确定性、幂等、**只读 `wiki/`**（用
+        `build_graph` 非 `build_and_write_graph`——零写 `graph/`，reader/MCP 可用）。并发 miss 最坏两线程
+        各建一次图、last-writer-wins——两份确定性等价，benign（同 DocBag memo「最坏多算一次、绝不永久陈旧」）。
+        """
+        wiki = Path(wiki).resolve()  # 与 corpus() 同口径：先 resolve 再分桶（避免相对路径撞同桶）。
+        bucket = wiki.parent.as_posix()
+        # 签名复用调用方刚拿到的 docs（DocBag 自带 mtime_ns/size、已是 iter_pages 序）：零额外 stat、零排序。
+        sig = tuple((d.page, d.mtime_ns, d.size) for d in docs)
+        with self._lock:  # 短临界区：纯字典读。
+            cached = self._backlinks.get(bucket)
+            if cached is not None and cached[0] == sig:
+                return cached[1]  # 签名命中 → 返回 memo，不建图。
+        from .graph import build_graph, compute_backlinks  # 函数级导入：保核 import 面 graph-free。
+
+        try:
+            inlinks = compute_backlinks(build_graph(wiki))  # 锁外重活：确定性、幂等、只读 wiki/、零写 graph/。
+        except OSError:
+            # 遍历/读盘 race（页被删/不可读）→ 本次降级为**无 boost**（纯 BM25），**不 memo 失败**、下次
+            # 重试。守 corpus() 同款 best-effort 容错：长驻读路径（/api/search、MCP search）绝不因瞬时 IO
+            # 抖动 500，退化为纯 BM25 召回仍是合法结果（决策P5.3-6 的只读容错延伸）。
+            return {}
+        with self._lock:  # 短临界区：纯字典写（last-writer-wins，benign）。
+            self._backlinks[bucket] = (sig, inlinks)
+        return inlinks
+
+    def search(self, wiki: Path, query: str, *, limit: int) -> SearchResult:
+        """长驻进程的整页召回**单一入口**（Web `/api/search` / MCP `search` / 内嵌 chat 工具共用）：
+        把 corpus + 反链文档先验 + 打分的配对收进一处（决策P5.3-4 的脚枪收口）。
+
+        消除「四处接入各自 `corpus→backlinks→score`、漏传 `inlinks` 即静默丢重排」的风险：调用方只给
+        `(wiki, query, limit)`，`docs` 与 `inlinks` 由本方法保证取自**同一次** `corpus(wiki)`（满足
+        `backlinks` 契约）。与冷算 `search_pages` 字节等价（同 query 同 wiki，boost 同口径）。limit 校验
+        归口仍在 `score`。
+        """
+        docs = self.corpus(wiki)
+        inlinks = self.backlinks(wiki, docs)
+        return score(docs, query, limit=limit, inlinks=inlinks)
 
 
 def _emit_error(message: str, *, json_output: bool, exit_code: int = EXIT_USAGE) -> int:

@@ -47,6 +47,7 @@ __all__ = [
     "Graph",
     "build_graph",
     "compute_orphans",
+    "compute_backlinks",
     "graph_to_dict",
     "dump_json",
     "render_html",
@@ -152,13 +153,40 @@ def build_graph(wiki: Path) -> Graph:
     return Graph(nodes=nodes, edges=edges, adjacency=adjacency, broken=broken)
 
 
+def _inlink_counts(g: Graph) -> dict[str, int]:
+    """每个节点 id 的入度（resolved 边、**排自环**、排 broken）——入链口径的**单一归口**。
+
+    `compute_orphans`（入度==0）与 `compute_backlinks`（入度本身）皆由此派生，故「改一处即见另一处」
+    是字面真的：自环（`source != target`）/ broken（`e.resolved`）的判定只在这一处。`e.target in counts`
+    护 `+=` 不 KeyError（resolved 边目标恒为节点 id，此为防御性兜底）。
+    """
+    counts = {n.id: 0 for n in g.nodes}
+    for e in g.edges:
+        if e.resolved and e.source != e.target and e.target in counts:
+            counts[e.target] += 1
+    return counts
+
+
 def compute_orphans(g: Graph) -> list[Node]:
     """入度为 0 的节点（**自环不算入链**——孤儿定义是"无任何**其他**页链入"，§5.1）。
 
-    供 graph 的 stats.orphans 与 lint.orphan 共用，保证两处口径一致（建图逻辑单份）。
+    供 graph 的 stats.orphans 与 lint.orphan 共用，保证两处口径一致（建图逻辑单份）。入链口径
+    复用 `_inlink_counts` 归口（与 `compute_backlinks` 同一份，不漂移）。
     """
-    has_inlink = {e.target for e in g.edges if e.resolved and e.source != e.target}
-    return [n for n in g.nodes if n.id not in has_inlink]
+    counts = _inlink_counts(g)
+    return [n for n in g.nodes if counts[n.id] == 0]
+
+
+def compute_backlinks(g: Graph) -> dict[str, int]:
+    """每页入链数（resolved 边入度，排自环、排 broken）。键用 `node.path`（相对库根 posix），对齐
+    `search.DocBag.page`（决策P5.3-3，供 P5.0 检索 backlink 重排做文档先验）。
+
+    与 `compute_orphans` **同一入链口径**——同走 `_inlink_counts` 归口，`compute_orphans` 即「入度==0」、
+    本函数即「入度」，二者绝不漂移。alias/fold 链已在 `build_graph` 解析期归到拥有页节点
+    （决策P3-6/P3.1-5/P3.8-3），故反链计数 ≡ graph 入度 ≡ lint/check 同口径。
+    """
+    counts = _inlink_counts(g)
+    return {n.path: counts[n.id] for n in g.nodes}  # 转 path 键，对齐 DocBag.page
 
 
 def graph_to_dict(

@@ -597,3 +597,215 @@ def test_no_hit_is_ok(tmp_path: Path):
     r = search_pages(wiki, "区块链")
     assert r.hits == []
     assert r.pages_searched == 1
+
+
+# ---------- P5.3 反链文档先验（backlink 重排）----------
+
+
+def _count_build_graph(monkeypatch) -> list:
+    """patch `guanlan.graph.build_graph`（被 search 函数级 `from .graph import` 在调用期取）计调用次数。"""
+    import guanlan.graph as graph_mod
+
+    calls: list = []
+    real = graph_mod.build_graph
+    monkeypatch.setattr(graph_mod, "build_graph", lambda w: (calls.append(w), real(w))[1])
+    return calls
+
+
+def test_backlink_boost_ranks_higher_inlink_first(tmp_path: Path):
+    """同 BM25 两页，有入链者上浮到 path 靠前页之前（log 缩放生效，决策P5.3-2）。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    # Aaa/Zzz 正文标题全同 → BM25 相等；Ref 给 Zzz 一条入链、自身不命中 query。
+    _page(wiki, "entities/Aaa.md", title="区块链", body="区块链 技术 内容。")
+    _page(wiki, "entities/Zzz.md", title="区块链", body="区块链 技术 内容。")
+    _page(wiki, "concepts/Ref.md", title="引用页", body="见 [[Zzz]]")
+    # 冷算路径已带 boost：Zzz 有入链 → 即使 path 靠后也排到 Aaa 之前。
+    assert _pages(search_pages(wiki, "区块链"))[:2] == ["wiki/entities/Zzz.md", "wiki/entities/Aaa.md"]
+    # 反证：纯 BM25（inlinks=None）两页同分 → 按 path 升序 → Aaa 在前。
+    plain = score(build_corpus(wiki), "区块链", limit=10)
+    assert _pages(plain)[:2] == ["wiki/entities/Aaa.md", "wiki/entities/Zzz.md"]
+
+
+def test_backlink_zero_inlink_not_dropped(tmp_path: Path):
+    """零反链页不被归零挤出：仍在结果里、分数 == 纯 BM25（因子 1.0，决策P5.3-2）。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/Solo.md", title="孤页", body="去中心化金融 内容。")  # 无任何入链
+    r = search_pages(wiki, "去中心化金融")
+    assert "wiki/entities/Solo.md" in _pages(r)
+    plain = score(build_corpus(wiki), "去中心化金融", limit=10)
+    s_boost = next(h.score for h in r.hits if h.page == "wiki/entities/Solo.md")
+    s_plain = next(h.score for h in plain.hits if h.page == "wiki/entities/Solo.md")
+    assert s_boost == s_plain  # c=0 因子 1.0，原分原样保留
+
+
+def test_backlink_boost_preserves_recall_set(tmp_path: Path):
+    """收录门槛判在 boost 之前：带 boost 的召回集 == 纯 BM25 召回集，boost 只改名次（决策P5.3-7）。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    # 多页不同入链、不同命中强度；query 命中全部。
+    _page(wiki, "entities/Aaa.md", title="区块链", body="区块链 [[Bbb]] [[Ccc]] 内容。")
+    _page(wiki, "entities/Bbb.md", title="区块链", body="区块链 [[Ccc]] 内容。")
+    _page(wiki, "entities/Ccc.md", title="区块链", body="区块链 内容。")
+    boosted = set(_pages(search_pages(wiki, "区块链")))
+    plain = set(_pages(score(build_corpus(wiki), "区块链", limit=10)))
+    assert boosted == plain  # 召回集逐页相同（boost 绝不增删召回，只重排）
+
+
+def test_backlink_boost_byte_stable(tmp_path: Path):
+    """带 boost 的检索同库同 query 连跑两次字节稳定（决策P5.3-7）。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/A.md", title="区块链", body="区块链 技术。")
+    _page(wiki, "entities/B.md", title="智能合约", body="区块链 上的 [[A]] 智能合约。")
+    out1 = json.dumps([(h.page, h.score, h.snippet) for h in search_pages(wiki, "区块链").hits])
+    out2 = json.dumps([(h.page, h.score, h.snippet) for h in search_pages(wiki, "区块链").hits])
+    assert out1 == out2
+
+
+def test_score_inlinks_none_is_pure_bm25(tmp_path: Path):
+    """`inlinks=None` 与省略一致，且 == 既有纯 BM25 行为（向后兼容，决策P5.3-4）。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/A.md", title="区块链", body="区块链 [[A]] 自指 技术。")
+    docs = build_corpus(wiki)
+    omit = [(h.page, h.score) for h in score(docs, "区块链", limit=10).hits]
+    explicit = [(h.page, h.score) for h in score(docs, "区块链", limit=10, inlinks=None).hits]
+    assert omit == explicit
+
+
+def test_backlink_cold_and_cached_ranks_match(tmp_path: Path):
+    """四处接入名次一致的根因：冷算（CLI）与 cache 路径（Web/MCP/chat）产出**逐字节相同**的分数+名次。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/Aaa.md", title="区块链", body="区块链 技术。")
+    _page(wiki, "entities/Zzz.md", title="区块链", body="区块链 技术。")
+    _page(wiki, "concepts/Ref.md", title="引用", body="见 [[Zzz]]")
+    cold = search_pages(wiki, "区块链")
+    cache = CorpusCache()
+    docs = cache.corpus(wiki)
+    cached = score(docs, "区块链", limit=10, inlinks=cache.backlinks(wiki, docs))
+    assert [(h.page, h.score) for h in cold.hits] == [(h.page, h.score) for h in cached.hits]
+
+
+def test_backlinks_cache_reuse_and_content_invalidate(tmp_path: Path, monkeypatch):
+    """memo：(a) 签名命中不再 build_graph；(b) 改 content 页链接 → 签名变 → 重算、入链更新（决策P5.3-5）。"""
+    import os
+
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    p = _page(wiki, "entities/A.md", title="A", body="见 [[Hub]]")
+    _page(wiki, "entities/Hub.md", title="Hub", body="枢纽。")
+    cache = CorpusCache()
+    calls = _count_build_graph(monkeypatch)
+
+    bl1 = cache.backlinks(wiki, cache.corpus(wiki))
+    assert bl1["wiki/entities/Hub.md"] == 1 and len(calls) == 1
+    # (a) 同库再调 → 签名命中、不再 build_graph。
+    bl2 = cache.backlinks(wiki, cache.corpus(wiki))
+    assert bl2 == bl1 and len(calls) == 1
+    # (b) A 不再链 Hub → 签名变 → 重算。
+    mt = p.stat().st_mtime_ns + 10**9
+    p.write_text("---\ntitle: A\n---\n\n不再链接。\n", encoding="utf-8")
+    os.utime(p, ns=(mt, mt))
+    bl3 = cache.backlinks(wiki, cache.corpus(wiki))
+    assert len(calls) == 2 and bl3["wiki/entities/Hub.md"] == 0
+
+
+def test_backlinks_cache_config_change_no_rebuild(tmp_path: Path, monkeypatch):
+    """config 页（index.md）变更不进 docs 签名 → 不触发反链重算（content-only 失效，决策P5.3-5）。"""
+    import os
+
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/A.md", body="见 [[Hub]]")
+    _page(wiki, "entities/Hub.md", body="枢纽。")
+    cache = CorpusCache()
+    calls = _count_build_graph(monkeypatch)
+
+    cache.backlinks(wiki, cache.corpus(wiki))
+    assert len(calls) == 1
+    idx = wiki / "index.md"
+    mt = idx.stat().st_mtime_ns + 10**9
+    idx.write_text("# 索引 改了内容\n", encoding="utf-8")
+    os.utime(idx, ns=(mt, mt))
+    cache.backlinks(wiki, cache.corpus(wiki))
+    assert len(calls) == 1  # config 变更不触发反链重算
+
+
+def test_backlinks_cache_reordered_docs_safe_rebuild(tmp_path: Path, monkeypatch):
+    """传入乱序 docs → 签名不匹配 → 安全多余重算（决不误命中陈旧），结果仍正确（决策P5.3-5 契约）。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/A.md", body="见 [[Hub]]")
+    _page(wiki, "entities/Hub.md", body="枢纽。")
+    cache = CorpusCache()
+    calls = _count_build_graph(monkeypatch)
+
+    docs = cache.corpus(wiki)
+    bl1 = cache.backlinks(wiki, docs)
+    assert len(calls) == 1
+    bl2 = cache.backlinks(wiki, list(reversed(docs)))  # 乱序 → 签名不命中
+    assert len(calls) == 2  # 多算一次（安全降级）
+    assert bl2 == bl1  # 结果正确、绝不返回陈旧
+
+
+def test_backlinks_cache_isolates_roots(tmp_path: Path):
+    """一个 cache 服务两库：反链 memo 按库根分桶、不串用对方入链（决策P5.3-5）。"""
+    rootA = _kb(tmp_path / "A")
+    rootB = _kb(tmp_path / "B")
+    wA, wB = rootA / "wiki", rootB / "wiki"
+    _page(wA, "entities/A.md", body="见 [[Hub]]")
+    _page(wA, "entities/Hub.md", body="枢纽 A。")
+    _page(wB, "entities/Hub.md", body="枢纽 B 无人链入。")
+    cache = CorpusCache()
+    blA = cache.backlinks(wA, cache.corpus(wA))
+    blB = cache.backlinks(wB, cache.corpus(wB))
+    assert blA["wiki/entities/Hub.md"] == 1
+    assert blB["wiki/entities/Hub.md"] == 0  # 不串用 A 的反链
+
+
+def test_backlinks_cache_no_writes(tmp_path: Path):
+    """反链路径只读：`build_graph` 不写 `graph/`，整库零字节写盘（决策P5.3-6）。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/A.md", body="见 [[Hub]]")
+    _page(wiki, "entities/Hub.md", body="枢纽。")
+    before = {p: p.stat().st_mtime_ns for p in root.rglob("*") if p.is_file()}
+    cache = CorpusCache()
+    bl = cache.backlinks(wiki, cache.corpus(wiki))
+    assert bl["wiki/entities/Hub.md"] == 1  # 反链确实算了（非空操作蒙混）
+    assert not (root / "graph").exists()  # 没建派生 graph/
+    after = {p: p.stat().st_mtime_ns for p in root.rglob("*") if p.is_file()}
+    assert before == after
+
+
+def test_backlinks_cache_oserror_degrades_to_no_boost(tmp_path: Path, monkeypatch):
+    """build_graph 抛 OSError（页删/不可读 race）→ backlinks 返回 {}（纯 BM25 降级）、不 memo 失败、下次重试。"""
+    import guanlan.graph as graph_mod
+
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/A.md", body="见 [[Hub]]")
+    _page(wiki, "entities/Hub.md", body="枢纽。")
+    cache = CorpusCache()
+    docs = cache.corpus(wiki)
+
+    monkeypatch.setattr(graph_mod, "build_graph", lambda w: (_ for _ in ()).throw(OSError("gone")))
+    assert cache.backlinks(wiki, docs) == {}  # 降级为无 boost，不 500/不抛
+    # 不 memo 失败：恢复后下次重试出真值。
+    monkeypatch.undo()
+    assert cache.backlinks(wiki, cache.corpus(wiki))["wiki/entities/Hub.md"] == 1
+
+
+def test_cache_search_equals_cold(tmp_path: Path):
+    """`CorpusCache.search` 单一入口与冷算 `search_pages` 逐字段一致（决策P5.3-4 收口、不破等价）。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/Aaa.md", title="区块链", body="区块链 技术。")
+    _page(wiki, "entities/Zzz.md", title="区块链", body="区块链 技术。")
+    _page(wiki, "concepts/Ref.md", title="引用", body="见 [[Zzz]]")
+    cold = search_result_dict(search_pages(wiki, "区块链", limit=10))
+    warm = search_result_dict(CorpusCache().search(wiki, "区块链", limit=10))
+    assert warm == cold

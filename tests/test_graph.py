@@ -11,6 +11,7 @@ from pathlib import Path
 from guanlan.check import run_check
 from guanlan.graph import (
     build_graph,
+    compute_backlinks,
     compute_orphans,
     dump_json,
     graph_entrypoint,
@@ -288,3 +289,53 @@ def test_entrypoint_read_failure_not_mislabeled_as_write(tmp_path: Path, monkeyp
     monkeypatch.setattr(graph_mod, "build_graph", boom)
     with pytest.raises(OSError, match="Permission denied"):
         graph_mod.graph_entrypoint(kb, json_only=True)  # 读错外抛，不被 except OSError 误标为写失败
+
+
+# ---------- P5.3 反链计数（compute_backlinks）----------
+
+
+def test_compute_backlinks_inlink_degree(tmp_path: Path):
+    """入链数 = resolved 边入度，排自环、排 broken；键用 node.path（对齐 DocBag.page，决策P5.3-3）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    # Hub 被 A、B 指向（入链 2）；A 自指（自环不计）；A 指向断链目标（broken 不计）。
+    _page(wiki, "entities/Hub.md", type="entity", body="枢纽页正文")
+    _page(wiki, "entities/A.md", type="entity", body="见 [[Hub]] 和 [[A]] 与 [[不存在的页]]")
+    _page(wiki, "concepts/B.md", body="也见 [[Hub]]")
+    g = build_graph(wiki)
+    bl = compute_backlinks(g)
+    assert bl["wiki/entities/Hub.md"] == 2  # A、B 各一条，去重后 2
+    assert bl["wiki/entities/A.md"] == 0  # 自环不算入链
+    assert bl["wiki/concepts/B.md"] == 0
+    # 键为相对库根 posix，与 graph node.path 集合一致（对齐 DocBag.page）。
+    assert set(bl) == {n.path for n in g.nodes}
+
+
+def test_compute_backlinks_consistent_with_orphans(tmp_path: Path):
+    """与 `compute_orphans` 入链集互证：入度==0 ⟺ 是孤儿（同一入链口径，决策P5.3-3）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "entities/Hub.md", type="entity", body="枢纽")
+    _page(wiki, "entities/A.md", type="entity", body="见 [[Hub]]")
+    _page(wiki, "concepts/Lonely.md", body="无人链入，也不外链")
+    g = build_graph(wiki)
+    bl = compute_backlinks(g)
+    orphan_paths = {n.path for n in compute_orphans(g)}
+    zero_inlink = {path for path, c in bl.items() if c == 0}
+    assert zero_inlink == orphan_paths  # 入度0 集 ≡ 孤儿集
+
+
+def test_compute_backlinks_alias_link_counts_to_owner(tmp_path: Path):
+    """别名链计入拥有页（复用 build_graph 解析期归一，alias-aware，决策P5.3-3）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    # LLM 页声明别名「大模型」；另页用 [[大模型]] 链接 → 计入 LLM 页入链。
+    (wiki / "entities").mkdir(parents=True, exist_ok=True)
+    (wiki / "entities/LLM.md").write_text(
+        "---\ntitle: 大语言模型\ntype: entity\naliases: ['大模型']\n---\n\n一种模型。\n",
+        encoding="utf-8",
+    )
+    _page(wiki, "concepts/Use.md", body="它基于 [[大模型]] 构建")
+    g = build_graph(wiki)
+    bl = compute_backlinks(g)
+    assert bl["wiki/entities/LLM.md"] == 1  # 别名链归到拥有页

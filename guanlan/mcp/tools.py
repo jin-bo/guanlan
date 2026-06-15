@@ -36,7 +36,7 @@ from ..lint import run_lint
 from ..pages import iter_pages, load_page, page_title, page_type, report_dict
 from ..query import QUERY_PROMPT
 from ..runtime import AgentRunner, run_agent_task
-from ..search import CorpusCache, score, search_result_dict
+from ..search import CorpusCache, search_result_dict
 
 __all__ = [
     "SearchEnvelope",
@@ -153,9 +153,10 @@ def tool_search(
 ) -> SearchEnvelope:
     """确定性整页召回（BM25 + CJK 2-gram + 标题/别名加权），复用 P5.0 内核 + P5.1 长驻 cache。
 
-    `score(search_cache.corpus(wiki), q, limit=lim)`——走 server 级 `CorpusCache`（与 P5.1 Web 同款
-    性能路径，按 (mtime_ns,size) 增量重建），**不**冷算 `search_pages`（决策P4.10-11）。并发临界区靠
-    `CorpusCache` 自持锁（决策P4.10-15）。`page` 带 `wiki/` 前缀、可直接喂 `read_page`。
+    `search_cache.search(wiki, q, limit=lim)`——走 server 级 `CorpusCache` 单一入口（P5.3 决策P5.3-4：
+    内部配好 corpus + 反链文档先验 + 打分，无从漏传 inlinks），与 P5.1 Web 同款性能路径（corpus 按
+    (mtime_ns,size) 增量重建、反链按语料签名 memo），**不**冷算 `search_pages`（决策P4.10-11）。并发临界区
+    靠 `CorpusCache` 自持锁（决策P4.10-15）。`page` 带 `wiki/` 前缀、可直接喂 `read_page`。
 
     坏参数自防（决策P4.10-12，无 HTTP `Query(ge=1)` 兜底）：`limit` 经 `try/except (TypeError,
     ValueError)`——0/负值 clamp 到 1、坏类型（`None`/`"abc"`）回默认 10，绝不让 `score` 的 `limit<1`
@@ -168,7 +169,9 @@ def tool_search(
         lim = 10
     if not isinstance(query, str):
         query = "" if query is None else str(query)
-    result = score(search_cache.corpus(wiki), query, limit=lim)
+    # P5.3：`CorpusCache.search` 单一入口内部配好 corpus + 反链文档先验 + 打分（决策P5.3-4/5），无从漏传
+    # inlinks 而静默丢重排；反链由语料签名 memo（签名变才 build_graph）。
+    result = search_cache.search(wiki, query, limit=lim)
     # search_result_dict 是 CLI/Web/MCP 三处字段 + 取整单一归口（决策P5.1-4 / P4.10-10）。
     return search_result_dict(result)  # type: ignore[return-value]
 
