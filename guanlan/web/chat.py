@@ -44,7 +44,7 @@ from agentao.tools.base import Tool
 
 from ..check import Violation, run_check
 from ..gate import REPAIR_PROMPT, _render_violations
-from ..search import CorpusCache, score, search_result_dict
+from ..search import CorpusCache, search_result_dict
 from ..skill import SKILL_NAME, ensure_skill_available
 from .jobs import WriteGate
 from .policy_fs import (
@@ -211,7 +211,9 @@ def make_guanlan_search_tool(search_cache: CorpusCache, *, wiki: Path) -> Tool:
             # tokenize→re.finditer 抛 TypeError（被 agentao executor 吞成错误串、召回静默失败）。
             if not isinstance(query, str):
                 query = "" if query is None else str(query)
-            result = score(self._search_cache.corpus(self._wiki), query, limit=lim)
+            # P5.3：`CorpusCache.search` 单一入口内部配好 corpus + 反链文档先验 + 打分（决策P5.3-4/5），
+            # 无从漏传 inlinks 而静默丢重排；反链由语料签名 memo（签名变才 build_graph）。
+            result = self._search_cache.search(self._wiki, query, limit=lim)
             # 工具契约 execute() -> str（执行器把返回值当 result_text）：返回 **JSON 字符串**，
             # 经 search_result_dict 单一归口、与 /api/search 字段同形（决策P5.1-4）。
             return json.dumps(search_result_dict(result), ensure_ascii=False)

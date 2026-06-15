@@ -51,7 +51,7 @@ from ..pages import iter_pages, load_page, page_title, page_type
 from ..query import run_query
 from ..rawio import raw_slug
 from ..runtime import AgentRunner
-from ..search import CorpusCache, score, search_result_dict, tokenize
+from ..search import CorpusCache, search_result_dict, tokenize
 from .chat import IDLE_TTL_SECONDS, MAX_CONVERSATIONS, ConversationStore
 from .jobs import JobQueue, WriteGate
 from .parsefeed import (
@@ -647,7 +647,7 @@ def create_app(
         target = _safe_raw_image(root, path)  # 越界 409 / 缺失 404
         return _image_file_response(target)  # 白名单 404 + svg 安全交付（共用归口）
 
-    # 检索（读，P5.1 决策P5.1-1/7）：直接调 P5.0 内核 `score(search_cache.corpus(wiki), …)`，
+    # 检索（读，P5.1 决策P5.1-1/7）：直接调 P5.0 内核 `search_cache.search(wiki, q, …)`（P5.3 单一入口），
     # **不** shell out `guanlan search`、不入 JobQueue、不取快照、不 bump 代际——纯读 `wiki/`，与
     # `/api/pages`/`/api/page` 同读线。reader 下仍注册（非写、决策P5.1-7）。阻塞的 stat/分词/打分经
     # `anyio.to_thread.run_sync` 卸离事件循环（CorpusCache 内部自持锁，Web 层不另加全局搜索锁，§3.3）。
@@ -661,8 +661,11 @@ def create_app(
         if not tokenize(q):  # 纯空白/标点 → 无可检索词；与 CLI run_search 同口径，但走 HTTP 422
             raise HTTPException(status_code=422, detail="query 为空或无可检索词（纯空白/标点）。")
 
+        # P5.3：`CorpusCache.search` 单一入口内部配好 corpus + 反链文档先验 + 打分（决策P5.3-4 脚枪收口）；
+        # 反链 backlinks() 由语料签名 memo（签名变才 build_graph，决策P5.3-5）——热路绝不每搜建图。整个
+        # 阻塞段经 `anyio.to_thread.run_sync` 卸离事件循环（CorpusCache 内部自持锁）。
         def _run():
-            return score(search_cache.corpus(root / "wiki"), q, limit=limit)
+            return search_cache.search(root / "wiki", q, limit=limit)
 
         return search_result_dict(await anyio.to_thread.run_sync(_run))
 
