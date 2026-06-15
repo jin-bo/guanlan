@@ -31,13 +31,13 @@ from .graphstats import (
 )
 from .pages import (
     WIKILINK_RE,
-    alias_index,
     iter_pages,
+    link_resolution_index,
     link_stem,
-    link_target_stems,
     load_page,
     page_title,
     page_type,
+    resolve_owner,
 )
 from .paths import require_kb_root
 
@@ -83,11 +83,12 @@ class Graph:
 def build_graph(wiki: Path) -> Graph:
     """建图：节点=非 config 页，边=已解析 `[[wikilink]]`（含断链边）。
 
-    每个 `[[…]]` 经 `link_stem` 归一后分类（决策P3-6 / P3.1-5）：
-      ① 命中非 config 页 stem → resolved 边（进 adjacency）；
-      ② 命中**别名** → resolved 边，归到「拥有页 stem」节点（不建别名幽灵节点，P3.1）；
-      ③ 命中 config 页（index/log/overview）→ 丢弃（不建边、不算断链）；
-      ④ 谁都没命中 → broken 边（resolved=False）。
+    每个 `[[…]]` 经 `resolve_owner`（精确 `link_stem` + fold 兜底）解析为 owner 路径后分类
+    （决策P3-6 / P3.1-5 / P3.8-3，与 check/heal/Web 同一张解析表）：
+      ① owner 命中**内容页**（直接 stem / 别名 / fold variant）→ resolved 边，归到拥有页节点
+         （不建别名/fold 幽灵节点）；
+      ② owner 命中 **config 页**（index/log/overview）→ 丢弃（不建边、不算断链）；
+      ③ owner is None（精确 + fold 皆不中）→ broken 边（resolved=False）。
     自环保留为边但 `(source,target)` 去重，避免可视化重边。
     """
     wiki = Path(wiki)
@@ -95,7 +96,8 @@ def build_graph(wiki: Path) -> Graph:
 
     # 节点 id = stem（小写），**必须**等于链接解析键：边目标经 link_stem 归一为 stem，邻接表按
     # 此 id 寻址，故唯有 id==stem 才能让 graph.broken ≡ check.wikilink.broken（决策P3-6）。
-    # 这意味着整个系统（含 P2 check 的 link_target_stems）都假设**页面 stem 全库唯一**——
+    # 这意味着整个系统（含 check 与本模块共用的同一张 link_resolution_index 解析表）都假设**页面
+    # stem 全库唯一**——
     # 这是 wikilink 按名解析的固有前提，由命名约定保证。若两张非 config 页 stem 相同
     # （如 sources/Foo.md 与 entities/Foo.md），它们会共享 id、在邻接/孤儿上被视作同一逻辑节点；
     # 这是 stem 寻址模型下不可消除的歧义，应由"页名唯一"约定避免，而非在此改用路径 id（那会破坏
@@ -117,9 +119,11 @@ def build_graph(wiki: Path) -> Graph:
         node_ids.add(nid)
         bodies.append((nid, body))
 
-    # 解析集 = 全页面 stem（含 config）∪ 别名，与 check 同口径；config-only stem 用于"丢弃"分类。
-    all_stems = link_target_stems(wiki)
-    aliases = alias_index(wiki)  # 别名 → 拥有页 stem（决策P3.1-5）
+    # 解析表 = 精确 stem/别名（含 config）∪ 安全 fold variant → owner path，与 check/heal/Web 同一
+    # 归口（P3.8，决策P3.8-3）。content_path_to_id：owner 路径 → 节点 id（与 idx 的 owner 值同基，皆
+    # 相对库根 posix）；config 页不在其中，故指向 config 的链接经 resolve_owner 命中却归类为"丢弃"。
+    idx = link_resolution_index(wiki)
+    content_path_to_id = {n.path: n.id for n in nodes}
 
     adjacency: dict[str, set[str]] = {nid: set() for nid in node_ids}
     resolved_pairs: set[tuple[str, str]] = set()
@@ -129,18 +133,14 @@ def build_graph(wiki: Path) -> Graph:
             target = link_stem(raw)
             if not target:
                 continue
-            if target in node_ids:
-                resolved_pairs.add((nid, target))
-                adjacency[nid].add(target)
-            elif target in aliases and aliases[target] in node_ids:
-                # 别名命中 → 边归到**拥有页 stem** 节点，不建别名幽灵节点（决策P3.1-5）。
-                owner = aliases[target]
-                resolved_pairs.add((nid, owner))
-                adjacency[nid].add(owner)
-            elif target in all_stems:
-                continue  # 指向 config 页 → 丢弃（决策P3-6）。
-            else:
-                broken_pairs.add((nid, target))
+            owner = resolve_owner(raw, idx)
+            if owner is None:
+                broken_pairs.add((nid, target))  # 精确 + fold 皆不中 → 断链边（断链键用 link_stem）。
+            elif owner in content_path_to_id:
+                tid = content_path_to_id[owner]  # 命中内容页（直接/别名/fold）→ 归到拥有页节点。
+                resolved_pairs.add((nid, tid))
+                adjacency[nid].add(tid)
+            # else: owner 非空但非内容页（config index/log/overview）→ 丢弃（决策P3-6）。
 
     edge_tuples = [(s, t, True) for s, t in resolved_pairs]
     edge_tuples += [(s, t, False) for s, t in broken_pairs]

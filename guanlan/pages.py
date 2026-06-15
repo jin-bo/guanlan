@@ -20,7 +20,9 @@ from __future__ import annotations
 import json
 import posixpath
 import re
-from collections.abc import Iterator
+import unicodedata
+from collections import defaultdict
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -37,11 +39,14 @@ __all__ = [
     "page_title",
     "page_type",
     "link_stem",
+    "fold_stem",
+    "link_fold_stem",
     "iter_pages",
     "page_stem_index",
     "alias_index",
     "link_target_stems",
     "link_resolution_index",
+    "resolve_owner",
     "index_md_links",
     "index_sync_state",
     "report_dict",
@@ -185,6 +190,28 @@ def link_stem(target: str) -> str:
     return target.lower()
 
 
+def fold_stem(stem: str) -> str:
+    """把已归一的 stem **进一步**折叠掉常见等价变体（NFKC → casefold → `_`→`-`）。（P3.8）
+
+    解析期非破坏「消变体」的单一归口（决策P3.8-1 最小折叠集）：
+
+    - **NFKC**：折全角/半角、兼容字符、组合记号（`Café`(NFD) → `café`(NFC) 同形）；
+    - **casefold**（非 `.lower()`）：Unicode 大小写折叠更全；纯 ASCII/CJK 与 `.lower()` 一致、无回归；
+    - **`_`→`-`**：kebab-case 为主、`_` 是最常见同义变体——**仅此一条**字符替换，不折重复 `-`、
+      不剥首尾 `-`（过激会误并真实独立名）。
+
+    **绝不替换 `link_stem`**：fold 永远叠在 `link_stem` 之上（见 `link_fold_stem`），`link_stem`
+    自身语义不动——否则 `foo_bar` 当场被改写成 `foo-bar`、丢「raw 精确优先」、波及全体 `link_stem`
+    消费者（`alias_index`/check/graph/heal/Web，决策P3.8-2）。
+    """
+    return unicodedata.normalize("NFKC", stem).casefold().replace("_", "-")
+
+
+def link_fold_stem(raw: str) -> str:
+    """`[[raw]]` 的折叠键 = `fold_stem(link_stem(raw))`（fold 叠在 link_stem 之上，决策P3.8-2）。"""
+    return fold_stem(link_stem(raw))
+
+
 def iter_pages(wiki: Path) -> Iterator[Path]:
     """按稳定排序遍历 `wiki/` 下所有**非 config** 的 `*.md` 页面（供 check/health/lint/graph 复用）。"""
     for path in sorted(wiki.rglob("*.md")):
@@ -198,8 +225,8 @@ def iter_pages(wiki: Path) -> Iterator[Path]:
 def page_stem_index(wiki: Path) -> dict[str, str]:
     """`wiki/` 下**所有**页面（**含 config**）的 stem(小写) → 相对知识库根的 posix 路径。
 
-    `[[wikilink]]` 解析的**单一归口**：`link_target_stems`（只要 stem 集）与 Web 渲染
-    （要 stem→路径，供站内导航）都由它派生，避免两处各扫一遍、解析口径漂移（决策P3-6：config
+    `[[wikilink]]` 解析的**单一归口**：`_base_resolution_index`（→ `link_resolution_index` 解析表 +
+    `resolve_owner`，check/graph/heal/Web 共用）由它派生，避免各扫一遍、解析口径漂移（决策P3-6：config
     页不被校验/不建节点，但**可作合法链接目标**）。stem 全库唯一是按名解析的固有前提；万一
     重名，按排序取第一个，保持确定性。
     """
@@ -242,20 +269,21 @@ def alias_index(wiki: Path) -> dict[str, str]:
 
 
 def link_target_stems(wiki: Path) -> frozenset[str]:
-    """`[[wikilink]]` 解析键集 = 全页面 stem（**含 config**）**∪ content 页别名**，小写不敏感。
+    """`[[wikilink]]` 解析键集（**仅兼容用途**）= `link_resolution_index` 的键集。（P3.8 退化）
 
-    与 `check` / `graph` 完全同口径（决策P3-6 / P3.1-5）：别名一并纳入这一个解析集，是保持核心
-    不变式 **`graph.broken ≡ check.wikilink.broken`** 的关键——两边断链判定共用此集、不分叉。
-    从 `page_stem_index`（stem）与 `alias_index`（别名）派生（同一归口）。
+    自 P3.8 起，断链判定一律走 `resolve_owner`（精确 + fold 兜底两段探针）；本集**断不可再当断链
+    判据**——`link_stem(raw) in 此集` 会漏掉所有 fold 兜底命中（如 `[[multi_head_attention]]` 命中
+    `multi-head-attention.md`），退回误断链。保留它只为仍需「键集」的旧调用方（无内部调用）。
     """
-    return frozenset(page_stem_index(wiki)) | frozenset(alias_index(wiki))
+    return frozenset(link_resolution_index(wiki))
 
 
-def link_resolution_index(wiki: Path) -> dict[str, str]:
-    """解析键(stem | 别名, 小写) → 拥有页相对库根 posix 路径，供 Web 站内导航（P3.1，决策P3.1-6）。
+def _base_resolution_index(wiki: Path) -> dict[str, str]:
+    """解析键(stem | 别名, 小写) → 拥有页相对库根 posix 路径（P3.1 基底，决策P3.1-6）。
 
     在 `page_stem_index`（stem→path）之上叠加 别名→拥有页 path；**页面 stem 优先于别名**——撞名时
     别名不遮蔽真实页（且该撞名已由 `check` 报 `aliases.collides_stem`）。指向别名拥有页缺失者跳过。
+    P3.8 把它从 `link_resolution_index` 抽出作基底：fold variant 叠加层在其上派生（见下）。
     """
     stem_to_path = page_stem_index(wiki)
     resolved = dict(stem_to_path)
@@ -266,6 +294,49 @@ def link_resolution_index(wiki: Path) -> dict[str, str]:
         if path is not None:
             resolved[alias] = path
     return resolved
+
+
+def link_resolution_index(wiki: Path) -> dict[str, str]:
+    """解析表：键(精确 stem|别名 ∪ **安全 fold variant**) → 拥有页相对库根 posix 路径。（P3.8，决策P3.8-3）
+
+    `check`(owner 是否 None) / `graph`(owner→节点) / `heal`(写后回执判 still_broken) / `Web`(owner→
+    路径) **全复用**此一张表 + `resolve_owner`，杜绝各写一套 owner 逻辑、口径漂移。
+
+    在 `_base_resolution_index`（精确 stem/别名）之上**只叠加无冲突的 fold variant**（决策P3.8-4 机械规则）：
+    对每个 base 键算 `fold_stem`，**当且仅当**「该 fold 键不在 base 键集」**且**「该 fold 键的 fold group
+    拥有者恰 1 个」才生成 variant 键 → 拥有者路径。
+
+    - variant 键与 base 键**天然不相交**（`fk not in base` 门），故整表每键唯一 owner、无须区分
+      「raw 命中 vs fold 命中」。
+    - `foo_bar.md` + `foo-bar.md` 同存：两者 base 键各在表中、fold 键 `foo-bar` 已是 base 键 → 不新增
+      → 两页各由精确键解析、零串台（**撞则不折叠**自动成立，无需额外检测，决策P3.8-6）。
+    - fold group ≥2 拥有者（真撞名）→ 丢弃该 variant、不影响 base 键解析（歧义 fold 形保持断链、不猜）。
+    """
+    base = _base_resolution_index(wiki)
+    groups: dict[str, set[str]] = defaultdict(set)
+    for key, owner in base.items():
+        fk = fold_stem(key)
+        if fk not in base:  # fk 撞任意已有精确键 → 不新增（精确优先、撞则不折叠，自动成立）
+            groups[fk].add(owner)
+    for fk, owners in groups.items():
+        if len(owners) == 1:  # fold group **唯一拥有者**才生成 variant；≥2 → 撞名，丢弃
+            base[fk] = next(iter(owners))
+    return base
+
+
+def resolve_owner(raw: str, idx: Mapping[str, str]) -> str | None:
+    """`[[raw]]` → 拥有页相对库根 posix 路径；皆不中 → None。（P3.8 单一 owner 归口，决策P3.8-2/3）
+
+    两段探针：**raw 精确（`link_stem`）优先**、**fold（`link_fold_stem`）兜底**——绝不把 fold 塞进
+    `link_stem`（会丢精确优先、波及全体 `link_stem` 消费者）。`idx` 取 `link_resolution_index(wiki)`。
+    """
+    k = link_stem(raw)
+    if k in idx:
+        return idx[k]  # raw stem / 别名 精确命中（优先）
+    fk = link_fold_stem(raw)
+    if fk in idx:
+        return idx[fk]  # fold variant 兜底
+    return None
 
 
 def report_dict(*, ok: bool, pages_checked: int, items_key: str, items: list) -> dict:

@@ -25,11 +25,12 @@ from .pages import (
     Violation,
     WIKILINK_RE,
     iter_pages,
+    link_resolution_index,
     link_stem,
-    link_target_stems,
     page_stem_index,
     parse_frontmatter,
     report_json,
+    resolve_owner,
     split_frontmatter,
 )
 from .paths import require_kb_root
@@ -89,13 +90,18 @@ def _check_frontmatter(page: str, meta: dict) -> list[Violation]:
     return violations
 
 
-def _check_wikilinks(page: str, body: str, link_targets: frozenset[str]) -> list[Violation]:
+def _check_wikilinks(page: str, body: str, idx: dict[str, str]) -> list[Violation]:
+    """正文 `[[…]]` 断链校验：经 `resolve_owner`（精确 + fold 兜底）皆不中 → broken（P3.8）。
+
+    `idx` = `link_resolution_index`（精确 stem/别名 ∪ 安全 fold variant → owner path）。**断链判据
+    一律走 `resolve_owner`**，不再用 `link_stem(raw) in 键集`（会漏 fold 兜底命中，决策P3.8-3）。
+    """
     violations: list[Violation] = []
     for raw in WIKILINK_RE.findall(body):
         stem = link_stem(raw)
         if not stem:
-            continue
-        if stem not in link_targets:
+            continue  # 空键（如 [[|别名]]/[[#锚]]）不校验，与历史行为一致。
+        if resolve_owner(raw, idx) is None:
             violations.append(
                 Violation(page, "wikilink.broken", f"[[{raw.strip()}]] 无对应页面")
             )
@@ -195,11 +201,11 @@ def run_check(wiki: Path) -> CheckResult:
             violations=[Violation("wiki", "wiki.missing", "wiki/ 不存在或不是目录")],
         )
 
-    # 链接解析集 = 所有页面 stem（含 config 页），大小写不敏感。
-    # 注意：扫描排除（哪些页被校验，iter_pages 排 config）与解析集（哪些 stem 算合法目标，
-    # 含 config）是两件事——口径单一归口 pages.py，与 graph/lint 完全一致（决策P3-2/P3-6）。
-    link_targets = link_target_stems(wiki)
-    # 别名撞名判定要的是**纯页面 stem 集**（不含别名），与 link_targets（stem∪别名）不同（决策P3.1-4）。
+    # 链接解析表 = 精确 stem/别名（含 config 页）∪ 安全 fold variant → owner path（P3.8，决策P3.8-3）。
+    # 注意：扫描排除（哪些页被校验，iter_pages 排 config）与解析表（哪些键算合法目标，含 config）是两件
+    # 事——口径单一归口 pages.py，断链判定（resolve_owner）与 graph/heal/Web 完全一致（决策P3-2/P3-6）。
+    idx = link_resolution_index(wiki)
+    # 别名撞名判定要的是**纯页面 stem 集**（不含别名/fold），与解析表 idx 不同（决策P3.1-4）。
     page_stems = frozenset(page_stem_index(wiki))
 
     violations: list[Violation] = []
@@ -218,7 +224,7 @@ def run_check(wiki: Path) -> CheckResult:
             violations.extend(alias_vios)
             for key in alias_keys:
                 alias_owners[key].append(page)
-        violations.extend(_check_wikilinks(page, body, link_targets))
+        violations.extend(_check_wikilinks(page, body, idx))
         violations.extend(_check_sources(page, meta, wiki))
 
     violations.extend(_check_aliases_global(alias_owners, page_stems))
