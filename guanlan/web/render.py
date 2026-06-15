@@ -18,7 +18,7 @@ import xml.etree.ElementTree as _etree  # stdlib，始终可用；只有 markdow
 from html.parser import HTMLParser as _HTMLParser
 from pathlib import Path
 
-from ..pages import WIKILINK_RE, link_resolution_index, link_stem, load_page
+from ..pages import WIKILINK_RE, link_resolution_index, link_stem, load_page, resolve_owner
 
 try:  # markdown 是 web extra 的一部分；缺失时回退 <pre> 源码视图（§6）。
     import markdown as _markdown
@@ -174,6 +174,14 @@ def _code_ref_target(content: str, stem_to_path: dict[str, str]) -> str | None:
     去 `wiki/` 前缀 / 纯文件名（均可带或不带 `.md`，大小写不敏感）。如此既放行**含空格的
     合法页名**（如 `Smart Tools 模块`），又挡住命令/多 token 代码（如 `cat wiki/x.md`）——后者经
     `link_stem` 取末段虽与某页共享 stem，但整体不等于该页的任何合法写法，故不误判为引用。
+
+    **故意不接 `fold_stem`**（决策P3.8-7 边界，**只有 `[[wikilink]]` 走 fold**）：代码标识符里 `_`/`-`
+    语义不同，折叠会把普通代码误链成页面引用。此处仍按精确 `link_stem` 查表 + **末步整体相等**判定。
+    注意 `stem_to_path`（=`link_resolution_index`）现含 fold variant 键，故 `stem_to_path.get(stem)`
+    **可能命中** variant——库内有 `foo_bar.md` 时它生成 `foo-bar` variant 键，行内 code `` `foo-bar` ``
+    的 `stem` 恰是 `foo-bar`、会在 `.get` 命中那张页。真正拦住它的是**末步与页面真实写法（未折叠）整体
+    相等**：`foo-bar`(连字符) 不等于 `foo_bar.md` 的任何合法形态 → 返回 None、不联链。**勿删末步相等
+    判定**——它不是 `.get` 顺带兜住的，是本函数不 fold 的唯一安全闸。
     """
     norm = content.strip().replace("\\", "/")
     stem = link_stem(norm) if norm else ""
@@ -188,10 +196,14 @@ def _code_ref_target(content: str, stem_to_path: dict[str, str]) -> str | None:
 
 def _resolve_wikilink(raw: str, stem_to_path: dict[str, str]) -> tuple[str, dict[str, str], str]:
     """把 `[[…]]` 内部 raw 解析为 `(tag, attrib, display)`：命中现有页 → `a.wikilink[data-page]`，
-    断链 → `span.wikilink.broken`。行内 `[[…]]` 与 code 兜底两路共用，杜绝两处样式/类名漂移。"""
+    断链 → `span.wikilink.broken`。行内 `[[…]]` 与 code 兜底两路共用，杜绝两处样式/类名漂移。
+
+    P3.8：经 `resolve_owner`（精确 `link_stem` + fold 兜底）解析，与 check/graph/heal 同一张表、同
+    口径——`[[multi_head_attention]]` 命中 `multi-head-attention.md`。**仅 `[[wikilink]]` 走 fold**；
+    行内 code 引用（`_code_ref_target`）按精确路径/文件名判定、**不接 fold**（决策P3.8-7 边界）。
+    """
     display = _wikilink_display(raw) or raw.strip()
-    stem = link_stem(raw)
-    target = stem_to_path.get(stem) if stem else None
+    target = resolve_owner(raw, stem_to_path)
     if target is not None:
         return "a", {"class": "wikilink", "data-page": target}, display
     return "span", {"class": "wikilink broken", "title": "无对应页面"}, display

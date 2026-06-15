@@ -27,7 +27,7 @@ from typing import Literal
 from .errors import EXIT_OK, GuanlanError
 from .gate import diff_raw, run_guarded_write_result
 from .lint import MISSING_ENTITY_MIN_REFS, missing_entities
-from .pages import link_resolution_index, link_stem, load_page_text
+from .pages import link_resolution_index, link_stem, load_page_text, resolve_owner
 from .paths import require_kb_root
 from .runtime import AgentRunner
 
@@ -341,8 +341,11 @@ def _build_receipts(
     """写后判每个目标是否真解析（§5，零 LLM）。
 
     `resolved` 的判据是「`[[target]]` **现在指向一张真实页**」——即 `target`（已是 `link_stem` 归一键）
-    命中写后的 `link_resolution_index`（stem ∪ 别名 → 页路径，决策P3.1-6）。这比「无断链边」更准：
-    若引用页恰被删致断链边消失却无页可指，`resolved_to` 仍为 None、判 `still_broken`。
+    经 `resolve_owner`（精确 + fold 兜底）命中写后的 `link_resolution_index`（stem ∪ 别名 ∪ 安全 fold
+    variant → 页路径，决策P3.1-6 / P3.8-3）。**走 `resolve_owner` 而非 `resolution.get`**：若 `target`
+    是 `foo_bar`、Agent 按规范建了 `foo-bar.md`，精确查表会漏 fold 命中、误报 `still_broken`；两段探针
+    才与门禁/lint 同口径判"是否真补上"。这比「无断链边」更准：若引用页恰被删致断链边消失却无页可指，
+    `resolved_to` 仍为 None、判 `still_broken`。
 
     **门禁未过（`gate_ok=False`）时一律 `still_broken`**：写入未干净落地（改动留盘待修），此时哪怕
     磁盘上躺着一张 frontmatter 非法的同名页、`link_resolution_index` 按 stem 也会"命中"它，不能据此
@@ -351,7 +354,7 @@ def _build_receipts(
     resolution = link_resolution_index(Path(wiki)) if gate_ok else {}
     receipts: list[HealReceipt] = []
     for w in batch:
-        resolved_to = resolution.get(w.target)
+        resolved_to = resolve_owner(w.target, resolution)  # 精确 + fold 兜底，不漏 _→- 命名命中
         if resolved_to is not None:
             receipts.append(
                 HealReceipt(
