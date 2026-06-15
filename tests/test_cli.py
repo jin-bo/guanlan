@@ -122,6 +122,20 @@ def test_heal_rejects_non_positive_limit(bad):
         _parse(["heal", "--min-refs", bad])
 
 
+def test_audit_flags_default():
+    """`audit` 子命令（P3.7）：默认 --limit 10、dry_run/json False、-C 透传。"""
+    args = _parse(["audit", "-C", "/kb"])
+    assert args.command == "audit" and args.dir == "/kb"
+    assert args.limit == 10
+    assert args.dry_run is False and args.json is False and args.model is None
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "abc"])
+def test_audit_rejects_non_positive_limit(bad):
+    with pytest.raises(SystemExit):
+        _parse(["audit", "--limit", bad])
+
+
 def test_mcp_parser_defaults():
     """`mcp` 子命令：-C 透传、--model 默认 None（P4.10）。"""
     args = _parse(["-C", "/kb", "mcp"])

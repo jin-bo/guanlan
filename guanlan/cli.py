@@ -10,6 +10,8 @@ import argparse
 import sys
 
 from . import __version__
+from .audit import DEFAULT_LIMIT as AUDIT_DEFAULT_LIMIT
+from .audit import audit_entrypoint
 from .check import check_entrypoint
 from .convert import _BACKENDS as _CONVERT_BACKENDS
 from .convert import convert_entrypoint
@@ -78,6 +80,16 @@ def _cmd_heal(args: argparse.Namespace) -> int:
         args.dir,
         limit=args.limit,
         min_refs=args.min_refs,
+        model=args.model,
+        dry_run=args.dry_run,
+        json_output=args.json,
+    )
+
+
+def _cmd_audit(args: argparse.Namespace) -> int:
+    return audit_entrypoint(
+        args.dir,
+        limit=args.limit,
         model=args.model,
         dry_run=args.dry_run,
         json_output=args.json,
@@ -271,6 +283,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_heal.add_argument("--model", default=None, help="覆盖 Agentao 模型")
     p_heal.add_argument("--json", action="store_true", help="输出 worklist/receipt 的结构化 JSON")
     p_heal.set_defaults(func=_cmd_heal)
+
+    p_audit = sub.add_parser(
+        "audit",
+        parents=[dir_parent],
+        help="语义审计：确定性粗筛漂移源（raw 已变但 wiki 未重综合）→ LLM 复核过期论断（走 P2 写门禁）",
+    )
+    p_audit.add_argument(
+        "--limit",
+        type=positive_int,
+        default=AUDIT_DEFAULT_LIMIT,
+        help=f"本批复核的**漂移源组**上限（默认 {AUDIT_DEFAULT_LIMIT}，按 slug 升序；整组原子复核+刷新；须 ≥ 1）",
+    )
+    p_audit.add_argument(
+        "--dry-run", action="store_true", help="仅打印漂移源组（纯读、零 LLM、不触 Agentao）"
+    )
+    p_audit.add_argument("--model", default=None, help="覆盖 Agentao 模型")
+    p_audit.add_argument("--json", action="store_true", help="输出漂移源组 / 回执的结构化 JSON")
+    p_audit.set_defaults(func=_cmd_audit)
 
     p_reindex = sub.add_parser(
         "reindex",
