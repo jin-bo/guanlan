@@ -28,6 +28,14 @@ from pathlib import Path
 
 import yaml
 
+# 优先用 libyaml 的 C 实现 SafeLoader（CSafeLoader）：纯 Python SafeLoader 是全库 frontmatter 解析的
+# 热点（`build_graph` 冷算里约 78%）。CSafeLoader 与 SafeLoader 同一套安全 schema、解析结果等价，仅 C
+# 加速；未随 PyYAML 装上 libyaml 时优雅回落纯 Python。报错仍是 `yaml.YAMLError` 子类，下游 except 不变。
+try:
+    from yaml import CSafeLoader as _SafeLoader
+except ImportError:  # pragma: no cover - 取决于 PyYAML 是否带 libyaml
+    from yaml import SafeLoader as _SafeLoader
+
 __all__ = [
     "Violation",
     "Finding",
@@ -120,14 +128,23 @@ def split_frontmatter(text: str) -> tuple[str | None, str]:
     return None, text
 
 
-def _load_yaml_mapping(block: str) -> tuple[dict | None, str | None]:
+def _load_yaml_mapping(
+    block: str, *, loader: type = _SafeLoader
+) -> tuple[dict | None, str | None]:
     """解析 frontmatter 块为映射，两档共用以杜绝口径分叉。
 
     返回 `(meta, error)`：成功 `(dict, None)`；YAML 报错 `(None, 错误消息)`；
     解析出非映射 `(None, '…不是键值映射')`。严格档据 `error` 报 violation，容错档忽略之。
+
+    `loader` 默认 `_SafeLoader`（libyaml 优先，仅 C 加速、解析**值**与纯 Python 等价）——供**容错档**
+    （`load_page`→graph/health/lint 热路）提速；它丢弃 `error` 文本，故两 loader 的报错文本差异无影响。
+    **严格档**（`check`，经 `parse_frontmatter`）显式传 `yaml.SafeLoader`：libyaml 与纯 Python loader 的
+    `str(exc)` 文本不同（C 不含源码片段+^ 标记、个别 problem 措辞亦异），而该文本会进 `check` 的
+    `frontmatter.unparsable` detail；锁定纯 Python loader 使 `check` 报错文本与宿主是否装 libyaml 无关、
+    跨环境字节一致（且与本次提速前的 `safe_load` 行为逐字相同）。
     """
     try:
-        meta = yaml.safe_load(block)
+        meta = yaml.load(block, Loader=loader)
     except yaml.YAMLError as exc:
         return None, f"frontmatter 无法解析：{exc}"
     if not isinstance(meta, dict):
@@ -143,7 +160,9 @@ def parse_frontmatter(block: str | None) -> tuple[dict | None, Violation | None]
     """
     if block is None:
         return None, Violation("", "frontmatter.block_missing", "缺 frontmatter（--- 块）")
-    meta, error = _load_yaml_mapping(block)
+    # 严格档锁定纯 Python SafeLoader：报错文本进 check 的 unparsable detail，须与宿主 libyaml 无关（见
+    # _load_yaml_mapping 文档）。容错档不传 loader，照用默认 _SafeLoader（libyaml 提速、丢弃报错文本）。
+    meta, error = _load_yaml_mapping(block, loader=yaml.SafeLoader)
     if error is not None:
         return None, Violation("", "frontmatter.unparsable", error)
     return meta, None
@@ -254,7 +273,9 @@ def page_stem_index(wiki: Path) -> dict[str, str]:
     return index
 
 
-def alias_index(wiki: Path) -> dict[str, str]:
+def alias_index(
+    wiki: Path, *, loaded: list[tuple[Path, dict | None]] | None = None
+) -> dict[str, str]:
     """content 页 frontmatter `aliases` → 拥有页 stem(小写)。**零 LLM。**（P3.1，决策P3.1-1/2/3）
 
     别名进入 `[[wikilink]]` 解析命名空间（与 stem 同口径、大小写不敏感）：`[[别名]]` 解析到声明页，
@@ -265,10 +286,18 @@ def alias_index(wiki: Path) -> dict[str, str]:
     - **归一**：别名经 `link_stem` 归一后入键，与 `[[…]]` 查找口径**完全对称**（决策P3.1-3）。
     - **幂等**：同名别名按 `iter_pages` 稳定排序**先到先得**（`setdefault`）；真冲突（撞 stem / 撞另一
       别名）由 `check` 报错（决策P3.1-4），此处不裁决，只保证确定性。
+    - **复用已加载**：`loaded` 给 `(path, meta)` 对（调用方**已 `load_page`** 的结果，如 `build_graph`
+      的节点循环按 `iter_pages` 序产出的 `meta`）时直接复用、**不再 `iter_pages`+`load_page` 重解析整库**
+      （消 `build_graph` 双解析；与 `index_sync_state` 的 `pages` 透传同款）。缺省 `None` 则内部
+      `iter_pages`+`load_page` 一次（原行为）。须与 `iter_pages` 同序、同 `load_page` 口径以保确定性。
     """
     out: dict[str, str] = {}
-    for path in iter_pages(wiki):
-        meta, _body = load_page(path)
+    items = (
+        loaded
+        if loaded is not None
+        else ((path, load_page(path)[0]) for path in iter_pages(wiki))
+    )
+    for path, meta in items:
         if not isinstance(meta, dict):
             continue
         raw_aliases = meta.get("aliases")
@@ -294,16 +323,21 @@ def link_target_stems(wiki: Path) -> frozenset[str]:
     return frozenset(link_resolution_index(wiki))
 
 
-def _base_resolution_index(wiki: Path) -> dict[str, str]:
+def _base_resolution_index(
+    wiki: Path, *, loaded: list[tuple[Path, dict | None]] | None = None
+) -> dict[str, str]:
     """解析键(stem | 别名, 小写) → 拥有页相对库根 posix 路径（P3.1 基底，决策P3.1-6）。
 
     在 `page_stem_index`（stem→path）之上叠加 别名→拥有页 path；**页面 stem 优先于别名**——撞名时
     别名不遮蔽真实页（且该撞名已由 `check` 报 `aliases.collides_stem`）。指向别名拥有页缺失者跳过。
     P3.8 把它从 `link_resolution_index` 抽出作基底：fold variant 叠加层在其上派生（见下）。
+
+    `loaded` 透传给 `alias_index` 复用已 `load_page` 的 `(path, meta)`、免整库重解析（`page_stem_index`
+    只 rglob 取 stem、不读 YAML，不在复用之列）。
     """
     stem_to_path = page_stem_index(wiki)
     resolved = dict(stem_to_path)
-    for alias, owner in alias_index(wiki).items():
+    for alias, owner in alias_index(wiki, loaded=loaded).items():
         if alias in resolved:
             continue  # 页面 stem 优先；撞名由 check 报错
         path = stem_to_path.get(owner)
@@ -312,11 +346,17 @@ def _base_resolution_index(wiki: Path) -> dict[str, str]:
     return resolved
 
 
-def link_resolution_index(wiki: Path) -> dict[str, str]:
+def link_resolution_index(
+    wiki: Path, *, loaded: list[tuple[Path, dict | None]] | None = None
+) -> dict[str, str]:
     """解析表：键(精确 stem|别名 ∪ **安全 fold variant**) → 拥有页相对库根 posix 路径。（P3.8，决策P3.8-3）
 
     `check`(owner 是否 None) / `graph`(owner→节点) / `heal`(写后回执判 still_broken) / `Web`(owner→
     路径) **全复用**此一张表 + `resolve_owner`，杜绝各写一套 owner 逻辑、口径漂移。
+
+    `loaded` 透传给底层 `alias_index`：`build_graph` 把节点循环已 `load_page` 的 `(path, meta)` 传进来，
+    避免「建节点解析一遍 + 建解析表又解析一遍」的整库 frontmatter 双解析（缺省 None = 原行为，
+    check/heal/Web 等既有调用方不受影响）。
 
     在 `_base_resolution_index`（精确 stem/别名）之上**只叠加无冲突的 fold variant**（决策P3.8-4 机械规则）：
     对每个 base 键算 `fold_stem`，**当且仅当**「该 fold 键不在 base 键集」**且**「该 fold 键的 fold group
@@ -328,7 +368,7 @@ def link_resolution_index(wiki: Path) -> dict[str, str]:
       → 两页各由精确键解析、零串台（**撞则不折叠**自动成立，无需额外检测，决策P3.8-6）。
     - fold group ≥2 拥有者（真撞名）→ 丢弃该 variant、不影响 base 键解析（歧义 fold 形保持断链、不猜）。
     """
-    base = _base_resolution_index(wiki)
+    base = _base_resolution_index(wiki, loaded=loaded)
     groups: dict[str, set[str]] = defaultdict(set)
     for key, owner in base.items():
         fk = fold_stem(key)

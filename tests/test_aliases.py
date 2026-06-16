@@ -91,6 +91,31 @@ def test_link_resolution_index_alias_to_owner_path_and_stem_priority(tmp_path: P
     assert ri["llm"] == "wiki/concepts/LLM.md"  # 真 stem 仍在
 
 
+def test_loaded_passthrough_equals_default(tmp_path: Path):
+    """`build_graph` 透传已加载 `(path, meta)` 给 alias_index/_base/link_resolution_index，避免整库
+    二次解析（性能改）。锁定「loaded 路径 ≡ 默认路径」：撞名 setdefault 先到先得、坏页跳过、fold 兜底
+    任一处漂移都会悄悄改 graph 边/断链分类——此处直接对拍三层归口，默认路径用例覆盖不到 loaded 入参。
+    """
+    from guanlan.pages import _base_resolution_index, iter_pages, load_page
+
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/LLM.md", aliases="['大模型', '大语言模型']")
+    _page(wiki, "concepts/Attention.md", aliases="['注意力', 'multi_head_attention']")  # fold 兜底
+    _page(wiki, "concepts/A.md", aliases="['共用名']")
+    _page(wiki, "concepts/B.md", aliases="['共用名']")  # 撞名 → 先到先得
+    (wiki / "concepts" / "Bad.md").write_text("没有 frontmatter\n", encoding="utf-8")  # 坏页两路都跳过
+
+    # 复刻 build_graph 的加载口径：同 iter_pages 序、同 load_page 容错档。
+    loaded = [(p, load_page(p)[0]) for p in iter_pages(wiki)]
+
+    assert alias_index(wiki, loaded=loaded) == alias_index(wiki)
+    assert _base_resolution_index(wiki, loaded=loaded) == _base_resolution_index(wiki)
+    assert link_resolution_index(wiki, loaded=loaded) == link_resolution_index(wiki)
+    # 撞名先到先得在 loaded 路径下仍确定（A 先于 B）。
+    assert alias_index(wiki, loaded=loaded)["共用名"] == "a"
+
+
 # ───────────────────────── check 校验 ─────────────────────────
 
 
