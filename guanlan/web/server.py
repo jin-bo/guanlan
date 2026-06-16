@@ -142,6 +142,8 @@ def serve(
     )
     if open_browser:
         _open_browser_when_ready(HOST, port)
+    # P5.4：后台预热检索缓存，把首搜 ~1 分钟冷算移出用户关键路径（只预热本进程挂载的库，daemon、失败静默）。
+    app.state.search_cache.prewarm_async(kb / "wiki")
 
     # workers=1 硬编码（决策P4-2/P4-5）：内存作业/会话表 + 单写者假设要求单进程单事件循环。
     uvicorn.run(app, host=HOST, port=port, workers=1, log_level="warning")

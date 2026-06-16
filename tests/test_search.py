@@ -809,3 +809,131 @@ def test_cache_search_equals_cold(tmp_path: Path):
     cold = search_result_dict(search_pages(wiki, "区块链", limit=10))
     warm = search_result_dict(CorpusCache().search(wiki, "区块链", limit=10))
     assert warm == cold
+
+
+# ---------- P5.4 检索冷启动性能（启动预热 + singleflight 构建锁）----------
+
+
+def test_prewarm_then_search_no_rebuild(tmp_path: Path, monkeypatch):
+    """预热付清两笔冷算后，后续 search 全 memo 命中：corpus 不再 build_doc、backlinks 不再 build_graph。"""
+    import guanlan.search as search_mod
+
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/A.md", title="区块链", body="区块链 [[Hub]] 技术。")
+    _page(wiki, "entities/Hub.md", title="Hub", body="枢纽。")
+    cache = CorpusCache()
+    assert cache.prewarm(wiki) is True  # 预热成功
+    calls = _count_build_graph(monkeypatch)
+    builds: list = []
+    real_build = search_mod.build_doc
+    monkeypatch.setattr(
+        search_mod, "build_doc", lambda p, *, root: (builds.append(p), real_build(p, root=root))[1]
+    )
+    # 预热后未改盘 → search 走纯 memo：零 build_doc、零 build_graph。
+    cache.search(wiki, "区块链", limit=10)
+    assert builds == [] and calls == []
+
+
+def test_prewarm_equivalent_to_cold(tmp_path: Path):
+    """预热后的 search 结果与冷算 `search_pages` 逐字段一致（预热只搬运冷算、不改语义，决策P5.4-1）。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/Aaa.md", title="区块链", body="区块链 技术。")
+    _page(wiki, "entities/Zzz.md", title="区块链", body="区块链 技术。")
+    _page(wiki, "concepts/Ref.md", title="引用", body="见 [[Zzz]]")
+    cache = CorpusCache()
+    cache.prewarm(wiki)
+    cold = search_result_dict(search_pages(wiki, "区块链", limit=10))
+    warm = search_result_dict(cache.search(wiki, "区块链", limit=10))
+    assert warm == cold
+
+
+def test_prewarm_idempotent(tmp_path: Path):
+    """预热幂等：连跑两次都成功、互不破坏；与未预热 search 结果一致。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/A.md", title="区块链", body="区块链 技术。")
+    cache = CorpusCache()
+    assert cache.prewarm(wiki) is True
+    assert cache.prewarm(wiki) is True
+    warm = search_result_dict(cache.search(wiki, "区块链", limit=10))
+    assert warm == search_result_dict(search_pages(wiki, "区块链", limit=10))
+
+
+def test_prewarm_swallows_failure(tmp_path: Path, monkeypatch):
+    """预热容错：底层抛异常 → prewarm 返回 False、**不抛**（守 serve 不被预热拖垮，决策P5.4-1）。"""
+    import guanlan.search as search_mod
+
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "entities/A.md", title="区块链", body="区块链 技术。")
+    cache = CorpusCache()
+    monkeypatch.setattr(
+        search_mod, "iter_pages", lambda w: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    assert cache.prewarm(wiki) is False  # 静默吞掉、不冒泡
+
+
+def test_singleflight_concurrent_cold_builds_graph_once(tmp_path: Path, monkeypatch):
+    """singleflight：N 个并发首搜（含模拟预热）冷启同库 → build_graph 只跑**一次**（决策P5.4-2 合流去重）。
+
+    没有构建锁时，并发 miss 会各自 build_graph（last-writer-wins，N 次）；加锁后首个建、余者复查命中。
+    """
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    for i in range(12):
+        _page(wiki, f"entities/P{i}.md", title=f"P{i}", body=f"区块链 [[P0]] 第{i}页。")
+    cache = CorpusCache()
+    calls = _count_build_graph(monkeypatch)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(lambda _: cache.search(wiki, "区块链", limit=10), range(8)))
+    assert len(calls) == 1  # 8 路并发冷启，build_graph 仅一次（singleflight 合流）
+    # 全部返回一致名次（与冷算等价）。
+    cold = [(h.page, h.score) for h in search_pages(wiki, "区块链", limit=10).hits]
+    for r in results:
+        assert [(h.page, h.score) for h in r.hits] == cold
+
+
+def test_corpus_does_not_evict_concurrently_added_page(tmp_path: Path, monkeypatch):
+    """修 P5.4 评审 over-prune：构建锁内的剪枝以**锁外首次 snapshot** 为基准（非复查 re-snapshot），
+    故并发线程在首次快照之后新加的页（不在本次 entries/seen）不被误删-重建。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    p = _page(wiki, "entities/A.md", body="内容。")
+    cache = CorpusCache()
+    bucket = wiki.parent.as_posix()
+    ghost_key = "wiki/entities/ghost.md"
+    real_classify = cache._classify
+    injected: list = []
+
+    def classify_then_inject(entries, snapshot):
+        result = real_classify(entries, snapshot)
+        if not injected:  # 仅锁外首次分类后：模拟并发 builder 在我们首次快照之后提交 ghost。
+            injected.append(True)
+            cache._caches.setdefault(bucket, {})[ghost_key] = build_doc(p, root=wiki.parent)
+        return result
+
+    monkeypatch.setattr(cache, "_classify", classify_then_inject)
+    cache.corpus(wiki)  # A 是 miss → 走构建锁分支 → 合并剪枝（旧实现会以 re-snapshot 误删 ghost）。
+    assert ghost_key in cache._caches[bucket]  # 并发新加页未被误删
+
+
+def test_singleflight_concurrent_corpus_builds_each_page_once(tmp_path: Path, monkeypatch):
+    """singleflight：并发冷启 corpus → 每页 build_doc 只跑一次（无锁时会 N×，决策P5.4-2）。"""
+    import guanlan.search as search_mod
+
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    for i in range(15):
+        _page(wiki, f"entities/P{i}.md", title=f"P{i}", body=f"去中心化金融 第{i}页。")
+    cache = CorpusCache()
+    builds: list = []
+    real_build = search_mod.build_doc
+    monkeypatch.setattr(
+        search_mod, "build_doc", lambda p, *, root: (builds.append(p), real_build(p, root=root))[1]
+    )
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(lambda _: cache.corpus(wiki), range(8)))
+    # 每页恰建一次（共 15 页）；无锁时 8 路并发会重复 build。
+    assert len(builds) == 15 and len(set(builds)) == 15
