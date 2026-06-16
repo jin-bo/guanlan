@@ -38,6 +38,22 @@ def client(kb):
         yield c
 
 
+# 原单文件 app.js 已按关注点拆为多个经典脚本（core/i18n_apply/wiki/reports/jobs/
+# staging/attach/chat/boot），共享全局作用域。前端接线断言改扫**全部应用脚本的拼接**，
+# 以免某断言落在已迁走的关注点文件上（如 heal/audit/backfill 接线现居 jobs.js + chat.js）。
+#
+# 文件清单从 index.html 的 <script src> 标签**按真实载入序派生**（非硬编码元组）：这样
+#   ① 新增/改名拆分文件自动纳入，与 test_web_i18n.py 的 glob 同为自发现、无清单漂移；
+#   ② 顺带校验 index.html 引用的脚本确实存在（test_static_assets_bundled），堵住"入口页引用了
+#      未随包脚本→线上整页 404"的风险。i18n.js 是词表/不含接线，排除。
+# 直接读盘拼接（接线断言只看内容；脚本是否被正确 serve 另有 test_static_assets_served 覆盖）。
+_FRONTEND_JS = tuple(
+    n for n in re.findall(r'<script src="/static/([^"]+\.js)">', (STATIC_DIR / "index.html").read_text(encoding="utf-8"))
+    if n != "i18n.js"
+)
+_FRONTEND_JS_SRC = "\n".join((STATIC_DIR / n).read_text(encoding="utf-8") for n in _FRONTEND_JS)
+
+
 # ───────────────────────── 安全 / 形态（C1） ─────────────────────────
 
 
@@ -52,13 +68,14 @@ def test_index_served(kb) -> None:
         resp = client.get("/")
     assert resp.status_code == 200
     assert "观澜" in resp.text
-    # 前端引用随包静态资源（C6）。
-    assert "/static/app.js" in resp.text and "/static/app.css" in resp.text
+    # 前端引用随包静态资源（C6）：app.js 已拆分，入口页须引首尾两个脚本（core 提供工具，boot 最后载入）。
+    assert "/static/core.js" in resp.text and "/static/boot.js" in resp.text
+    assert "/static/app.css" in resp.text
 
 
 def test_static_assets_served(client) -> None:
-    """随包前端资源命中（C6：app.js / app.css）。"""
-    js = client.get("/static/app.js")
+    """随包前端资源命中（C6：拆分后的脚本 / app.css）。"""
+    js = client.get("/static/core.js")  # 工具层：含 fetch 封装
     css = client.get("/static/app.css")
     assert js.status_code == 200 and "fetch" in js.text
     assert css.status_code == 200 and "--lan-ripple" in css.text  # 观澜配色变量
@@ -67,14 +84,14 @@ def test_static_assets_served(client) -> None:
 def test_static_and_index_no_cache(client) -> None:
     """入口页与静态资源带 `Cache-Control: no-cache`（仍可 ETag 304 协商）。
 
-    否则升级观澜后浏览器拿启发式缓存的旧 app.js 渲染新接口会出怪症（图像徽章落「文本」等）。
+    否则升级观澜后浏览器拿启发式缓存的旧脚本渲染新接口会出怪症（图像徽章落「文本」等）。
     """
     assert client.get("/").headers.get("cache-control") == "no-cache"
-    assert client.get("/static/app.js").headers.get("cache-control") == "no-cache"
+    assert client.get("/static/core.js").headers.get("cache-control") == "no-cache"
 
 
 def test_static_assets_bundled() -> None:
-    for name in ("index.html", "app.js", "app.css", "logo.png"):
+    for name in ("index.html", "app.css", "logo.png", *_FRONTEND_JS):
         assert (STATIC_DIR / name).is_file()
 
 
@@ -3037,10 +3054,10 @@ def test_heal_serial_behind_ingest(kb) -> None:
 
 
 def test_heal_frontend_wired(client) -> None:
-    """前端接线（C2）：顶栏有 heal 按钮，app.js 拉 preview/POST heal 并按 result 渲染回执。"""
+    """前端接线（C2）：顶栏有 heal 按钮，前端拉 preview/POST heal 并按 result 渲染回执。"""
     index = client.get("/").text
     assert 'id="heal-btn"' in index
-    js = client.get("/static/app.js").text
+    js = _FRONTEND_JS_SRC
     assert "/api/heal/preview" in js
     assert '"/api/heal"' in js  # POST 物化
     assert "renderHealDone" in js and "job.result" in js  # 按结构化 result 渲染
@@ -3211,10 +3228,10 @@ def test_audit_reader_trims_post_keeps_preview(kb) -> None:
 
 
 def test_audit_frontend_wired(client) -> None:
-    """前端接线（C2）：顶栏有 audit 按钮，app.js 拉 preview/POST audit 并按 result 渲染回执。"""
+    """前端接线（C2）：顶栏有 audit 按钮，前端拉 preview/POST audit 并按 result 渲染回执。"""
     index = client.get("/").text
     assert 'id="audit-btn"' in index
-    js = client.get("/static/app.js").text
+    js = _FRONTEND_JS_SRC
     assert "/api/audit/preview" in js
     assert '"/api/audit"' in js  # POST 审计
     assert "renderAuditDone" in js and "job.result" in js  # 按结构化 result 渲染
@@ -3397,7 +3414,7 @@ def test_backfill_frontend_wired(client) -> None:
     index = client.get("/").text
     assert 'id="backfill-btn"' in index
     assert "#i-backfill" in index  # 图标 symbol + 引用
-    js = client.get("/static/app.js").text
+    js = _FRONTEND_JS_SRC
     assert '"/api/backfill"' in js  # POST 回填
     assert "openBackfill" in js and "triggerBackfill" in js
     assert "appendBackfillButton" in js  # 气泡尾部「沉淀」按钮
