@@ -1,6 +1,8 @@
 # gbrain 反向评审结论（backlog）
 
 > 状态：**反向评审结论，非排期项**。记录对 `../llm-wiki/gbrain`（v0.42.42、TypeScript/Bun、Postgres/PGLite、~146K 页的生产级"第二大脑"，CLI + MCP/HTTP 宿主）逐条款的"借不借/怎么落"研判，供后续排期参照。**本笔记不改变现状**。
+>
+> **进展更新（实现后回填）**：本笔记 §10 推荐排期的**四条零-LLM 借鉴全部已实现**——§2 检索 backlink 重排 = **P5.3** ✅、§3 finding 因果排序 ✅、§4 schema detect 漂移侦测 = **P3.10** ✅、§5 源撤回恢复窗 = **P3.9** ✅；§6 检索质量回放 = `tests/test_search_quality.py` ✅、§7 矛盾检测 = **P3.7** ✅。余下 §6 成本闸（存疑借）、§7 autopilot/SkillOpt（park=E3/P6）、§8 别借（E1/E2）未变。
 > 关联：[`openkb-反向评审结论.md`](openkb-反向评审结论.md)（同类反向评审先例）、[`next-milestone-and-graph-viz.md`](next-milestone-and-graph-viz.md)（反向评审收口先例）、[`cjk-retrieval-enhancements.md`](cjk-retrieval-enhancements.md)（检索增强线，§3 借点并入此线）、[`../../P5.0-检索层.md`](../../P5.0-检索层.md)、[`../../P3.7-语义审计.md`](../../P3.7-语义审计.md)、[`p3.7-语义审计-raw_digest写入主体未决.md`](p3.7-语义审计-raw_digest写入主体未决.md)、[`../../P6-技能蒸馏-草案.md`](../../P6-技能蒸馏-草案.md)、DESIGN §8（语义维护 / CJK 检索 / graph 增强）/ §7（路线表 E1·E2·E3）。
 
 ## 0. 一句话 / 为什么记
@@ -83,11 +85,11 @@ gbrain 与观澜**同源不同量级**（同 Karpathy LLM Wiki 模式，但 gbra
 - **零-LLM / LLM 干净分档**：观澜 `init`/`check`/`health`/`lint`/`graph`/`reindex`/`convert` 全零-LLM，LLM 只在 `ingest`/`query`；gbrain 22 相位 dream **混编**结构修复与 LLM 合成。
 - **薄壳**：观澜 `guanlan/` 不携带业务智能（业务住 skill + agentao）；gbrain **本身就是**那坨业务智能（大型 TS 代码库）。反向评审取其形、不取其重。
 
-## 10. 建议排期顺序（park 后再排）
+## 10. 建议排期顺序（park 后再排）—— ✅ 四条均已实现
 
-1. **检索 backlink 重排（§2）** —— 最干净的零-LLM 净新增，候选 `docs/P5.x`，并入 [`cjk-retrieval-enhancements.md`](cjk-retrieval-enhancements.md) 检索增强线。
-2. **finding 因果排序（§3）** —— 纯展示层、最小、零风险，可随手落。
-3. **`schema detect` 漂移侦测（§4）** —— advisory，并入 health/lint 家族。
-4. **源撤回恢复窗（§5）** —— 喂 [openkb §5](openkb-反向评审结论.md) 的 `docs/P3.9-源撤回.md` 候选，与"删内容页谁来定"未决一并拍。
+1. **检索 backlink 重排（§2）** —— ✅ **已实现 = P5.3**（[`P5.3-检索backlink重排.md`](../../P5.3-检索backlink重排.md)），并入 [`cjk-retrieval-enhancements.md`](cjk-retrieval-enhancements.md) 第④档。
+2. **finding 因果排序（§3）** —— ✅ **已实现**（`pages.order_findings` 归口，[`finding-因果排序.md`](../../finding-因果排序.md)）。
+3. **`schema detect` 漂移侦测（§4）** —— ✅ **已实现 = P3.10**（[`P3.10-页型目录一致性.md`](../../P3.10-页型目录一致性.md)，health advisory）。
+4. **源撤回恢复窗（§5）** —— ✅ **已实现 = P3.9**（[`P3.9-源撤回.md`](../../P3.9-源撤回.md)，`guanlan remove` 移 `.trash/` 恢复窗）。
 
-其余（§6 实证驱动 / §7 已在路上或已 park / §8 别借）不主动排。
+其余（§6 成本闸 实证驱动 / §7 已在路上[P3.7 已实现]或已 park[E3/P6] / §8 别借[E1/E2]）不主动排。
