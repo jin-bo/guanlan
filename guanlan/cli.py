@@ -183,6 +183,293 @@ def _cmd_install_skill(args: argparse.Namespace) -> int:
     return 0
 
 
+# —— 子命令解析器构建 ——
+# 每个子命令一个 `_add_<cmd>_parser(sub, dir_parent)`：build_parser 只负责创建 root parser
+# 与共享父解析器、再依次调用这些 adder。纯机械拆分、零行为变更（与对应 _cmd_* handler 配对）。
+
+
+def _add_init_parser(sub, dir_parent) -> None:
+    p = sub.add_parser(
+        "init", parents=[dir_parent], help="在目录生成最小知识库模板（确定性，零 LLM）"
+    )
+    p.add_argument(
+        "path", nargs="?", default=None, help="目标目录（默认 -C/--dir 或当前目录）"
+    )
+    p.set_defaults(func=_cmd_init)
+
+
+def _add_ingest_parser(sub, dir_parent) -> None:
+    p = sub.add_parser("ingest", parents=[dir_parent], help="摄入一篇 .md 资料")
+    p.add_argument("target", help="raw/ 下的 .md 文件，如 raw/x.md")
+    p.add_argument("--model", default=None, help="覆盖 Agentao 模型")
+    p.set_defaults(func=_cmd_ingest)
+
+
+def _add_query_parser(sub, dir_parent) -> None:
+    p = sub.add_parser("query", parents=[dir_parent], help="对知识库提问（默认只读）")
+    p.add_argument("question", help="问题文本")
+    p.add_argument(
+        "--backfill", action="store_true", help="把好答案回填 wiki/syntheses/（走完整门禁）"
+    )
+    p.add_argument("--model", default=None, help="覆盖 Agentao 模型")
+    p.set_defaults(func=_cmd_query)
+
+
+def _add_check_parser(sub, dir_parent) -> None:
+    p = sub.add_parser(
+        "check", parents=[dir_parent], help="确定性基础校验：frontmatter + 断链 + sources（零 LLM）"
+    )
+    p.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p.set_defaults(func=_cmd_check)
+
+
+def _add_health_parser(sub, dir_parent) -> None:
+    p = sub.add_parser(
+        "health", parents=[dir_parent], help="文件级结构体检：桩页 + index↔磁盘同步（零 LLM，建议非门禁）"
+    )
+    p.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p.add_argument("--strict", action="store_true", help="有建议则以退出码 6 失败（供 CI/nightly）")
+    p.set_defaults(func=_cmd_health)
+
+
+def _add_lint_parser(sub, dir_parent) -> None:
+    p = sub.add_parser(
+        "lint", parents=[dir_parent], help="图感知结构 lint：孤儿 / 断链 / 缺失实体（零 LLM，建议非门禁）"
+    )
+    p.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p.add_argument("--strict", action="store_true", help="有建议则以退出码 6 失败（供 CI/nightly）")
+    p.set_defaults(func=_cmd_lint)
+
+
+def _add_graph_parser(sub, dir_parent) -> None:
+    # allow_abbrev=False：graph 无 stdout JSON 概念，故不让 `--json` 前缀静默命中 `--json-only`
+    # （在 health/lint 里 `--json` 是"机器输出"，语义不同；与其静默别名不如直接报未知参数）。
+    p = sub.add_parser(
+        "graph",
+        parents=[dir_parent],
+        allow_abbrev=False,
+        help="确定性建图：[[wikilink]] → graph/graph.json + graph.html（零 LLM）",
+    )
+    p.add_argument(
+        "--json-only", action="store_true", help="只写 graph.json，跳过 graph.html"
+    )
+    p.set_defaults(func=_cmd_graph)
+
+
+def _add_heal_parser(sub, dir_parent) -> None:
+    p = sub.add_parser(
+        "heal",
+        parents=[dir_parent],
+        help="缺失实体物化：把高频断链按需 LLM 建成 entity 页（走 P2 写门禁）",
+    )
+    p.add_argument(
+        "--limit",
+        type=positive_int,
+        default=DEFAULT_LIMIT,
+        help=f"本批最多物化几个（默认 {DEFAULT_LIMIT}，按引用频次降序；须 ≥ 1）",
+    )
+    p.add_argument(
+        "--min-refs",
+        type=positive_int,
+        default=MISSING_ENTITY_MIN_REFS,
+        help=f"入选阈值：被 ≥ 此数页引用才物化（默认 {MISSING_ENTITY_MIN_REFS}，对齐 lint；须 ≥ 1）",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="仅打印 worklist（纯读、零 LLM、不触 Agentao）"
+    )
+    p.add_argument("--model", default=None, help="覆盖 Agentao 模型")
+    p.add_argument("--json", action="store_true", help="输出 worklist/receipt 的结构化 JSON")
+    p.set_defaults(func=_cmd_heal)
+
+
+def _add_audit_parser(sub, dir_parent) -> None:
+    p = sub.add_parser(
+        "audit",
+        parents=[dir_parent],
+        help="语义审计：确定性粗筛漂移源（raw 已变但 wiki 未重综合）→ LLM 复核过期论断（走 P2 写门禁）",
+    )
+    p.add_argument(
+        "--limit",
+        type=positive_int,
+        default=AUDIT_DEFAULT_LIMIT,
+        help=f"本批复核的**漂移源组**上限（默认 {AUDIT_DEFAULT_LIMIT}，按 slug 升序；整组原子复核+刷新；须 ≥ 1）",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="仅打印漂移源组（纯读、零 LLM、不触 Agentao）"
+    )
+    p.add_argument("--model", default=None, help="覆盖 Agentao 模型")
+    p.add_argument("--json", action="store_true", help="输出漂移源组 / 回执的结构化 JSON")
+    p.set_defaults(func=_cmd_audit)
+
+
+def _add_reindex_parser(sub, dir_parent) -> None:
+    p = sub.add_parser(
+        "reindex",
+        parents=[dir_parent],
+        help="索引回填：把磁盘已存在但未收录的内容页登记进 index.md（零 LLM，修 health.index_missing_page）",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="只打印 worklist，不写盘（纯读、零 LLM）"
+    )
+    p.add_argument(
+        "--prune", action="store_true", help="额外删除 index 里指向不存在文件的悬空行（index_dangling）"
+    )
+    p.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p.set_defaults(func=_cmd_reindex)
+
+
+def _add_remove_parser(sub, dir_parent) -> None:
+    # remove（P3.9）：人发起的零-LLM 源撤回——移源自身落盘物入 .trash/ + 摘多源页引用 + 修 index。
+    # 默认预览、显式 --yes 才写（比 reindex/convert 默认即写更保守，因删内容页破坏性更大）。
+    p = sub.add_parser(
+        "remove",
+        parents=[dir_parent],
+        help="源撤回：把误摄/已撤稿源移入 .trash/ + 摘多源页引用 + 修 index（零 LLM、人发起，默认预览）",
+    )
+    p.add_argument("src", help="源标识：<slug> / raw/<slug>.md / wiki/sources/<slug>.md")
+    p.add_argument(
+        "--yes", action="store_true", help="确认执行（不带则只打印 worklist、零写盘）"
+    )
+    p.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p.set_defaults(func=_cmd_remove)
+
+
+def _add_search_parser(sub, dir_parent) -> None:
+    p = sub.add_parser(
+        "search",
+        parents=[dir_parent],
+        help="确定性整页召回：BM25 + CJK 2-gram，按分数降序打印 top-N 页（零 LLM）",
+    )
+    p.add_argument("query", help="检索词")
+    p.add_argument(
+        "--limit",
+        type=positive_int,
+        default=10,
+        help="召回条数（默认 10，须 ≥ 1）",
+    )
+    p.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p.set_defaults(func=_cmd_search)
+
+
+def _add_convert_parser(sub, dir_parent) -> None:
+    # convert（P5.2）：多格式 → raw/<slug>.md（复用 pdf-to-markdown skill，脚本零 LLM）。
+    # 刻意**不设 `--model`**：转换的 LLM 用法由 `--backend` + 用户环境决定，guanlan 不代为指定
+    # （决策P5.2-4）。`--backend` 透传 skill convert.py。
+    p = sub.add_parser(
+        "convert",
+        parents=[dir_parent],
+        help="多格式（PDF/DOCX/…）转 markdown 落 raw/<slug>.md（零 LLM，复用 pdf-to-markdown skill）",
+    )
+    p.add_argument("src", help="待转换的文件（PDF/DOCX/PPTX/XLSX/HTML/图片…）")
+    p.add_argument("--name", default=None, help="覆盖目标 slug（默认取原件 stem）")
+    p.add_argument(
+        "--origin", default=None, help="显式出处（默认 = 转换前原始 src 路径）"
+    )
+    p.add_argument(
+        "--overwrite", action="store_true", help="同名 raw/ 已存在时显式覆盖（默认不覆盖）"
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="只把转换结果打到 stdout，raw/ 零写（人审预览）"
+    )
+    p.add_argument(
+        "--ingest", action="store_true", help="转换成功后串联 `ingest raw/<slug>.md`（默认关）"
+    )
+    p.add_argument(
+        "--backend",
+        choices=_CONVERT_BACKENDS,
+        default="auto",
+        help="转换后端（透传 skill convert.py：auto/mineru/marker/python，默认 auto）",
+    )
+    p.set_defaults(func=_cmd_convert)
+
+
+def _add_web_parser(sub, dir_parent) -> None:
+    p = sub.add_parser(
+        "web",
+        parents=[dir_parent],
+        help="起本地 Web 宿主（可选叠加层，需 `pip install 'guanlan-wiki[web]'`）",
+    )
+    p.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765，仅 127.0.0.1）")
+    p.add_argument("--no-browser", action="store_true", help="起服后不自动打开浏览器")
+    p.add_argument("--model", default=None, help="覆盖 Agentao 模型（透传写作业与会话）")
+    p.add_argument(
+        "--reader",
+        action="store_true",
+        help="只读多会话部署（P4.9）：裁掉全部写端点与会话枚举、强制只读姿态、默认 KB 零字节写入；"
+        "多用户各持自己的 ?c= 会话 UUID 各聊各的、互不可见（无账号、无用户管理）",
+    )
+    # 三态日志旗标（决策P4.9-15）：BooleanOptionalAction 给 --agent-log / --no-agent-log，default=None
+    # （未指定）。_cmd_web 按 reader 解析默认：非 reader 默认开 / reader 默认关 / 显式旗标覆盖。
+    p.add_argument(
+        "--agent-log",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="是否把会话 agent 日志写入 <库>/agentao.log（未指定：非 reader 默认开、reader 默认关；"
+        "ingest 子进程日志不受影响）",
+    )
+    p.add_argument(
+        "--max-conversations",
+        type=int,
+        default=100,
+        help="内存会话硬上限（默认 100；须 ≥ 1，多用户部署可调高，P4.9-18）",
+    )
+    p.add_argument(
+        "--no-session-persist",
+        action="store_true",
+        help="不把只读问答会话落盘 <库>/.agentao/sessions/（默认落盘+跨重启恢复；关时等价纯内存，隐私/临时场景用）",
+    )
+    p.add_argument(
+        "--mode",
+        choices=["read-only", "workspace-write"],
+        default="read-only",
+        help="新会话开局姿态（默认 read-only；workspace-write 起即可让 Agent 写 wiki/workspace，浏览器内可 /mode 切换）",
+    )
+    p.set_defaults(func=_cmd_web)
+
+
+def _add_mcp_parser(sub, dir_parent) -> None:
+    p = sub.add_parser(
+        "mcp",
+        parents=[dir_parent],
+        help="起只读 MCP 服务端（stdio，可选叠加层，需 `pip install 'guanlan-wiki[mcp]'`）：把 wiki "
+        "检索/读页/图谱/体检暴露给任意 MCP 客户端（与『Agentao 作客户端的 Tool 注入』方向相反）",
+    )
+    p.add_argument("--model", default=None, help="覆盖 ask 工具的 Agentao 模型（仅 ask 用）")
+    p.set_defaults(func=_cmd_mcp)
+
+
+def _add_install_skill_parser(sub, dir_parent) -> None:
+    # install-skill 不接受 -C/--dir（装到 ~/.agentao/skills/，与知识库根无关），故不继承 dir_parent。
+    p = sub.add_parser(
+        "install-skill", help="把随包 guanlan-wiki skill 装入 ~/.agentao/skills/（外部库用）"
+    )
+    p.add_argument(
+        "--force", action="store_true", help="已存在也覆盖重装（默认保留用户改动）"
+    )
+    p.set_defaults(func=_cmd_install_skill)
+
+
+# 按当前帮助里的展示顺序登记；新增命令时在此追加一行即可。
+_SUBCOMMAND_BUILDERS = (
+    _add_init_parser,
+    _add_ingest_parser,
+    _add_query_parser,
+    _add_check_parser,
+    _add_health_parser,
+    _add_lint_parser,
+    _add_graph_parser,
+    _add_heal_parser,
+    _add_audit_parser,
+    _add_reindex_parser,
+    _add_remove_parser,
+    _add_search_parser,
+    _add_convert_parser,
+    _add_web_parser,
+    _add_mcp_parser,
+    _add_install_skill_parser,
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="guanlan",
@@ -209,237 +496,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser(
-        "init", parents=[dir_parent], help="在目录生成最小知识库模板（确定性，零 LLM）"
-    )
-    p_init.add_argument(
-        "path", nargs="?", default=None, help="目标目录（默认 -C/--dir 或当前目录）"
-    )
-    p_init.set_defaults(func=_cmd_init)
-
-    p_ingest = sub.add_parser("ingest", parents=[dir_parent], help="摄入一篇 .md 资料")
-    p_ingest.add_argument("target", help="raw/ 下的 .md 文件，如 raw/x.md")
-    p_ingest.add_argument("--model", default=None, help="覆盖 Agentao 模型")
-    p_ingest.set_defaults(func=_cmd_ingest)
-
-    p_query = sub.add_parser(
-        "query", parents=[dir_parent], help="对知识库提问（默认只读）"
-    )
-    p_query.add_argument("question", help="问题文本")
-    p_query.add_argument(
-        "--backfill", action="store_true", help="把好答案回填 wiki/syntheses/（走完整门禁）"
-    )
-    p_query.add_argument("--model", default=None, help="覆盖 Agentao 模型")
-    p_query.set_defaults(func=_cmd_query)
-
-    p_check = sub.add_parser(
-        "check", parents=[dir_parent], help="确定性基础校验：frontmatter + 断链 + sources（零 LLM）"
-    )
-    p_check.add_argument("--json", action="store_true", help="输出 JSON 契约")
-    p_check.set_defaults(func=_cmd_check)
-
-    p_health = sub.add_parser(
-        "health", parents=[dir_parent], help="文件级结构体检：桩页 + index↔磁盘同步（零 LLM，建议非门禁）"
-    )
-    p_health.add_argument("--json", action="store_true", help="输出 JSON 契约")
-    p_health.add_argument("--strict", action="store_true", help="有建议则以退出码 6 失败（供 CI/nightly）")
-    p_health.set_defaults(func=_cmd_health)
-
-    p_lint = sub.add_parser(
-        "lint", parents=[dir_parent], help="图感知结构 lint：孤儿 / 断链 / 缺失实体（零 LLM，建议非门禁）"
-    )
-    p_lint.add_argument("--json", action="store_true", help="输出 JSON 契约")
-    p_lint.add_argument("--strict", action="store_true", help="有建议则以退出码 6 失败（供 CI/nightly）")
-    p_lint.set_defaults(func=_cmd_lint)
-
-    # allow_abbrev=False：graph 无 stdout JSON 概念，故不让 `--json` 前缀静默命中 `--json-only`
-    # （在 health/lint 里 `--json` 是"机器输出"，语义不同；与其静默别名不如直接报未知参数）。
-    p_graph = sub.add_parser(
-        "graph",
-        parents=[dir_parent],
-        allow_abbrev=False,
-        help="确定性建图：[[wikilink]] → graph/graph.json + graph.html（零 LLM）",
-    )
-    p_graph.add_argument(
-        "--json-only", action="store_true", help="只写 graph.json，跳过 graph.html"
-    )
-    p_graph.set_defaults(func=_cmd_graph)
-
-    p_heal = sub.add_parser(
-        "heal",
-        parents=[dir_parent],
-        help="缺失实体物化：把高频断链按需 LLM 建成 entity 页（走 P2 写门禁）",
-    )
-    p_heal.add_argument(
-        "--limit",
-        type=positive_int,
-        default=DEFAULT_LIMIT,
-        help=f"本批最多物化几个（默认 {DEFAULT_LIMIT}，按引用频次降序；须 ≥ 1）",
-    )
-    p_heal.add_argument(
-        "--min-refs",
-        type=positive_int,
-        default=MISSING_ENTITY_MIN_REFS,
-        help=f"入选阈值：被 ≥ 此数页引用才物化（默认 {MISSING_ENTITY_MIN_REFS}，对齐 lint；须 ≥ 1）",
-    )
-    p_heal.add_argument(
-        "--dry-run", action="store_true", help="仅打印 worklist（纯读、零 LLM、不触 Agentao）"
-    )
-    p_heal.add_argument("--model", default=None, help="覆盖 Agentao 模型")
-    p_heal.add_argument("--json", action="store_true", help="输出 worklist/receipt 的结构化 JSON")
-    p_heal.set_defaults(func=_cmd_heal)
-
-    p_audit = sub.add_parser(
-        "audit",
-        parents=[dir_parent],
-        help="语义审计：确定性粗筛漂移源（raw 已变但 wiki 未重综合）→ LLM 复核过期论断（走 P2 写门禁）",
-    )
-    p_audit.add_argument(
-        "--limit",
-        type=positive_int,
-        default=AUDIT_DEFAULT_LIMIT,
-        help=f"本批复核的**漂移源组**上限（默认 {AUDIT_DEFAULT_LIMIT}，按 slug 升序；整组原子复核+刷新；须 ≥ 1）",
-    )
-    p_audit.add_argument(
-        "--dry-run", action="store_true", help="仅打印漂移源组（纯读、零 LLM、不触 Agentao）"
-    )
-    p_audit.add_argument("--model", default=None, help="覆盖 Agentao 模型")
-    p_audit.add_argument("--json", action="store_true", help="输出漂移源组 / 回执的结构化 JSON")
-    p_audit.set_defaults(func=_cmd_audit)
-
-    p_reindex = sub.add_parser(
-        "reindex",
-        parents=[dir_parent],
-        help="索引回填：把磁盘已存在但未收录的内容页登记进 index.md（零 LLM，修 health.index_missing_page）",
-    )
-    p_reindex.add_argument(
-        "--dry-run", action="store_true", help="只打印 worklist，不写盘（纯读、零 LLM）"
-    )
-    p_reindex.add_argument(
-        "--prune", action="store_true", help="额外删除 index 里指向不存在文件的悬空行（index_dangling）"
-    )
-    p_reindex.add_argument("--json", action="store_true", help="输出 JSON 契约")
-    p_reindex.set_defaults(func=_cmd_reindex)
-
-    # remove（P3.9）：人发起的零-LLM 源撤回——移源自身落盘物入 .trash/ + 摘多源页引用 + 修 index。
-    # 默认预览、显式 --yes 才写（比 reindex/convert 默认即写更保守，因删内容页破坏性更大）。
-    p_remove = sub.add_parser(
-        "remove",
-        parents=[dir_parent],
-        help="源撤回：把误摄/已撤稿源移入 .trash/ + 摘多源页引用 + 修 index（零 LLM、人发起，默认预览）",
-    )
-    p_remove.add_argument("src", help="源标识：<slug> / raw/<slug>.md / wiki/sources/<slug>.md")
-    p_remove.add_argument(
-        "--yes", action="store_true", help="确认执行（不带则只打印 worklist、零写盘）"
-    )
-    p_remove.add_argument("--json", action="store_true", help="输出 JSON 契约")
-    p_remove.set_defaults(func=_cmd_remove)
-
-    p_search = sub.add_parser(
-        "search",
-        parents=[dir_parent],
-        help="确定性整页召回：BM25 + CJK 2-gram，按分数降序打印 top-N 页（零 LLM）",
-    )
-    p_search.add_argument("query", help="检索词")
-    p_search.add_argument(
-        "--limit",
-        type=positive_int,
-        default=10,
-        help="召回条数（默认 10，须 ≥ 1）",
-    )
-    p_search.add_argument("--json", action="store_true", help="输出 JSON 契约")
-    p_search.set_defaults(func=_cmd_search)
-
-    # convert（P5.2）：多格式 → raw/<slug>.md（复用 pdf-to-markdown skill，脚本零 LLM）。
-    # 刻意**不设 `--model`**：转换的 LLM 用法由 `--backend` + 用户环境决定，guanlan 不代为指定
-    # （决策P5.2-4）。`--backend` 透传 skill convert.py。
-    p_convert = sub.add_parser(
-        "convert",
-        parents=[dir_parent],
-        help="多格式（PDF/DOCX/…）转 markdown 落 raw/<slug>.md（零 LLM，复用 pdf-to-markdown skill）",
-    )
-    p_convert.add_argument("src", help="待转换的文件（PDF/DOCX/PPTX/XLSX/HTML/图片…）")
-    p_convert.add_argument("--name", default=None, help="覆盖目标 slug（默认取原件 stem）")
-    p_convert.add_argument(
-        "--origin", default=None, help="显式出处（默认 = 转换前原始 src 路径）"
-    )
-    p_convert.add_argument(
-        "--overwrite", action="store_true", help="同名 raw/ 已存在时显式覆盖（默认不覆盖）"
-    )
-    p_convert.add_argument(
-        "--dry-run", action="store_true", help="只把转换结果打到 stdout，raw/ 零写（人审预览）"
-    )
-    p_convert.add_argument(
-        "--ingest", action="store_true", help="转换成功后串联 `ingest raw/<slug>.md`（默认关）"
-    )
-    p_convert.add_argument(
-        "--backend",
-        choices=_CONVERT_BACKENDS,
-        default="auto",
-        help="转换后端（透传 skill convert.py：auto/mineru/marker/python，默认 auto）",
-    )
-    p_convert.set_defaults(func=_cmd_convert)
-
-    p_web = sub.add_parser(
-        "web",
-        parents=[dir_parent],
-        help="起本地 Web 宿主（可选叠加层，需 `pip install 'guanlan-wiki[web]'`）",
-    )
-    p_web.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765，仅 127.0.0.1）")
-    p_web.add_argument(
-        "--no-browser", action="store_true", help="起服后不自动打开浏览器"
-    )
-    p_web.add_argument("--model", default=None, help="覆盖 Agentao 模型（透传写作业与会话）")
-    p_web.add_argument(
-        "--reader",
-        action="store_true",
-        help="只读多会话部署（P4.9）：裁掉全部写端点与会话枚举、强制只读姿态、默认 KB 零字节写入；"
-        "多用户各持自己的 ?c= 会话 UUID 各聊各的、互不可见（无账号、无用户管理）",
-    )
-    # 三态日志旗标（决策P4.9-15）：BooleanOptionalAction 给 --agent-log / --no-agent-log，default=None
-    # （未指定）。_cmd_web 按 reader 解析默认：非 reader 默认开 / reader 默认关 / 显式旗标覆盖。
-    p_web.add_argument(
-        "--agent-log",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="是否把会话 agent 日志写入 <库>/agentao.log（未指定：非 reader 默认开、reader 默认关；"
-        "ingest 子进程日志不受影响）",
-    )
-    p_web.add_argument(
-        "--max-conversations",
-        type=int,
-        default=100,
-        help="内存会话硬上限（默认 100；须 ≥ 1，多用户部署可调高，P4.9-18）",
-    )
-    p_web.add_argument(
-        "--no-session-persist",
-        action="store_true",
-        help="不把只读问答会话落盘 <库>/.agentao/sessions/（默认落盘+跨重启恢复；关时等价纯内存，隐私/临时场景用）",
-    )
-    p_web.add_argument(
-        "--mode",
-        choices=["read-only", "workspace-write"],
-        default="read-only",
-        help="新会话开局姿态（默认 read-only；workspace-write 起即可让 Agent 写 wiki/workspace，浏览器内可 /mode 切换）",
-    )
-    p_web.set_defaults(func=_cmd_web)
-
-    p_mcp = sub.add_parser(
-        "mcp",
-        parents=[dir_parent],
-        help="起只读 MCP 服务端（stdio，可选叠加层，需 `pip install 'guanlan-wiki[mcp]'`）：把 wiki "
-        "检索/读页/图谱/体检暴露给任意 MCP 客户端（与『Agentao 作客户端的 Tool 注入』方向相反）",
-    )
-    p_mcp.add_argument("--model", default=None, help="覆盖 ask 工具的 Agentao 模型（仅 ask 用）")
-    p_mcp.set_defaults(func=_cmd_mcp)
-
-    p_skill = sub.add_parser(
-        "install-skill", help="把随包 guanlan-wiki skill 装入 ~/.agentao/skills/（外部库用）"
-    )
-    p_skill.add_argument(
-        "--force", action="store_true", help="已存在也覆盖重装（默认保留用户改动）"
-    )
-    p_skill.set_defaults(func=_cmd_install_skill)
+    for add in _SUBCOMMAND_BUILDERS:
+        add(sub, dir_parent)
 
     return parser
 
