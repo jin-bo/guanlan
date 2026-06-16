@@ -106,6 +106,9 @@ def build_graph(wiki: Path) -> Graph:
     nodes: list[Node] = []
     node_ids: set[str] = set()
     bodies: list[tuple[str, str]] = []  # (node_id, body)
+    # 节点循环已 load_page 全库 → 把 (path, meta) 攒下透传给 link_resolution_index，消「建节点 +
+    # 建解析表」两遍整库 frontmatter 解析（约半数 build_graph 冷算冗余）。须与 iter_pages 同序。
+    loaded: list[tuple[Path, dict | None]] = []
     for path in iter_pages(wiki):
         meta, body = load_page(path)  # 容错档：坏 frontmatter 不抛、照常建节点。
         nid = path.stem.lower()
@@ -119,11 +122,12 @@ def build_graph(wiki: Path) -> Graph:
         )
         node_ids.add(nid)
         bodies.append((nid, body))
+        loaded.append((path, meta))
 
     # 解析表 = 精确 stem/别名（含 config）∪ 安全 fold variant → owner path，与 check/heal/Web 同一
     # 归口（P3.8，决策P3.8-3）。content_path_to_id：owner 路径 → 节点 id（与 idx 的 owner 值同基，皆
     # 相对库根 posix）；config 页不在其中，故指向 config 的链接经 resolve_owner 命中却归类为"丢弃"。
-    idx = link_resolution_index(wiki)
+    idx = link_resolution_index(wiki, loaded=loaded)  # 复用上面已加载的 meta，免整库二次解析。
     content_path_to_id = {n.path: n.id for n in nodes}
 
     adjacency: dict[str, set[str]] = {nid: set() for nid in node_ids}
