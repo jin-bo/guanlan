@@ -132,6 +132,18 @@
 </div>
 
 <script src="/static/i18n.js"></script>
-<script src="/static/app.js"></script>
+<!-- 原 app.js 按关注点拆分为多个经典脚本，共享全局作用域（非 ES module）。
+     硬性次序仅两条：① core 必须最先（其 `const $` 等被各文件在载入期顶层 $(...) 接线时引用，
+     晚载入会 TDZ 报错）；② boot 必须最后（其顶层启动代码跨全部关注点引用声明）。
+     中间六个文件只是关注点分组、彼此无载入期依赖（函数声明全局提升、共享 let 仅在运行期互访）。 -->
+<script src="/static/core.js"></script>
+<script src="/static/i18n_apply.js"></script>
+<script src="/static/wiki.js"></script>
+<script src="/static/reports.js"></script>
+<script src="/static/jobs.js"></script>
+<script src="/static/staging.js"></script>
+<script src="/static/attach.js"></script>
+<script src="/static/chat.js"></script>
+<script src="/static/boot.js"></script>
 </body>
 </html>

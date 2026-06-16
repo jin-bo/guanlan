@@ -1,6 +1,6 @@
 """P4.7 界面双语词表静态守恒测试（见 docs/P4.7-中英双语.md §8）。
 
-纯文本扫 `static/{i18n.js,index.html,app.js}`——**不依赖 web extra、不起服务、不触 LLM**，
+纯文本扫 `static/{i18n.js,index.html, 全部拆分脚本}`——**不依赖 web extra、不起服务、不触 LLM**，
 故不 `importorskip`。专防三类漂移（`t()` 缺 key 静默回退字面量、运行时才露 key，静态扫描是唯一拦截）：
   ① zh/en 两套 key 必须一一对应；
   ② index.html 每个 data-i18n* 的值都在词表里；
@@ -15,7 +15,13 @@ from pathlib import Path
 STATIC = Path(__file__).resolve().parent.parent / "guanlan" / "web" / "static"
 I18N_JS = (STATIC / "i18n.js").read_text(encoding="utf-8")
 INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
-APP_JS = (STATIC / "app.js").read_text(encoding="utf-8")
+# 原单文件 app.js 已按关注点拆为多个经典脚本；i18n.js 是词表/不含 t() 调用，排除在外。
+# 拼接全部应用脚本后做 t() 扫描，确保迁走的调用点仍受词表守恒约束。
+APP_JS = "\n".join(
+    p.read_text(encoding="utf-8")
+    for p in sorted(STATIC.glob("*.js"))
+    if p.name != "i18n.js"
+)
 
 _KEY_RE = re.compile(r'^\s*"([^"]+)"\s*:', re.M)
 _ENTRY_RE = re.compile(r'^\s*"([^"]+)"\s*:\s*"(.*)",\s*$', re.M)
