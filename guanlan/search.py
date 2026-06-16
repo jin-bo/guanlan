@@ -417,11 +417,11 @@ class CorpusCache:
     """长驻进程（web/mcp）专用**进程内** memo：按 (mtime_ns,size) 复用已建 DocBag、只重建变更页。
 
     **不落盘**、可幂等重建、与冷算 `search_pages` 字节等价（决策P5.0-14）。线程安全（决策P5.0-19）：
-    `corpus()` 把**重活（glob + 全库 stat + build_doc）放在锁外**并发跑，`threading.Lock` 只护两段
-    **纯字典**操作——拍桶快照、合并重建 + 剪枝（决策P5.1-8，收窄临界区）。代价是放弃「全程单锁」的
-    双重-build 抑制：并发线程可能对同页各 build 一次、合并 last-writer-wins，但 (mtime_ns,size) 键保证
-    下次 stat 必重建，最坏多算一次、绝不永久陈旧（与「冷算恒权威」兜底一致）。返回值只取「本调用 stat
-    对齐的命中/新建 DocBag」，故仍与冷算字节等价、确定性不变。CLI 单进程单线程不用（新进程吃不到缓存）。
+    `corpus()` 把 glob + 全库 stat 放在锁外算 entries，`threading.Lock`（`self._lock`）只护**纯字典**短
+    临界区——拍桶快照、合并重建 + 剪枝（决策P5.1-8，收窄临界区）。**P5.4 singleflight（决策P5.4-2）**：
+    冷/变更构建（build_doc / build_graph）改在**按桶分的构建锁**内串行，进锁后复查缓存——并发线程（含启动
+    预热）已填好的页直接复用、不重复 build，故同桶冷启每页/图恰建一次（无锁版会 N× last-writer-wins）。
+    返回值只取「本调用 stat 对齐的命中/新建 DocBag」，故仍与冷算字节等价、确定性不变。CLI 单进程单线程不用。
 
     **按库根分桶**：缓存先按 `root` 分到独立子表，再按相对库根 posix 路径索引。否则单个 cache 实例
     服务多个知识库时，两库同相对路径（如 `wiki/entities/A.md`）若 `(mtime_ns,size)` 偶合，会串用对方
@@ -436,6 +436,15 @@ class CorpusCache:
         # (语料签名, {相对库根 posix → 入链数})。签名变才重算图，签名命中直接返回。
         self._backlinks: dict[str, tuple[tuple, dict[str, int]]] = {}
         self._lock = threading.Lock()
+        # P5.4 singleflight：root posix → 本桶**构建锁**。冷/变更构建（build_doc / build_graph）在持此锁
+        # 时串行，余者等其结果后复查缓存即命中——预热线程与并发首搜天然合流、不重复全库冷扫（决策P5.4-2，
+        # 反转 P5.0-19 的「放弃双重-build 抑制」权衡，但**只在有 miss 时入锁**，hot path 仍全程无构建锁、
+        # 并发不互阻）。**corpus 与 backlinks 各持一套独立锁**：否则慢的 `build_graph` 会卡住只需重建一两页
+        # 的 `corpus`（二者无数据依赖、串一把锁等于把图构建延迟摊给了 corpus 重建，违背 P5.4 把冷算移出
+        # 关键路径的初衷）。与 `self._lock`（只护纯字典短临界区）**分层**：构建锁可长持（建 DocBag/图），
+        # `self._lock` 永远短持即放；获取顺序恒为「构建锁 → self._lock」、绝不反向、绝不跨桶嵌套，故无死锁。
+        self._corpus_build_locks: dict[str, threading.Lock] = {}
+        self._backlink_build_locks: dict[str, threading.Lock] = {}
 
     def corpus(self, wiki: Path) -> list[DocBag]:
         # **先绝对化再分桶**：相对路径（如不同 cwd 下的 `wiki`，其 parent 同为文本 `.`）会撞同一个桶，
@@ -469,40 +478,90 @@ class CorpusCache:
         with self._lock:
             snapshot = dict(self._caches.setdefault(bucket, {}))
 
-        # ③ 锁外：未变页直接复用快照里的 DocBag（保 `is` 复用契约）；miss/变更页 build_doc（O(变更)
-        # 读盘+分词）。build 期被删/读失败 → 跳过该页（best-effort，下次自愈，不冒泡崩整次检索）。
-        hits: dict[str, DocBag] = {}
+        # ③ 锁外分类（对齐本次 stat）：未变页复用快照里的 DocBag（保 `is` 复用契约），其余为 miss。
+        hits, misses = self._classify(entries, snapshot)
         rebuilt: dict[str, DocBag] = {}
-        for key, path, mtime_ns, size in entries:
-            cached = snapshot.get(key)
-            if cached is not None and cached.mtime_ns == mtime_ns and cached.size == size:
-                hits[key] = cached
-            else:
-                try:
-                    rebuilt[key] = build_doc(path, root=root)
-                except OSError:
-                    continue
+        seen = {e[0] for e in entries}
 
-        # 本次返回 = **本调用视图**：每页取「命中的快照 DocBag」或「本次新建的 DocBag」，二者都对齐本次
+        if misses:
+            # ④ 有 miss → 入本桶 **corpus 构建锁**（P5.4 singleflight，决策P5.4-2）：同桶冷/变更构建串行、合流去重。
+            # 进锁后**只复查 miss 子集**（`_classify(misses, fresh)`，通常很小）——并发 builder（含启动预热线程）
+            # 可能已把这些 miss 填好，于是 miss 变 hit、本次不再重复 build_doc（消除预热与首搜的双重全库冷扫）。
+            # 复查仍用**本次 entries 的 stat**比键，故命中的 DocBag 必对齐本调用 stat、与冷算字节等价（决策P5.0-14）。
+            # **不重算整盘 hits**——锁外已分出的 hit 是按本次 stat 命中的快照对象，不因并发刷新而失效（值等价）。
+            with self._build_lock(self._corpus_build_locks, bucket):
+                with self._lock:
+                    fresh = dict(self._caches.setdefault(bucket, {}))
+                promoted, misses = self._classify(misses, fresh)
+                hits.update(promoted)
+                # miss/变更页 build_doc（O(变更) 读盘+分词）；build 期被删/读失败 → 跳过（best-effort，
+                # 下次自愈，不冒泡崩整次检索）。
+                for key, path, mtime_ns, size in misses:
+                    try:
+                        rebuilt[key] = build_doc(path, root=root)
+                    except OSError:
+                        continue
+                # 锁内（短，纯字典）：把本次重建并入共享缓存 + 剪枝。仍在构建锁内（同桶串行，benign）。
+                self._merge_and_prune(bucket, rebuilt, snapshot, seen)
+        else:
+            # hot path：全命中、无构建锁（并发首搜互不阻塞），但仍剪掉已删页。`rebuilt` 为空 → 仅剪枝。
+            self._merge_and_prune(bucket, rebuilt, snapshot, seen)
+
+        # ⑤ 本次返回 = **本调用视图**：每页取「命中的快照 DocBag」或「本次新建的 DocBag」，二者都对齐本次
         # stat、绝不含陈旧版本——故与冷算 `search_pages` 字节等价（决策P5.0-14 不变）；按 iter_pages 排序
         # 序，确定性。**不**从合并后的共享 cache 取，避免并发线程的覆盖串进本次结果。
-        docs = [
+        return [
             hits[key] if key in hits else rebuilt[key]
             for key, *_ in entries
             if key in hits or key in rebuilt
         ]
 
-        # ④ 锁内（短，纯字典）：把本次重建并入共享缓存 + 剪枝。**只剪本次快照里有、现已不在盘上的页**
-        # （`snapshot - seen`），绝不动并发线程在我们拍快照后新加的页（旧版整桶 `set(cache)-seen` 剪枝会
-        # 误删它们）。`update` last-writer-wins：与并发同页新建可能互相覆盖，但 (mtime_ns,size) 键保证下次
-        # stat 必不同而重建，最坏多算一次、绝不永久陈旧。
-        seen = {e[0] for e in entries}
+    def _classify(
+        self,
+        entries: list[tuple[str, Path, int, int]],
+        snapshot: dict[str, DocBag],
+    ) -> tuple[dict[str, DocBag], list[tuple[str, Path, int, int]]]:
+        """按**本次 entries 的 stat**与快照比键，分出 hit（同 (mtime_ns,size) → 复用同一 DocBag 对象）
+        与 miss（缺页/变更页 → 待 build_doc）。纯计算、无锁无 syscall。锁外对全量 entries 调一次定 hot
+        path；进构建锁后只对 **miss 子集**复查（通常很小），不重算整盘——避免冷/变更路重复整库分类。"""
+        hits: dict[str, DocBag] = {}
+        misses: list[tuple[str, Path, int, int]] = []
+        for entry in entries:
+            key, _path, mtime_ns, size = entry
+            cached = snapshot.get(key)
+            if cached is not None and cached.mtime_ns == mtime_ns and cached.size == size:
+                hits[key] = cached
+            else:
+                misses.append(entry)
+        return hits, misses
+
+    def _merge_and_prune(
+        self,
+        bucket: str,
+        rebuilt: dict[str, DocBag],
+        snapshot: dict[str, DocBag],
+        seen: set[str],
+    ) -> None:
+        """锁内（短，纯字典）：把本次重建并入共享缓存 + 剪枝。**剪枝基准恒为锁外拍的首次 `snapshot`**
+        （非构建锁内的复查快照）——只剪「首次快照里有、本次 entries 已无」的删页，绝不动并发线程在首次
+        快照**之后**新加的页（否则会反复误删-重建并发刚缓存的页）。两分支共用本归口，剪枝口径不漂移。"""
         with self._lock:
             cache = self._caches.setdefault(bucket, {})
             cache.update(rebuilt)
             for stale in set(snapshot) - seen:
                 cache.pop(stale, None)
-        return docs
+
+    def _build_lock(
+        self, registry: dict[str, threading.Lock], bucket: str
+    ) -> threading.Lock:
+        """取/建本桶在给定 `registry`（corpus 或 backlink 各一套）里的构建锁（P5.4 singleflight，决策P5.4-2）。
+        建锁本身用 `self._lock` 护（短临界区），锁对象按桶长驻、复用——保证同桶同类构建拿到**同一把**锁。"""
+        with self._lock:
+            lock = registry.get(bucket)
+            if lock is None:
+                lock = threading.Lock()
+                registry[bucket] = lock
+            return lock
 
     def backlinks(self, wiki: Path, docs: list[DocBag]) -> dict[str, int]:
         """长驻进程的反链文档先验 memo（P5.3，决策P5.3-5）：签名命中直接返回缓存、签名变才重算图。
@@ -515,9 +574,11 @@ class CorpusCache:
         `build_graph` 的解析表虽含 config，但全库 stem 唯一下 config 永不是图节点、指向 config 的链接一律
         丢弃，故 config 改动不改 content→content 入链数——content-only 失效面 near-lossless（决策P5.3-5）。
 
-        重活（`build_graph` + `compute_backlinks`）放**锁外**并发跑，确定性、幂等、**只读 `wiki/`**（用
-        `build_graph` 非 `build_and_write_graph`——零写 `graph/`，reader/MCP 可用）。并发 miss 最坏两线程
-        各建一次图、last-writer-wins——两份确定性等价，benign（同 DocBag memo「最坏多算一次、绝不永久陈旧」）。
+        重活（`build_graph` + `compute_backlinks`）放 **backlink 构建锁内**串行（P5.4 singleflight，决策P5.4-2）：
+        签名 miss 时入锁、进锁后**复查签名**——并发 builder（含启动预热线程）可能已填好同签名 memo，于是本次
+        直接返回、不重复 `build_graph`（消除预热与首搜的双重全库建图）。**用独立于 corpus 的一套构建锁**，使
+        慢的建图不阻塞只重建几页的 `corpus`（二者无数据依赖）。确定性、幂等、**只读 `wiki/`**（用 `build_graph`
+        非 `build_and_write_graph`——零写 `graph/`，reader/MCP 可用）。
         """
         wiki = Path(wiki).resolve()  # 与 corpus() 同口径：先 resolve 再分桶（避免相对路径撞同桶）。
         bucket = wiki.parent.as_posix()
@@ -527,18 +588,24 @@ class CorpusCache:
             cached = self._backlinks.get(bucket)
             if cached is not None and cached[0] == sig:
                 return cached[1]  # 签名命中 → 返回 memo，不建图。
-        from .graph import build_graph, compute_backlinks  # 函数级导入：保核 import 面 graph-free。
+        # 签名 miss → 入 backlink 构建锁串行建图（singleflight）。进锁后复查：并发线程可能已建好同签名 memo。
+        with self._build_lock(self._backlink_build_locks, bucket):
+            with self._lock:
+                cached = self._backlinks.get(bucket)
+                if cached is not None and cached[0] == sig:
+                    return cached[1]  # 复查命中 → 复用并发线程刚建的图，不重复 build_graph。
+            from .graph import build_graph, compute_backlinks  # 函数级导入：保核 import 面 graph-free。
 
-        try:
-            inlinks = compute_backlinks(build_graph(wiki))  # 锁外重活：确定性、幂等、只读 wiki/、零写 graph/。
-        except OSError:
-            # 遍历/读盘 race（页被删/不可读）→ 本次降级为**无 boost**（纯 BM25），**不 memo 失败**、下次
-            # 重试。守 corpus() 同款 best-effort 容错：长驻读路径（/api/search、MCP search）绝不因瞬时 IO
-            # 抖动 500，退化为纯 BM25 召回仍是合法结果（决策P5.3-6 的只读容错延伸）。
-            return {}
-        with self._lock:  # 短临界区：纯字典写（last-writer-wins，benign）。
-            self._backlinks[bucket] = (sig, inlinks)
-        return inlinks
+            try:
+                inlinks = compute_backlinks(build_graph(wiki))  # 锁内重活：确定性、幂等、只读 wiki/、零写 graph/。
+            except OSError:
+                # 遍历/读盘 race（页被删/不可读）→ 本次降级为**无 boost**（纯 BM25），**不 memo 失败**、下次
+                # 重试。守 corpus() 同款 best-effort 容错：长驻读路径（/api/search、MCP search）绝不因瞬时 IO
+                # 抖动 500，退化为纯 BM25 召回仍是合法结果（决策P5.3-6 的只读容错延伸）。
+                return {}
+            with self._lock:  # 短临界区：纯字典写。
+                self._backlinks[bucket] = (sig, inlinks)
+            return inlinks
 
     def search(self, wiki: Path, query: str, *, limit: int) -> SearchResult:
         """长驻进程的整页召回**单一入口**（Web `/api/search` / MCP `search` / 内嵌 chat 工具共用）：
@@ -552,6 +619,29 @@ class CorpusCache:
         docs = self.corpus(wiki)
         inlinks = self.backlinks(wiki, docs)
         return score(docs, query, limit=limit, inlinks=inlinks)
+
+    def prewarm(self, wiki: Path) -> bool:
+        """启动预热（P5.4 候选①，决策P5.4-1）：在长驻进程起服时一次性付清首搜的两笔冷全扫
+        （`corpus` 的全库 build_doc + `backlinks` 的 `build_graph`），把 ~1 分钟从**用户首搜的关键路径**
+        移到**启动期后台**。返回是否预热成功（仅供日志/测试，调用方不据此分支）。
+
+        **幂等 + 容错**：与正常 corpus/backlinks 同路径、同 memo，故重复调用安全、与首搜结果字节等价；
+        **任何异常都吞掉**（预热是优化、非正确性前提）——失败时首搜照常懒构建、绝不拖垮 serve。配 P5.4
+        singleflight：若用户在预热跑完前就发起首搜，二者经同一把构建锁**合流**、绝不双重全库冷扫（决策P5.4-2）。
+        只读 `wiki/`、零写盘，reader/MCP 同样可用。"""
+        try:
+            self.backlinks(wiki, self.corpus(wiki))
+            return True
+        except Exception:  # noqa: BLE001 — 预热失败必须静默降级（不阻塞 serve、不污染 MCP stdout）。
+            return False
+
+    def prewarm_async(self, wiki: Path) -> threading.Thread:
+        """在 daemon 后台线程里跑 `prewarm(wiki)`（P5.4 候选①）：长驻宿主（Web/MCP）起服时调一次，把
+        首搜冷算移出关键路径。`daemon=True` 不拖住进程退出；失败由 `prewarm` 内部静默吞掉。归口于此，使
+        Web/MCP 两处接线共用同一套线程/容错策略、不漂移（返回 `Thread` 仅供测试 join，调用方可忽略）。"""
+        thread = threading.Thread(target=lambda: self.prewarm(wiki), daemon=True)
+        thread.start()
+        return thread
 
 
 def _emit_error(message: str, *, json_output: bool, exit_code: int = EXIT_USAGE) -> int:

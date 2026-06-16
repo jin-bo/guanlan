@@ -162,6 +162,11 @@ def serve_mcp(
     JSON-RPC 帧（决策P4.10-13）。
     """
     kb = require_kb_root(root, writable=False)
-    mcp = build_mcp(kb, model=model, runner=runner)
+    # P5.4 候选①（决策P5.4-1）：MCP 同为长驻进程，首个 `search` 工具调用同样付冷全扫。起服前自建
+    # `CorpusCache` 并后台预热（daemon、失败静默，归口 `prewarm_async`），把冷算移出客户端首搜关键路径；
+    # 预热只读 wiki/、零写盘、不碰 stdout（MCP 帧洁净不破，决策P4.10-13）。
+    cache = CorpusCache()
+    cache.prewarm_async(kb / "wiki")
+    mcp = build_mcp(kb, model=model, runner=runner, search_cache=cache)
     mcp.run(transport="stdio")
     return EXIT_OK
