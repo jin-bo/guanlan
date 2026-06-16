@@ -56,7 +56,6 @@ from .conversation_store import ConversationStore  # noqa: E402,F401
 __all__ = [
     "Conversation",
     "ConversationStore",
-    "Emit",
     "IDLE_TTL_SECONDS",
     "MAX_CONVERSATIONS",
     "build_from_environment",
