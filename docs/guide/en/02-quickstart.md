@@ -28,6 +28,83 @@ my-wiki/
 
 > **`-C` selects the KB root**: except for `init`, run every command as `guanlan -C my-wiki <command>` (or `cd my-wiki` first and drop `-C`).
 
+### 1.1 Updating `SCHEMA.md` with LLM help
+
+`SCHEMA.md` is the human-facing convention file for this knowledge base: domain boundaries, page-type usage, custom rules, and evolving organizational assumptions. It is not a machine-parsed API schema. After the KB has grown for a while, use an LLM to analyze the current state and update `SCHEMA.md` when scope, tags, naming, section structure, or organizational assumptions have changed.
+
+You can give this prompt to an LLM that can read and write the current directory:
+
+```text
+You are maintaining a Guanlan knowledge base. Analyze the real current state of the knowledge base, then update the root SCHEMA.md accordingly.
+
+Goal:
+Make SCHEMA.md accurately reflect the current domain boundary, page-type usage, naming/tag/section rules, and the organizational assumptions that have emerged. SCHEMA.md is free-form Markdown for humans and Agents. It is not a machine-parsed API schema; do not turn it into a program configuration file.
+
+Follow these steps:
+
+1. Read and understand these files/directories:
+   - SCHEMA.md
+   - wiki/index.md
+   - wiki/overview.md
+   - wiki/log.md
+   - Samples from each wiki/ directory, prioritizing coverage of source/entity/concept/synthesis pages
+   - If needed, sample raw/ source titles or frontmatter provenance
+
+2. Summarize the current KB state:
+   - What are the main domains/topics?
+   - Which topics or source types have reached meaningful scale?
+   - How are source/entity/concept/synthesis pages actually used?
+   - What tags are common, and are there synonyms, duplicates, quote-style drift, or inconsistent granularity?
+   - What real conventions exist for page titles, filenames, wikilinks, and section structure?
+   - Which organizational assumptions are stable enough to record under "Evolving assumptions / biases"?
+   - Which old rules no longer match the current state?
+
+3. Update SCHEMA.md:
+   - Preserve its role as this KB's convention file
+   - Do not add pseudo-configuration fields that current tools cannot execute
+   - Do not claim unsupported behavior, such as "SCHEMA.md is parsed by the program"
+   - Do not invent topics, tags, or rules that are not present
+   - Consolidate, clarify, and deduplicate existing rules
+   - If you find only isolated bad pages, do not turn those outliers into rules; record the dominant, stable practices worth continuing
+
+4. The updated content should cover these sections:
+   - ## Domain / Topics
+   - ## Enabled Page Types
+   - ## Custom Rules for This KB
+   - ## Evolving Assumptions / Biases
+
+5. Writing requirements:
+   - Write in the same language as the existing SCHEMA.md unless the user asks otherwise
+   - Use concise, actionable rules
+   - Keep the Markdown readable
+   - Tables are fine, but do not put overly detailed or quickly stale facts into tables
+   - Be specific about tag vocabularies, naming rules, and section rules
+   - Make it clear that "Evolving Assumptions / Biases" are working assumptions; counterexamples should be recorded in the relevant page's contradictions/uncertainties section
+
+6. After finishing, output:
+   - A short analysis of the current KB state
+   - The main changes made to SCHEMA.md
+   - The full updated SCHEMA.md
+   - Points that deserve human review
+
+Boundaries:
+- SCHEMA.md is not parsed by Guanlan Python code; it is a human/Agent convention file.
+- Do not modify raw/.
+- Do not batch-edit wiki pages.
+- Unless the user explicitly asks otherwise, only update SCHEMA.md.
+- If you find page-structure problems, list them as recommendations at the end; do not migrate pages as a side effect.
+```
+
+If you want the LLM to write the file directly, append:
+
+```text
+Please directly edit the root SCHEMA.md. After finishing, run:
+uv run guanlan check
+uv run guanlan health
+
+If checks fail, only fix problems caused by SCHEMA.md; do not modify raw/ or batch-edit wiki pages.
+```
+
 ## 2. Ingest a source
 
 Feed a markdown source to the Agent; it reads sources under `raw/` and creates/updates pages under `wiki/`:
