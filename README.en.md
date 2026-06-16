@@ -94,6 +94,8 @@ my-wiki/
     └── overview.md  # living cross-source overview
 ```
 
+> 💡 Once the KB has grown, have an LLM analyze its real current state and update `SCHEMA.md` (domain boundary / page-type usage / naming & tag conventions / evolving organizational assumptions) — with a ready-to-use prompt, see the **[User Guide → Quickstart §1.1 Updating `SCHEMA.md` with LLM help](docs/guide/en/02-quickstart.md#11-updating-schemamd-with-llm-help)**.
+
 ## Documentation
 
 - 📖 **[User Guide `docs/guide/`](docs/guide/)** — installation, quickstart, every command, Web/MCP hosts (bilingual)
