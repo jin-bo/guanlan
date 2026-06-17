@@ -26,7 +26,7 @@ from guanlan.convert import (
 )
 from guanlan.errors import EXIT_OK, EXIT_USAGE
 from guanlan.pages import split_frontmatter
-from guanlan.rawio import MAX_RAW_BYTES, apply_origin
+from guanlan.rawio import MAX_RAW_BYTES, apply_origin, find_source_page
 
 
 def _mock_convert(md: str, images=()):
@@ -41,6 +41,29 @@ def _src(tmp_path: Path, name: str = "报告.pdf", data: bytes = b"%PDF-1.4 fake
     p = d / name
     p.write_bytes(data)
     return p
+
+
+# ── find_source_page：raw→source 摘要页定位，容忍 . / - 归一分歧 ─────────────────────
+def test_find_source_page_exact_and_dot_dash_tolerant(tmp_path: Path):
+    """精确 slug 优先命中；raw 带点而摘要页按 kebab 落成横杠时，退一步仍能认出（修「未收录」误判）。"""
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    (sources / "标准体系-20240531.md").touch()  # 无序号：精确命中
+    (sources / "1-标准体系-20240531.md").touch()  # 有序号：Agent kebab 成横杠形
+
+    # 精确命中（raw_slug 保点，但此名本无点）。
+    assert find_source_page(sources, "标准体系-20240531") == sources / "标准体系-20240531.md"
+    # raw 带枚举点 `1.` → raw_slug 保点为 `1.标准体系…`，盘上是横杠形 → 点折横杠后认出。
+    assert find_source_page(sources, "1.标准体系-20240531") == sources / "1-标准体系-20240531.md"
+
+
+def test_find_source_page_misses_when_absent(tmp_path: Path):
+    """既无精确也无横杠形 → None（不凭空认；空 slug 同样 None，不误配）。"""
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    (sources / "其他源.md").touch()
+    assert find_source_page(sources, "3.数据清洗-20240531") is None
+    assert find_source_page(sources, "...") is None  # slug 归一后为空
 
 
 # ── 定位 skill convert.py（决策P5.2-5）────────────────────────────────────────────

@@ -13,6 +13,7 @@ from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .gate import run_guarded_write
 from .paths import require_kb_root
 from .provenance import compute_raw_digest, format_digest_value, stamp_raw_digest
+from .rawio import find_source_page
 from .runtime import AgentRunner
 
 # 薄 prompt：真正步骤在 skill。{rel} = 相对 raw/ 的 posix 路径。
@@ -89,13 +90,13 @@ def run_ingest(
 def _stamp_source_digest(kb: Path, raw_file: Path, rel: str) -> None:
     """门禁后由 wrapper 把本次摄入 raw 的内容指纹 stamp 进对应 source 摘要页（P3.7 §4.2，决策P3.7-3a）。
 
-    **只 stamp 本次那一张** `wiki/sources/<stem>.md`（按 conventions slug==rawname 约定定位），绝不
-    顺手刷别页（否则抹平别处真实漂移，是致命 bug）。定位不到 / 该页 frontmatter 本就坏 / 写后 check
-    不过 → `stamp_raw_digest` 跳过并回滚、记一句降级到 stderr，**绝不阻断 ingest**（决策P3.7-9）。
+    **只 stamp 本次那一张** source 摘要页（经 `find_source_page` 按 slug 定位、容忍 `.`/`-` 归一
+    分歧，绝不顺手刷别页——否则抹平别处真实漂移，是致命 bug）。定位不到 / 该页 frontmatter 本就坏 /
+    写后 check 不过 → `stamp_raw_digest` 跳过并回滚、记一句降级到 stderr，**绝不阻断 ingest**（决策P3.7-9）。
     指纹计算与写入是 wrapper 确定性代码、不持 LLM client（红线）。
     """
-    source_page = kb / "wiki" / "sources" / f"{Path(rel).stem}.md"
-    if not source_page.is_file():
+    source_page = find_source_page(kb / "wiki" / "sources", Path(rel).stem)
+    if source_page is None:
         return  # 无对应 source 页（slug 不符约定）→ 无声跳过（决策P3.7-5 安全退化、下次自然补）
     try:
         # raw 字节读取也可能抛 OSError（极小窗口：门禁后被删/权限变）；与 audit `_refresh_one` 同口径
