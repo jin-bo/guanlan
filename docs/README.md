@@ -50,6 +50,8 @@
 - [P4.10-MCP宿主](P4.10-MCP宿主.md) —— `guanlan mcp` 只读 MCP 服务端(stdio)
 - [P4.11-信任边界](P4.11-信任边界.md) —— 内容即数据 / 提示词注入防御(纯文档纪律)
 - [P4.12-Web语义审计](P4.12-Web语义审计.md) —— Web 端 `audit` 写作业(预览漂移源组 → 复核 → 结构化回执)
+- [P4.13-Web-mermaid渲染](P4.13-Web-mermaid渲染.md) —— Web 端 ```mermaid``` 围栏块浏览器内渲染成图(vendored UMD + strict 安全闸 + 优雅降级)
+- [P4.14-Web数学化学代码渲染](P4.14-Web数学化学代码渲染.md) —— Web 端数学/化学(KaTeX+mhchem) + 代码高亮(highlight.js)渲染(vendored + trust:false 默认安全闸 + 失败保留源码)
 
 ### P5 —— 语料规模化(多格式 + 检索)
 

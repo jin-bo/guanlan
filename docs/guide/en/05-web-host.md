@@ -36,6 +36,19 @@ guanlan -C my-wiki web --port 9000 --no-browser # different port / no browser
 - **Writable work-session** `/mode workspace-write`: the Agent may write `workspace/` (`raw/` stays hard read-only), with a three-layer write guard + single-writer + undo
 - **Bilingual UI**: a top-right 中文 ⇄ English toggle (pure-frontend i18n; only translates interface chrome — wiki content / agent answers / report bodies stay in their source language)
 
+## Rich rendering (in-browser, pure frontend)
+
+A few kinds of markup in wiki pages and chat answers render into rich output in the browser — **markdown stays the sole source of truth**; rendering is an overlay enhancement, and the CLI / plain-text fallback still shows honest source:
+
+- **mermaid diagrams**: ` ```mermaid ` fenced blocks → flow / sequence / class / state diagrams (P4.13)
+- **Math**: `$…$` / `$$…$$` / `\(…\)` / `\[…\]` → KaTeX typesetting (P4.14)
+- **Chemistry**: mhchem `\ce{}` / `\pu{}`, **must be inside math delimiters** (e.g. `$\ce{2H2 + O2 -> 2H2O}$`); a bare `\ce{}` stays literal (P4.14)
+- **Code highlighting**: language-fenced blocks like ` ```python ` → syntax highlighting (highlight.js common, ~36 languages; uncovered languages stay plain text) (P4.14)
+
+The renderers are all **vendored, bundled, non-CDN, offline-capable**, and **lazy-loaded** (pages without such content load nothing); any load/syntax failure **keeps the source** and never blanks the page. Security-wise: KaTeX `trust:false` (blocks `\href`/`\html*`), mermaid `securityLevel:'strict'`, highlight is fed escaped text — **products are not assumed unconditionally trusted**; trust boundaries are in the per-phase design docs. CLI / MCP text channels do not render (they return literal source).
+
+> **Copy raw Markdown**: each answer bubble has a clipboard icon in its bottom-right corner; clicking it copies that turn's **markdown source** (not the rendered text — formulas / code / `[[links]]` paste back verbatim) to the clipboard, with a brief "Copied" confirmation.
+
 ## Read/write split
 
 - The only write job `ingest` (and heal/backfill/audit/raw-write) reuses the **P2 subprocess + single-writer gate** (one background worker, FIFO).
@@ -59,4 +72,4 @@ Opens the single-user host as a **read-only multi-user deployment**:
 
 **Single-user, local only.** Always `workers=1` + listens on `127.0.0.1` only. **Never expose the port to a network** — there is no account/auth; `--reader` isolation is only the capability-URL model (honest threat boundary in the design docs), not access control.
 
-See: repo [`docs/P4-Web宿主.md`](../../P4-Web宿主.md) and the `P4.x` docs ([P4.1](../../P4.1-Web投喂.md) / [P4.5](../../P4.5-可写Web工作会话.md) / [P4.6](../../P4.6-Web上传与晋级.md) / [P4.9](../../P4.9-只读多会话.md), etc.).
+See: repo [`docs/P4-Web宿主.md`](../../P4-Web宿主.md) and the `P4.x` docs ([P4.1](../../P4.1-Web投喂.md) / [P4.5](../../P4.5-可写Web工作会话.md) / [P4.6](../../P4.6-Web上传与晋级.md) / [P4.9](../../P4.9-只读多会话.md) / [P4.13](../../P4.13-Web-mermaid渲染.md) / [P4.14](../../P4.14-Web数学化学代码渲染.md), etc.).

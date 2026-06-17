@@ -174,6 +174,30 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .mermaid-error { margin: .45rem 0 0; font-size: .82rem; color: var(--lan-ink-soft);
   border-left: 3px solid var(--lan-ripple); padding-left: .5rem; }
 
+/* 代码语法高亮（P4.14，决策P4.14-6）：highlight.js 产物 <span class="hljs-*">。不 vendored 第三方主题 CSS，
+   就地写一档**昼澜 token 主题**——代码块底是深澜（pre{background:#0d2b33}），故 token 取**深底可读**的澜调
+   亮色（青/海沫绿 + 一抹暖砂作数字对比），与界面同水墨澜色调。wiki 单页 / 对话气泡 / 暂存区预览共用。 */
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-name, .hljs-tag,
+.hljs-meta-keyword { color: #5ab9cf; }                       /* 关键字/标签：亮澜青（≈--lan-ripple 提亮） */
+.hljs-string, .hljs-attr, .hljs-symbol, .hljs-bullet,
+.hljs-addition, .hljs-regexp, .hljs-selector-attr { color: #9fd6c8; } /* 字符串/属性：海沫绿 */
+.hljs-title, .hljs-title.function_, .hljs-section,
+.hljs-selector-id, .hljs-selector-class { color: #8fd0de; }  /* 函数名/标题：更亮澜青 */
+.hljs-number, .hljs-literal, .hljs-type, .hljs-params,
+.hljs-class .hljs-title { color: #d3b78a; }                  /* 数字/字面量/类型：暖砂（深底对比） */
+.hljs-variable, .hljs-template-variable, .hljs-attribute,
+.hljs-property { color: #cfe6ea; }                           /* 变量/属性名：近涟漪高光（≈--lan-foam） */
+.hljs-comment, .hljs-quote, .hljs-meta { color: #6f8b91; font-style: italic; } /* 注释/元信息：淡墨雾 */
+.hljs-deletion { color: #e0a3a3; }                           /* 删除行：淡赭 */
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 700; }
+
+/* 数学/化学排版（P4.14，决策P4.14-6）：KaTeX 必需其 vendored katex.min.css（排版定位 + @font-face），
+   此处仅补颜色继承 + 宽 display 公式溢出滚动（不改 KaTeX 排版骨架）。公式只现于浅底（气泡/wiki 正文，
+   代码块内 $ 经 ignoredTags 不排版），故取浓墨随正文。 */
+.katex { color: var(--lan-ink); }
+.katex-display { overflow-x: auto; overflow-y: hidden; max-width: 100%; }
+
 /* ── Wiki（右）：搜索 + 回退/往前 + 合并视图（列表 ⇄ 单页） ── */
 .wiki { grid-area: wiki; min-height: 0; display: flex; flex-direction: column; background: var(--lan-paper); border-left: 1px solid var(--lan-mist); }
 .wiki-bar { display: flex; align-items: center; gap: .4rem; padding: .7rem .8rem; border-bottom: 1px solid var(--lan-mist); }
@@ -396,6 +420,19 @@ body.col-resizing { user-select: none; cursor: col-resize; }
   transition: background .16s, border-color .16s, color .16s; }
 .msg .bubble-backfill .ico { width: .92em; height: .92em; stroke-width: 1.8; }
 .msg .bubble-backfill:hover { background: var(--lan-ripple); border-color: var(--lan-ripple); color: #fff; }
+
+/* 复制原始 Markdown（输出气泡右下角）：绝对定位贴右下角、用气泡底色遮挡正文末行；默认低存在感，
+   气泡 hover / 钮聚焦时提亮；复制成功短暂变青底（图标换勾）。.has-copy 给气泡预留右下角空间。 */
+.msg.bot.has-copy { position: relative; padding-bottom: 1.6rem; }
+.msg .bubble-copy { position: absolute; right: .3rem; bottom: .25rem; display: inline-flex;
+  align-items: center; justify-content: center; width: 1.55rem; height: 1.35rem; padding: 0; line-height: 0;
+  background: var(--lan-paper); color: var(--lan-ink-soft); border: 1px solid var(--lan-mist);
+  border-radius: 6px; cursor: pointer; opacity: .5;
+  transition: opacity .16s, background .16s, border-color .16s, color .16s; }
+.msg.bot:hover .bubble-copy, .msg .bubble-copy:focus-visible { opacity: 1; }
+.msg .bubble-copy .ico { width: .95em; height: .95em; stroke-width: 1.8; }
+.msg .bubble-copy:hover { color: var(--lan-deep); border-color: var(--lan-ripple); background: var(--lan-foam); opacity: 1; }
+.msg .bubble-copy.copied, .msg .bubble-copy.copy-fail { color: #fff; background: var(--lan-ripple); border-color: var(--lan-ripple); opacity: 1; }
 
 /* 历史会话行（P4.2）：标题 + live/落盘徽标 + 打开/删除。 */
 .conv-row { display: flex; align-items: center; gap: .5rem; padding: .35rem .4rem; border-bottom: 1px solid var(--lan-mist); font-size: .9rem; }

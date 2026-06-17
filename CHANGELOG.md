@@ -3,7 +3,7 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
-## [Unreleased]
+## [0.1.13] - 2026-06-17
 
 ### 新增
 
@@ -34,6 +34,53 @@
   保真/转义零回归/资产随包/strict 配置/四注入点接线,6 例)+ `test_web_i18n.py` 平价;**真浏览器(Playwright)
   端到端冒烟已过**(合法图渲成 SVG、注入块经 strict 消毒无活元素无 alert、坏语法保留源+徽标)。**无新命令 / 无新
   退出码 / 无新 Python 依赖**;设计见 `docs/P4.13-Web-mermaid渲染.md`。
+
+- **Web 端数学 / 化学 / 代码渲染(P4.14)** —— 承 P4.13「安全 markdown 富渲染」第二里程:把 wiki 页 / 对话答案 /
+  暂存区预览里的**数学公式**(`$…$` / `$$…$$` / `\(…\)` / `\[…\]`)、**化学表达式**(mhchem `\ce{}`/`\pu{}`,**须置于
+  数学分隔符内**如 `$\ce{H2O}$`)、**代码块语法高亮**(` ```python ` 等带语言围栏块)在浏览器内渲染成富呈现,取代字面
+  源码。**纯前端表现层、服务端零改**:① 代码块经 `fenced_code` 已落成 `code.language-X` 转义文本(与 mermaid 同载体);
+  数学 `$…$` 作普通文本原样穿过 `render.py`、落成转义文本节点——`render.py` 字节未动、`_EscapeHtmlExtension` 转义姿态
+  全程不破(前端读 `textContent` 拿 TeX 串 / 代码源、非 HTML)。② **新机制:DOM 文本走查**——数学无围栏载体,新增
+  `static/math_enhance.js`(`typesetMath`):懒加载按序注入 `katex.min.css`+`katex`→`mhchem`→`auto-render`,
+  `renderMathInElement` **遍历容器文本节点**按分隔符就地排版(`ignoredTags` 含 `pre/code` → 代码块内 `$` 不排版、保
+  字面;`ignoredClasses` 含 `page-meta` → 跳 wiki chrome)。代码侧 `static/code_enhance.js`(`highlightCode`):扫
+  `pre>code.language-X`、跳 `language-mermaid`/已高亮/未注册语言、`hljs.highlightElement` 就地高亮。
+  `static/content_enhance.js` 把 P4.13 单钩子**泛化为 `enhanceContent` 编排器**(mermaid+highlight+math 区域不相交),
+  四注入点(`wiki.js paintPage` / `chat.js` 流式收尾+历史 / `jobs.js` raw 预览 / `staging.js paint`)由
+  `enhanceMermaid(x)`→`enhanceContent(x)`、挂载位置不变,令切语言/切预览重绘后三类产物一并重增强。③ **vendored 运行时**
+  (非 CDN、离线自洽、随 `packages=["guanlan"]` 自动入 wheel、无 `force-include`):`vendor/katex/`(KaTeX **0.16.22**:
+  `katex.min.js`+`mhchem`/`auto-render` contrib+`katex.min.css`+20 枚 `fonts/*.woff2`,字体经 `@font-face` 同源拉取)、
+  `vendor/highlight/highlight.min.js`(**11.10.0** common 构建,36 语言)。④ **安全闸(本相位实质)**——KaTeX 硬编码
+  **`trust:false`**(KaTeX 默认值,禁 `\href`/`\url`/`\includegraphics`/`\html*`、渲成错误色而非生效)+ **不传共享
+  `macros`**(auto-render 每次调用自造一份默认 `macros:{}`、**跨容器隔离**,`\gdef`/`\newcommand` 不跨页/气泡泄漏);
+  highlight.js v11 默认安全(读转义 `textContent`、产物只 `<span class=hljs-*>` 转义文本、剥未转义 HTML)。**取 KaTeX 而否
+  MathJax**:KaTeX 安全是「默认即安全、单旗、文档明载」的白名单铰链,MathJax `-full` 需在全量包上做减法黑名单(语义/完备性
+  脆弱)。**不承诺产物绝对可信**,边界收在 `trust:false`+不共享 macros+highlight 转义契约+钉版+失败保留源码;CSP 列独立加固。
+  ⑤ **优雅降级**:运行时加载失败→源码字面留存;公式语法错/被禁命令→KaTeX 错误色源码;未注册语言→可读纯文本(非静默)。
+  **配色**:`app.css` 写一档昼澜 hljs token 主题(深底 `#0d2b33` 可读的澜调亮色,不 vendored 第三方 CSS)+ `.katex` 颜色
+  继承/`.katex-display` 溢出滚动;KaTeX 必需其 vendored css。**i18n 零改**(math 错误 KaTeX 自渲、code 降级纯文本,无新文案)。
+  对决策P4-3 作有界破例(KaTeX/highlight 归「内容渲染器」、与已 vendored 的 mermaid/`markdown` 同位阶);CLI/MCP 文本通道不
+  渲染。守于 `tests/test_web.py`(代码/数学源保真到达 / 转义零回归 / KaTeX 子树随包含字体 / `trust:false`+未共享 macros +
+  探测四支均含闭合 / highlight 守门 / 编排器四注入点接线 / `render.py` 无服务端渲染依赖,9 例)+ `test_web_i18n.py` 平价;
+  **真浏览器(headless Chromium)端到端冒烟已过(16/16)**:数学/化学渲成 `.katex`、代码 `code.hljs` token 高亮、**注入运行时
+  验证**(`\href{javascript:}`/`\htmlData{onload=}`/`\includegraphics` 不弹窗、DOM 无活链接/`onerror`/`onload`/活 `<img>`)、
+  **宏不跨容器**(A 页 `\gdef\foo{LEAKED}` → B 页 `\foo` 渲成错误色未定义、不显 LEAKED)、**懒加载**(孤立 `$5`/裸 `\(` 页不
+  请求运行时、含公式页确加载)。**无新命令 / 无新退出码 / 无新 Python 依赖**;设计见 `docs/P4.14-Web数学化学代码渲染.md`。
+
+- **Web 端输出气泡「复制原始 Markdown」按钮** —— 对话答案气泡右下角加一枚剪贴板图标钮,点击把该轮答案的
+  **markdown 源**复制进剪贴板(**复制源而非渲染后文本**——markdown 是唯一事实来源,公式/代码/`[[链接]]` 原样
+  可粘回)。复制源:流式收尾取 `payload.answer`(始终随 `done` 帧下发的原始答案,`answer_html` 只是其渲染叠加)、
+  历史重载取 `m.content`;`navigator.clipboard.writeText`(`http://127.0.0.1` 浏览器视作安全上下文)+ 隐藏
+  `<textarea>`/`execCommand` legacy 兜底。钮绝对定位贴右下角、用气泡底色遮挡不压正文,默认低存在感、气泡 hover/
+  聚焦提亮,复制成功短暂回显「已复制」(图标换勾)。`reader` 只读部署同样可用(纯读操作)。新增 i18n
+  `chat.copy`/`chat.copied`/`chat.copyFail`(zh/en 双语)。守于 `tests/test_web.py`(两处接线 + 图标 + 双语存在性)+
+  `test_web_i18n.py` 平价;**真浏览器冒烟已过(7/7)**:点击后剪贴板**逐字** == markdown 源(含字面 `$E=mc^2$`/
+  ` ```python `/`\ce{H2O}`、非渲染后文本)、钮贴右下角、复制成功回显。**无新命令 / 无新退出码 / 无新依赖 / 服务端零改**。
+
+- **文档:用户指南补「富渲染」节 + 顶层第三方声明** —— `docs/guide/{zh,en}/05-web-宿主` 新增「富渲染(浏览器内)」
+  小节(mermaid / 数学 / 化学 / 代码 + 复制原始 Markdown 钮),并加 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)
+  汇总 vendored 前端运行时(mermaid MIT / KaTeX 含字体 MIT / highlight.js BSD-3)的许可(各文件版本/SHA256 仍归
+  `vendor/README.md`)。
 
 ### 修复
 

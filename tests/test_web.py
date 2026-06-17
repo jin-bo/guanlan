@@ -5253,15 +5253,19 @@ def test_mermaid_enhance_security_config(client) -> None:
 
 
 def test_mermaid_enhance_wired_at_four_injection_points() -> None:
-    """四类注入点全接线、勿漏 staging.js（评审点 1）；wiki/staging 须挂在重绘函数内（决策P4.13-8）。"""
+    """四类注入点全接线、勿漏 staging.js（评审点 1）；wiki/staging 须挂在重绘函数内。
+
+    P4.14 把单钩子泛化为 enhanceContent 编排器（决策P4.14-9）：四注入点改调 enhanceContent(，
+    enhanceMermaid 本身不动、仅由编排器内部调（断言随相位演进，见 test_content_orchestrator_wiring）。
+    """
     for name in ("wiki.js", "chat.js", "jobs.js", "staging.js"):
         src = (STATIC_DIR / name).read_text(encoding="utf-8")
-        assert "enhanceMermaid(" in src, f"{name} 缺 enhanceMermaid 接线"
-    # wiki：挂在 paintPage 内（首渲 + 切语言 repaint 一并覆盖，决策P4.13-8）。
+        assert "enhanceContent(" in src, f"{name} 缺 enhanceContent 接线"
+    # wiki：挂在 paintPage 内（首渲 + 切语言 repaint 一并覆盖，决策P4.13-8 经 P4.14-9 沿用）。
     wiki = (STATIC_DIR / "wiki.js").read_text(encoding="utf-8")
     pp = wiki.index("function paintPage")
-    assert "enhanceMermaid(" in wiki[pp:wiki.index("\n}", pp)]
-    # index.html 在调用者之前载入 mermaid_enhance.js。
+    assert "enhanceContent(" in wiki[pp:wiki.index("\n}", pp)]
+    # index.html 在调用者之前载入三增强 + 编排器。
     index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert index.index("mermaid_enhance.js") < index.index("wiki.js")
 
@@ -5271,3 +5275,143 @@ def test_mermaid_no_loading_placeholder_key() -> None:
     i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
     assert "mermaid.renderFail" in i18n
     assert "mermaid.loading" not in i18n
+
+
+# ──────────────── P4.14 Web 数学 / 化学 / 代码渲染 ────────────────
+# 测试分工同 P4.13：渲染正确性是 upstream 的事、DOM 交互需真浏览器（走手测，见
+# docs/P4.14-Web数学化学代码渲染.md §7）；Python 层只锁**服务端不变量**（源保真到达 +
+# 转义姿态零回归 + 资产随包 + 安全配置硬编码 + 编排器接线）。安全配置的 grep 断言是
+# **必要非充分**（证「配置字符串在」，真生效与否走手测 11/12，决策P4.14-4）。
+
+
+def test_api_page_preserves_code_source(client, kb) -> None:
+    """```python 围栏块经 fenced_code 落成 code.language-python、源转义保真——供前端高亮（服务端零改）。"""
+    write_page(kb, "wiki/concepts/Code.md", type="concept",
+               body="示例：\n\n```python\nif a < b: f(x)\n```\n")
+    html = client.get("/api/page", params={"path": "wiki/concepts/Code.md"}).json()["html"]
+    assert 'class="language-python"' in html  # 前端按此 class 拾取（与 mermaid 同载体）
+    assert "a &lt; b" in html  # 源转义保真（前端读 textContent 反转义回 a < b 喂 highlight.js）
+
+
+def test_api_page_preserves_math_source(client, kb) -> None:
+    """$…$ / $\\ce{}$ 作普通文本原样穿过 render.py、落成转义文本节点——供前端 typeset（服务端零改）。"""
+    write_page(kb, "wiki/concepts/Math.md", type="concept",
+               body="行内 $E=mc^2$ 与化学 $\\ce{2H2 + O2 -> 2H2O}$。")
+    html = client.get("/api/page", params={"path": "wiki/concepts/Math.md"}).json()["html"]
+    assert "$E=mc^2$" in html  # 数学分隔符原样穿过（python-markdown 不识、不吞）
+    # 化学 \ce 在分隔符内、`->` 转义保真（前端 auto-render 走查文本节点排版）。
+    assert "\\ce{2H2 + O2 -&gt; 2H2O}" in html
+
+
+def test_api_page_math_does_not_break_escape_posture(client, kb) -> None:
+    """含 $…$ 的页里夹带原始 <script> 仍被转义——P4.14 未碰 _EscapeHtmlExtension（决策P4.14-5）。"""
+    write_page(kb, "wiki/concepts/MathMixed.md", type="concept",
+               body="公式 $E=mc^2$。\n\n正文夹带 <script>alert(1)</script> 与 <img onerror=x>。")
+    html = client.get("/api/page", params={"path": "wiki/concepts/MathMixed.md"}).json()["html"]
+    assert "$E=mc^2$" in html  # 公式文本仍在
+    assert "<script" not in html and "&lt;script&gt;" in html  # 原始 HTML 仍全转义、姿态不变
+    assert "onerror=" not in html.replace("&lt;img onerror=x&gt;", "")  # <img onerror> 被转义、无活属性
+
+
+def test_vendor_katex_highlight_runtime_and_enhance_served(client) -> None:
+    """vendored KaTeX 资产树（含一枚字体）+ highlight + 三增强脚本随包可取（packages=["guanlan"] 自动携带）。"""
+    for path, needle in (
+        ("/static/vendor/katex/katex.min.js", None),
+        ("/static/vendor/katex/katex.min.css", None),
+        ("/static/vendor/katex/contrib/mhchem.min.js", None),
+        ("/static/vendor/katex/contrib/auto-render.min.js", "renderMathInElement"),
+        ("/static/vendor/katex/fonts/KaTeX_Main-Regular.woff2", None),  # css 相对引、须同级（决策P4.14-5）
+        ("/static/vendor/highlight/highlight.min.js", None),
+        ("/static/math_enhance.js", "window.typesetMath"),
+        ("/static/code_enhance.js", "window.highlightCode"),
+        ("/static/content_enhance.js", "window.enhanceContent"),
+    ):
+        resp = client.get(path)
+        assert resp.status_code == 200, f"{path} 未命中 200"
+        if needle:
+            assert needle in resp.text, f"{path} 缺 {needle}"
+
+
+def test_katex_security_config(client) -> None:
+    """KaTeX 选项硬编码安全/隔离配置（决策P4.14-4 信任铰链）：必要非充分（真生效走手测 11/12）。"""
+    src = (STATIC_DIR / "math_enhance.js").read_text(encoding="utf-8")
+    assert "trust: false" in src and "trust: true" not in src  # 信任铰链（KaTeX 默认即此）
+    assert "throwOnError: false" in src  # 语法错退回错误色源码、不抛
+    assert '"code"' in src  # ignoredTags 含 code：代码块内 $ 不排版
+    assert "ignoredClasses" in src and '"page-meta"' in src  # 跳 chrome（P2 修）
+    # KATEX_OPTS 对象**不含 macros 键**（注释里提 macros 不算；只看 stripped 行起首），调用以 {...KATEX_OPTS} 展开。
+    opts = src[src.index("const KATEX_OPTS"):src.index("let _katexPromise")]
+    assert not any(ln.strip().startswith("macros") for ln in opts.splitlines()), "KATEX_OPTS 不应设 macros 键"
+    assert "...KATEX_OPTS" in src  # 每次展开新选项 → auto-render 每容器一份默认 macros、跨容器隔离
+    # 懒加载探测正则四支**均含闭合**（非单纯开头符，P3 修）：三跨行支用 [\s\S]*? + 行内支 $[^$\n]+$。
+    assert r"\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$[^$\n]+\$" in src
+    assert src.count(r"[\s\S]*?") == 3  # 三跨行支均要求闭合（孤立开头符不触发）
+    assert "/static/vendor/katex/katex.min.js" in src  # 注入 vendored、懒加载
+
+
+def test_highlight_enhance_wiring(client) -> None:
+    """code_enhance.js 接线正确：跳 mermaid / 已高亮 / 未注册语言（决策P4.14-7）。"""
+    src = (STATIC_DIR / "code_enhance.js").read_text(encoding="utf-8")
+    assert "language-mermaid" in src  # 跳 mermaid（归 mermaid_enhance）
+    assert '"hljs"' in src  # 跳已高亮（v11 重复高亮告警）
+    assert "getLanguage" in src  # 未注册语言守门 → 纯文本、不猜
+    assert "window.highlightCode" in src
+    assert "/static/vendor/highlight/highlight.min.js" in src  # 注入 vendored、懒加载
+
+
+def test_content_orchestrator_wiring(client) -> None:
+    """content_enhance.js 编排器调三增强；index.html 三增强先于编排器、编排器先于调用者（决策P4.14-9）。"""
+    co = (STATIC_DIR / "content_enhance.js").read_text(encoding="utf-8")
+    assert "window.enhanceContent" in co
+    body = co[co.index("function enhanceContent"):]
+    for fn in ("enhanceMermaid(", "highlightCode(", "typesetMath("):
+        assert fn in body, f"enhanceContent 缺调 {fn}"
+    # 用 <script src> 标签形（带 /static/ 前缀 + 收尾引号）定位，避开载入注释里的裸文件名。
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    def tag(n: str) -> int:
+        return index.index(f'/static/{n}"')
+
+    ce = tag("content_enhance.js")
+    for three in ("mermaid_enhance.js", "math_enhance.js", "code_enhance.js"):
+        assert tag(three) < ce, f"{three} 须先于 content_enhance.js 载入"
+    for caller in ("wiki.js", "jobs.js", "staging.js", "chat.js"):
+        assert ce < tag(caller), f"content_enhance.js 须先于 {caller} 载入"
+
+
+def test_render_py_has_no_server_side_math_or_code_renderer() -> None:
+    """render.py 字节稳定的机械保证：服务端零改、未引入任何 math/code 渲染依赖（决策P4.14-5）。"""
+    src = (STATIC_DIR.parent / "render.py").read_text(encoding="utf-8")
+    low = src.lower()
+    for forbidden in ("katex", "highlight", "mathjax", "arithmatex", "pymdownx"):
+        assert forbidden not in low, f"render.py 不应引入服务端渲染器 {forbidden}（决策P4.14-5：渲染只在前端）"
+
+
+def test_p414_no_new_i18n_key(client) -> None:
+    """P4.14 无新增 i18n key（决策P4.14-8）：math 错误 KaTeX 自渲、code 降级纯文本，均无文案。"""
+    i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
+    assert "math.renderFail" not in i18n and "code.renderFail" not in i18n
+
+
+# ──────────────── 输出气泡「复制原始 Markdown」按钮 ────────────────
+# 右下角图标钮：点击复制答案的 **markdown 源**（非渲染后文本——markdown 是唯一事实来源）。
+# 渲染交互/剪贴板写入需真浏览器（走 Playwright 冒烟）；Python 层只锁前端接线 + i18n 存在性。
+
+
+def test_copy_button_wired_on_bot_bubbles() -> None:
+    """chat.js 定义 appendCopyButton/copyText，并在流式 done(答案源 payload.answer) + 历史(m.content) 两处接线。"""
+    src = (STATIC_DIR / "chat.js").read_text(encoding="utf-8")
+    assert "function appendCopyButton" in src and "async function copyText" in src
+    assert "appendCopyButton(botEl, payload.answer)" in src  # done：复制答案 markdown 源（非 answer_html 渲染后）
+    assert "appendCopyButton(el, m.content)" in src  # 历史气泡：复制原始 content
+    assert "navigator.clipboard" in src and "execCommand" in src  # 优先 Clipboard API + legacy 兜底
+    assert '"bubble-copy"' in src
+
+
+def test_copy_button_icon_and_i18n() -> None:
+    """#i-copy 图标在 sprite；复制文案 zh/en 双语齐备（parity 另由 test_web_i18n 守）。"""
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="i-copy"' in index
+    i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
+    for key in ("chat.copy", "chat.copied", "chat.copyFail"):
+        assert i18n.count(f'"{key}"') >= 2, f"{key} 须在 zh + en 双语词表各一"
