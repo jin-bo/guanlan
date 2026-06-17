@@ -702,6 +702,38 @@ def test_ingest_job_success(kb) -> None:
     assert data["exit_code"] == 0  # EXIT_OK
 
 
+def test_ingest_job_emits_progress_heartbeat(kb, monkeypatch) -> None:
+    """入库作业 running 期把心跳刷进 job.progress（pollJob 实时渲染）；done 后清空、不污染 output。"""
+    import guanlan.web.jobs as jobs_mod
+
+    monkeypatch.setattr(jobs_mod, "_JOB_HEARTBEAT_INTERVAL_S", 0.05)
+    target = _put_raw(kb)
+
+    def action(root):
+        write_page(root, "wiki/concepts/New.md")  # 落一页，使心跳可数到「已写 N 页」
+        time.sleep(0.25)  # 静默 > 数个心跳间隔，逼出 progress 帧
+
+    runner = make_runner(action)
+    seen: list[str] = []
+    with TestClient(create_app(kb, runner=runner)) as client:
+        job_id = client.post("/api/ingest", json={"target": target}).json()["job_id"]
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            data = client.get(f"/api/jobs/{job_id}").json()
+            if data.get("progress"):
+                seen.append(data["progress"])
+            if data["state"] == "done":
+                break
+            time.sleep(0.02)
+        final = client.get(f"/api/jobs/{job_id}").json()
+
+    assert final["state"] == "done" and final["exit_code"] == 0
+    assert seen, "running 期应至少观察到一帧非空 progress"
+    assert any("仍在运行" in p for p in seen)
+    assert final["progress"] == ""  # 收尾清空（瞬时字段）
+    assert "仍在运行" not in (final["output"] or "")  # 心跳不进最终 output（干净摘要）
+
+
 def test_ingest_job_check_failure_is_3(kb) -> None:
     # 持续写出阻断性 frontmatter 违规（type 非法），自愈耗尽 → EXIT_CHECK_FAILED（断链只是警告，
     # 不会到 3，见 test_ingest_broken_link_is_warning_ok）。
@@ -1864,6 +1896,56 @@ def _chat_with(client, message, attachments):
     return tokens, done, error
 
 
+def test_chat_emits_heartbeat_during_silence(kb, monkeypatch) -> None:
+    """静默间隙（arun 不发 token 地久跑）应补 `heartbeat` 帧，带整型 elapsed；不毁正常 done。"""
+    import guanlan.web.app as app_mod
+    import guanlan.web.chat as chat_mod
+
+    monkeypatch.setattr(app_mod, "_CHAT_HEARTBEAT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+
+    class _SlowAgent(_FakeAgent):
+        async def arun(self, msg, images=None, **_kw):  # 静默 > 数个心跳间隔后才出答案
+            self.messages.append({"role": "user", "content": msg})
+            await asyncio.sleep(0.18)
+            self.messages.append({"role": "assistant", "content": "迟到答案"})
+            return "迟到答案"
+
+    monkeypatch.setattr(chat_mod, "build_from_environment", lambda **kw: _SlowAgent(kw))
+
+    heartbeats: list = []
+    done = None
+    with TestClient(create_app(kb)) as client:
+        with client.stream("POST", "/api/chat", json={"message": "在吗"}) as resp:
+            assert resp.status_code == 200
+            event = None
+            for line in resp.iter_lines():
+                if line.startswith("event:"):
+                    event = line.split(":", 1)[1].strip()
+                elif line.startswith("data:"):
+                    data = json.loads(line.split(":", 1)[1].strip())
+                    if event == "heartbeat":
+                        heartbeats.append(data)
+                    elif event == "done":
+                        done = data
+
+    assert heartbeats, "静默间隙应至少补一帧 heartbeat"
+    assert all(isinstance(h.get("elapsed"), int) for h in heartbeats)
+    assert done is not None and done["answer"] == "迟到答案"  # 心跳不影响正常收尾
+
+
+def test_chat_no_heartbeat_when_tokens_flow(chat_client) -> None:
+    """token 正常流动时不应出现 heartbeat（每帧都重置等待）——默认 fake agent 即时吐字。"""
+    client, _ = chat_client
+    saw_heartbeat = False
+    with client.stream("POST", "/api/chat", json={"message": "快问"}) as resp:
+        assert resp.status_code == 200
+        for line in resp.iter_lines():
+            if line.startswith("event:") and line.split(":", 1)[1].strip() == "heartbeat":
+                saw_heartbeat = True
+    assert not saw_heartbeat
+
+
 def test_chat_new_conversation_streams_and_returns_id(chat_client) -> None:
     client, _ = chat_client
     tokens, done, error = _chat(client, "第一问")
@@ -2939,6 +3021,38 @@ def test_heal_post_enqueues_and_serializes_result(kb) -> None:
     # 散文进 output、不掺 result。
     assert "已建大模型页" in data["output"]
     assert "已建大模型页" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_heal_job_emits_progress_heartbeat(kb, monkeypatch) -> None:
+    """heal 作业同样经 progress 通道补心跳（与 ingest 共用 _wiki_job_progress 工厂，verb=物化）；
+    done 后清空、不污染 output——守住「心跳已推广到 ingest 之外的长跑 agent 作业」这条线。"""
+    import guanlan.web.jobs as jobs_mod
+
+    monkeypatch.setattr(jobs_mod, "_JOB_HEARTBEAT_INTERVAL_S", 0.05)
+    _ref_missing(kb, "a", "大模型")
+    _ref_missing(kb, "b", "大模型")
+
+    def action(root):
+        write_page(root, "wiki/entities/大模型.md", type="entity")
+        time.sleep(0.25)  # 静默 > 数个心跳间隔，逼出 progress 帧
+
+    runner = make_runner(action, final_text="已建大模型页")
+    seen: list[str] = []
+    with TestClient(create_app(kb, runner=runner)) as client:
+        job_id = client.post("/api/heal", json={}).json()["job_id"]
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            data = client.get(f"/api/jobs/{job_id}").json()
+            if data.get("progress"):
+                seen.append(data["progress"])
+            if data["state"] == "done":
+                break
+            time.sleep(0.02)
+        final = client.get(f"/api/jobs/{job_id}").json()
+
+    assert final["state"] == "done" and final["exit_code"] == 0
+    assert any("物化" in p for p in seen), "heal 心跳应带 verb=物化（工厂 verb 入参生效）"
+    assert final["progress"] == ""  # 收尾清空（瞬时字段）
 
 
 def test_heal_post_targets_filters_over_server_recompute(kb) -> None:

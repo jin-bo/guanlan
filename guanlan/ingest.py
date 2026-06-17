@@ -70,6 +70,14 @@ def run_ingest(
         return exc.exit_code
 
     rel = tpath.relative_to((kb / "raw").resolve()).as_posix()
+    # 开场提示（仅交互式终端，stderr 不污染 stdout 信封/管道）：摄入经 Agentao 跑 LLM，
+    # 可能耗时数分钟且全程静默——配合 runtime 的心跳，让用户确认不是卡死（A+ 心跳方案）。
+    if sys.stderr.isatty():
+        print(
+            f"→ 正在摄入 raw/{rel}（经 Agentao + guanlan-wiki skill，可能耗时数分钟）…",
+            file=sys.stderr,
+            flush=True,
+        )
     rc = run_guarded_write(
         kb, INGEST_PROMPT.format(rel=rel), model=model, runner=runner
     )

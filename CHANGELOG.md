@@ -5,6 +5,25 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **长跑作业的「进展心跳」** —— `ingest`/`query` 经 Agentao 子进程跑 LLM 时**全程静默**(子进程
+  `capture_output` 把 stdout/stderr 缓冲到结束),长任务看着像卡死。本版在三处补上「还活着」信号,
+  **零契约变更、不动子进程协议与写门禁**:
+  - **CLI**(`runtime.py`):子进程运行期起一条**守护线程**,每 15s 往 stderr 打一行
+    `⏳ 仍在运行 Ns · wiki/ 已变动 N 个文件`。**仅交互式终端启用**(`sys.stderr.isatty()`)——
+    管道/重定向/CI/`--json` 消费者一律静默,非交互行为逐字节不变;`ingest` 另加一行开场提示。
+  - **Web chat**(`app.py` SSE):静默间隙(长工具调用 / 首 token 前思考)经 `asyncio.wait_for`
+    超时补一帧 `heartbeat` 事件(带 `elapsed` 秒),前端 `chat.js` 渲染一行随秒数刷新的「处理中」,
+    token 一来即清。token 正常流动时**永不触发**(每来一帧就重置等待)。
+  - **Web 长跑作业**(`jobs.py`/`入库·物化·沉淀·审计`):作业 worker 起一条心跳线程,running 期把
+    `⏳ 正在<verb>…仍在运行 Ns · wiki/ 已写 N 页` 刷进**瞬时** `job.progress`,`pollJob` 实时渲染;
+    作业收尾即清空 → **不污染**完成后的干净回执。复用既有 `/api/jobs/{id}` 轮询通道,无 SSE。
+  - 节拍单一真相源 `runtime.HEARTBEAT_INTERVAL_S`(=15s),web 两处各起本模块别名便于测试 monkeypatch;
+    `wiki/` 变动计数归一到 `paths.count_files_modified_since`(CLI 与 Web 共用,免重复 `os.walk`)。
+  - 守于 `tests/test_runtime.py`、`tests/test_web.py`(chat 静默补帧 / token 流动不补 / 入库·物化
+    作业 running 期见 progress 且 done 后清空、不进最终 output)。
+
 ### 优化
 
 - **`check` 全库 frontmatter 单次读盘** —— `run_check` 原先把整库读两遍：主循环逐页严格档读+解析一遍

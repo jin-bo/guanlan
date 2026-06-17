@@ -194,9 +194,13 @@ async function pollJob(jobId, label, renderDone) {
     // running 态：渲染已累加的增量 output（决策P4.6.1-7③/-11）——解析作业的 backend 分级日志在此
     // 实时可见（emit 推上）；ingest/heal/backfill 顺带受益。无 output 时仍只显运行徽标。
     const running = `<p class="muted">${escapeHtml(t("job.running", label, job.state))}</p>`;
-    $("#overlay-body").innerHTML = job.output
-      ? `${running}<pre>${escapeHtml(collapseCR(job.output))}</pre>`
-      : running;
+    const out = job.output ? `<pre>${escapeHtml(collapseCR(job.output))}</pre>` : "";
+    // 瞬时进度行（A+ 心跳）：ingest 这类静默长跑作业的活跃提示（「⏳ 仍在运行 Ns · wiki/ 已写 N 页」）。
+    // 仅 running 期出现，done 后服务端清空 → 最终结果只剩干净摘要。放在 output 之后、轻样式。
+    const prog = job.progress
+      ? `<p class="muted job-hb">${escapeHtml(job.progress)}</p>`
+      : "";
+    $("#overlay-body").innerHTML = `${running}${out}${prog}`;
     await sleep(400);
   }
 }

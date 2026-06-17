@@ -137,6 +137,13 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .msg.bot { align-self: flex-start; background: var(--lan-paper); border: 1px solid var(--lan-mist); border-bottom-left-radius: 2px; max-width: 88%; }
 .msg.err { align-self: stretch; background: #fdecec; color: #8a1f1f; border: 1px solid #f3c4c4; }
 
+/* chat 心跳（chat.js）：静默间隙的「处理中」指示器，作为气泡的兄弟节点落在其后。左对齐、
+   淡墨小字、轻微呼吸；token 一来或本轮收尾即被移除。 */
+.chat-hb { align-self: flex-start; color: var(--lan-ink-soft); font-size: .82rem; padding: .1rem .25rem; animation: chat-hb-pulse 1.4s ease-in-out infinite; }
+@keyframes chat-hb-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+/* 作业进度模态的瞬时心跳行（jobs.js pollJob running 态，如入库）：同款呼吸提示。 */
+.job-hb { animation: chat-hb-pulse 1.4s ease-in-out infinite; }
+
 /* 斜杠命令（P4.4）：cmd = 用户键入的命令回显（右对齐、淡色）；note = 命令的只读输出（左对齐、
    细边框、不开浮层、落对话流）。两者均不是 LLM 消息（决策P4.4-1/2）。 */
 .msg.cmd { align-self: flex-end; background: transparent; color: var(--lan-ink-soft); border: 1px dashed var(--lan-mist); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; max-width: 80%; }
