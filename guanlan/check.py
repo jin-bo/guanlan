@@ -28,6 +28,7 @@ from .pages import (
     iter_pages,
     link_resolution_index,
     link_stem,
+    load_page_text,
     page_stem_index,
     parse_frontmatter,
     report_json,
@@ -204,21 +205,41 @@ def run_check(wiki: Path) -> CheckResult:
             violations=[Violation("wiki", "wiki.missing", "wiki/ 不存在或不是目录")],
         )
 
+    # 第一遍：逐页**只读盘一次**，攒下 (page, body, meta, fatal) 校验记录与 (path, 容错 meta) 解析对。
+    # 把解析对透传给 link_resolution_index 复用——免「主循环读一遍 + 解析表内部 alias_index 又
+    # iter_pages+load_page 把整库再读一遍」的二次读盘/二次目录遍历（每次 ingest 跑 2–4 次 run_check）。
+    #
+    # 解析表必须与 graph/heal/Web **同口径（容错档 load_page，libyaml）**，否则破 `broken≡check` 不变式
+    # （决策P3.8-2/P3-6）：严格档（纯 Python SafeLoader，供 frontmatter.unparsable 报错文本确定性）与容错档
+    # （libyaml CSafeLoader）对**「是否可解析」会分歧**——如 flow 序列里的字面 TAB（`aliases: [a\tb]`），
+    # libyaml 收、纯 Python 抛。故**绝不把严格 meta 塞进解析表**（会让 check 的解析表与 graph 不一致、对这类
+    # 页误报 wikilink.broken）。改为对**已读文本**走容错档 `load_page_text` 解析入 loaded：它与 `load_page`
+    # 逐字等价（文本已以 utf-8 成功解码——非 UTF-8 页严格 read_text 早抛，与原主循环同款），令 loaded **逐页
+    # 等同 load_page** → `link_resolution_index(wiki, loaded=loaded)` 与 `link_resolution_index(wiki)` 逐字节相同。
+    # 省下的是二次**读盘+遍历**，容错档那次 libyaml 解析（廉价）仍保留以维持口径一致。
+    parsed: list[tuple[str, str, dict | None, Violation | None]] = []
+    loaded: list[tuple[Path, dict | None]] = []
+    for path in iter_pages(wiki):
+        page = path.relative_to(root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        block, body = split_frontmatter(text)
+        meta, fatal = parse_frontmatter(block)  # 严格档：违规判定（坏块硬报，纯 Python loader）。
+        parsed.append((page, body, meta, fatal))
+        loaded.append((path, load_page_text(text)[0]))  # 容错档：解析表口径，与 graph/heal/Web 一致。
+
     # 链接解析表 = 精确 stem/别名（含 config 页）∪ 安全 fold variant → owner path（P3.8，决策P3.8-3）。
     # 注意：扫描排除（哪些页被校验，iter_pages 排 config）与解析表（哪些键算合法目标，含 config）是两件
     # 事——口径单一归口 pages.py，断链判定（resolve_owner）与 graph/heal/Web 完全一致（决策P3-2/P3-6）。
-    idx = link_resolution_index(wiki)
+    idx = link_resolution_index(wiki, loaded=loaded)  # 复用上面已读文本的容错 meta，免整库二次读盘。
     # 别名撞名判定要的是**纯页面 stem 集**（不含别名/fold），与解析表 idx 不同（决策P3.1-4）。
+    # page_stem_index 只 rglob 取 stem、不读 YAML，不在文本复用之列。
     page_stems = frozenset(page_stem_index(wiki))
 
+    # 第二遍：在已解析记录上跑逐页校验。违规产出顺序（逐页 frontmatter/alias/wikilink/sources，
+    # 末尾全局 alias）与原单遍实现逐字一致。
     violations: list[Violation] = []
     alias_owners: dict[str, list[str]] = defaultdict(list)  # 归一别名 → 声明页（含重复）
-    pages_checked = 0
-    for path in iter_pages(wiki):
-        pages_checked += 1
-        page = path.relative_to(root).as_posix()
-        block, body = split_frontmatter(path.read_text(encoding="utf-8"))
-        meta, fatal = parse_frontmatter(block)  # 严格档：每页只解析一次，坏块硬报。
+    for page, body, meta, fatal in parsed:
         if fatal is not None:
             violations.append(Violation(page, fatal.kind, fatal.detail))
         else:
@@ -232,7 +253,7 @@ def run_check(wiki: Path) -> CheckResult:
 
     violations.extend(_check_aliases_global(alias_owners, page_stems))
 
-    return CheckResult(ok=not violations, pages_checked=pages_checked, violations=violations)
+    return CheckResult(ok=not violations, pages_checked=len(parsed), violations=violations)
 
 
 def format_report(result: CheckResult, *, json_output: bool) -> str:
