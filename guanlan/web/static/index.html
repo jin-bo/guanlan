@@ -38,6 +38,8 @@
   <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1.5-1.5"/></symbol>
   <symbol id="i-arrow-right" viewBox="0 0 24 24"><line x1="4" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></symbol>
+  <!-- 复制原始 Markdown（输出气泡右下角）：双层方框剪贴板。 -->
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
 </svg>
 <header class="topbar">
   <div class="brand">
@@ -138,8 +140,13 @@
      中间六个文件只是关注点分组、彼此无载入期依赖（函数声明全局提升、共享 let 仅在运行期互访）。 -->
 <script src="/static/core.js"></script>
 <script src="/static/i18n_apply.js"></script>
-<!-- mermaid 渲染增强（P4.13）：定义全局 enhanceMermaid，须在其调用者 wiki/jobs/staging/chat 之前载入。 -->
+<!-- 内容富渲染增强（P4.13 mermaid + P4.14 数学/化学/代码）：mermaid/math/code 三脚本各定义一个全局
+     （enhanceMermaid/typesetMath/highlightCode），content_enhance.js 把三者编排为 enhanceContent；四者须在
+     其调用者 wiki/jobs/staging/chat **之前**载入，content_enhance.js 又须在三增强**之后**（它引用三全局）。 -->
 <script src="/static/mermaid_enhance.js"></script>
+<script src="/static/math_enhance.js"></script>
+<script src="/static/code_enhance.js"></script>
+<script src="/static/content_enhance.js"></script>
 <script src="/static/wiki.js"></script>
 <script src="/static/reports.js"></script>
 <script src="/static/jobs.js"></script>

@@ -166,10 +166,11 @@ async function restoreConversation(c) {
         if (m.html !== undefined) {  // 富排版（[[页]]→站内链）；缺则回退纯文本
           el.classList.add("rendered");
           el.innerHTML = m.html;
-          enhanceMermaid(el); // 历史重渲：把答案里的 ```mermaid 渲染成图（决策P4.13-8）
+          enhanceContent(el); // 历史重渲：富渲染答案 ```mermaid→图 / ```X→高亮 / $…$→公式（决策P4.14-9，泛化 P4.13-8）
         } else {
           el.textContent = m.content;
         }
+        appendCopyButton(el, m.content); // 历史气泡也挂「复制原始 Markdown」：复制答案源
       }
     }
   } catch (e) {
@@ -512,6 +513,61 @@ function addMsg(cls, text) {
   return div;
 }
 
+// 复制纯文本到剪贴板：优先 Clipboard API（http://127.0.0.1 浏览器视作安全上下文、可用），
+// 失败回退隐藏 <textarea> + execCommand('copy')（老接口/非安全上下文兜底）。返回是否成功。
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* 落到下方 legacy 兜底 */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus(); // 部分浏览器 execCommand('copy') 要求选区元素先获焦（fixed 离屏，不滚动文档）
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+// 给输出气泡右下角挂「复制原始 Markdown」图标钮（决策：复制**源**而非渲染后文本——markdown 是唯一事实来源）。
+// raw = 该轮答案的 markdown 源（done 用 payload.answer、历史用 m.content）。幂等；空源不挂。复制成功短暂回显「已复制」。
+function appendCopyButton(botEl, raw) {
+  if (!botEl || !raw) return;
+  if (botEl.querySelector(".bubble-copy")) return; // 幂等：done 后又触发不重复挂
+  botEl.classList.add("has-copy"); // 预留右下角空间，绝对定位的钮不压正文（见 app.css）
+  const btn = document.createElement("button");
+  btn.className = "bubble-copy";
+  btn.type = "button";
+  btn.title = t("chat.copy");
+  btn.setAttribute("aria-label", t("chat.copy"));
+  btn.innerHTML = `<svg class="ico"><use href="#i-copy"/></svg>`;
+  btn.addEventListener("click", async () => {
+    const ok = await copyText(raw);
+    const use = btn.querySelector("use");
+    btn.classList.add(ok ? "copied" : "copy-fail");
+    if (use) use.setAttribute("href", ok ? "#i-check" : "#i-copy"); // 成功短暂换勾
+    btn.title = ok ? t("chat.copied") : t("chat.copyFail"); // 字面 key（i18n linter 决策P4.7-8）
+    clearTimeout(btn._t);
+    btn._t = setTimeout(() => {
+      btn.classList.remove("copied", "copy-fail");
+      if (use) use.setAttribute("href", "#i-copy");
+      btn.title = t("chat.copy");
+    }, 1400);
+  });
+  botEl.appendChild(btn);
+}
+
 // 心跳指示器：作为气泡的**兄弟**节点（非子节点）插在其后——否则 token 的
 // `botEl.textContent +=` 会把它的文本一并吞进答案、done 的 innerHTML 重渲也会冲突。
 // 一来 token / 收尾即清；下一段静默间隙再触发会重建。
@@ -619,10 +675,11 @@ function handleSSE(frame, botEl) {
     if (payload.answer_html !== undefined) {
       botEl.classList.add("rendered"); // 切到正常空白模型 + 富排版（见 app.css）
       botEl.innerHTML = payload.answer_html;
-      enhanceMermaid(botEl); // 流式收尾：把答案里的 ```mermaid 渲染成图（决策P4.13-8）
+      enhanceContent(botEl); // 流式收尾：富渲染答案 ```mermaid→图 / ```X→高亮 / $…$→公式（决策P4.14-9，泛化 P4.13-8）
     } else if (payload.answer) {
       botEl.textContent = payload.answer;
     }
+    appendCopyButton(botEl, payload.answer); // 右下角「复制原始 Markdown」：复制答案源（非渲染后文本）
     renderWritableReceipts(payload); // 可写 turn 收尾：check 回执 / 撤销 / immutable 告警
     appendBackfillButton(botEl); // 气泡尾部挂「沉淀」按钮：预填该轮问题（P4.8）
     refreshStagingIfOpen(); // 修订 turn 收尾：暂存区开着则重拉刷新池（决策P4.6-9）

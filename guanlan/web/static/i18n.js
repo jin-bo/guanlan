@@ -66,6 +66,9 @@ window.I18N = {
     "chat.fail": "对话失败：{0}",
     "chat.error": "错误：{0}",
     "chat.backfill": "沉淀为综合页",
+    "chat.copy": "复制原始 Markdown",
+    "chat.copied": "已复制",
+    "chat.copyFail": "复制失败",
     // —— 弹层通用 ——
     "aria.overlayClose": "关闭",
     "common.running": "运行中…",
@@ -369,6 +372,9 @@ window.I18N = {
     "chat.fail": "Chat failed: {0}",
     "chat.error": "Error: {0}",
     "chat.backfill": "Distill into a page",
+    "chat.copy": "Copy raw Markdown",
+    "chat.copied": "Copied",
+    "chat.copyFail": "Copy failed",
     // —— Overlay common ——
     "aria.overlayClose": "Close",
     "common.running": "Running…",

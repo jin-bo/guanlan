@@ -539,7 +539,7 @@ async function previewWorkspaceFile(path) {
     if (mode === "markdown") {
       view.className = "stage-preview rendered";
       view.innerHTML = data.html; // render_page 已 sanitize（同 /api/page）
-      enhanceMermaid(view); // 挂在 paint 内 → 切回 markdown 模式也重增强 ```mermaid（决策P4.13-8）
+      enhanceContent(view); // 挂在 paint 内 → 切回 markdown 模式也重增强 ```mermaid→图 / ```X→高亮 / $…$→公式（决策P4.14-9，泛化 P4.13-8）
     } else {
       view.className = "stage-preview source";
       view.innerHTML = "";
