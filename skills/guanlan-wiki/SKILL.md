@@ -5,6 +5,7 @@ description: >
   对知识库提问、或维护一个结构化互链的 markdown wiki（摘要页/实体页/概念页/综述）时使用。
   Trigger on: "ingest", "摄入", "投喂资料", "query wiki", "查知识库", "更新 wiki",
   "维护知识库", "guanlan", "观澜", or 通过 `guanlan init/ingest/query` 命令进入的工作流。
+  此外：在以观澜库为 cwd 的会话里收到关于本库领域的任何实质问题时一律激活（即便用户没明说"查知识库/query"）——按 query 工作流先检索 wiki 再作答。
 ---
 
 # guanlan-wiki — 知识库维护引擎
