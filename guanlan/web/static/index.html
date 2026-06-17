@@ -138,6 +138,8 @@
      中间六个文件只是关注点分组、彼此无载入期依赖（函数声明全局提升、共享 let 仅在运行期互访）。 -->
 <script src="/static/core.js"></script>
 <script src="/static/i18n_apply.js"></script>
+<!-- mermaid 渲染增强（P4.13）：定义全局 enhanceMermaid，须在其调用者 wiki/jobs/staging/chat 之前载入。 -->
+<script src="/static/mermaid_enhance.js"></script>
 <script src="/static/wiki.js"></script>
 <script src="/static/reports.js"></script>
 <script src="/static/jobs.js"></script>

@@ -18,6 +18,23 @@
   解码失败吞掉交自愈。**无新命令 / 无新退出码 / 无新依赖**;守于 `tests/test_fmrepair.py` +
   `tests/test_gate.py`,设计见 `docs/ingest-frontmatter-自愈消除.md`。
 
+- **Web 端 mermaid 图表渲染(P4.13)** —— Web 宿主把 wiki 页 / 对话答案 / 暂存区 parsed 预览里用户或 LLM 手写
+  的 ` ```mermaid ` 围栏块**在浏览器内渲染成图**(流程/时序/类/状态图…),取代现状的字面源码。**纯前端表现层、
+  服务端零改**:① `fenced_code` 已把图源完整保留为 `code.language-mermaid` 转义文本,`render.py` 字节未动、
+  `_EscapeHtmlExtension` 关原始 HTML 透传的转义姿态全程不破(前端只读 `textContent` 拿图 DSL、非 HTML);
+  ② 新增 `static/mermaid_enhance.js`(全局 `enhanceMermaid`):扫 `pre>code.language-mermaid`、**懒加载**注入
+  vendored 运行时、`mermaid.render` 产 SVG 就地替换;**挂在 `wiki.js` `paintPage()` / `staging.js` `paint()`
+  等重绘函数内**,令切语言、切 md↔源码预览后图被重新增强、不打回源码;③ **vendored 运行时**
+  `static/vendor/mermaid.min.js`(v11.15.0,**自包含 UMD 单文件**、零运行时动态 import、离线自洽,**非 CDN**;
+  随 `packages=["guanlan"]` 自动入 wheel、无需 `force-include`);④ **安全闸** `securityLevel:'strict'`+
+  `htmlLabels:false` 硬编码——「内容→客户端 HTML」首次破例的信任边界,内置 DOMPurify 消毒标签 + 禁 click/script,
+  **不承诺 mermaid 产物绝对可信**,CSP 收紧列独立加固;⑤ **优雅降级**——JS 关/加载失败/语法错一律退回 `<pre>`
+  源码 + 错误徽标(`i18n` `mermaid.renderFail`)。**对决策P4-3「前端无 CDN/第三方运行时」作有界破例**(mermaid 归
+  「内容渲染器」、与已 vendored 的 `markdown` 同位阶);CLI/MCP 文本通道不渲染。守于 `tests/test_web.py`(图源
+  保真/转义零回归/资产随包/strict 配置/四注入点接线,6 例)+ `test_web_i18n.py` 平价;**真浏览器(Playwright)
+  端到端冒烟已过**(合法图渲成 SVG、注入块经 strict 消毒无活元素无 alert、坏语法保留源+徽标)。**无新命令 / 无新
+  退出码 / 无新 Python 依赖**;设计见 `docs/P4.13-Web-mermaid渲染.md`。
+
 ### 修复
 
 - **README 图片/链接改用绝对 URL(修 PyPI 渲染)** —— PyPI 长描述(`pyproject` `readme = "README.md"`)
