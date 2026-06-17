@@ -116,6 +116,42 @@ def test_loaded_passthrough_equals_default(tmp_path: Path):
     assert alias_index(wiki, loaded=loaded)["共用名"] == "a"
 
 
+def test_check_broken_equiv_graph_on_loader_divergent_page(tmp_path: Path):
+    """`run_check`（单次读盘性能改）复用已读文本建解析表时，**必须仍走容错档**（`load_page_text`），不可
+    改用其逐页严格档 meta：严格档（纯 Python `SafeLoader`，供 unparsable 报错确定性）与容错档（libyaml
+    `CSafeLoader`）对**「是否可解析」会分歧**（flow 序列里的字面 TAB：libyaml 收、纯 Python 抛）。若解析表
+    误用严格 meta，这类页的别名会从 check 的解析表掉出、而 graph/heal/Web 仍用容错档得到它，当场破
+    `check.wikilink.broken ≡ graph.broken` 不变式（决策P3.8-2）。
+
+    端到端钉死该不变式而非某个绝对结果，故**与是否装 libyaml 无关、两环境皆有效**：A 页 frontmatter 的
+    aliases flow 含字面 TAB 且声明别名 `张三`，B 页 `[[张三]]` 引用它——
+      - 装 libyaml：容错档收 TAB → 别名入表 → check 与 graph **都判 B 解析**；
+      - 未装 libyaml：容错档亦纯 Python → 别名不入表 → check 与 graph **都判 B 断链**。
+    两环境下 check 对 B 的断链判定都必须与 graph **同判**；bug（解析表误用严格 meta）会让 check 在装 libyaml
+    时单边判 B 断链、与 graph 分叉。A 的 `frontmatter.unparsable` 来自恒为纯 Python 的严格档，与环境无关。
+    """
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    # A：aliases flow 序列含字面 TAB —— 严格档抛、libyaml 收的分歧页。
+    (wiki / "entities").mkdir(parents=True, exist_ok=True)
+    (wiki / "entities" / "A.md").write_text(
+        "---\ntitle: 'A'\ntype: entity\ntags: []\naliases: [张三,\tother]\n"
+        "sources: []\nlast_updated: 2026-06-03\n---\n\n正文\n",
+        encoding="utf-8",
+    )
+    _page(wiki, "entities/B.md", type="entity", body="见 [[张三]]")
+
+    viols = {(v.page, v.kind) for v in run_check(wiki).violations}
+    # A 严格档恒不可解析（纯 Python loader 锁定）→ 恒报 unparsable，与是否装 libyaml 无关。
+    assert ("wiki/entities/A.md", "frontmatter.unparsable") in viols
+
+    # 核心不变式：check 对 B 链接的断链判定 ≡ graph 的判定（两者共用容错档解析表）。
+    g = build_graph(wiki)
+    check_b_broken = ("wiki/entities/B.md", "wikilink.broken") in viols
+    graph_b_broken = any(e.source == "b" and not e.resolved for e in g.edges)
+    assert check_b_broken == graph_b_broken
+
+
 # ───────────────────────── check 校验 ─────────────────────────
 
 
