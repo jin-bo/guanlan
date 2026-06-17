@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **确定性 frontmatter 引号修复(免去 ingest 最高频自愈轮)** —— 写门禁最常见的自愈触发器是
+  `frontmatter.unparsable`(字符串值尤其 `title` 引号写坏:双引号套双引号 / 坏单引号 → 整块 YAML 解析
+  失败),而每轮自愈 = 一整个额外 Agentao 子进程(冷启动 + LLM)。新增 `guanlan/fmrepair.py`:零-LLM 确定性
+  把**有成对外引号**的失败标量剥外引号后单引号重包、整块复验为 mapping 后**逐字节落盘**,返回写前原字节。
+  接入 `gate.run_guarded_write_result`(**仅 page_guard 路径**:ingest / query --backfill / audit;heal
+  跳过以守其逐字节不变契约):修后用**真 `enforce_write_result` 重判**,仍出现在新阻断违规里的修复页一律
+  回滚到原字节——验收判据即门禁本身(run_check + 源不回退 + raw 完整性),只保留真省下自愈轮的修复、决不留
+  半成品写。安全闸:拒符号链接页 / 父目录符号链接越界、逐字节 I/O(不改 CRLF)、只修首尾成对引号、非 UTF-8
+  解码失败吞掉交自愈。**无新命令 / 无新退出码 / 无新依赖**;守于 `tests/test_fmrepair.py` +
+  `tests/test_gate.py`,设计见 `docs/ingest-frontmatter-自愈消除.md`。
+
 ### 修复
 
 - **README 图片/链接改用绝对 URL(修 PyPI 渲染)** —— PyPI 长描述(`pyproject` `readme = "README.md"`)

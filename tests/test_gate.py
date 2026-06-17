@@ -673,6 +673,155 @@ def test_guarded_write_raw_priority_over_regression(tmp_path: Path):
     assert result.exit_code == EXIT_RAW_MUTATED
 
 
+# ====================================================================
+# 确定性 frontmatter 引号修复：消除最常见的自愈轮（见 guanlan/fmrepair.py）。
+# 坏引号页本可解析失败 → 触发一整轮 LLM 自愈；宿主确定性修引号后零自愈直接过。
+# ====================================================================
+
+
+def _write_quote_broken(root: Path, name: str = "Q") -> None:
+    """写一页 frontmatter 引号写坏（title 双引号套双引号）的实体页——除此外全合法。"""
+    p = root / "wiki" / "entities" / f"{name}.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        '---\ntitle: "他说"你好""\ntype: entity\ntags: []\nsources: []\n'
+        "last_updated: 2026-06-03\n---\n\n正文\n",
+        encoding="utf-8",
+    )
+
+
+def _runner_quote_broken():
+    """每次被调都写同一页坏引号 frontmatter（若有自愈轮会再写一次→可观测）。"""
+    state = {"n": 0}
+
+    def runner(prompt, **kwargs):
+        state["n"] += 1
+        _write_quote_broken(kwargs["working_directory"])
+        return AgentRunResult(ok=True, final_text="done")
+
+    runner.state = state
+    return runner
+
+
+def test_frontmatter_quote_repair_skips_selfheal(tmp_path: Path, capsys):
+    """坏引号 frontmatter → 宿主确定性修 → 门禁通过，**自愈轮数为 0**（runner 只被调一次）。"""
+    _kb_writable(tmp_path)
+    runner = _runner_quote_broken()
+    result = run_guarded_write_result(tmp_path, "PROMPT", runner=runner, page_guard=True)
+    assert result.exit_code == EXIT_OK
+    assert result.gate.ok
+    assert runner.state["n"] == 1  # 关键：无 REPAIR_PROMPT 自愈轮
+    err = capsys.readouterr().err
+    assert "确定性修正" in err and "门禁未过" not in err  # 修了、且未进自愈
+
+
+def test_frontmatter_quote_repair_actually_fixes_disk(tmp_path: Path):
+    """修复是真写盘：通过后该页 frontmatter 严格档可解析、title 还原。"""
+    _kb_writable(tmp_path)
+    run_guarded_write_result(
+        tmp_path, "PROMPT", runner=_runner_quote_broken(), page_guard=True
+    )
+    from guanlan.pages import parse_frontmatter, split_frontmatter
+
+    text = (tmp_path / "wiki" / "entities" / "Q.md").read_text(encoding="utf-8")
+    meta, fatal = parse_frontmatter(split_frontmatter(text)[0])
+    assert fatal is None and meta["title"] == '他说"你好"'
+
+
+def test_frontmatter_repair_leaves_non_quote_violations_to_selfheal(tmp_path: Path, capsys):
+    """非引号类阻断违规（bad_type）不被修复触碰 → 仍走完整有界自愈、行为与今相同。"""
+    _kb_writable(tmp_path)
+    state = {"n": 0}
+
+    def runner(prompt, **kwargs):
+        state["n"] += 1
+        _bad_fm_page(kwargs["working_directory"])  # type=bogus，可解析但 bad_type
+        return AgentRunResult(ok=True, final_text="done")
+
+    result = run_guarded_write_result(tmp_path, "PROMPT", runner=runner, page_guard=True)
+    assert result.exit_code == EXIT_CHECK_FAILED
+    assert any(v.kind == "frontmatter.bad_type" for v in result.gate.violations)
+    assert state["n"] == 3  # 首轮 + 2 自愈，未被修复短路
+    assert "确定性修正" not in capsys.readouterr().err
+
+
+def test_frontmatter_repair_untouched_when_clean(tmp_path: Path, capsys):
+    """合法页过门禁 → 修复零触碰、stderr 无修正行。"""
+    _kb_writable(tmp_path)
+    result = run_guarded_write_result(
+        tmp_path, "PROMPT", runner=make_runner(_good_page), page_guard=True
+    )
+    assert result.exit_code == EXIT_OK
+    assert "确定性修正" not in capsys.readouterr().err
+
+
+def test_frontmatter_repair_reverts_source_regression(tmp_path: Path, capsys):
+    """修复页若仍含 page_guard 源不回退（sources.dropped，`run_check` 看不见）→ 门禁回滚修复（回归 Codex P2）。
+
+    既有页 X（sources {a,b}）被 agent 写成「坏引号 + 丢源 b」：unparsable 掩盖了 sources.dropped；
+    修引号后 dropped 浮现 → 门禁重判（含 `_check_source_regression`）判 X 仍阻断 → **回滚**到 agent 原写。
+    无回滚（旧 `run_check`-only 验收）会保留 `title: 'a"b'` 半成品并打印「确定性修正」——这里反证已回滚。
+    """
+    _kb(tmp_path)
+    _src(tmp_path, "a")
+    _src(tmp_path, "b")
+    _entity(tmp_path, "X", "[a, b]")  # 既有页 X，sources {a,b} 进 page_before
+
+    def runner(prompt, **kwargs):
+        (kwargs["working_directory"] / "wiki" / "entities" / "X.md").write_text(
+            '---\ntitle: "a"b"\ntype: entity\ntags: []\nsources: [a]\n'
+            "last_updated: 2026-06-03\n---\n\n正文\n",
+            encoding="utf-8",
+        )
+        return AgentRunResult(ok=True, final_text="done")
+
+    result = run_guarded_write_result(
+        tmp_path, "P", runner=runner, page_guard=True, max_repair=0
+    )
+    assert result.exit_code == EXIT_CHECK_FAILED
+    x = (tmp_path / "wiki" / "entities" / "X.md").read_text(encoding="utf-8")
+    assert 'title: "a"b"' in x  # 回滚到 agent 原写（坏引号），非保留修复后的 'a"b'
+    assert "确定性修正" not in capsys.readouterr().err  # kept 为空 → 不打印
+
+
+def test_frontmatter_repair_reverts_hidden_alias_collision(tmp_path: Path, capsys):
+    """unparsable 掩盖的跨页 alias 撞名，修引号后浮现 → 门禁回滚（`run_check` 侧，回归 Codex P2）。"""
+    _kb(tmp_path)
+    foo = tmp_path / "wiki" / "concepts" / "Foo.md"  # 既有页 stem foo
+    foo.parent.mkdir(parents=True)
+    foo.write_text(FM.format(type="concept", sources="[]", body="正文"), encoding="utf-8")
+
+    def runner(prompt, **kwargs):
+        (kwargs["working_directory"] / "wiki" / "concepts" / "Bar.md").write_text(
+            '---\ntitle: "a"b"\ntype: concept\ntags: []\nsources: []\n'
+            "last_updated: 2026-06-03\naliases: ['Foo']\n---\n\n正文\n",
+            encoding="utf-8",
+        )
+        return AgentRunResult(ok=True, final_text="done")
+
+    result = run_guarded_write_result(
+        tmp_path, "P", runner=runner, page_guard=True, max_repair=0
+    )
+    assert result.exit_code == EXIT_CHECK_FAILED
+    bar = (tmp_path / "wiki" / "concepts" / "Bar.md").read_text(encoding="utf-8")
+    assert 'title: "a"b"' in bar  # 回滚（修复后会是 'a"b' 且撞名 Foo）
+    assert "确定性修正" not in capsys.readouterr().err
+
+
+def test_frontmatter_repair_skipped_on_heal_path(tmp_path: Path, capsys):
+    """page_guard=False（heal 直调本核心）→ 修复不启用，保 heal 逐字节不变契约。
+
+    坏引号页本可被宿主修好；但 heal 路不该被改页，故仍走自愈（runner 持续重写坏页 → 修不掉）
+    → EXIT_CHECK_FAILED、stderr 无「确定性修正」。
+    """
+    _kb_writable(tmp_path)
+    runner = _runner_quote_broken()
+    result = run_guarded_write_result(tmp_path, "PROMPT", runner=runner, page_guard=False)
+    assert result.exit_code == EXIT_CHECK_FAILED
+    assert any(v.kind == "frontmatter.unparsable" for v in result.gate.violations)
+    assert "确定性修正" not in capsys.readouterr().err
+
+
 # --- report_outcome：骤缩警告独立成行（与断链并列、区分 kind）---
 
 

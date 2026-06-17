@@ -27,6 +27,7 @@ from .errors import (
     EXIT_OK,
     EXIT_RAW_MUTATED,
 )
+from .fmrepair import repair_unparsable_pages
 from .pages import iter_pages, load_page
 from .runtime import AgentRunner, AgentRunResult, run_agent_task
 
@@ -424,9 +425,14 @@ def run_guarded_write_result(
 ) -> GuardedWriteResult:
     """写入口的统一编排核心，**不向 stdout 打印门禁报告**（决策P3.2-13）。
 
-    快照 `raw/` → Agentao(`workspace-write`) → `enforce_write_result` → 有界自愈 → 结构化结果。
-    门禁、自愈、退出码全在此收口；是否打印交给调用方（`run_guarded_write` 薄壳打印，heal 自渲染）。
-    自愈进度行 `↻ …` 仍走 **stderr**（属编排核心、不污染 `--json` 的 stdout）。
+    快照 `raw/` → Agentao(`workspace-write`) → `enforce_write_result` → **确定性 frontmatter 引号修复**
+    （仅 `page_guard` 路径）→ 有界自愈 → 结构化结果。门禁、修复、自愈、退出码全在此收口；是否打印
+    交给调用方（`run_guarded_write` 薄壳打印，heal 自渲染）。进度行 `↻ …`/`✓ 确定性修正 …` 均走
+    **stderr**（属编排核心、不污染 `--json` 的 stdout）。
+
+    **确定性 frontmatter 引号修复（仅 page_guard 路径）**：首轮门禁若因 `frontmatter.unparsable`
+    （字符串值引号写坏）失败，先零-LLM 修引号、重判一次，把这条最高频自愈轮省掉（见 `fmrepair.py`、
+    docs/ingest-frontmatter-自愈消除.md）。page_guard=False 的 heal 跳过（保其逐字节不变契约）。
 
     **增量门禁（决策7/8）**：写操作**前**先取 `raw/` 快照与阻断性违规基线 `baseline`；门禁只追究
     **本次新引入**的阻断性违规（frontmatter/sources），历史断链/欠债不连累本次。断链全程作警告。
@@ -454,6 +460,36 @@ def run_guarded_write_result(
     gate = enforce_write_result(
         root, before, first_result, page_before=page_before, baseline=baseline
     )
+
+    # 确定性 frontmatter 引号修复：写门禁最高频的自愈触发器是 `frontmatter.unparsable`
+    # （字符串值引号写坏），这一类零-LLM 可修。先确定性修引号落盘，再用**真门禁重判**裁定——
+    # 验收判据就是 `enforce_write_result` 本身（含 run_check + 源不回退 + raw 完整性），故决不会漏掉
+    # 任何门禁校验；仍有新阻断违规的修复页**一律回滚**（只接受真省下自愈轮的修复，决不留半成品写），
+    # 修不动/回滚的残留照样进下面的有界自愈（零回退）。**仅 page_guard 路径**（ingest/backfill/audit）
+    # 启用：page_guard=False 的 heal 直调本核心、契约是「逐字节不变 + 越界写审计」，跳过修复保其行为不变。
+    if page_guard and gate.kind == "check_failed":
+        written = repair_unparsable_pages(root, gate.violations)
+        if written:
+            probe = enforce_write_result(
+                root, before, first_result, page_before=page_before, baseline=baseline
+            )
+            stuck = {rel for rel in written if any(v.page == rel for v in probe.violations)}
+            for rel in stuck:
+                (Path(root) / rel).write_bytes(written[rel])  # 仍阻断 → 回滚到原字节，最差=现状
+            kept = [rel for rel in sorted(written) if rel not in stuck]
+            if kept:
+                print(
+                    f"✓ 确定性修正 {len(kept)} 页 frontmatter 引号（免去自愈轮）",
+                    file=sys.stderr,
+                )
+            # probe 反映回滚前状态；有回滚须重判得终态，无回滚 probe 即终态（省一次门禁扫描）。
+            gate = (
+                enforce_write_result(
+                    root, before, first_result, page_before=page_before, baseline=baseline
+                )
+                if stuck
+                else probe
+            )
 
     attempt = 0
     while gate.kind == "check_failed" and attempt < max_repair:
