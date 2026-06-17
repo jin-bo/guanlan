@@ -5166,31 +5166,31 @@ def test_parsed_preview_rewrites_image_to_endpoint(client, kb) -> None:
 # ── 拆分断链恢复（按 basename 从源文件图目录唯一恢复，决策P4.6.1-5）─────────────────────
 def test_image_lint_recovers_split_basename(client, kb) -> None:
     """拆分子文件引用「目录错、basename 对」→ lint 判可重整（非悬空），因源图在原文件图目录唯一可寻。"""
-    _put_parsed_image(kb, "4.数据检验-20240531", "4.数据检验-20240531-7.jpg", b"FIG")
+    _put_parsed_image(kb, "4.示例检验-20240531", "4.示例检验-20240531-7.jpg", b"FIG")
     _put_workspace(
-        kb, "parsed", "4b.数据检验.md",
-        "正文\n![](images/4b.数据检验/4.数据检验-20240531-7.jpg)\n",  # 目录错、basename 对
+        kb, "parsed", "4b.示例检验.md",
+        "正文\n![](images/4b.示例检验/4.示例检验-20240531-7.jpg)\n",  # 目录错、basename 对
     )
     data = client.get(
-        "/api/workspace/image-lint", params={"file": "workspace/parsed/4b.数据检验.md"}
+        "/api/workspace/image-lint", params={"file": "workspace/parsed/4b.示例检验.md"}
     ).json()
     assert data["dangling"] == []  # 不再误判悬空（源图可按 basename 唯一恢复）
-    assert data["misplaced"] == ["images/4b.数据检验/4.数据检验-20240531-7.jpg"]
+    assert data["misplaced"] == ["images/4b.示例检验/4.示例检验-20240531-7.jpg"]
     assert data["needs_relocalize"] is True
 
 
 def test_relocalize_recovers_split_image(client, kb) -> None:
     """重整：把拆分子文件引用的源图（basename 唯一）copy 到本文件目录、改名编号、重写引用（用户诉求）。"""
-    _put_parsed_image(kb, "4.数据检验-20240531", "4.数据检验-20240531-7.jpg", b"FIG")
+    _put_parsed_image(kb, "4.示例检验-20240531", "4.示例检验-20240531-7.jpg", b"FIG")
     _put_workspace(
-        kb, "parsed", "4b.数据检验.md",
-        "正文\n![图](images/4b.数据检验/4.数据检验-20240531-7.jpg)\n",
+        kb, "parsed", "4b.示例检验.md",
+        "正文\n![图](images/4b.示例检验/4.示例检验-20240531-7.jpg)\n",
     )
-    r = client.post("/api/workspace/relocalize", json={"file": "workspace/parsed/4b.数据检验.md"})
+    r = client.post("/api/workspace/relocalize", json={"file": "workspace/parsed/4b.示例检验.md"})
     assert r.status_code == 200
     d = kb / "workspace" / "parsed"
-    assert (d / "images" / "4b.数据检验" / "4b.数据检验-1.jpg").read_bytes() == b"FIG"  # 复制到本文件目录
-    assert "images/4b.数据检验/4b.数据检验-1.jpg" in (d / "4b.数据检验.md").read_text("utf-8")  # 链接已更新
+    assert (d / "images" / "4b.示例检验" / "4b.示例检验-1.jpg").read_bytes() == b"FIG"  # 复制到本文件目录
+    assert "images/4b.示例检验/4b.示例检验-1.jpg" in (d / "4b.示例检验.md").read_text("utf-8")  # 链接已更新
 
 
 def test_image_lint_truly_missing_stays_dangling(client, kb) -> None:
