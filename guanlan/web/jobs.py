@@ -19,11 +19,13 @@ import contextlib
 import io
 import queue
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
 from ..errors import EXIT_AGENT_ERROR
+from ..runtime import HEARTBEAT_INTERVAL_S
 
 JobState = Literal["queued", "running", "done"]
 
@@ -31,6 +33,14 @@ JobState = Literal["queued", "running", "done"]
 # `job.output`（running 期即可被 `/api/jobs/{id}` 轮询看见，不必等 done）。既有 thunk 忽略它、仍靠
 # `print()` 经 redirect 进 buf（行为不变）；仅 parse thunk 用它把转换内核的 stderr 行实时推上去。
 Emit = Callable[[str], None]
+
+# 心跳回调（A+ 心跳方案）：入队时可附一个 `progress(elapsed_s) -> 一行人读进度`。worker 在作业
+# running 期每隔 `_JOB_HEARTBEAT_INTERVAL_S` 秒调它，把返回串写进**瞬时**字段 `job.progress`
+# （pollJob running 态实时渲染）。与 `emit`/`job.output` 正交：progress 是会被收尾清空的活跃提示、
+# 不进最终结果，故入库等长跑作业既能 running 期见进展、完成后又只剩干净摘要（决策：瞬时进度行）。
+ProgressCb = Callable[[float], str]
+# = 共用节拍 HEARTBEAT_INTERVAL_S 的本模块别名（保留独立名便于测试 monkeypatch）。
+_JOB_HEARTBEAT_INTERVAL_S = HEARTBEAT_INTERVAL_S
 
 
 class WriteGate:
@@ -125,6 +135,9 @@ class Job:
     state: JobState = "queued"
     exit_code: int | None = None
     output: str = ""
+    # 瞬时进度（A+ 心跳）：running 期由 worker 心跳线程刷新的一行活跃提示（如「⏳ 仍在运行 45s」），
+    # worker 收尾即清空——**不进最终结果**（最终只看 output）。无心跳回调的作业恒为 ""。
+    progress: str = ""
     result: object | None = None  # 进程内结构化结果（heal 的 HealRun）；ingest/投喂为 None。
     done_event: threading.Event = field(default_factory=threading.Event)
     # 进度写锁（决策P4.6.1-14）：parse 内核 `progress=` 经 Popen 两条并发 drain 线程调 emit，emit 写
@@ -141,7 +154,9 @@ class JobQueue:
         write_lock: threading.Lock | None = None,
         on_job_done: Callable[[str], None] | None = None,
     ) -> None:
-        self._queue: queue.Queue[tuple[Job, Callable[[Emit], object]]] = queue.Queue()
+        self._queue: queue.Queue[
+            tuple[Job, Callable[[Emit], object], ProgressCb | None]
+        ] = queue.Queue()
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()  # 仅护 _jobs / _counter；worker 改 job 字段无并发读写竞态点
         self._counter = 0
@@ -155,28 +170,36 @@ class JobQueue:
         self._worker = threading.Thread(target=self._run, name="guanlan-jobs", daemon=True)
         self._worker.start()
 
-    def _register(self, kind: str, fn: Callable[[Emit], object]) -> Job:
+    def _register(
+        self, kind: str, fn: Callable[[Emit], object], progress: ProgressCb | None = None
+    ) -> Job:
         """建表 + 入队的内部归口，返回 Job 本体（enqueue / submit_and_wait 共用）。
 
         `fn` 统一收一个 `emit(line)` 进度 sink（决策P4.6.1-11）：既有 thunk 忽略它、仅 parse 用之。
         签名升 `Callable[[Emit], object]` **须在本归口统一**——它同服务 `enqueue`（异步）与
         `submit_and_wait`（同步），只改 enqueue 会漏掉同步作业（raw_write/upload/delete）。
+
+        `progress`（可选，A+ 心跳）：附则 worker running 期周期刷新 `job.progress`；None = 无心跳。
         """
         with self._lock:
             self._counter += 1
             job = Job(id=str(self._counter), kind=kind)
             self._jobs[job.id] = job
-        self._queue.put((job, fn))
+        self._queue.put((job, fn, progress))
         return job
 
-    def enqueue(self, kind: str, fn: Callable[[Emit], object]) -> str:
+    def enqueue(
+        self, kind: str, fn: Callable[[Emit], object], *, progress: ProgressCb | None = None
+    ) -> str:
         """登记一个作业并入队，立即返回 `job_id`（不阻塞）。
 
         `fn(emit)` 返回**退出码 `int`**（ingest/投喂）**或**带 `.exit_code` 的结构化结果（heal 的
         `HealRun`）——worker 鸭子分流（见 `_run`）。异步作业（ingest/heal/parse）用：入队即返回
         job_id，前端轮询 `/api/jobs/{id}`（parse 期间即可见 emit 推上的增量 backend 日志）。
+
+        `progress`（可选）：长跑作业（如 ingest）附心跳回调，running 期把活跃提示刷进 `job.progress`。
         """
-        return self._register(kind, fn).id
+        return self._register(kind, fn, progress).id
 
     def submit_and_wait(self, kind: str, fn: Callable[[Emit], object]) -> Job:
         """入队一个作业并**阻塞到它完成**，返回 Job 本体（直接持 Job，无 Optional）。
@@ -197,9 +220,33 @@ class JobQueue:
 
     def _run(self) -> None:
         while True:
-            job, fn = self._queue.get()
+            job, fn, progress = self._queue.get()
             job.state = "running"
             buf = io.StringIO()
+
+            # 进度心跳（A+ 心跳，决策：瞬时进度行）：附了 progress 回调的作业（ingest）起一条守护
+            # 线程，running 期每隔间隔把 `progress(elapsed)` 刷进 **瞬时** `job.progress`（pollJob
+            # running 态实时渲染）。worker 收尾会清空 progress，故不污染最终 output。无回调 → 不起线程。
+            hb_stop: threading.Event | None = None
+            hb_thread: threading.Thread | None = None
+            if progress is not None:
+                hb_stop = threading.Event()
+                hb_start = time.monotonic()
+
+                def _beat(
+                    _job: Job = job,
+                    _cb: ProgressCb = progress,
+                    _stop: threading.Event = hb_stop,
+                    _start: float = hb_start,
+                ) -> None:
+                    while not _stop.wait(_JOB_HEARTBEAT_INTERVAL_S):
+                        try:
+                            _job.progress = _cb(time.monotonic() - _start)
+                        except Exception:  # noqa: BLE001 — 进度提示绝不能拖垮作业
+                            pass
+
+                hb_thread = threading.Thread(target=_beat, name="guanlan-job-hb", daemon=True)
+                hb_thread.start()
 
             # 增量进度 sink（决策P4.6.1-11/14）：thunk 经它把一行进度实时累加进 job.output，running
             # 期即可被轮询看见。buf 写 + 整串赋值在 job.output_lock 内（parse 的 drain 线程并发调时
@@ -231,6 +278,14 @@ class JobQueue:
                 job.exit_code = EXIT_AGENT_ERROR
                 buf.write(f"\n作业执行异常：{type(exc).__name__}: {exc}")
             finally:
+                # 先停心跳：set()+join 后再无线程写 job.progress，随后清空它才不被迟到的一拍盖回。
+                # join 超时（心跳正卡在 progress 回调的 os.walk）也无碍——daemon 线程随进程亡，且最终
+                # 态渲染只看 output，迟到写进 progress 的串对已 done 作业不可见（pollJob done 分支忽略）。
+                if hb_stop is not None:
+                    hb_stop.set()
+                    if hb_thread is not None:
+                        hb_thread.join(timeout=1.0)
+                job.progress = ""  # 清瞬时进度：最终结果只看 output（干净摘要，不含心跳历史）
                 if self._write_lock is not None:
                     self._write_lock.release()  # 写执行收尾即释放，早于状态翻转/唤醒
                 # 顺序要紧：先写 output、再翻 state="done"，最后 set()。轮询读者只在见到

@@ -511,6 +511,16 @@ function addMsg(cls, text) {
   return div;
 }
 
+// 心跳指示器：作为气泡的**兄弟**节点（非子节点）插在其后——否则 token 的
+// `botEl.textContent +=` 会把它的文本一并吞进答案、done 的 innerHTML 重渲也会冲突。
+// 一来 token / 收尾即清；下一段静默间隙再触发会重建。
+function clearHeartbeat(botEl) {
+  if (botEl && botEl._hb) {
+    botEl._hb.remove();
+    botEl._hb = null;
+  }
+}
+
 // 对话气泡里的 [[wikilink]]（来自渲染后的答案）点了切到右栏 wiki 单页。
 $("#chat-log").addEventListener("click", (e) => {
   const a = e.target.closest("a.wikilink[data-page]");
@@ -547,9 +557,11 @@ async function sendChat(message, attachments) {
       }
     }
   } catch (e) {
+    clearHeartbeat(botEl);
     botEl.classList.replace("bot", "err");
     botEl.textContent = t("chat.fail", e.message);
   } finally {
+    clearHeartbeat(botEl); // 兜底：任何退出路径都不留下「处理中」残影
     setChatSending(false); // 复位：按钮切回「发送」、清 chatStreaming/禁用
   }
 }
@@ -575,9 +587,20 @@ function handleSSE(frame, botEl) {
     if (payload.conversation_id) setConversation(payload.conversation_id); // 连带写进 ?c=（刷新可恢复）
     if (pendingStop) { pendingStop = false; stopChat(); } // 首轮 id 未回时点过停止 → 现在补发
   } else if (event === "token") {
+    clearHeartbeat(botEl); // 有内容流出了，撤掉「处理中」
     botEl.textContent += payload;
     log.scrollTop = log.scrollHeight;
+  } else if (event === "heartbeat") {
+    // 静默间隙（长工具调用 / 首 token 前思考）的存活提示，随 elapsed 刷新；token 一来即清。
+    if (!botEl._hb) {
+      botEl._hb = document.createElement("div");
+      botEl._hb.className = "chat-hb";
+      botEl.after(botEl._hb);
+    }
+    botEl._hb.textContent = t("chat.working", payload.elapsed || 0);
+    log.scrollTop = log.scrollHeight;
   } else if (event === "stopped") {
+    clearHeartbeat(botEl);
     // 用户主动停止：保留已流出的纯文本（不再渲染 markdown），加一行轻提示。
     if (payload.conversation_id) setConversation(payload.conversation_id);
     const note = document.createElement("span");
@@ -589,6 +612,7 @@ function handleSSE(frame, botEl) {
     refreshStagingIfOpen(); // 修订 turn 收尾：暂存区开着则重拉刷新池（决策P4.6-9）
     log.scrollTop = log.scrollHeight;
   } else if (event === "done") {
+    clearHeartbeat(botEl);
     setConversation(payload.conversation_id);
     // 收尾：用服务端渲染的安全 markdown HTML 替换流式纯文本（含 [[页]]→站内链接）。
     if (payload.answer_html !== undefined) {
@@ -602,6 +626,7 @@ function handleSSE(frame, botEl) {
     refreshStagingIfOpen(); // 修订 turn 收尾：暂存区开着则重拉刷新池（决策P4.6-9）
     log.scrollTop = log.scrollHeight;
   } else if (event === "error") {
+    clearHeartbeat(botEl);
     // 记下服务端已建会话（即便本轮失败）：否则首轮失败时下次又以 null 另起新会话，堆到 503。
     if (payload.conversation_id) setConversation(payload.conversation_id);
     botEl.classList.replace("bot", "err");

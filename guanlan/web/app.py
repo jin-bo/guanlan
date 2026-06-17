@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from urllib.parse import quote
@@ -53,7 +54,8 @@ from ..lint import MISSING_ENTITY_MIN_REFS
 from ..lint import format_report as _format_lint
 from ..lint import run_lint
 from ..query import run_query
-from ..runtime import AgentRunner
+from ..paths import count_files_modified_since
+from ..runtime import HEARTBEAT_INTERVAL_S, AgentRunner
 from ..search import CorpusCache, search_result_dict, tokenize
 from .chat import IDLE_TTL_SECONDS, MAX_CONVERSATIONS, ConversationStore
 from .helpers import (
@@ -102,6 +104,11 @@ from .workspace import (
     _safe_workspace_md,
     _safe_workspace_scratch,
 )
+
+# chat SSE 心跳间隔（秒）= 共用节拍 HEARTBEAT_INTERVAL_S 的本模块别名（保留独立名便于测试
+# monkeypatch）：静默间隙（长工具调用 / 首 token 前思考）每隔这么久补一帧 `heartbeat`，让前端证明
+# 会话还活着；token 正常流动时永不触发（每来一帧就重置等待）。
+_CHAT_HEARTBEAT_INTERVAL_S = HEARTBEAT_INTERVAL_S
 
 
 class IngestBody(BaseModel):
@@ -762,6 +769,23 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"{filename} 尚未生成，请先 GET /graph")
         return FileResponse(path, media_type=media_type)
 
+    # 作业心跳回调工厂（A+ 心跳，决策：瞬时进度行）：长跑的 agent 作业（ingest/heal/backfill/audit）
+    # 全程靠 agentao 子进程（capture_output）静默、worker 又 redirect stderr 到 buf，tty 心跳够不到
+    # 模态。改走 JobQueue 的 progress 通道：running 期把「⏳ 正在<verb>…仍在运行 Ns · wiki/ 已写 N 页」
+    # 刷进 job.progress（pollJob 实时渲染），作业收尾清空 → 不污染最终干净摘要。verb 如 摄入/物化/沉淀/审计。
+    def _wiki_job_progress(verb: str):
+        wiki_dir = root / "wiki"
+
+        def _progress(elapsed: float) -> str:
+            line = f"⏳ 正在{verb}…仍在运行 {int(elapsed)}s"
+            # 自作业起跑（墙钟 ≈ now − elapsed）以来 wiki/ 写了几页；0 时省略后缀（首拍前 / 尚未落页）。
+            changed = count_files_modified_since(wiki_dir, time.time() - elapsed)
+            if changed:
+                line += f" · wiki/ 已写 {changed} 页"
+            return line
+
+        return _progress
+
     # 写（唯一写入口 = ingest）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
     @_writer_only(app.post("/api/ingest"))  # reader 下不注册（入库是写，决策P4.9-2）
     async def ingest(body: IngestBody) -> dict:
@@ -776,7 +800,7 @@ def create_app(
                 runner=runner,
             )
 
-        return {"job_id": jobs.enqueue("ingest", _job)}
+        return {"job_id": jobs.enqueue("ingest", _job, progress=_wiki_job_progress("摄入"))}
 
     # heal 预览（零 LLM 读，决策P4.3-4）：只算 worklist（== heal --dry-run），不入队、不触 Agentao、
     # 不取 raw/ 快照；阻塞跑 to_thread。limit 默认用 Web 专属值（=5）、min_refs 与 CLI 同源，
@@ -807,7 +831,7 @@ def create_app(
                 print(run.final_text)
             return run
 
-        return {"job_id": jobs.enqueue("heal", _job)}
+        return {"job_id": jobs.enqueue("heal", _job, progress=_wiki_job_progress("物化"))}
 
     # 写（唯一写入口之一 = backfill，P4.8）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
     # 与 ingest 端点逐行同构——整体复用 run_query(backfill=True)，答案 + 门禁回执经 stdout 捕获进 job.output。
@@ -825,7 +849,7 @@ def create_app(
                 runner=runner,
             )
 
-        return {"job_id": jobs.enqueue("backfill", _job)}
+        return {"job_id": jobs.enqueue("backfill", _job, progress=_wiki_job_progress("沉淀"))}
 
     # audit 预览（零 LLM 读，决策P4.12-4）：只算漂移源组（== audit --dry-run），不入队、不触 Agentao、
     # 不取 raw/ 快照；阻塞跑 to_thread。limit 默认 import 自 CLI 的 audit.DEFAULT_LIMIT、越界 422（Query ge=1）。
@@ -853,7 +877,7 @@ def create_app(
                 print(run.final_text)
             return run
 
-        return {"job_id": jobs.enqueue("audit", _job)}
+        return {"job_id": jobs.enqueue("audit", _job, progress=_wiki_job_progress("审计"))}
 
     @app.get("/api/jobs/{job_id}")
     async def job_status(job_id: str) -> dict:
@@ -874,6 +898,7 @@ def create_app(
             "state": job.state,
             "exit_code": job.exit_code,
             "output": job.output,
+            "progress": job.progress,  # 瞬时进度（A+ 心跳）：running 期活跃提示，done 后恒为 ""
             "result": result,
         }
 
@@ -979,9 +1004,21 @@ def create_app(
 
         async def event_stream() -> AsyncIterator[str]:
             task = asyncio.create_task(_run_turn())
+            started = time.monotonic()
             try:
                 while True:
-                    item = await queue.get()
+                    try:
+                        item = await asyncio.wait_for(
+                            queue.get(), _CHAT_HEARTBEAT_INTERVAL_S
+                        )
+                    except asyncio.TimeoutError:
+                        # 静默间隙（长工具调用 / 首 token 前的思考）：补一帧心跳证明还活着。
+                        # 取消的是内层 queue.get()——尚未取到任何项，不丢事件；token 正常流动时
+                        # 每帧都重置等待、永不触发。纯事件循环侧、无线程（区别于 CLI 的心跳线程）。
+                        yield _sse(
+                            "heartbeat", {"elapsed": int(time.monotonic() - started)}
+                        )
+                        continue
                     if item is None:
                         break
                     kind, data = item

@@ -17,9 +17,20 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import threading
+import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+from .paths import count_files_modified_since
+
+# 心跳节拍（秒）——**单一真相源**：CLI 子进程心跳（本模块）/ Web chat SSE（app.py）/ Web 作业心跳
+# （jobs.py）共用同一节拍，后两者各以本值起本模块别名（保留独立名便于测试各自 monkeypatch）。
+# 子进程运行期每隔这么久往 stderr 打一行「仍在运行」（仅交互式终端）。
+HEARTBEAT_INTERVAL_S = 15.0
 
 
 @dataclass
@@ -59,6 +70,41 @@ def run_agent_task(
     )
 
 
+@contextmanager
+def _progress_heartbeat(working_directory: Path):
+    """Agentao 子进程运行期间，每 `_HEARTBEAT_INTERVAL_S` 秒往 stderr 打一行存活提示。
+
+    **仅当 stderr 是交互式终端时启用**——管道 / 重定向 / CI / `--json` 消费者一律静默，
+    既不污染日志、也保证非交互行为逐字节不变（默认子进程 runner 之外的注入 runner 走不到这）。
+    心跳顺带数 `wiki/` 下「自子进程启动后被写过」的文件数，让「还活着」带上真实进展含义：
+    长跑的 ingest 不再看着像卡死（决策：A+ 心跳方案，不动子进程协议与快照门禁）。
+    """
+    if not sys.stderr.isatty():
+        yield
+        return
+    start = time.monotonic()
+    start_wall = time.time()  # 用墙钟比对文件 mtime（monotonic 不可比 mtime）
+    wiki_dir = working_directory / "wiki"
+    stop = threading.Event()
+
+    def _beat() -> None:
+        # wait(interval) 命中超时返回 False → 打一拍；stop.set() 后返回 True → 退出，无忙等。
+        while not stop.wait(HEARTBEAT_INTERVAL_S):
+            line = f"  ⏳ 仍在运行 {int(time.monotonic() - start)}s"
+            changed = count_files_modified_since(wiki_dir, start_wall)
+            if changed:  # 0 时省略后缀：读路径（query）永远 0、ingest 首拍前也 0
+                line += f" · wiki/ 已变动 {changed} 个文件"
+            print(line, file=sys.stderr, flush=True)
+
+    thread = threading.Thread(target=_beat, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+
+
 def _subprocess_runner(
     prompt: str,
     *,
@@ -95,15 +141,18 @@ def _subprocess_runner(
         cmd += ["--model", model]
 
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(working_directory),
-            capture_output=True,
-            text=True,
-            # 我们总是显式传 --prompt；切断继承的 stdin，否则父进程被管道/重定向喂 stdin 时，
-            # agentao 会把管道 stdin 当成 run spec，与 --prompt 冲突而拒绝执行（破坏自动化场景）。
-            stdin=subprocess.DEVNULL,
-        )
+        # capture_output 仍把子进程 stdout（JSON 信封）缓冲到结束；心跳是父进程旁路打到 stderr，
+        # 二者互不干扰——既保住信封解析，又在交互式终端给出「还活着」的进展信号。
+        with _progress_heartbeat(working_directory):
+            proc = subprocess.run(
+                cmd,
+                cwd=str(working_directory),
+                capture_output=True,
+                text=True,
+                # 我们总是显式传 --prompt；切断继承的 stdin，否则父进程被管道/重定向喂 stdin 时，
+                # agentao 会把管道 stdin 当成 run spec，与 --prompt 冲突而拒绝执行（破坏自动化场景）。
+                stdin=subprocess.DEVNULL,
+            )
     except OSError as exc:
         # agentao 不在 PATH（或无法启动子进程）：归一为运行时错误，遵守退出码契约，
         # 不让 CLI 抛 traceback。常见于只装了 Python 依赖但 scripts 目录未入 PATH。

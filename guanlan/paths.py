@@ -6,9 +6,31 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .errors import EXIT_USAGE, GuanlanError
+
+
+def count_files_modified_since(directory: Path, since: float) -> int:
+    """统计 `directory` 下 mtime ≥ `since`（墙钟秒）的文件数（新建 + 改写都算）。
+
+    供「自某时刻起改了几个文件」的进度提示复用（CLI 子进程心跳 / Web 入库作业心跳，均为
+    A+ 心跳方案）。**best-effort**：任何 OSError（遍历中文件被删 / 权限变 / 目录不存在）一律
+    吞掉、不中断——它只是进展提示，绝不该让计数本身抛错拖垮调用方（心跳线程）。
+    """
+    n = 0
+    try:
+        for root, _dirs, files in os.walk(directory):
+            for name in files:
+                try:
+                    if os.stat(os.path.join(root, name)).st_mtime >= since:
+                        n += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return n
 
 # 写入口（ingest、query --backfill）要求齐全；只读路径（query、check）仅要求 wiki/。
 _WRITABLE_REQUIRED: tuple[tuple[str, bool], ...] = (
