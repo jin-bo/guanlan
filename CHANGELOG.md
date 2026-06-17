@@ -24,6 +24,23 @@
   - 守于 `tests/test_runtime.py`、`tests/test_web.py`(chat 静默补帧 / token 流动不补 / 入库·物化
     作业 running 期见 progress 且 done 后清空、不进最终 output)。
 
+### 优化
+
+- **`check` 全库 frontmatter 单次读盘** —— `run_check` 原先把整库读两遍：主循环逐页严格档读+解析一遍
+  （`read_text` + `parse_frontmatter`，供 `frontmatter.unparsable` 报错），建链接解析表的
+  `link_resolution_index` 内部又经 `alias_index` `iter_pages`+`load_page` 把整库再读+遍历一遍。改为
+  先一遍读盘攒下记录，把**对已读文本走容错档解析**的 `(path, meta)` 透传给 `link_resolution_index(loaded=)`
+  复用（即 0.1.11 已加的 keyword-only 入参），消去二次读盘与二次目录遍历（N 页：2N→N 次读，4→3 次
+  rglob）。对每次 `ingest` 的 2–4 次写门禁 `run_check` 都生效。
+  **关键正确性约束**：解析表复用的是**容错档**（libyaml `load_page_text`）而非主循环的严格档 meta——严格档
+  （纯 Python `SafeLoader`）与容错档（libyaml `CSafeLoader`）对**「是否可解析」会分歧**（如 flow 序列里的
+  字面 TAB：libyaml 收、纯 Python 抛），若解析表误用严格 meta，这类页的别名会从 `check` 的解析表掉出、而
+  graph/heal/Web 仍用容错档得到它，当场破 `check.wikilink.broken ≡ graph.broken` 不变式（决策P3.8-2）。
+  复用已读文本走 `load_page_text` 使 `loaded` 逐页等同 `load_page` → 解析表与 `link_resolution_index(wiki)`
+  逐字节相同。容错档那次（廉价的 libyaml）解析仍保留以维持口径一致。**零 LLM、零契约变更、零新依赖**，
+  `check` 报错文本/违规/退出码不变；守于 `tests/test_aliases.py`（分歧页端到端 broken≡check + loaded ≡
+  默认解析表）与既有全套 `tests/test_check.py`。
+
 ## [0.1.11] - 2026-06-16
 
 性能与工程整备版，**无新命令、无新退出码、无新依赖、无契约变更**：把长驻 Web/MCP 宿主的检索冷启动
