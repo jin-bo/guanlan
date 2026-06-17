@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/guanlan.png" alt="观澜 GuānLán" width="160">
+  <img src="docs/guanlan-origin.png" alt="观澜 GuānLán" width="160">
 </p>
 
 <h1 align="center">观澜 (GuānLán)</h1>

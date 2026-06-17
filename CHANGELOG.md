@@ -3,14 +3,15 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
-## [Unreleased]
+## [0.1.12] - 2026-06-17
 
 ### 新增
 
 - **长跑作业的「进展心跳」** —— `ingest`/`query` 经 Agentao 子进程跑 LLM 时**全程静默**(子进程
   `capture_output` 把 stdout/stderr 缓冲到结束),长任务看着像卡死。本版在三处补上「还活着」信号,
   **零契约变更、不动子进程协议与写门禁**:
-  - **CLI**(`runtime.py`):子进程运行期起一条**守护线程**,每 15s 往 stderr 打一行
+  - **CLI**(`runtime.py`):子进程运行期起一条**守护线程**,每 15s 在 stderr **单行原地刷新**
+    (`\r` 覆盖同一行、不滚屏;停止信号已到的迟到拍丢弃,免与收尾摘要撞行)
     `⏳ 仍在运行 Ns · wiki/ 已变动 N 个文件`。**仅交互式终端启用**(`sys.stderr.isatty()`)——
     管道/重定向/CI/`--json` 消费者一律静默,非交互行为逐字节不变;`ingest` 另加一行开场提示。
   - **Web chat**(`app.py` SSE):静默间隙(长工具调用 / 首 token 前思考)经 `asyncio.wait_for`
@@ -23,6 +24,14 @@
     `wiki/` 变动计数归一到 `paths.count_files_modified_since`(CLI 与 Web 共用,免重复 `os.walk`)。
   - 守于 `tests/test_runtime.py`、`tests/test_web.py`(chat 静默补帧 / token 流动不补 / 入库·物化
     作业 running 期见 progress 且 done 后清空、不进最终 output)。
+
+- **「知识库优先」默认作答反射** —— 修订随包模板 `AGENTAO.md` 与 `guanlan-wiki` skill,补上
+  Karpathy LLM Wiki 模式此前缺失的「问答入口」触发:以观澜库为 cwd 的会话里收到领域问题时,默认
+  **先查已编译 wiki 再作答**(走 query 工作流:search 入口或扫 `index.md` → 读候选页 → 带 `[[页]]`
+  引用综合;库内无覆盖才明说降级、标 `(未验证)`),而非凭模型通识空答或临时 RAG 原始资料。`AGENTAO.md`
+  新增「知识库优先」一节、并把记账员身份从「维护者」扩为「维护者 + 问答入口」;skill `description`
+  触发面从 ingest/query 命令向扩到一般领域问答,使裸提问也能自动激活 skill。仅改随包模板/skill 文案,
+  零代码、零契约变更。
 
 ### 优化
 
@@ -40,6 +49,16 @@
   逐字节相同。容错档那次（廉价的 libyaml）解析仍保留以维持口径一致。**零 LLM、零契约变更、零新依赖**，
   `check` 报错文本/违规/退出码不变；守于 `tests/test_aliases.py`（分歧页端到端 broken≡check + loaded ≡
   默认解析表）与既有全套 `tests/test_check.py`。
+
+### 修复
+
+- **`raw/` 源收录判定容忍 `.`/`-` slug 分歧** —— `raw_slug` 保留文件名内部点(如 `1.标准体系`),而
+  ingest Agent 按「kebab-case(同源文件名)」常把开头枚举序号的点命成横杠(落成 `1-标准体系`)。旧逻辑
+  只按 `raw_slug` 输出精确比对,认不出 Agent 实际落的横杠页 → **已建好的 source 摘要页被长期误判
+  「未收录」**,且同一分歧让 `_stamp_source_digest` 漏盖 `raw_digest`(audit 对该源失明)。新增
+  `rawio.find_source_page` 容忍该分歧(精确 slug 优先、单向点折横杠回退、仍精确 stat 不扫目录),
+  `web._list_raw` 收录判定与 `ingest._stamp_source_digest` 共用。守于 `find_source_page` 单测 +
+  `/api/raw` 点-横杠容错集成测试。
 
 ## [0.1.11] - 2026-06-16
 
