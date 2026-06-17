@@ -503,6 +503,18 @@ def test_api_raw_marks_ingested(client, kb) -> None:
     assert files == {"标准体系-20240531.md": True, "数据获取-20240531.md": False}
 
 
+def test_api_raw_ingested_tolerates_dot_dash_slug(client, kb) -> None:
+    """raw 名带枚举点 `1.`（raw_slug 保点），摘要页按 kebab 落成横杠 `1-` → 仍判已收录。
+
+    回归：旧逻辑只精确比 `raw_slug` 输出，认不出 Agent 实际命的横杠形，长期误判「未收录」。
+    """
+    (kb / "raw" / "1.标准体系-20240531.md").write_text("# 标准\n", encoding="utf-8")
+    write_page(kb, "wiki/sources/1-标准体系-20240531.md", type="source")  # 横杠形
+
+    files = {f["name"]: f["ingested"] for f in client.get("/api/raw").json()["files"]}
+    assert files["1.标准体系-20240531.md"] is True
+
+
 def test_api_raw_file_renders_markdown(client, kb) -> None:
     """raw 源预览：渲染 markdown（含 html 字段，同 /api/page）；纯读、不动盘。"""
     (kb / "raw" / "note.md").write_text("# 标题\n\n正文一段。\n", encoding="utf-8")

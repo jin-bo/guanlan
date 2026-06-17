@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, Response
 from ..audit import audit_preview
 from ..heal import compute_worklist
 from ..pages import iter_pages, load_page, page_title, page_type
-from ..rawio import raw_slug
+from ..rawio import find_source_page
 from .uploads import _IMAGE_EXT_TO_MIME
 
 
@@ -245,7 +245,9 @@ def _list_raw(root: Path) -> list[dict]:
 
     `ingested` 是纯读派生信号、不落盘、可随时重算：raw 源经 ingest 会在
     `wiki/sources/<slug>.md` 落一篇摘要页（slug = 同源文件名 kebab-case，见 SKILL.md
-    与 `raw_slug` 归口），故同名 source 页存在即视为该源已收录。前端默认只显未收录、
+    与 `raw_slug` 归口），故同名 source 页存在即视为该源已收录。定位交给
+    `find_source_page`——它在精确 slug 之外容忍 `.`/`-` 归一分歧（Agent 常把枚举序号
+    `1.` 命成 `1-`），免得已建好的页被误判「未收录」。前端默认只显未收录、
     一键可切看已收录（非破坏：永不隐藏磁盘文件、已收录源仍可预览/重投 ingest）。
     """
     raw = root / "raw"
@@ -253,8 +255,7 @@ def _list_raw(root: Path) -> list[dict]:
     files: list[dict] = []
     for path in sorted(raw.glob("*.md")):
         if path.is_file():
-            slug = raw_slug(path.stem)
-            ingested = bool(slug) and (sources / f"{slug}.md").is_file()
+            ingested = find_source_page(sources, path.stem) is not None
             files.append(
                 {"name": path.name, "size": path.stat().st_size, "ingested": ingested}
             )

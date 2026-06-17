@@ -29,7 +29,7 @@ from .paths import count_files_modified_since
 
 # 心跳节拍（秒）——**单一真相源**：CLI 子进程心跳（本模块）/ Web chat SSE（app.py）/ Web 作业心跳
 # （jobs.py）共用同一节拍，后两者各以本值起本模块别名（保留独立名便于测试各自 monkeypatch）。
-# 子进程运行期每隔这么久往 stderr 打一行「仍在运行」（仅交互式终端）。
+# 子进程运行期每隔这么久在 stderr 同一行原地刷新「仍在运行」（\r 覆盖，仅交互式终端）。
 HEARTBEAT_INTERVAL_S = 15.0
 
 
@@ -72,7 +72,7 @@ def run_agent_task(
 
 @contextmanager
 def _progress_heartbeat(working_directory: Path):
-    """Agentao 子进程运行期间，每 `_HEARTBEAT_INTERVAL_S` 秒往 stderr 打一行存活提示。
+    """Agentao 子进程运行期间，每 `HEARTBEAT_INTERVAL_S` 秒在 stderr 同一行原地刷新（\r 覆盖）存活提示。
 
     **仅当 stderr 是交互式终端时启用**——管道 / 重定向 / CI / `--json` 消费者一律静默，
     既不污染日志、也保证非交互行为逐字节不变（默认子进程 runner 之外的注入 runner 走不到这）。
@@ -86,15 +86,26 @@ def _progress_heartbeat(working_directory: Path):
     start_wall = time.time()  # 用墙钟比对文件 mtime（monotonic 不可比 mtime）
     wiki_dir = working_directory / "wiki"
     stop = threading.Event()
+    printed = False  # 是否打过至少一拍——决定收尾要不要补一个换行收束滚动行
+    width = 0  # 上一拍行宽（字符数）：用空格补齐覆盖更短一拍的残留，不依赖 ANSI
 
     def _beat() -> None:
         # wait(interval) 命中超时返回 False → 打一拍；stop.set() 后返回 True → 退出，无忙等。
+        nonlocal printed, width
         while not stop.wait(HEARTBEAT_INTERVAL_S):
             line = f"  ⏳ 仍在运行 {int(time.monotonic() - start)}s"
             changed = count_files_modified_since(wiki_dir, start_wall)
             if changed:  # 0 时省略后缀：读路径（query）永远 0、ingest 首拍前也 0
                 line += f" · wiki/ 已变动 {changed} 个文件"
-            print(line, file=sys.stderr, flush=True)
+            # count_files_modified_since 的 os.walk 可能跑过 join 的 1s 超时；停止信号已在本拍
+            # 计算期间到达就丢弃这拍——否则会把无换行的滚动行打到收尾换行之后、与结果摘要撞行。
+            if stop.is_set():
+                return
+            # \r 刷回行首原地覆盖上一拍（同一行滚动计时，不逐行刷屏）；行尾用空格补到上一拍宽度，
+            # 盖掉更短一拍（如文件数位数变少）的残留——不走 ANSI \033[K，dumb 终端也不漏转义串。
+            print(f"\r{line}{' ' * max(0, width - len(line))}", end="", file=sys.stderr, flush=True)
+            width = len(line)
+            printed = True
 
     thread = threading.Thread(target=_beat, daemon=True)
     thread.start()
@@ -103,6 +114,8 @@ def _progress_heartbeat(working_directory: Path):
     finally:
         stop.set()
         thread.join(timeout=1.0)
+        if printed:  # 收束滚动行：补一个换行，让后续结果从干净的新行开始
+            print(file=sys.stderr, flush=True)
 
 
 def _subprocess_runner(
