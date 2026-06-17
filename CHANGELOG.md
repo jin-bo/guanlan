@@ -3,6 +3,16 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [Unreleased]
+
+### 修复
+
+- **README 图片/链接改用绝对 URL(修 PyPI 渲染)** —— PyPI 长描述(`pyproject` `readme = "README.md"`)
+  不能解析仓库相对路径:logo 的相对 `src` 经 PyPI camo 代理时报「Bad url scheme」、不显示,相对文档
+  链接(`LICENSE`/`docs/`/`CLAUDE.md`/`CHANGELOG.md` 等)在 PyPI 页面断链。把 `README.md`/`README.en.md`
+  的 logo 与全部相对链接改成绝对 GitHub URL(文件 `…/blob/main/`、目录 `…/tree/main/`、logo 用
+  `raw.githubusercontent.com`)。GitHub 端照常可点;PyPI 页面随本版发布生效(已发布的 0.1.12 描述不可改)。
+
 ## [0.1.12] - 2026-06-17
 
 ### 新增
