@@ -112,6 +112,7 @@ async function previewRawFile(name, files) {
   const view = document.createElement("div");
   view.className = "stage-preview rendered";
   view.innerHTML = data.html; // render_page 已 sanitize（同 /api/page）
+  enhanceMermaid(view); // raw 预览：把源里的 ```mermaid 渲染成图（决策P4.13-8）
   box.append(back, title, view);
 }
 

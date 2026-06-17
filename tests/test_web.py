@@ -5208,3 +5208,66 @@ def test_image_lint_ambiguous_basename_stays_dangling(client, kb) -> None:
     _put_workspace(kb, "parsed", "c.md", "![](images/c/dup.png)\n")
     data = client.get("/api/workspace/image-lint", params={"file": "workspace/parsed/c.md"}).json()
     assert data["dangling"] == ["images/c/dup.png"]  # 歧义 → 不恢复
+
+
+# ───────────────────────── P4.13 Web mermaid 渲染 ─────────────────────────
+# 服务端不变量（最该守的「零回归」）+ 前端接线存在性。渲染交互（DOM/SVG）需真浏览器，走手测
+# （见 docs/P4.13-Web-mermaid渲染.md §7）；此处只锁服务端图源保真 + 转义姿态不破 + 资产随包 + 四注入点接线。
+
+def test_api_page_preserves_mermaid_source(client, kb) -> None:
+    """```mermaid 围栏块经 fenced_code 落成 code.language-mermaid、图源转义保真——供前端拾取（服务端零改）。"""
+    write_page(kb, "wiki/concepts/Diagram.md", type="concept",
+               body="图示：\n\n```mermaid\ngraph TD\n  A-->B\n```\n")
+    resp = client.get("/api/page", params={"path": "wiki/concepts/Diagram.md"})
+    assert resp.status_code == 200
+    html = resp.json()["html"]
+    assert 'class="language-mermaid"' in html  # 前端按此 class 拾取
+    assert "A--&gt;B" in html  # 图源转义保真（前端读 textContent 反转义回 A-->B 喂 mermaid）
+
+
+def test_api_page_mermaid_does_not_break_escape_posture(client, kb) -> None:
+    """含 ```mermaid 的页里夹带原始 <script> 仍被转义——P4.13 未碰 _EscapeHtmlExtension（决策P4.13-4）。"""
+    write_page(kb, "wiki/concepts/Mixed.md", type="concept",
+               body="```mermaid\ngraph TD\n  A-->B\n```\n\n正文夹带 <script>alert(1)</script>。")
+    html = client.get("/api/page", params={"path": "wiki/concepts/Mixed.md"}).json()["html"]
+    assert 'class="language-mermaid"' in html  # 图块仍在
+    assert "<script" not in html and "&lt;script&gt;" in html  # 原始 HTML 仍全转义、姿态不变
+
+
+def test_vendor_mermaid_runtime_and_enhance_served(client) -> None:
+    """vendored mermaid 运行时 + 增强脚本随包可取（packages=["guanlan"] 自动携带包内静态资源，非 force-include）。"""
+    runtime = client.get("/static/vendor/mermaid.min.js")
+    assert runtime.status_code == 200
+    assert 'globalThis["mermaid"]' in runtime.text  # 自包含 UMD：加载后挂 window.mermaid
+    enhance = client.get("/static/mermaid_enhance.js")
+    assert enhance.status_code == 200
+    assert "window.enhanceMermaid" in enhance.text
+
+
+def test_mermaid_enhance_security_config(client) -> None:
+    """增强脚本硬编码 strict 安全配置（决策P4.13-3 信任铰链）：无放宽旋钮。"""
+    src = (STATIC_DIR / "mermaid_enhance.js").read_text(encoding="utf-8")
+    assert 'securityLevel: "strict"' in src
+    assert "htmlLabels: false" in src
+    assert "loadMermaid" in src and "/static/vendor/mermaid.min.js" in src  # 注入 vendored、懒加载
+
+
+def test_mermaid_enhance_wired_at_four_injection_points() -> None:
+    """四类注入点全接线、勿漏 staging.js（评审点 1）；wiki/staging 须挂在重绘函数内（决策P4.13-8）。"""
+    for name in ("wiki.js", "chat.js", "jobs.js", "staging.js"):
+        src = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert "enhanceMermaid(" in src, f"{name} 缺 enhanceMermaid 接线"
+    # wiki：挂在 paintPage 内（首渲 + 切语言 repaint 一并覆盖，决策P4.13-8）。
+    wiki = (STATIC_DIR / "wiki.js").read_text(encoding="utf-8")
+    pp = wiki.index("function paintPage")
+    assert "enhanceMermaid(" in wiki[pp:wiki.index("\n}", pp)]
+    # index.html 在调用者之前载入 mermaid_enhance.js。
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert index.index("mermaid_enhance.js") < index.index("wiki.js")
+
+
+def test_mermaid_no_loading_placeholder_key() -> None:
+    """按评审收窄：只一个 i18n key（renderFail），无 loading 占位。"""
+    i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
+    assert "mermaid.renderFail" in i18n
+    assert "mermaid.loading" not in i18n

@@ -194,6 +194,7 @@ function paintPage(data, path) {
     meta = `<span>${escapeHtml(path)}</span> · <span class="muted">${escapeHtml(t("wiki.noFrontmatter"))}</span>`;
   }
   view.innerHTML = `<div class="page-meta">${meta}</div>` + data.html;
+  enhanceMermaid(view); // 把正文里的 ```mermaid 渲染成图；挂在 paintPage 内 → 切语言重绘也重增强（决策P4.13-8）
 }
 
 // 语言切换时纯重绘当前单页的外围 chrome（吃缓存数据，绝不重拉 /api/page，决策P4.7-6）。

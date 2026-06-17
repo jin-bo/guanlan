@@ -166,6 +166,7 @@ async function restoreConversation(c) {
         if (m.html !== undefined) {  // 富排版（[[页]]→站内链）；缺则回退纯文本
           el.classList.add("rendered");
           el.innerHTML = m.html;
+          enhanceMermaid(el); // 历史重渲：把答案里的 ```mermaid 渲染成图（决策P4.13-8）
         } else {
           el.textContent = m.content;
         }
@@ -618,6 +619,7 @@ function handleSSE(frame, botEl) {
     if (payload.answer_html !== undefined) {
       botEl.classList.add("rendered"); // 切到正常空白模型 + 富排版（见 app.css）
       botEl.innerHTML = payload.answer_html;
+      enhanceMermaid(botEl); // 流式收尾：把答案里的 ```mermaid 渲染成图（决策P4.13-8）
     } else if (payload.answer) {
       botEl.textContent = payload.answer;
     }

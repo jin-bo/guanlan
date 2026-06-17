@@ -167,6 +167,13 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .msg.bot.rendered a.wikilink { color: var(--lan-deep); text-decoration: none; border-bottom: 1px dotted var(--lan-deep); cursor: pointer; }
 .msg.bot.rendered a.wikilink.broken { color: var(--lan-ink-soft); border-bottom-color: var(--lan-mist); cursor: default; }
 
+/* mermaid 渲染图（P4.13）：```mermaid 块经 enhanceMermaid 换成的 <figure>。SVG 自适应宽、不溢出；
+   渲染失败时 .mermaid-error 徽标贴在保留的 <pre> 源码上方。wiki 单页 / 对话气泡 / 预览共用。 */
+.mermaid-rendered { margin: .55rem 0; overflow-x: auto; text-align: center; }
+.mermaid-rendered svg { max-width: 100%; height: auto; }
+.mermaid-error { margin: .45rem 0 0; font-size: .82rem; color: var(--lan-ink-soft);
+  border-left: 3px solid var(--lan-ripple); padding-left: .5rem; }
+
 /* ── Wiki（右）：搜索 + 回退/往前 + 合并视图（列表 ⇄ 单页） ── */
 .wiki { grid-area: wiki; min-height: 0; display: flex; flex-direction: column; background: var(--lan-paper); border-left: 1px solid var(--lan-mist); }
 .wiki-bar { display: flex; align-items: center; gap: .4rem; padding: .7rem .8rem; border-bottom: 1px solid var(--lan-mist); }
