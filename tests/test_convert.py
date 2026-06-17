@@ -48,13 +48,13 @@ def test_find_source_page_exact_and_dot_dash_tolerant(tmp_path: Path):
     """精确 slug 优先命中；raw 带点而摘要页按 kebab 落成横杠时，退一步仍能认出（修「未收录」误判）。"""
     sources = tmp_path / "sources"
     sources.mkdir()
-    (sources / "标准体系-20240531.md").touch()  # 无序号：精确命中
-    (sources / "1-标准体系-20240531.md").touch()  # 有序号：Agent kebab 成横杠形
+    (sources / "示例报告-20240531.md").touch()  # 无序号：精确命中
+    (sources / "1-示例报告-20240531.md").touch()  # 有序号：Agent kebab 成横杠形
 
     # 精确命中（raw_slug 保点，但此名本无点）。
-    assert find_source_page(sources, "标准体系-20240531") == sources / "标准体系-20240531.md"
-    # raw 带枚举点 `1.` → raw_slug 保点为 `1.标准体系…`，盘上是横杠形 → 点折横杠后认出。
-    assert find_source_page(sources, "1.标准体系-20240531") == sources / "1-标准体系-20240531.md"
+    assert find_source_page(sources, "示例报告-20240531") == sources / "示例报告-20240531.md"
+    # raw 带枚举点 `1.` → raw_slug 保点为 `1.示例报告…`，盘上是横杠形 → 点折横杠后认出。
+    assert find_source_page(sources, "1.示例报告-20240531") == sources / "1-示例报告-20240531.md"
 
 
 def test_find_source_page_misses_when_absent(tmp_path: Path):

@@ -495,12 +495,12 @@ def test_api_raw_marks_ingested(client, kb) -> None:
 
     纯读派生、不落盘；前端据此默认只显未收录、按钮切看已收录（不从磁盘删任何源）。
     """
-    (kb / "raw" / "标准体系-20240531.md").write_text("# 标准\n", encoding="utf-8")
-    (kb / "raw" / "数据获取-20240531.md").write_text("# 数据\n", encoding="utf-8")
-    write_page(kb, "wiki/sources/标准体系-20240531.md", type="source")  # 仅前者有摘要页
+    (kb / "raw" / "示例报告-20240531.md").write_text("# 标准\n", encoding="utf-8")
+    (kb / "raw" / "示例数据-20240531.md").write_text("# 数据\n", encoding="utf-8")
+    write_page(kb, "wiki/sources/示例报告-20240531.md", type="source")  # 仅前者有摘要页
 
     files = {f["name"]: f["ingested"] for f in client.get("/api/raw").json()["files"]}
-    assert files == {"标准体系-20240531.md": True, "数据获取-20240531.md": False}
+    assert files == {"示例报告-20240531.md": True, "示例数据-20240531.md": False}
 
 
 def test_api_raw_ingested_tolerates_dot_dash_slug(client, kb) -> None:
@@ -508,11 +508,11 @@ def test_api_raw_ingested_tolerates_dot_dash_slug(client, kb) -> None:
 
     回归：旧逻辑只精确比 `raw_slug` 输出，认不出 Agent 实际命的横杠形，长期误判「未收录」。
     """
-    (kb / "raw" / "1.标准体系-20240531.md").write_text("# 标准\n", encoding="utf-8")
-    write_page(kb, "wiki/sources/1-标准体系-20240531.md", type="source")  # 横杠形
+    (kb / "raw" / "1.示例报告-20240531.md").write_text("# 标准\n", encoding="utf-8")
+    write_page(kb, "wiki/sources/1-示例报告-20240531.md", type="source")  # 横杠形
 
     files = {f["name"]: f["ingested"] for f in client.get("/api/raw").json()["files"]}
-    assert files["1.标准体系-20240531.md"] is True
+    assert files["1.示例报告-20240531.md"] is True
 
 
 def test_api_raw_file_renders_markdown(client, kb) -> None:

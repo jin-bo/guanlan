@@ -76,8 +76,8 @@ def raw_slug(stem: str) -> str:
 def find_source_page(sources_dir: Path, raw_stem: str) -> Path | None:
     """按 raw 文件名 stem 定位其 source 摘要页路径；容忍 `.`/`-` 归一分歧，无则 None。
 
-    `raw_slug` **保留内部点**（`1.标准体系` 原样），而 ingest Agent 按「kebab-case（同源文件名）」
-    命名摘要页时，常把开头枚举序号的点写成横杠（落成 `1-标准体系`）。两边对这个点处理不一致，会让
+    `raw_slug` **保留内部点**（`1.示例报告` 原样），而 ingest Agent 按「kebab-case（同源文件名）」
+    命名摘要页时，常把开头枚举序号的点写成横杠（落成 `1-示例报告`）。两边对这个点处理不一致，会让
     「同名 source 页存在 = 已收录」的纯读判定（`web._list_raw`）与 `raw_digest` stamp 定位
     （`ingest._stamp_source_digest`）都认不出**其实已建好**的页——表现为长期「未收录」+ 无指纹。
     故：① 先按确定性 `raw_slug` 精确命中（保点形）；② 未命中再把点折成横杠退一步认 kebab 形。
