@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/guanlan-origin.png" alt="GuānLán 观澜" width="160">
+  <img src="https://raw.githubusercontent.com/jin-bo/guanlan/main/docs/guanlan-origin.png" alt="GuānLán 观澜" width="160">
 </p>
 
 <h1 align="center">GuānLán (观澜)</h1>
 
-[中文](README.md) | **English**
+[中文](https://github.com/jin-bo/guanlan/blob/main/README.md) | **English**
 
-[![PyPI](https://img.shields.io/pypi/v/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![Python](https://img.shields.io/pypi/pyversions/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE) ![Status](https://img.shields.io/badge/status-CLI%20loop%20%2B%20Web%2FMCP%20hosts-brightgreen)
+[![PyPI](https://img.shields.io/pypi/v/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![Python](https://img.shields.io/pypi/pyversions/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/jin-bo/guanlan/blob/main/LICENSE) ![Status](https://img.shields.io/badge/status-CLI%20loop%20%2B%20Web%2FMCP%20hosts-brightgreen)
 
 > "There is an art to observing water — one must observe its ripples." (*Mencius*) — discerning patterns and trends in an ocean of information.
 
@@ -34,7 +34,7 @@ This is an implementation of the [Karpathy LLM Wiki pattern](https://gist.github
 | `guanlan web` | Browse, ask, and maintain in a browser (optional add-on) | partly |
 | `guanlan mcp` | Expose the wiki read-only to MCP clients (optional add-on) | partly |
 
-> There are also `reindex` (index backfill), `heal` (missing-entity materialization), `audit` (semantic audit: re-review drifted sources whose `raw/` changed but the wiki wasn't re-synthesized), `remove` (source retraction: move a mis-ingested/retracted source into `.trash/`), `convert` (PDF/DOCX/… → markdown), etc. Per-command detail is in the **[User Guide](docs/guide/)**.
+> There are also `reindex` (index backfill), `heal` (missing-entity materialization), `audit` (semantic audit: re-review drifted sources whose `raw/` changed but the wiki wasn't re-synthesized), `remove` (source retraction: move a mis-ingested/retracted source into `.trash/`), `convert` (PDF/DOCX/… → markdown), etc. Per-command detail is in the **[User Guide](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)**.
 
 ## Installation
 
@@ -79,7 +79,7 @@ guanlan -C my-wiki web       # local Web host, 127.0.0.1 only, opens a browser b
 
 In the browser: browse the wiki and follow `[[wikilink]]` navigation, run check·health·lint reports, view the graph, trigger ingest and other write jobs from `raw/` (incl. heal, audit drift-review, backfill), and chat read-only with the agent. **Single-user, local only — never expose the port to a network.**
 
-For a full walkthrough see the **[User Guide → Quickstart](docs/guide/en/02-quickstart.md)**.
+For a full walkthrough see the **[User Guide → Quickstart](https://github.com/jin-bo/guanlan/blob/main/docs/guide/en/02-quickstart.md)**.
 
 ## Generated layout
 
@@ -94,13 +94,13 @@ my-wiki/
     └── overview.md  # living cross-source overview
 ```
 
-> 💡 Once the KB has grown, have an LLM analyze its real current state and update `SCHEMA.md` (domain boundary / page-type usage / naming & tag conventions / evolving organizational assumptions) — with a ready-to-use prompt, see the **[User Guide → Quickstart §1.1 Updating `SCHEMA.md` with LLM help](docs/guide/en/02-quickstart.md#11-updating-schemamd-with-llm-help)**.
+> 💡 Once the KB has grown, have an LLM analyze its real current state and update `SCHEMA.md` (domain boundary / page-type usage / naming & tag conventions / evolving organizational assumptions) — with a ready-to-use prompt, see the **[User Guide → Quickstart §1.1 Updating `SCHEMA.md` with LLM help](https://github.com/jin-bo/guanlan/blob/main/docs/guide/en/02-quickstart.md#11-updating-schemamd-with-llm-help)**.
 
 ## Documentation
 
-- 📖 **[User Guide `docs/guide/`](docs/guide/)** — installation, quickstart, every command, Web/MCP hosts (bilingual)
-- 🏗️ [Design doc `docs/DESIGN.md`](docs/DESIGN.md) — full design (developer-facing, authoritative spec; in Chinese)
-- 📋 [CHANGELOG.md](CHANGELOG.md) — versions and milestone progress
+- 📖 **[User Guide `docs/guide/`](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)** — installation, quickstart, every command, Web/MCP hosts (bilingual)
+- 🏗️ [Design doc `docs/DESIGN.md`](https://github.com/jin-bo/guanlan/blob/main/docs/DESIGN.md) — full design (developer-facing, authoritative spec; in Chinese)
+- 📋 [CHANGELOG.md](https://github.com/jin-bo/guanlan/blob/main/CHANGELOG.md) — versions and milestone progress
 
 ## Development
 
@@ -109,8 +109,8 @@ uv run guanlan init /tmp/demo   # run the CLI
 uv run pytest                   # run tests
 ```
 
-The maintenance engine is `skills/guanlan-wiki/` (`SKILL.md` + `references/conventions.md` + scripts); in dev mode it is found via Agentao's repo-root skill discovery (`<working-dir>/skills/`) with no install. See [`CLAUDE.md`](CLAUDE.md).
+The maintenance engine is `skills/guanlan-wiki/` (`SKILL.md` + `references/conventions.md` + scripts); in dev mode it is found via Agentao's repo-root skill discovery (`<working-dir>/skills/`) with no install. See [`CLAUDE.md`](https://github.com/jin-bo/guanlan/blob/main/CLAUDE.md).
 
 ## License
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](https://github.com/jin-bo/guanlan/blob/main/LICENSE)
