@@ -1,6 +1,6 @@
 # SCHEMA — 本库约定
 
-> 本库的领域约定，**覆盖** `guanlan-wiki` skill 的通用默认（`references/conventions.md`）；人与 Agent 共同演进、随 markdown 走。按下列各节填写，删掉占位与示例。
+> 本库的领域约定，覆盖 `guanlan-wiki` skill 的通用默认（`skills/guanlan-wiki/references/conventions.md`）；人与 Agent 共同演进、随 markdown 走。按下列各节填写，删掉占位与示例。
 
 ## 领域 / 主题
 
