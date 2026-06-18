@@ -150,6 +150,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
             mode=args.mode,
             reader=args.reader,
             max_conversations=args.max_conversations,
+            confirm=args.confirm,
+            confirm_timeout=args.confirm_timeout,
         )
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
@@ -423,6 +425,20 @@ def _add_web_parser(sub, dir_parent) -> None:
         choices=["read-only", "workspace-write"],
         default="read-only",
         help="新会话开局姿态（默认 read-only；workspace-write 起即可让 Agent 写 wiki/workspace，浏览器内可 /mode 切换）",
+    )
+    p.add_argument(
+        "--confirm",
+        choices=["ask", "auto"],
+        default="ask",
+        help="workspace-write 下 ASK 决策（带操作符 shell / 需确认工具）的处置（P4.15，默认 ask）："
+        "ask=经浏览器弹给人确认（允许/本会话起自动放行/拒绝）；auto=沿用 P4.5 静默放行逃生舱。"
+        "会话内可点气泡②或经 UI 翻 auto↔ask",
+    )
+    p.add_argument(
+        "--confirm-timeout",
+        type=float,
+        default=120.0,
+        help="confirm/ask 等待用户应答的超时秒数（P4.15，默认 120）；无人应答即默认拒绝，兜「人走开 → 写锁永占」",
     )
     p.set_defaults(func=_cmd_web)
 

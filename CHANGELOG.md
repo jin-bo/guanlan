@@ -5,6 +5,34 @@
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-06-17
+
+### 新增
+
+- **Web 工具确认 / `ask_user` 人在环(P4.15)** —— 把 P4.5 可写 Web 会话里「ASK 决策被嵌入 transport
+  **静默自动放行**」的那一刻补成「**人在浏览器里确认**」,并接上模型主动**提问**(`ask_user`)。
+  workspace-write 下凡 agentao 判为 `ASK` 的调用(带操作符/管道的 shell、带 `requires_confirmation`
+  的工具)不再默默跑,而是**经 SSE 推一帧 `confirm_request`、阻塞 turn 等用户点 允许/拒绝、再把布尔
+  回传运行时**;模型 `ask_user` 同机制弹 `ask_request`(可带选项/自由文本)、收回答案串。三个硬点都
+  钉死:① **写锁**——确认/提问阻塞期全程持进程级 `write_lock`,故 ② **超时**(`--confirm-timeout`,默认
+  120s)是硬需求、无人应答**默认拒绝**(绝不默认放行),③ **取消**——停止按钮 / 客户端断开都 trip 同一
+  取消令牌(断线时若有未决 pending 则 `request_stop()`,内层立即收尾释写锁、不空等满超时)。线程桥:
+  确认/提问回调在 `arun` 的 executor 线程同步阻塞,经 `call_soon_threadsafe` 推帧、`queue.Queue`
+  收应答,端点(`POST /api/chat/{id}/confirm`·`/answer`·`/confirm-mode`)在事件循环线程 `put_nowait`
+  瞬返、**绝不取 write_lock/conv.lock**(防与持锁等待的 turn 死锁)。confirm 气泡**三选项**:允许 /
+  **本会话起自动放行**(对标 CLI 第 2 项但取**安全版**——只把本会话 `confirm_mode` 切 `auto`,姿态仍
+  workspace-write、层①②③ 一个不少、`raw/`/`AGENTAO.md` 仍硬只读,**非 full-access**,且可逆「恢复逐次
+  确认」)/ 拒绝。**安全闸**:pending 槽记 `kind`,`/confirm` 只消费 confirm、`/answer` 只消费 ask、
+  **跨类一律 409**(否则 `/answer` 的非空串被 `confirm_tool` 当 truthy `True` 绕过「点允许」放行
+  shell);`info().pending` 回完整请求 envelope 供断线重连重渲染。**关键不变量**:「人点允许 ≠ 绕过
+  immutable」——确认只决定 ASK 工具跑不跑,不开新写路径,`raw/`/`AGENTAO.md` 只读永由确定性层①②扛。
+  新进程开关 `guanlan web --confirm {ask,auto}`(默认 **ask**)+ `--confirm-timeout`;子进程 `ingest`/
+  `query` 路径不在本期(无人值守、靠 `permissions.json`)。`ask_user` 跨姿态触发(read-only 也问、只占
+  `conv.lock` 不持写锁)。守于 `tests/test_web.py`(确认放行/拒绝/超时/停止/断线释锁/跨类拒/陈旧 409/
+  写工具不弹/immutable 不放宽/auto 模式/气泡②≠full-access/可逆/info envelope/层③ 423/ask 往返/只读
+  ask 不持写锁,20 例)+ `test_web_i18n.py` 平价;前端确认·提问气泡(命令/问题字面显示、倒计时、断线
+  重渲)。**无新退出码 / 无新 Python 依赖**;设计见 `docs/P4.15-Web工具确认.md`。
+
 ## [0.1.13] - 2026-06-17
 
 ### 新增

@@ -68,6 +68,7 @@ function startNewConversation() {
   chatLoadToken++; // 作废任何在飞的历史气泡回放（用户已开新会话）
   setConversation(null);
   $("#chat-log").innerHTML = "";
+  clearPendingInteractions(); // P4.15：清掉旧会话残留的确认/提问气泡 + 其倒计时 setInterval（防泄漏）
   clearAttachments(); // 弃掉未发送的附件徽章（新会话不继承上一会话的待发附件）
   setModeBadge(defaultMode); // 新会话开局 = 进程默认姿态（决策P4.5-8）
 }
@@ -141,6 +142,7 @@ async function restoreConversation(c) {
   setConversation(c.id);
   const log = $("#chat-log");
   log.innerHTML = "";
+  clearPendingInteractions(); // P4.15：清掉上一会话残留的确认/提问气泡 + 倒计时（再据本会话 info.pending 重渲）
   $("#chat-input").focus();
   // 切会话即刷新姿态徽标（评审 P2）：否则徽标停留在上一个会话的姿态——一个 workspace-write 的 live
   // 会话切过去仍显 read-only（或反之），正是徽标该指示写能力时误导。先乐观置进程默认（冷会话恢复即
@@ -148,7 +150,12 @@ async function restoreConversation(c) {
   // 失败/已切走不阻断回放，徽标退回默认。
   setModeBadge(defaultMode);
   getJSON(`/api/chat/${encodeURIComponent(c.id)}/info`)
-    .then((info) => { if (tok === chatLoadToken && info && info.mode) setModeBadge(info.mode); })
+    .then((info) => {
+      if (tok !== chatLoadToken || !info) return;
+      if (info.mode) setModeBadge(info.mode);
+      if (info.confirm_mode === "auto") showAutoModeNote(); // P4.15：本会话已自动放行（可恢复）
+      rerenderPendingInteractions(info.pending); // P4.15：断线重连重渲染未决确认/提问气泡
+    })
     .catch(() => {});
   // 回放历史气泡（user/assistant）：拉该会话的消息，逐条上屏。失败仅降级为一条提示、不阻断续聊。
   try {
@@ -684,6 +691,17 @@ function handleSSE(frame, botEl) {
     appendBackfillButton(botEl); // 气泡尾部挂「沉淀」按钮：预填该轮问题（P4.8）
     refreshStagingIfOpen(); // 修订 turn 收尾：暂存区开着则重拉刷新池（决策P4.6-9）
     log.scrollTop = log.scrollHeight;
+  } else if (event === "confirm_request") {
+    // P4.15a：Agent 的 ASK 决策弹给人——审阅命令全文，点 允许/本会话起自动放行/拒绝（docs/P4.15）。
+    clearHeartbeat(botEl); // 不是「思考中」，是「等你拍板」
+    renderConfirmRequest(payload);
+  } else if (event === "ask_request") {
+    // P4.15b：Agent 主动提问，弹一帧（可带选项/自由文本），收回答案串。
+    clearHeartbeat(botEl);
+    renderAskRequest(payload);
+  } else if (event === "interaction_resolved") {
+    // 确认/提问落定（人点了 / 超时 / 停止）：收掉气泡、标记结局。
+    resolveInteractionUI(payload);
   } else if (event === "error") {
     clearHeartbeat(botEl);
     // 记下服务端已建会话（即便本轮失败）：否则首轮失败时下次又以 null 另起新会话，堆到 503。
@@ -796,4 +814,232 @@ async function undoTurn(token, btn, box) {
   }
   box.appendChild(note);
   loadPages(); // 撤销后刷新右栏 wiki 列表
+}
+
+// ── P4.15 工具确认 / ask_user 人在环（docs/P4.15）─────────────────────────────
+// 服务端 SSE 推 confirm_request / ask_request → 渲染一个交互气泡（命令/问题用 textContent 字面
+// 显示、绝不渲染或执行）；用户点选 → POST /confirm·/answer；interaction_resolved → 收掉气泡。
+// 气泡端绝不取任何锁（端点瞬返），等待期间内层 turn 在服务端阻塞、持写锁（§4）。
+
+const pendingInteractions = {}; // interaction_id -> { el }（供 interaction_resolved 找回气泡收尾）
+
+// 切换/新建会话时调：停掉所有未决气泡的倒计时 setInterval 并清空登记表——否则切走后 interval
+// 仍每秒在已脱离 DOM 的节点上空转、map 也越积越多（评审泄漏修复）。气泡 DOM 由调用方清 log 清掉。
+function clearPendingInteractions() {
+  for (const id of Object.keys(pendingInteractions)) {
+    stopCountdown(pendingInteractions[id].el);
+    delete pendingInteractions[id];
+  }
+}
+
+// 交互气泡的 POST 归口：成功 onOk；409（陈旧/已超时/已停止/打错端点）或网络失败 → 标记气泡失效。
+function interactionPost(path, body, box, onOk) {
+  if (!conversationId) { markInteractionStale(box, 0); return; }
+  return fetch(`/api/chat/${encodeURIComponent(conversationId)}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+    .then((res) => {
+      if (res.ok) { if (onOk) onOk(); }
+      else markInteractionStale(box, res.status);
+      return res;
+    })
+    .catch(() => markInteractionStale(box, 0));
+}
+
+function disableInteraction(div) {
+  for (const b of div.querySelectorAll("button")) b.disabled = true;
+  for (const inp of div.querySelectorAll("input")) inp.disabled = true;
+}
+
+function markInteractionStale(div, status) {
+  disableInteraction(div);
+  const note = document.createElement("div");
+  note.className = "interaction-status stale";
+  note.textContent = status === 409 ? t("interaction.expired") : t("interaction.failHttp", status || 0);
+  div.appendChild(note);
+}
+
+// 倒计时（纯前端提示，到点服务端会自送 interaction_resolved{timeout}）。deadline_epoch 是墙钟秒。
+function startCountdown(el, deadlineEpoch) {
+  if (!deadlineEpoch) return;
+  const tick = () => {
+    const remain = Math.ceil((deadlineEpoch * 1000 - Date.now()) / 1000);
+    el.textContent = t("interaction.countdown", Math.max(0, remain));
+    if (remain <= 0 && el._cd) { clearInterval(el._cd); el._cd = null; }
+  };
+  tick();
+  el._cd = setInterval(tick, 1000);
+}
+
+function stopCountdown(div) {
+  const cd = div.querySelector(".interaction-cd");
+  if (cd && cd._cd) { clearInterval(cd._cd); cd._cd = null; }
+}
+
+// 新建一个交互气泡骨架（head + 倒计时槽），登记进 pendingInteractions。
+function newInteractionBubble(p, cls, title) {
+  const div = addNote(() => {});
+  div.classList.add("interaction", cls);
+  div.dataset.iid = p.interaction_id;
+  const head = document.createElement("div");
+  head.className = "interaction-head";
+  head.textContent = title;
+  div.appendChild(head);
+  pendingInteractions[p.interaction_id] = { el: div };
+  return div;
+}
+
+function renderConfirmRequest(p) {
+  const div = newInteractionBubble(p, "confirm", t("interaction.confirmTitle"));
+  const toolLine = document.createElement("div");
+  toolLine.className = "interaction-tool";
+  toolLine.textContent = t("interaction.tool", p.tool || "");
+  div.appendChild(toolLine);
+  // 命令/参数全文，字面显示（不渲染、不执行）——这是「人在环」相对「静默放行」的全部信息增益。
+  const cmd = p.args && p.args.command !== undefined ? p.args.command : p.args;
+  const pre = document.createElement("pre");
+  pre.className = "interaction-cmd";
+  pre.textContent = typeof cmd === "string" ? cmd : JSON.stringify(cmd, null, 2);
+  div.appendChild(pre);
+  const cd = document.createElement("div");
+  cd.className = "interaction-cd";
+  div.appendChild(cd);
+  startCountdown(cd, p.deadline_epoch);
+  const actions = document.createElement("div");
+  actions.className = "interaction-actions";
+  const mk = (label, btnCls, decision) => {
+    const b = document.createElement("button");
+    b.className = "interaction-btn " + btnCls;
+    b.textContent = label;
+    b.addEventListener("click", () => {
+      disableInteraction(div);
+      interactionPost("/confirm", { interaction_id: p.interaction_id, decision }, div);
+    });
+    return b;
+  };
+  actions.append(
+    mk(t("interaction.allow"), "allow", "allow"),
+    mk(t("interaction.allowSession"), "allow-session", "allow_session"),
+    mk(t("interaction.deny"), "deny", "deny"),
+  );
+  div.appendChild(actions);
+  $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+}
+
+function renderAskRequest(p) {
+  const div = newInteractionBubble(p, "ask", t("interaction.askTitle"));
+  const q = document.createElement("div");
+  q.className = "interaction-q";
+  q.textContent = p.question || ""; // 问题是内容，字面显示
+  div.appendChild(q);
+  const cd = document.createElement("div");
+  cd.className = "interaction-cd";
+  div.appendChild(cd);
+  startCountdown(cd, p.deadline_epoch);
+  const opts = Array.isArray(p.options) ? p.options : [];
+  const inputs = [];
+  if (opts.length) {
+    const inputType = p.multiple ? "checkbox" : "radio";
+    const groupName = "ask-" + p.interaction_id;
+    for (const opt of opts) {
+      const lab = document.createElement("label");
+      lab.className = "interaction-opt";
+      const inp = document.createElement("input");
+      inp.type = inputType;
+      inp.name = groupName;
+      inp.value = opt;
+      const span = document.createElement("span");
+      span.textContent = opt; // 选项是内容，字面显示
+      lab.append(inp, span);
+      div.appendChild(lab);
+      inputs.push(inp);
+    }
+  }
+  // 无选项、或允许自由文本时给输入框（答案最终是单串，base.py 契约）。
+  let freeInput = null;
+  if (!opts.length || p.allow_custom) {
+    freeInput = document.createElement("input");
+    freeInput.type = "text";
+    freeInput.className = "interaction-free";
+    freeInput.placeholder = t("interaction.answerPlaceholder");
+    div.appendChild(freeInput);
+  }
+  const actions = document.createElement("div");
+  actions.className = "interaction-actions";
+  const submit = document.createElement("button");
+  submit.className = "interaction-btn allow";
+  submit.textContent = t("interaction.submit");
+  submit.addEventListener("click", () => {
+    const chosen = inputs.filter((inp) => inp.checked).map((inp) => inp.value);
+    let answer = chosen.join(", ");
+    if (freeInput && freeInput.value.trim()) {
+      answer = answer ? answer + ", " + freeInput.value.trim() : freeInput.value.trim();
+    }
+    if (!answer) return; // 空答不提交
+    disableInteraction(div);
+    interactionPost("/answer", { interaction_id: p.interaction_id, answer }, div);
+  });
+  actions.appendChild(submit);
+  div.appendChild(actions);
+  $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+}
+
+function resolveInteractionUI(p) {
+  const rec = pendingInteractions[p.interaction_id];
+  if (!rec) return;
+  delete pendingInteractions[p.interaction_id];
+  finalizeInteraction(rec.el, p.decision);
+}
+
+function finalizeInteraction(div, decision) {
+  stopCountdown(div);
+  disableInteraction(div);
+  const status = document.createElement("div");
+  status.className = "interaction-status";
+  const labels = {
+    allow: t("interaction.allowed"),
+    allow_session: t("interaction.allowedSession"),
+    deny: t("interaction.denied"),
+    timeout: t("interaction.timedOut"),
+    stopped: t("interaction.stopped"),
+    answered: t("interaction.answeredOk"),
+  };
+  status.textContent = labels[decision] || decision;
+  div.appendChild(status);
+  if (decision === "allow_session") showAutoModeNote(); // 翻 auto：给「恢复逐次确认」一键
+  $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+}
+
+// 本会话起自动放行后的提示 + 「恢复逐次确认」（/confirm-mode {ask}）。镜像 CLI 第 2 项的安全版：
+// 仅松「问不问」、姿态仍 workspace-write、层①②③ 不动、可逆（§6）。
+function showAutoModeNote() {
+  addNote((div) => {
+    div.classList.add("interaction-automode");
+    const p = document.createElement("div");
+    p.textContent = t("interaction.autoNote");
+    div.appendChild(p);
+    const b = document.createElement("button");
+    b.className = "interaction-btn restore";
+    b.textContent = t("interaction.restoreConfirm");
+    b.addEventListener("click", () => {
+      b.disabled = true;
+      interactionPost("/confirm-mode", { confirm_mode: "ask" }, div, () => {
+        const done = document.createElement("div");
+        done.textContent = t("interaction.restored");
+        div.appendChild(done);
+      });
+    });
+    div.appendChild(b);
+  });
+}
+
+// 断线重连重渲染（§5.3）：切到/恢复会话时若服务端报有未决 pending，按 envelope 重建气泡让用户决策。
+function rerenderPendingInteractions(pending) {
+  if (!Array.isArray(pending)) return;
+  for (const p of pending) {
+    if (p.kind === "confirm") renderConfirmRequest(p);
+    else if (p.kind === "ask") renderAskRequest(p);
+  }
 }

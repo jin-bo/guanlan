@@ -217,6 +217,44 @@ class UndoBody(BaseModel):
     token: str
 
 
+class ConfirmBody(BaseModel):
+    """`POST /api/chat/{id}/confirm` 请求体（P4.15a）。`interaction_id` = confirm_request 帧带的 id；
+    `decision` 三值（决策P4.15-13）：`allow`=放行这一个 / `allow_session`=放行+本会话起自动放行
+    （翻 confirm_mode=auto，**非** full-access）/ `deny`=拒绝。非三值之一 → 422。"""
+
+    interaction_id: str
+    decision: str
+
+    @field_validator("decision")
+    @classmethod
+    def _decision_known(cls, v: str) -> str:
+        if v not in ("allow", "allow_session", "deny"):
+            raise ValueError(f"未知 decision：{v}（须 ∈ allow/allow_session/deny）。")
+        return v
+
+
+class AnswerBody(BaseModel):
+    """`POST /api/chat/{id}/answer` 请求体（P4.15b）。`answer` = 用户对模型 `ask_user` 的答案串
+    （原样交回模型）；前端按 `options`/`allow_custom` 约束 UI，端点不校验答案语义（交回模型容错）。"""
+
+    interaction_id: str
+    answer: str
+
+
+class ConfirmModeBody(BaseModel):
+    """`POST /api/chat/{id}/confirm-mode` 请求体（P4.15）。`confirm_mode` 仅 `ask`/`auto`，非法 → 422。
+    **仅切本会话未来模式**、不碰在飞 pending（§5.2）——与气泡②（放行当前+翻 auto）不同。"""
+
+    confirm_mode: str
+
+    @field_validator("confirm_mode")
+    @classmethod
+    def _mode_known(cls, v: str) -> str:
+        if v not in ("ask", "auto"):
+            raise ValueError(f"未知 confirm_mode：{v}（须 ∈ ask/auto）。")
+        return v
+
+
 # Web 端 heal 默认本批上限：刻意小于 CLI 的 DEFAULT_LIMIT（=10）——浏览器里一次少物化几个、
 # 看清回执再续批更顺手；`min_refs` 仍与 CLI 同源（只 limit 这一项 Web 单独取值）。
 WEB_HEAL_DEFAULT_LIMIT = 5
@@ -276,6 +314,8 @@ def create_app(
     mode: str = "read-only",
     reader: bool = False,
     max_conversations: int | None = None,
+    confirm: str = "ask",
+    confirm_timeout: float = 120.0,
 ) -> FastAPI:
     """构造绑定到知识库 `root` 的 FastAPI app。
 
@@ -291,6 +331,11 @@ def create_app(
         max_conversations: 内存会话硬上限（P4.9-18，`None`=用默认 100）。显式 `< 1` 即抛
             `GuanlanError(EXIT_USAGE)`（权威校验同落 `create_app`，堵「绕过 CLI 直建得到坏配置 app」
             的直建漏口）。`None` 透传 `ConversationStore`、调用时回落模块常量。
+        confirm: 新会话 confirm 开局姿态（P4.15，默认 `ask`）：`ask`=workspace-write 下 ASK 决策
+            （带操作符 shell / `requires_confirmation` 工具）弹给人确认；`auto`=沿用 P4.5 静默放行
+            逃生舱。每会话开局继承、之后可经气泡②或 `/confirm-mode` 翻（决策P4.15-7/13）。
+        confirm_timeout: confirm/ask 等待超时秒数（P4.15，默认 120）。无人应答即默认拒绝（§4.2），
+            兜「人走开 → 写锁永占」。
     """
     # 权威校验（决策P4.9-18）：任何 caller（CLI/serve/嵌入/测试直建）显式传 < 1 都早失败，
     # 不下沉 ConversationStore（那时 app 已建、太晚）。CLI/serve 可另作友好早提示，但权威点在此。
@@ -347,6 +392,10 @@ def create_app(
         write_gate=write_gate,
         max_conversations=effective_max,
         search_cache=search_cache,
+        # P4.15：confirm 进程默认（ask=ASK 弹给人 / auto=P4.5 静默放行逃生舱）+ 确认等待超时
+        # （秒）。每会话开局继承 confirm_mode、之后可被气泡②/`/confirm-mode` 翻（决策P4.15-7/13）。
+        confirm_mode=confirm,
+        confirm_timeout=confirm_timeout,
         # idle 回收**仅 reader 启用**（决策P4.9-6，评审 codex P2）：reader=多用户共享，需缓解并发顶满
         # 上限；非 reader=单用户、无上限压力，且 workspace-write 会话被逐会丢 memory-only 的 undo 日志/
         # 姿态（用户拿着的 undo token 随即 404）——故非 reader 关回收（idle_ttl=None），不动既有 P4/P4.5 行为。
@@ -970,14 +1019,17 @@ def create_app(
             # / undo），由本协程独占——无论 turn 返回还是抛错都读自己这只 dict，杜绝跨轮读串。
             # read-only turn 保持空，done/error 帧不带这些字段。
             meta: dict = {}
+            # 显式 Task（而非裸 coro）+ shield：客户端断开会取消本协程，但**不可**靠 asyncio 取消
+            # 打断 arun——那只转发 token.cancel() 便立刻 re-raise、不等线程收尾，于是 lock 会在后台
+            # executor 线程仍在跑时被释放，下一轮就可能与残线程并发改 agent.messages / 串错 token。
+            # shield 让 turn 跑到自然结束（lock 全程持有），杜绝该竞态；代价是断开后该轮仍跑完（本地
+            # 单用户、轮次有界，可接受）。**主动停止**走另一条干净路径：停止端点经 conv 上的取消令牌
+            # 打断，arun 持锁等线程真正收尾才抛 AgentCancelledError（见下 except）。持显式 task 句柄
+            # 是为在断线分支消费它最终的异常（P4.15 §4.3：断线 request_stop 会让后台 turn 抛
+            # AgentCancelledError，无人 await 即 asyncio「Task exception was never retrieved」噪声）。
+            turn_task = asyncio.ensure_future(conv.turn(agent_message, emit, meta, images))
             try:
-                # shield：客户端断开会取消本任务，但**不可**靠 asyncio 取消打断 arun——那只转发
-                # token.cancel() 便立刻 re-raise、不等线程收尾，于是 lock 会在后台 executor 线程仍
-                # 在跑时被释放，下一轮就可能与残线程并发改 agent.messages / 串错 token。shield 让
-                # turn 跑到自然结束（lock 全程持有），杜绝该竞态；代价是断开后该轮仍跑完（本地单
-                # 用户、轮次有界，可接受）。**主动停止**走另一条干净路径：停止端点经 conv 上的取消
-                # 令牌打断，arun 持锁等线程真正收尾才抛 AgentCancelledError（见下 except）。
-                answer = await asyncio.shield(conv.turn(agent_message, emit, meta, images))
+                answer = await asyncio.shield(turn_task)
                 # 答案已完整流出；再渲染安全 markdown HTML（[[页]] → 站内链接）作收尾。渲染失败
                 # **不能**丢掉这条成功答案：省略 answer_html，前端回退用纯文本 answer 上屏。
                 payload: dict = {"answer": answer, "conversation_id": conv.id, **meta}
@@ -993,6 +1045,11 @@ def create_app(
                 # 可写 turn 即便被停，写已发生、层②已还原、check/undo 已落 meta，照样带上（§7）。
                 emit("stopped", {"conversation_id": conv.id, **meta})
             except asyncio.CancelledError:
+                # 客户端断开：外层被取消，但 shielded turn_task 仍在后台跑到自然收尾（写锁释放/落盘
+                # 在 turn 自身 finally 完成）。断线时若 §4.3 的 request_stop 已 trip 令牌，turn_task 会
+                # 抛 AgentCancelledError——挂一个吞异常回调消费它，免「Task exception was never
+                # retrieved」噪声（t.cancelled() 短路守 .exception() 不在已取消任务上反抛）。
+                turn_task.add_done_callback(lambda t: t.cancelled() or t.exception())
                 raise  # 客户端已断开，流没了，不再 emit
             except Exception as exc:  # noqa: BLE001 — 任何失败都转 error 事件，不泄 traceback 到流
                 # 带上 conversation_id：首轮失败时前端据此记住已建会话，避免下次另起新会话堆积。
@@ -1024,8 +1081,19 @@ def create_app(
                     kind, data = item
                     yield _sse(kind, data)
             finally:
+                # 断线处理的精确执行序（P4.15 §4.3，落地钉死）：必须**先 trip 取消令牌、再取消
+                # 外层 task**。① 客户端断开时若本会话有未决 pending（confirm/ask 正阻塞内层 shielded
+                # turn、全程持写锁），仅 task.cancel() **不够**——外层 _run_turn 在 await shield 处秒回、
+                # 但 shield 保护的内层 conv.turn 仍卡在 _wait_interaction 等应答，会白占写锁达
+                # CONFIRM_TIMEOUT_S。故先 conv.request_stop()（幂等、线程安全、loop 线程直调）trip
+                # 同一令牌 → 内层下一拍读到 is_cancelled 立即返回拒绝 → arun 抛 AgentCancelledError →
+                # promptly 释写锁。**无 pending 的普通长轮不动**：保留 shield「后台跑完落盘」语义，不误杀。
+                # ② 再取消外层 task。顺序不可换：gather 等的是外层 task，它秒回 ≠ 内层结束，真正解开
+                # 内层阻塞的是 ①。窄竞态（断线与「刚要建 pending」擦肩）由 §4.2 超时兜底。
+                if conv.has_pending():
+                    conv.request_stop()
                 if not task.done():
-                    task.cancel()  # 客户端断开 → 取消在飞的 turn
+                    task.cancel()  # 客户端断开 → 取消外层 _run_turn（它走 finally end_turn）
                 await asyncio.gather(task, return_exceptions=True)
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -1052,6 +1120,40 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
         # request_stop 仅置位令牌（线程安全、不阻塞），无在飞 turn 时返回 False。
         return {"stopped": conv.request_stop()}
+
+    # P4.15a 工具确认应答（confirm_request → 用户点 允许/本会话起自动放行/拒绝）：解阻塞内层
+    # confirm_tool。**绝不**取 write_lock/conv.lock（只 put_nowait、loop 线程瞬返，§4.1/§5.2）——
+    # 否则与「持锁等它应答」的 turn 死锁。kind 必须匹配 confirm（跨类拒，决策P4.15-12/§5.2）。
+    @app.post("/api/chat/{conversation_id}/confirm")
+    async def chat_confirm(conversation_id: str, body: ConfirmBody) -> dict:
+        conv = conversations.get(conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        # id 对不上 / kind 不符（陈旧点击、已超时/停止、打错端点）/ 已有应答在途 → 409。
+        if not conv.resolve_confirm(body.interaction_id, body.decision):
+            raise HTTPException(status_code=409, detail="无匹配的待应答")
+        return {"ok": True}
+
+    # P4.15b 模型提问应答（ask_request → 用户填答案）：原样交回模型。同样瞬返、不取锁；kind
+    # 必须匹配 ask（跨类拒，决策P4.15-12）——否则 /answer 的非空串被 confirm_tool 当 truthy True。
+    @app.post("/api/chat/{conversation_id}/answer")
+    async def chat_answer(conversation_id: str, body: AnswerBody) -> dict:
+        conv = conversations.get(conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        if not conv.resolve_answer(body.interaction_id, body.answer):
+            raise HTTPException(status_code=409, detail="无匹配的待应答")
+        return {"ok": True}
+
+    # P4.15 翻本会话 confirm 姿态（ask↔auto）：**仅切未来模式**、不碰在飞 pending（§5.2 评审
+    # Medium）——「恢复逐次确认」走它（auto→ask），主动关确认也走它。镜像 /mode 的 per-conversation
+    # 语义：只动本会话、不动进程默认。冷会话/无会话 → 404（无 live agent 可翻）。零写、不取写锁。
+    @app.post("/api/chat/{conversation_id}/confirm-mode")
+    async def chat_confirm_mode(conversation_id: str, body: ConfirmModeBody) -> dict:
+        conv = conversations.get(conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        return {"confirm_mode": conv.set_confirm_mode(body.confirm_mode)}
 
     # 运行时翻姿态（P4.5 决策P4.5-5）：read-only ↔ workspace-write 真切换（只翻两点置位、不重建
     # agent、不动层① wrapper）。持会话锁与在飞 turn 串行。404 未知 id；409 冷会话（未激活、无 live

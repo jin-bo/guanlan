@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import asyncio
+import queue
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -61,6 +63,8 @@ class Conversation:
         mode: str = "read-only",
         write_gate: WriteGate | None = None,
         search_cache: CorpusCache | None = None,
+        confirm_mode: str = "ask",
+        confirm_timeout: float = 120.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.id = cid
@@ -98,6 +102,16 @@ class Conversation:
         self._check_baseline: set[tuple] | None = None
         self._check_baseline_gen = -1
 
+        # P4.15（见 docs/P4.15-Web工具确认.md）：Web 工具确认 / ask_user 人在环。`_confirm_mode`
+        # 是每会话状态（ask=ASK 逐次弹给人 / auto=静默放行，开局继承进程 --confirm 默认；气泡②或
+        # /confirm-mode 翻）。`_pending` 按 interaction_id 键控待应答槽（每项 {kind,queue,envelope}），
+        # 由独立 `_pending_lock` 护——**绝不**与 conv.lock/write_lock 混用（否则端点与阻塞在应答上的
+        # turn 死锁，§5.2）。这些须在构造 transport（下方）**之前**置位：确认回调被冻进 transport。
+        self._confirm_mode = confirm_mode
+        self._confirm_timeout = confirm_timeout
+        self._pending: dict[str, dict] = {}
+        self._pending_lock = threading.Lock()
+
         chat.ensure_skill_available(kb)  # 嵌入式同样需保证 skill 可发现（坑②前置）
 
         # 层①（决策P4.5-2）：构造期注入 PolicyFileSystem wrapper（姿态无关、装一次），包住
@@ -105,13 +119,21 @@ class Conversation:
         # 它还在可写 turn 内记 per-turn 写日志（wiki/ + SCHEMA.md），供撤销本轮写（§3）。
         self._policy_fs = make_policy_fs(kb)
 
+        # transport 在构造期冻结三类回调：token 流式（LLM_TEXT→chunk，事后改属性是死代码）、
+        # P4.15a confirm（ASK → 经 SSE 弹给人、阻塞回传布尔）、P4.15b ask_user（模型提问）。
+        transport = build_compat_transport(
+            llm_text_callback=self._on_token,
+            confirmation_callback=self._confirm_tool_cb,  # P4.15a：ASK → confirm_tool
+        )
+        # P4.15b：compat 的 `_ask` 只转发 `question`、丢结构化提示（options/header/multiple/
+        # allow_custom）。直接把 `SdkTransport._ask_user` 换成我们的富回调——`invoke_ask_user_callback`
+        # 会反射回调签名、把它能收的结构化字段按关键字转发（agentao 文档化的 ask_user 结构化面，§9）。
+        transport._ask_user = self._ask_user_cb
         opts: dict = dict(
             working_directory=kb,
             logger=_logger,
             filesystem=self._policy_fs,  # 层①：透传到 agent.filesystem → 绑定每个写工具（C0 已验）
-            # token 流式的**唯一活线**：transport 在构造期冻结（EventType.LLM_TEXT→chunk）。
-            # 事后改 self.agent.llm_text_callback 是死代码（只读存档，运行时不重读）。
-            transport=build_compat_transport(llm_text_callback=self._on_token),
+            transport=transport,
         )
         if model is not None:
             # --model 仅在给定时入 overrides：显式 model=None 会盖掉 .env 发现的模型、
@@ -168,6 +190,191 @@ class Conversation:
         """transport 固定回调，**在 arun 的 executor 线程里跑**；lock 串行化同会话各 turn，单槽无竞态。"""
         if self._emit is not None:
             self._emit("token", chunk)
+
+    # ── P4.15 工具确认 / ask_user 人在环（docs/P4.15-Web工具确认.md §3/§4/§9） ──
+    #
+    # 下面两个回调被冻进 transport，**在 arun 的 executor 线程里同步阻塞**（与 _on_token 同线程）：
+    # 生成 interaction_id → 建 pending 槽 → 经 SSE（thread_safe_emit，call_soon_threadsafe 桥回
+    # loop）推请求帧 → 阻塞短轮询等用户经 /confirm·/answer 应答（端点在 loop 线程 put_nowait 到
+    # 同一 queue）→ 落定后推 interaction_resolved。超时/停止/断线一律默认拒绝（confirm→False、
+    # ask→约定取消串，§4.2/§4.3），杜绝「人走开 → 写锁永占」。
+
+    def _emit_interaction(self, kind: str, data: dict) -> None:
+        """经当前 turn 的线程安全 emit 推一帧确认/提问相关 SSE（executor 线程安全）。"""
+        emit = self._emit
+        if emit is not None:
+            emit(kind, data)
+
+    def _wait_interaction(self, q: queue.Queue, deadline: float) -> tuple[str, object]:
+        """轮询等应答，同时观测停止令牌与墙钟超时（§4.3）。返回 `(outcome, payload)`：
+        `("answered", 应答)` / `("timeout", None)` / `("stopped", None)`。
+
+        粒度 0.2s：对人类应答无感、对取消足够灵敏、CPU 可忽略（一会话至多一个等待线程在转）。
+        读 `self._cancel_token`（turn 内安装的活跃轮令牌）——停止按钮/断线 trip 它即下一拍返回拒绝。
+        """
+        while True:
+            token = self._cancel_token
+            if token is not None and token.is_cancelled:
+                return "stopped", None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "timeout", None
+            try:
+                return "answered", q.get(timeout=min(0.2, remaining))
+            except queue.Empty:
+                continue
+
+    def _run_interaction(
+        self, kind: str, request_frame: str, envelope: dict
+    ) -> tuple[str, object]:
+        """confirm/ask 共用的人在环骨架（§3）：登记 pending → 经 SSE 推 request_frame → 阻塞短
+        轮询等应答 → 摘除 pending。返回 `_wait_interaction` 的 `(outcome, payload)`。envelope 已含
+        `interaction_id`（调用方据它建好），登记/摘除由 `_pending_lock` 护。"""
+        interaction_id = envelope["interaction_id"]
+        q: queue.Queue = queue.Queue(maxsize=1)
+        with self._pending_lock:
+            self._pending[interaction_id] = {"kind": kind, "queue": q, "envelope": envelope}
+        self._emit_interaction(request_frame, envelope)
+        outcome, payload = self._wait_interaction(
+            q, time.monotonic() + self._confirm_timeout
+        )
+        with self._pending_lock:
+            self._pending.pop(interaction_id, None)
+        return outcome, payload
+
+    def _confirm_tool_cb(self, tool_name: str, description: str, args: dict) -> bool:
+        """transport confirmation_callback，**executor 线程同步阻塞**（§3）。ASK 决策的执行准入。
+
+        `auto` 模式直接放行（不弹、不建 pending，§3 步0）——即气泡②/`--confirm auto`，仍
+        workspace-write + 层①②③、`raw/` 仍硬只读（§6）。否则经 SSE 推 `confirm_request`、阻塞等
+        用户经 `/confirm` 应答；超时/停止/断线默认拒绝（返回 False → 工具 CANCELLED，§4.2）。
+        """
+        with self._pending_lock:
+            if self._confirm_mode == "auto":
+                return True  # 静默放行（粒度=问/不问，**非** full-access，§6）
+        interaction_id = str(uuid.uuid4())
+        envelope = {
+            "interaction_id": interaction_id,
+            "kind": "confirm",
+            "tool": tool_name,
+            "args": args,  # 原样带上（尤其 run_shell_command 的 command 全文）——人要看清将跑什么
+            "description": description,
+            "mode": self._mode,
+            "deadline_epoch": time.time() + self._confirm_timeout,  # 墙钟，供前端倒计时
+        }
+        outcome, payload = self._run_interaction("confirm", "confirm_request", envelope)
+        if outcome == "answered":
+            # 端点已校验 decision ∈ {allow,allow_session,deny} 且翻好 confirm_mode（allow_session）。
+            decision = payload if payload in ("allow", "allow_session", "deny") else "deny"
+            result = decision in ("allow", "allow_session")
+        elif outcome == "timeout":
+            decision, result = "timeout", False
+        else:  # stopped / 断线
+            decision, result = "stopped", False
+        self._emit_interaction(
+            "interaction_resolved", {"interaction_id": interaction_id, "decision": decision}
+        )
+        return result
+
+    def _ask_user_cb(
+        self,
+        question: str,
+        *,
+        header: str | None = None,
+        options: list[str] | None = None,
+        multiple: bool = False,
+        allow_custom: bool = True,
+    ) -> str:
+        """transport ask_user 回调（P4.15b，§9）：模型主动提问 → SSE 弹一帧、收回答案串。
+
+        与 confirm 同骨架（executor 阻塞 + 线程桥 + 超时/取消），但返回 **string**、**跨姿态触发**
+        （read-only 也问、只占 conv.lock 不持写锁，§4.1 注）、**不受 confirm_mode 影响**（提问非
+        工具准入，auto 模式同样弹）。超时/停止返回约定取消串，模型据此自决（未接也不崩）。
+        """
+        interaction_id = str(uuid.uuid4())
+        envelope = {
+            "interaction_id": interaction_id,
+            "kind": "ask",
+            "question": question,
+            "header": header,
+            "options": list(options) if options else None,  # 呈现提示（前端渲单/多选）
+            "multiple": bool(multiple),
+            "allow_custom": bool(allow_custom),
+            "deadline_epoch": time.time() + self._confirm_timeout,
+        }
+        outcome, payload = self._run_interaction("ask", "ask_request", envelope)
+        if outcome == "answered":
+            answer, decision = str(payload), "answered"
+        elif outcome == "timeout":
+            answer, decision = "[ask_user: timed out, no answer]", "timeout"
+        else:
+            answer, decision = "[ask_user: cancelled]", "stopped"
+        self._emit_interaction(
+            "interaction_resolved", {"interaction_id": interaction_id, "decision": decision}
+        )
+        return answer
+
+    def resolve_confirm(self, interaction_id: str, decision: str) -> bool:
+        """端点 `/confirm` 用（**loop 线程、瞬返、绝不取 write_lock/conv.lock**，§5.2）。
+
+        **kind 必须是 confirm**（跨类拒，决策P4.15-12）：否则把 `/answer` 的非空串当 truthy `True`
+        放行 shell。`allow_session` 先把本会话 `_confirm_mode` 翻 `auto`（持 `_pending_lock`）**再**
+        put 决策串——放行当前工具 + 本会话后续 ASK 静默放行（仍 workspace-write + 层①②③，§6）。
+        命中并成功 put → True；id 对不上 / kind 不符 / 已有应答在途 → False（端点转 409）。
+        """
+        with self._pending_lock:
+            entry = self._pending.get(interaction_id)
+            if entry is None or entry["kind"] != "confirm":
+                return False
+            if decision == "allow_session":
+                self._confirm_mode = "auto"  # 翻未来模式（§6：松的是「问不问」、非「写到哪」）
+            q = entry["queue"]
+        try:
+            q.put_nowait(decision)
+        except queue.Full:
+            return False  # 已有应答在途（重复点击）：幂等忽略
+        return True
+
+    def resolve_answer(self, interaction_id: str, answer: str) -> bool:
+        """端点 `/answer` 用（loop 线程、瞬返）。**kind 必须是 ask**（跨类拒，决策P4.15-12）。"""
+        with self._pending_lock:
+            entry = self._pending.get(interaction_id)
+            if entry is None or entry["kind"] != "ask":
+                return False
+            q = entry["queue"]
+        try:
+            q.put_nowait(answer)
+        except queue.Full:
+            return False
+        return True
+
+    def set_confirm_mode(self, mode: str) -> str:
+        """`/confirm-mode`：**仅切本会话未来模式**（ask/auto），不碰在飞 pending（§5.2 评审 Medium）。
+
+        与气泡②（`/confirm {allow_session}`=放行当前+翻 auto）不同：本方法无 interaction_id、
+        不 put 任何 pending 的 True；当前若正有 pending 仍悬着，须另点允许/拒绝/②才落定。
+        """
+        if mode not in ("ask", "auto"):
+            raise ValueError(f"未知 confirm_mode：{mode}")
+        with self._pending_lock:
+            self._confirm_mode = mode
+        return mode
+
+    def has_pending(self) -> bool:
+        """是否有未决待应答（断线处理据此决定是否 trip 取消令牌，§4.3）。廉价纯读。"""
+        with self._pending_lock:
+            return bool(self._pending)
+
+    def pending_snapshot(self) -> list[dict]:
+        """当前 pending 的完整请求 envelope 列表（供 info() 回放、断线重连重渲染，§5.3）。"""
+        with self._pending_lock:
+            return [dict(e["envelope"]) for e in self._pending.values()]
+
+    @property
+    def confirm_mode(self) -> str:
+        """本会话 confirm 姿态（ask/auto）。持 `_pending_lock` 读，与气泡②/`/confirm-mode` 的翻一致。"""
+        with self._pending_lock:
+            return self._confirm_mode
 
     def begin_turn(self) -> None:
         """端点在 emit('start') **之前**调：标记本会话有一轮正在起跑（codex 竞态修复）。
@@ -517,6 +724,11 @@ class Conversation:
             "live": True,
             "model": self.agent.get_current_model(),
             "mode": self._mode,  # P4.5：报当前会话真实姿态（read-only / workspace-write）
+            # P4.15：本会话 confirm 姿态（ask/auto）+ 当前待应答列表（带完整请求 envelope，供断线
+            # 重连重渲染并让用户决策，§5.3）。confirm_mode 经气泡②或 /confirm-mode 翻、UI 据它显示
+            # 「逐次确认中 / 本会话已自动放行（可恢复）」。
+            "confirm_mode": self.confirm_mode,
+            "pending": self.pending_snapshot(),
             "messages": len(msgs),
             # context：headline（messages-only / api）+ 含 system prompt & tools schema 的精确 breakdown，
             # 完全对齐 agentao get_conversation_summary（否则 system/tools 分项被低报，codex 评审）。

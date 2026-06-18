@@ -78,6 +78,8 @@ def serve(
     mode: str = "read-only",
     reader: bool = False,
     max_conversations: int = MAX_CONVERSATIONS,
+    confirm: str = "ask",
+    confirm_timeout: float = 120.0,
 ) -> int:
     """起本地 Web 宿主，长驻直到 Ctrl-C；正常停服返回 `EXIT_OK`。
 
@@ -95,6 +97,8 @@ def serve(
     `reader`（P4.9，默认关）= 只读多会话部署：与 `--mode workspace-write` **互斥**（同给 →
     `EXIT_USAGE`）；钳制（裁写路由 + 强制 session_persist=False / read-only）落在 `create_app`。
     `max_conversations`（P4.9-18，默认 100）= 内存会话硬上限；权威校验在 `create_app`，此处另作友好早提示。
+    `confirm`（P4.15，默认 `ask`）= workspace-write 下 ASK 决策是「弹给人确认」还是「沿用 P4.5
+    静默放行」；`confirm_timeout`（默认 120s）= 确认/提问等待超时，无人应答即默认拒绝（兜写锁永占）。
     """
     if reader and mode == "workspace-write":
         raise GuanlanError(
@@ -139,6 +143,8 @@ def serve(
         mode=mode,
         reader=reader,
         max_conversations=max_conversations,
+        confirm=confirm,
+        confirm_timeout=confirm_timeout,
     )
     if open_browser:
         _open_browser_when_ready(HOST, port)
