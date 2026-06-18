@@ -96,6 +96,40 @@ body {
 .msg.note .receipt-btn:hover { background: var(--lan-deep); }
 .msg.note .receipt-btn:disabled { opacity: .5; cursor: default; }
 
+/* ── P4.15 工具确认 / ask_user 人在环气泡（docs/P4.15）── */
+.msg.note.interaction { border-color: var(--lan-ripple); background: #f3f8fc; }
+.msg.note.interaction.confirm { border-left: 3px solid #e0a800; }
+.msg.note.interaction.ask { border-left: 3px solid var(--lan-ripple); }
+.msg.note .interaction-head { font-weight: 600; color: var(--lan-deep); }
+.msg.note .interaction-tool { color: var(--lan-ink-soft); font-size: .82rem; }
+.msg.note .interaction-q { margin: .2rem 0; }
+.msg.note .interaction-cmd {
+  margin: .35rem 0; padding: .4rem .6rem; background: var(--lan-foam);
+  border: 1px solid var(--lan-mist); border-radius: 4px; white-space: pre-wrap;
+  word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem;
+}
+.msg.note .interaction-cd { color: var(--lan-ink-soft); font-size: .78rem; }
+.msg.note .interaction-opt { display: flex; align-items: center; gap: .4rem; font-size: .86rem; cursor: pointer; }
+.msg.note .interaction-free {
+  margin-top: .35rem; width: 100%; box-sizing: border-box; padding: .3rem .5rem;
+  border: 1px solid var(--lan-mist); border-radius: 4px; font-size: .86rem;
+}
+.msg.note .interaction-actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }
+.msg.note .interaction-btn {
+  background: var(--lan-ripple); color: #fff; border: 0; border-radius: 4px;
+  padding: .25rem .8rem; cursor: pointer; font-size: .82rem;
+}
+.msg.note .interaction-btn:hover { background: var(--lan-deep); }
+.msg.note .interaction-btn:disabled { opacity: .5; cursor: default; }
+.msg.note .interaction-btn.deny { background: #c0392b; }
+.msg.note .interaction-btn.deny:hover { background: #962d22; }
+.msg.note .interaction-btn.allow-session { background: #b8860b; }
+.msg.note .interaction-btn.allow-session:hover { background: #946c09; }
+.msg.note .interaction-btn.restore { background: transparent; color: var(--lan-deep); border: 1px solid var(--lan-mist); }
+.msg.note .interaction-status { margin-top: .4rem; font-size: .84rem; color: var(--lan-ink-soft); }
+.msg.note .interaction-status.stale { color: #c0392b; }
+.msg.note.interaction-automode { border-color: #e0a800; background: #fff8e1; color: #6b4e00; }
+
 /* ── 主体：grid（chat │split│ wiki / input 满宽） ──
    右栏宽度由 --wiki-w 驱动（默认 26rem），中间一条可拖动的分隔条改写它；JS 持久化到 localStorage。 */
 .layout {

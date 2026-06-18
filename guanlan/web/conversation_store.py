@@ -43,6 +43,8 @@ class ConversationStore:
         max_conversations: int | None = None,
         idle_ttl: float | None = IDLE_TTL_SECONDS,
         search_cache: CorpusCache | None = None,
+        confirm_mode: str = "ask",
+        confirm_timeout: float = 120.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._kb = kb
@@ -53,6 +55,10 @@ class ConversationStore:
         self._search_cache = search_cache
         # 新会话开局姿态 = 进程 --mode 默认（决策P4.5-8：恢复不回放盘上姿态、用进程默认）。
         self._default_mode = default_mode
+        # P4.15：新会话开局 confirm 姿态（ask/auto，= 进程 --confirm 默认）+ 确认等待超时秒数
+        # （--confirm-timeout）；透传每个会话（新建与懒恢复两路，决策P4.15-7）。
+        self._confirm_mode = confirm_mode
+        self._confirm_timeout = confirm_timeout
         self._write_gate = write_gate  # 进程级单写者协调，注入每个会话
         # 内存会话硬上限（决策P4.9-18）：取代直读模块常量 MAX_CONVERSATIONS，供多用户部署可配。
         # 存原值（可能 None=未指定）；**在 create/restore 取上限时**经 `_cap()` 解析——None 则读模块
@@ -127,6 +133,8 @@ class ConversationStore:
                     mode=self._default_mode,
                     write_gate=self._write_gate,
                     search_cache=self._search_cache,
+                    confirm_mode=self._confirm_mode,
+                    confirm_timeout=self._confirm_timeout,
                     clock=self._clock,
                 )
                 self._convs[cid] = conv
@@ -260,6 +268,8 @@ class ConversationStore:
                     mode=self._default_mode,
                     write_gate=self._write_gate,
                     search_cache=self._search_cache,  # 懒恢复同样带召回工具（§3.1，两路零漂移）
+                    confirm_mode=self._confirm_mode,
+                    confirm_timeout=self._confirm_timeout,
                     clock=self._clock,
                 )
                 conv.agent.messages = messages  # 镜像 agentao cli/commands/sessions.py 的 resume

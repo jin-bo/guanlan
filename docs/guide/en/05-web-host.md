@@ -21,6 +21,8 @@ guanlan -C my-wiki web --port 9000 --no-browser # different port / no browser
 | `--max-conversations` | `100` | In-memory conversation hard cap (must be ≥ 1) |
 | `--no-session-persist` | off (persists by default) | Don't persist read-only chat sessions to `<kb>/.agentao/sessions/`; off ⇒ memory-only (privacy/ephemeral) |
 | `--mode` | `read-only` | Opening posture for new sessions; `workspace-write` lets the Agent write `wiki`/`workspace` from the start, switchable in-browser via `/mode` |
+| `--confirm` | `ask` | Under workspace-write, whether ASK operations (operator/piped shell, confirmation-required tools) are **confirmed by a human**; `auto` keeps silent auto-approve (see "Tool confirmation") |
+| `--confirm-timeout` | `120` | Seconds to wait for the user's confirm/answer; no answer ⇒ **deny by default** |
 
 ## What it does
 
@@ -49,6 +51,20 @@ The renderers are all **vendored, bundled, non-CDN, offline-capable**, and **laz
 
 > **Copy raw Markdown**: each answer bubble has a clipboard icon in its bottom-right corner; clicking it copies that turn's **markdown source** (not the rendered text — formulas / code / `[[links]]` paste back verbatim) to the clipboard, with a brief "Copied" confirmation.
 
+## Tool confirmation / human-in-the-loop (writable sessions, P4.15)
+
+In a writable session (`workspace-write`), whenever the Agent wants to run an **operator/piped shell command** or a tool **marked "needs confirmation"** (what agentao decides is `ASK`), it is no longer silently approved — a confirmation request **pops in the browser**: the bubble **shows the full command verbatim** (displayed literally, never rendered or executed) and you click:
+
+- **Allow** — approve this one tool only;
+- **Auto-allow this session** — approve this one and stop asking for the rest of this session (reversible: click "Restore per-call confirm");
+- **Deny** — this one doesn't run (the Agent gets a "tool denied" and continues this turn, rerouting on its own).
+
+Not clicking ⇒ **deny by default** after `--confirm-timeout` (120s); hitting "Stop" or closing the tab (disconnect) also denies — so walking away never pins the write lock forever. The model can also **ask you a question** through the same channel (with options / free text); you fill in an answer that's sent back.
+
+**Key boundary**: "Allow" **≠** "bypass the read-only wall". Confirmation only decides whether one ASK tool **runs**; it opens **no** new write path for the Agent — `raw/` and `AGENTAO.md` stay read-only via the deterministic write guards (layers ①②). Even after you allow a shell command, if it then tries to write `raw/` it is still refused. "Auto-allow this session" likewise only loosens "ask or not" — the **posture stays workspace-write and every write guard stays in place**; it is **not** CLI-style full-access.
+
+For batch maintenance where you don't want per-call prompts: start with `--confirm auto` (equivalent to the old silent auto-approve), or click "Auto-allow this session" in the session.
+
 ## Read/write split
 
 - The only write job `ingest` (and heal/backfill/audit/raw-write) reuses the **P2 subprocess + single-writer gate** (one background worker, FIFO).
@@ -72,4 +88,4 @@ Opens the single-user host as a **read-only multi-user deployment**:
 
 **Single-user, local only.** Always `workers=1` + listens on `127.0.0.1` only. **Never expose the port to a network** — there is no account/auth; `--reader` isolation is only the capability-URL model (honest threat boundary in the design docs), not access control.
 
-See: repo [`docs/P4-Web宿主.md`](../../P4-Web宿主.md) and the `P4.x` docs ([P4.1](../../P4.1-Web投喂.md) / [P4.5](../../P4.5-可写Web工作会话.md) / [P4.6](../../P4.6-Web上传与晋级.md) / [P4.9](../../P4.9-只读多会话.md) / [P4.13](../../P4.13-Web-mermaid渲染.md) / [P4.14](../../P4.14-Web数学化学代码渲染.md), etc.).
+See: repo [`docs/P4-Web宿主.md`](../../P4-Web宿主.md) and the `P4.x` docs ([P4.1](../../P4.1-Web投喂.md) / [P4.5](../../P4.5-可写Web工作会话.md) / [P4.6](../../P4.6-Web上传与晋级.md) / [P4.9](../../P4.9-只读多会话.md) / [P4.13](../../P4.13-Web-mermaid渲染.md) / [P4.14](../../P4.14-Web数学化学代码渲染.md) / [P4.15](../../P4.15-Web工具确认.md), etc.).

@@ -1788,6 +1788,10 @@ class _FakeAgent:
         # 经注入的 PolicyFileSystem（kwargs["filesystem"]）做结构化写、或直接写盘模拟 shell 旁路。
         self.action = None
         self.images_seen: list = []  # 每轮 arun 收到的 images 载荷（None / list），附件测试断言用
+        # P4.15：可写 turn 内（executor 线程，镜像真 Phase 2/3）经 action 调 transport.confirm_tool /
+        # ask_user 时，把回传布尔/答案串收进这里供断言（人在浏览器点 允许/拒绝/填答案 → 经端点解阻塞）。
+        self.confirm_results: list = []
+        self.ask_results: list = []
 
     def get_current_model(self) -> str:
         return self._model or "fake-model"
@@ -1822,6 +1826,12 @@ class _FakeAgent:
                 self.action(self)
 
         await loop.run_in_executor(None, work)
+        # P4.15：镜像真 arun「下一检查点见 token 被 cancel 即抛」——confirm_tool 因停止/断线返回
+        # False 后，真 agent 循环的 token.check() 会抛 AgentCancelledError、turn 走 stopped 帧。
+        # 仅当本轮令牌真被 cancel 才抛（普通轮 token 未 cancel → 照常返回，不影响既有测试）。
+        token = _kw.get("cancellation_token")
+        if token is not None and token.is_cancelled:
+            raise AgentCancelledError(token.reason)
         self.messages.append({"role": "assistant", "content": answer})
         return answer
 
@@ -1885,6 +1895,38 @@ def _chat(client, message, conversation_id=None, model=None):
                 elif event == "error":
                     error = data
     return tokens, done, error
+
+
+def _chat_interactive(client, message, *, conversation_id=None, on_request=None):
+    """流式发一轮 chat，把每帧收进 `frames`（`(event, payload)` 列表）；遇 `confirm_request`/
+    `ask_request` 时**在流读循环内 inline** 回调 `on_request(client, event, payload)`——据其
+    `interaction_id` 即时 POST `/confirm`·`/answer` 解阻塞（内层 confirm_tool/ask_user 正卡在
+    executor 线程等应答，loop 空闲可处理该 POST）。无 on_request 则不应答（走超时/断线路径）。"""
+    body = {"message": message}
+    if conversation_id is not None:
+        body["conversation_id"] = conversation_id
+    frames: list[tuple[str, object]] = []
+    with client.stream("POST", "/api/chat", json=body) as resp:
+        assert resp.status_code == 200
+        event = None
+        for line in resp.iter_lines():
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                payload = json.loads(line.split(":", 1)[1].strip())
+                frames.append((event, payload))
+                if on_request and event in ("confirm_request", "ask_request"):
+                    on_request(client, event, payload)
+    return frames
+
+
+def _frame_kinds(frames):
+    return [e for e, _ in frames]
+
+
+def _first(frames, event):
+    """返回首个 `event` 帧的 payload；无则 None。"""
+    return next((p for e, p in frames if e == event), None)
 
 
 def _chat_with(client, message, attachments):
@@ -5415,3 +5457,578 @@ def test_copy_button_icon_and_i18n() -> None:
     i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
     for key in ("chat.copy", "chat.copied", "chat.copyFail"):
         assert i18n.count(f'"{key}"') >= 2, f"{key} 须在 zh + en 双语词表各一"
+
+
+
+# ───────────────────────── P4.15 工具确认 / ask_user 人在环（docs/P4.15） ─────────────────────────
+#
+# 测法（绕开「单 httpx.Client 不能在流读中途再发请求」的死锁）：**后台线程**经一个 client 流式跑
+# turn（内层 confirm_tool/ask_user 阻塞在 executor 线程等应答），**主线程**轮询 conv.pending 拿到
+# interaction_id 后经**另一个** TestClient（同一 app）POST /confirm·/answer·/stop 解阻塞。
+
+
+def _wait_pending(conv, *, kind=None, timeout=5.0):
+    """轮询 conv.pending_snapshot() 直到出现（可指定 kind）一个待应答 envelope；超时返回 None。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for env in conv.pending_snapshot():
+            if kind is None or env["kind"] == kind:
+                return env
+        time.sleep(0.02)
+    return None
+
+
+def _run_interactive(app, client, message, cid, responder, *, timeout=10.0):
+    """后台线程经 `client` 流式跑一轮（读 SSE 收 frames）；主线程轮询 pending 后调
+    `responder(poster, conv, env)`（poster = 同 app 的另一 TestClient）。返回收集的 frames。"""
+    result = {"frames": []}
+
+    def run():
+        result["frames"] = _chat_interactive(client, message, conversation_id=cid)
+
+    th = threading.Thread(target=run)
+    th.start()
+    try:
+        conv = app.state.conversations.get(cid)
+        poster = TestClient(app)
+        env = _wait_pending(conv, timeout=timeout)
+        if responder is not None:
+            responder(poster, conv, env)
+    finally:
+        th.join(timeout=timeout)
+    return result["frames"]
+
+
+def _set_confirm_action(agent, tool, desc, args):
+    """注入「本轮经 transport 调 confirm_tool 收回布尔」的 action（executor 线程跑，镜像 Phase 2）。"""
+
+    def _act(a):
+        a.confirm_results.append(a.transport.confirm_tool(tool, desc, args))
+
+    agent.action = _act
+
+
+def _wlock_released(gate, *, timeout=3.0):
+    """轮询断言进程级 write_lock 在 timeout 内被释放（可非阻塞 acquire 到即证已释）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if gate.active_writable_turns == 0 and gate.write_lock.acquire(blocking=False):
+            gate.write_lock.release()
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_confirm_allow_executes_tool(chat_env) -> None:
+    """workspace-write 下 ASK shell → confirm_request 帧弹出、turn 阻塞；人点允许 → confirm_tool
+    回 True、interaction_resolved{allow}、turn 正常 done。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "跑 shell", {"command": "ls | wc -l"})
+
+        def respond(poster, conv, env):
+            assert env is not None and env["tool"] == "run_shell_command"
+            assert env["args"]["command"] == "ls | wc -l"  # 命令全文原样带上
+            assert env["mode"] == "workspace-write" and "deadline_epoch" in env
+            r = poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "allow"},
+            )
+            assert r.status_code == 200 and r.json() == {"ok": True}
+
+        frames = _run_interactive(app, client, "跑命令", cid, respond)
+        assert "confirm_request" in _frame_kinds(frames)
+        assert agent.confirm_results == [True]
+        assert _first(frames, "interaction_resolved")["decision"] == "allow"
+        assert "done" in _frame_kinds(frames)
+
+
+def test_confirm_deny_cancels_tool(chat_env) -> None:
+    """人点拒绝 → confirm_tool 回 False（CANCELLED）；turn 仍继续到 done（模型收「工具被拒」）。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "跑 shell", {"command": "rm -rf /"})
+
+        def respond(poster, conv, env):
+            poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "deny"},
+            )
+
+        frames = _run_interactive(app, client, "跑命令", cid, respond)
+        assert agent.confirm_results == [False]
+        assert _first(frames, "interaction_resolved")["decision"] == "deny"
+        assert "done" in _frame_kinds(frames)
+
+
+def test_confirm_write_tool_not_prompted(chat_env, kb) -> None:
+    """触发集边界：结构化写 wiki/（经 filesystem，非 confirm_tool）**不弹**确认——直接 ALLOW。"""
+    _, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+
+        def write_page(a):
+            a.kwargs["filesystem"].write_text(
+                kb / "wiki" / "entities" / "示例.md", "---\ntype: entity\n---\n# 示例\n"
+            )
+
+        agent.action = write_page
+        frames = _chat_interactive(client, "写页", conversation_id=cid)  # 主线程直读：本不该阻塞
+        assert "confirm_request" not in _frame_kinds(frames)
+        assert "done" in _frame_kinds(frames)
+
+
+def test_confirm_does_not_widen_immutable(chat_env, kb) -> None:
+    """关键不变量（§6）：人点允许一条 shell **不**开新写路径——随后结构化写 raw/ 仍被层① 拒。"""
+    _, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+
+        def allow_then_write_raw(a):
+            a.confirm_results.append(
+                a.transport.confirm_tool("run_shell_command", "shell", {"command": "echo hi"})
+            )
+            try:
+                a.kwargs["filesystem"].write_text(kb / "raw" / "secret.md", "x\n")
+                a.confirm_results.append("RAW_WRITE_SUCCEEDED")  # 不该到这
+            except PermissionError:
+                a.confirm_results.append("RAW_BLOCKED")
+
+        agent.action = allow_then_write_raw
+
+        def respond(poster, conv, env):
+            poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "allow"},
+            )
+
+        _run_interactive(app, client, "跑命令", cid, respond)
+        assert agent.confirm_results == [True, "RAW_BLOCKED"]
+        assert not (kb / "raw" / "secret.md").exists()
+
+
+def test_confirm_timeout_denies_and_releases_lock(chat_env) -> None:
+    """无人应答 → 墙钟超时默认拒绝（§4.2）：confirm 回 False、resolved{timeout}、写锁最终释放。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write", confirm_timeout=0.5)
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "shell", {"command": "sleep 1"})
+        frames = _chat_interactive(client, "跑命令", conversation_id=cid)  # 不应答 → ~0.5s 后超时
+        assert agent.confirm_results == [False]
+        assert _first(frames, "interaction_resolved")["decision"] == "timeout"
+        assert "done" in _frame_kinds(frames)
+        assert _wlock_released(app.state.write_gate)
+
+
+def test_confirm_stop_denies_and_aborts_turn(chat_env) -> None:
+    """停止按钮 → trip 取消令牌 → confirm 回 False、turn 走 stopped、写锁释放（不空等超时）。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write", confirm_timeout=30.0)  # 长超时：证明 stop 是快路径
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "shell", {"command": "sleep 9"})
+
+        def respond(poster, conv, env):
+            assert poster.post(f"/api/chat/{cid}/stop").status_code == 200
+
+        frames = _run_interactive(app, client, "跑命令", cid, respond)
+        assert agent.confirm_results == [False]
+        assert "stopped" in _frame_kinds(frames)
+        assert _wlock_released(app.state.write_gate)
+
+
+def test_confirm_endpoint_does_not_take_write_lock(chat_env) -> None:
+    """端点不死锁（§5.2）：turn 阻塞在 confirm（持 write_lock）时 POST /confirm 仍 200 瞬返。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "shell", {"command": "ls"})
+        seen = {}
+
+        def respond(poster, conv, env):
+            # 此刻 write_lock 被持锁 turn 占着（acquire 不到），但 /confirm 不取它、照样 200。
+            seen["locked"] = not conv._write_gate.write_lock.acquire(blocking=False)
+            r = poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "allow"},
+            )
+            seen["status"] = r.status_code
+
+        _run_interactive(app, client, "跑命令", cid, respond)
+        assert seen["locked"] is True  # 确认等待期写锁确实被持锁 turn 占着
+        assert seen["status"] == 200  # 而 /confirm 仍瞬返 200（没去抢那把锁）
+        assert agent.confirm_results == [True]
+
+
+def test_confirm_stale_id_409(chat_env) -> None:
+    """陈旧/错乱点击：id 对不上当前 pending → 409；无任何 pending → 409。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        # 无 pending：直接 /confirm → 409
+        r0 = client.post(f"/api/chat/{cid}/confirm", json={"interaction_id": "nope", "decision": "allow"})
+        assert r0.status_code == 409
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "shell", {"command": "ls"})
+        seen = {}
+
+        def respond(poster, conv, env):
+            # 错 id → 409（不解阻塞）
+            seen["wrong"] = poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": "wrong-id", "decision": "allow"},
+            ).status_code
+            # 对的 id → 解阻塞收尾
+            poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "deny"},
+            )
+
+        _run_interactive(app, client, "跑命令", cid, respond)
+        assert seen["wrong"] == 409
+        assert agent.confirm_results == [False]  # 错 id 没误放行
+
+
+def test_cross_kind_answer_to_confirm_rejected(chat_env) -> None:
+    """安全回归（High #1 / 决策P4.15-12）：confirm pending 被 POST /answer 命中 → 409 **且工具未放行**
+    （非空 answer 串绝不被 confirm_tool 当 truthy True）。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "shell", {"command": "rm x"})
+        seen = {}
+
+        def respond(poster, conv, env):
+            # /answer 打到 confirm pending → 409，绝不把 "yes" 当 True 放行
+            seen["ans"] = poster.post(
+                f"/api/chat/{cid}/answer",
+                json={"interaction_id": env["interaction_id"], "answer": "yes"},
+            ).status_code
+            # 收尾：正经 /confirm 拒绝
+            poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "deny"},
+            )
+
+        _run_interactive(app, client, "跑命令", cid, respond)
+        assert seen["ans"] == 409
+        assert agent.confirm_results == [False]  # 关键：answer 串没绕过「点允许」放行 shell
+
+
+def test_info_pending_returns_full_envelope(chat_env) -> None:
+    """info().pending 回完整 envelope（High #2 / §5.3）：足以断线重连重渲染并让用户决策。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "跑 shell", {"command": "du -sh ."})
+        seen = {}
+
+        def respond(poster, conv, env):
+            info = poster.get(f"/api/chat/{cid}/info").json()
+            seen["info"] = info
+            poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "deny"},
+            )
+
+        _run_interactive(app, client, "跑命令", cid, respond)
+        info = seen["info"]
+        assert info["confirm_mode"] == "ask"
+        p = info["pending"][0]
+        assert p["kind"] == "confirm" and p["tool"] == "run_shell_command"
+        assert p["args"]["command"] == "du -sh ." and "deadline_epoch" in p
+
+
+def test_layer3_423_during_confirm_wait(chat_env, kb) -> None:
+    """确认等待期写锁被持（§4.1）：层③ /api/raw 在等待期 423（兜 curl 旁路）。"""
+    _, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "shell", {"command": "ls"})
+        seen = {}
+
+        def respond(poster, conv, env):
+            seen["raw"] = poster.post(
+                "/api/raw", json={"name": "x", "content": "y\n"}
+            ).status_code
+            poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "allow"},
+            )
+
+        _run_interactive(app, client, "跑命令", cid, respond)
+        assert seen["raw"] == 423  # 可写 turn 活跃（卡在确认）→ 写端点 423
+
+
+def test_confirm_auto_mode_silently_allows(chat_env) -> None:
+    """--confirm auto：同一带管道 shell 静默放行、无 confirm 帧（回归 P4.5 行为）。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write", confirm="auto")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "shell", {"command": "cat a | grep b"})
+        frames = _chat_interactive(client, "跑命令", conversation_id=cid)  # 主线程直读：不该阻塞
+        assert "confirm_request" not in _frame_kinds(frames)
+        assert agent.confirm_results == [True]  # 静默放行
+        assert client.get(f"/api/chat/{cid}/info").json()["confirm_mode"] == "auto"
+
+
+def test_allow_session_flips_to_auto_not_full_access(chat_env, kb) -> None:
+    """气泡②（决策P4.15-13）：本会话起自动放行 → ①当前放行、②下条 ASK 静默放行无帧、
+    ③confirm_mode=auto、④姿态仍 workspace-write、permission_engine 未翻 FULL_ACCESS、
+    ⑤层① 仍拦 raw/（②≠full-access）。"""
+    _, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "shell", {"command": "ls | wc"})
+
+        def respond(poster, conv, env):
+            poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "allow_session"},
+            )
+
+        frames1 = _run_interactive(app, client, "第一条", cid, respond)
+        assert agent.confirm_results == [True]  # ① 当前放行
+        assert _first(frames1, "interaction_resolved")["decision"] == "allow_session"
+        # ③ confirm_mode 翻 auto；④ 姿态仍 workspace-write
+        info = client.get(f"/api/chat/{cid}/info").json()
+        assert info["confirm_mode"] == "auto" and info["mode"] == "workspace-write"
+        # ④ permission_engine 绝未被翻 FULL_ACCESS（②≠full-access）
+        assert all("FULL_ACCESS" not in str(c) for c in agent.permission_engine.calls)
+
+        # ② 下一条 ASK 静默放行（无 confirm_request 帧）；⑤ 层① 仍拦 raw/
+        def next_turn(a):
+            a.confirm_results.append(
+                a.transport.confirm_tool("run_shell_command", "shell", {"command": "echo 2"})
+            )
+            try:
+                a.kwargs["filesystem"].write_text(kb / "raw" / "x.md", "z\n")
+                a.confirm_results.append("RAW_OK")
+            except PermissionError:
+                a.confirm_results.append("RAW_BLOCKED")
+
+        agent.action = next_turn
+        frames2 = _chat_interactive(client, "第二条", conversation_id=cid)  # 不阻塞（auto 短路）
+        assert "confirm_request" not in _frame_kinds(frames2)  # ② 无帧
+        assert agent.confirm_results == [True, True, "RAW_BLOCKED"]  # ⑤ 层① 仍拦
+        assert not (kb / "raw" / "x.md").exists()
+
+
+def test_allow_session_reversible_via_confirm_mode(chat_env) -> None:
+    """②可逆：allow_session 后 /confirm-mode{ask} → 下条 ASK **又弹** confirm_request、confirm_mode=ask。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "shell", {"command": "ls"})
+
+        def respond(poster, conv, env):
+            poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "allow_session"},
+            )
+
+        _run_interactive(app, client, "第一条", cid, respond)
+        assert client.get(f"/api/chat/{cid}/info").json()["confirm_mode"] == "auto"
+        # 恢复逐次确认
+        r = client.post(f"/api/chat/{cid}/confirm-mode", json={"confirm_mode": "ask"})
+        assert r.status_code == 200 and r.json() == {"confirm_mode": "ask"}
+        assert client.get(f"/api/chat/{cid}/info").json()["confirm_mode"] == "ask"
+        # 下一条 ASK 又弹（confirm_mode 已切回 ask）
+        _set_confirm_action(agent, "run_shell_command", "shell", {"command": "pwd"})
+
+        def respond2(poster, conv, env):
+            assert env is not None  # 又有 pending 了
+            poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "deny"},
+            )
+
+        frames2 = _run_interactive(app, client, "第二条", cid, respond2)
+        assert "confirm_request" in _frame_kinds(frames2)
+
+
+def test_confirm_mode_invalid_422(chat_env) -> None:
+    """/confirm-mode 非法值 → 422；/confirm 非三值 decision → 422。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        assert client.post(f"/api/chat/{cid}/confirm-mode", json={"confirm_mode": "full"}).status_code == 422
+        assert client.post(
+            f"/api/chat/{cid}/confirm", json={"interaction_id": "x", "decision": "full-access"}
+        ).status_code == 422
+        # 未知会话 → 404
+        assert client.post(f"/api/chat/{uuid.uuid4()}/confirm-mode", json={"confirm_mode": "ask"}).status_code == 404
+
+
+def _set_ask_action(agent, question, **kw):
+    def _act(a):
+        a.ask_results.append(a.transport.ask_user(question, **kw))
+
+    agent.action = _act
+
+
+def test_ask_user_roundtrip_with_options(chat_env) -> None:
+    """ask_user 往返（P4.15b/§9）：ask_request 帧带 options；POST answer → 模型收到该串。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_ask_action(agent, "选甲还是乙？", options=["甲", "乙"], multiple=False)
+
+        def respond(poster, conv, env):
+            assert env is not None and env["kind"] == "ask"
+            assert env["question"] == "选甲还是乙？"
+            assert env["options"] == ["甲", "乙"]  # 结构化提示转发到前端（compat 旁路验证）
+            poster.post(
+                f"/api/chat/{cid}/answer",
+                json={"interaction_id": env["interaction_id"], "answer": "甲"},
+            )
+
+        frames = _run_interactive(app, client, "提问", cid, respond)
+        assert "ask_request" in _frame_kinds(frames)
+        assert agent.ask_results == ["甲"]
+        assert _first(frames, "interaction_resolved")["decision"] == "answered"
+
+
+def test_ask_user_in_readonly_does_not_hold_write_lock(chat_env) -> None:
+    """ask_user 跨姿态触发：read-only 会话也弹、且**不持写锁**（§4.1 注）——等待期并发写者不被它挡。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="read-only")
+    with TestClient(app) as client:
+        cid = _chat(client, "建只读会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_ask_action(agent, "澄清一下？", options=None)
+        seen = {}
+
+        def respond(poster, conv, env):
+            assert env is not None and env["kind"] == "ask"
+            # read-only ask 阻塞期：不进可写态、写锁可被并发取（不挡写者）
+            seen["writable"] = conv._write_gate.active_writable_turns
+            seen["lock_free"] = conv._write_gate.write_lock.acquire(blocking=False)
+            if seen["lock_free"]:
+                conv._write_gate.write_lock.release()
+            poster.post(
+                f"/api/chat/{cid}/answer",
+                json={"interaction_id": env["interaction_id"], "answer": "好的"},
+            )
+
+        _run_interactive(app, client, "提问", cid, respond)
+        assert seen["writable"] == 0  # 只读 turn 不进可写态
+        assert seen["lock_free"] is True  # 写锁未被占（read-only ask 不持写锁）
+        assert agent.ask_results == ["好的"]
+
+
+def test_cross_kind_confirm_to_ask_rejected(chat_env) -> None:
+    """反向跨类拒：ask pending 被 POST /confirm 命中 → 409（决策P4.15-12）。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_ask_action(agent, "问？", options=None)
+        seen = {}
+
+        def respond(poster, conv, env):
+            seen["conf"] = poster.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "allow"},
+            ).status_code
+            poster.post(
+                f"/api/chat/{cid}/answer",
+                json={"interaction_id": env["interaction_id"], "answer": "x"},
+            )
+
+        _run_interactive(app, client, "提问", cid, respond)
+        assert seen["conf"] == 409  # /confirm 打到 ask pending → 409
+        assert agent.ask_results == ["x"]
+
+
+def test_disconnect_during_confirm_releases_lock_promptly(chat_env, kb) -> None:
+    """断线按需释锁（决策P4.15-8 / §4.3）：confirm 阻塞时断开 → 写锁在 ~轮询粒度内释放，不等满超时。"""
+    _, captured = chat_env
+    app = create_app(kb, mode="workspace-write", confirm_timeout=30.0)  # 长超时：证明走的是 request_stop 快路径
+    with TestClient(app) as client:
+        cid = _chat(client, "建会话")[1]["conversation_id"]
+        agent = captured["agents"][0]
+        _set_confirm_action(agent, "run_shell_command", "shell", {"command": "sleep 20"})
+        # 读流到 confirm_request 即断开（退出 stream 上下文 = 客户端断开）
+        with client.stream("POST", "/api/chat", json={"message": "跑命令", "conversation_id": cid}) as resp:
+            event = None
+            for line in resp.iter_lines():
+                if line.startswith("event:"):
+                    event = line.split(":", 1)[1].strip()
+                    if event == "confirm_request":
+                        break  # 断开
+        # 断开后：has_pending → request_stop → 内层立即收尾、释写锁（远早于 30s 超时）
+        assert _wlock_released(app.state.write_gate, timeout=3.0)
+
+
+def test_normal_long_turn_not_killed_on_disconnect(chat_env) -> None:
+    """对照：无 pending 的普通长轮断开仍后台跑完落盘（shield 语义不被误杀，§4.3）。"""
+    import guanlan.web.chat as chat_mod
+
+    kb, captured = chat_env
+    app = create_app(kb)  # read-only 默认
+    started = threading.Event()
+    release = threading.Event()
+    done = {}
+
+    class _SlowAgent(_FakeAgent):
+        async def arun(self, msg, images=None, **_kw):
+            loop = asyncio.get_running_loop()
+
+            def work():
+                started.set()
+                release.wait(timeout=5)  # 卡住模拟长轮（无 pending）
+                done["ran"] = True
+
+            await loop.run_in_executor(None, work)
+            self.messages.append({"role": "user", "content": msg})
+            self.messages.append({"role": "assistant", "content": "完成"})
+            return "完成"
+
+    monkeypatch_bfe = lambda **kw: _SlowAgent(kw)  # noqa: E731
+    import pytest as _pt  # local
+    with _pt.MonkeyPatch.context() as mp:
+        mp.setattr(chat_mod, "build_from_environment", monkeypatch_bfe)
+        with TestClient(app) as client:
+            with client.stream("POST", "/api/chat", json={"message": "长轮"}) as resp:
+                it = resp.iter_lines()
+                for line in it:
+                    if line.startswith("event:") and line.split(":", 1)[1].strip() == "start":
+                        break
+                assert started.wait(timeout=3)
+                # 断开（无 pending）：不应 trip 取消，内层 shielded turn 应后台跑完
+            release.set()
+            time.sleep(0.5)
+            assert done.get("ran") is True  # 普通长轮断开后仍后台跑完（未被误杀）
