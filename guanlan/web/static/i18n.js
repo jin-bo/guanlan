@@ -72,6 +72,8 @@ window.I18N = {
     // —— P4.15 工具确认 / ask_user 人在环 ——
     "interaction.confirmTitle": "Agent 请求执行操作（请审阅）",
     "interaction.tool": "工具：{0}",
+    "interaction.cmdExpand": "展开全文",
+    "interaction.cmdCollapse": "收起",
     "interaction.allow": "允许",
     "interaction.allowSession": "本会话起自动放行",
     "interaction.deny": "拒绝",
@@ -399,6 +401,8 @@ window.I18N = {
     // —— P4.15 tool confirm / ask_user human-in-the-loop ——
     "interaction.confirmTitle": "Agent requests to run an action (please review)",
     "interaction.tool": "Tool: {0}",
+    "interaction.cmdExpand": "Show full",
+    "interaction.cmdCollapse": "Collapse",
     "interaction.allow": "Allow",
     "interaction.allowSession": "Auto-allow this session",
     "interaction.deny": "Deny",
