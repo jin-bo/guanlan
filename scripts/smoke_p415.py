@@ -208,21 +208,21 @@ class Smoke:
         assert b.locator(".interaction-btn.allow-session").count() == 1
         assert b.locator(".interaction-btn.deny").count() == 1
         b.locator(".interaction-btn.allow").click()
-        b.locator(".interaction-status").wait_for(state="visible", timeout=8000)
-        status = b.locator(".interaction-status").inner_text()
-        assert "允许" in status, f"resolved 状态异常：{status!r}"
+        # 新交互：不增状态行，改在「允许」钮上打勾（.chosen）。
+        b.locator(".interaction-btn.allow.chosen").wait_for(state="visible", timeout=8000)
+        assert b.locator(".interaction-status").count() == 0, "确认决策不应再增加状态行"
         self.wait_idle()
-        return "命令原样显示 + 三按钮 + 点允许→已允许"
+        return "命令原样显示 + 三按钮 + 点允许→允许钮打勾"
 
     def confirm_deny(self):
         self.new_chat()
         self.send("shell: rm -rf /")
         b = self.wait_confirm()
         b.locator(".interaction-btn.deny").click()
-        b.locator(".interaction-status").wait_for(state="visible", timeout=8000)
-        assert "拒绝" in b.locator(".interaction-status").inner_text()
+        # 新交互：点拒绝→在「拒绝」钮上打勾（.chosen），不增状态行。
+        b.locator(".interaction-btn.deny.chosen").wait_for(state="visible", timeout=8000)
         self.wait_idle()
-        return "点拒绝→已拒绝、turn 仍收尾"
+        return "点拒绝→拒绝钮打勾、turn 仍收尾"
 
     def confirm_countdown(self):
         self.new_chat()
@@ -262,7 +262,8 @@ class Smoke:
         self.send("shell: cat a | grep b")
         b1 = self.wait_confirm()
         b1.locator(".interaction-btn.allow-session").click()
-        b1.locator(".interaction-status").wait_for(state="visible", timeout=8000)
+        # 新交互：在「本会话起自动放行」钮上打勾（.chosen），不增状态行。
+        b1.locator(".interaction-btn.allow-session.chosen").wait_for(state="visible", timeout=8000)
         # 翻 auto：出现自动放行提示 + 「恢复逐次确认」钮
         self.page.locator(".interaction-automode").last.wait_for(state="visible", timeout=8000)
         self.wait_idle()

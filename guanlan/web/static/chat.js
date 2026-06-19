@@ -903,6 +903,7 @@ function renderConfirmRequest(p) {
   pre.className = "interaction-cmd";
   pre.textContent = typeof cmd === "string" ? cmd : JSON.stringify(cmd, null, 2);
   div.appendChild(pre);
+  clampCmd(div, pre); // 超过 3 行则默认收起前三行，给「展开全文」钮（全文始终留在 DOM）
   const cd = document.createElement("div");
   cd.className = "interaction-cd";
   div.appendChild(cd);
@@ -926,6 +927,35 @@ function renderConfirmRequest(p) {
   );
   div.appendChild(actions);
   $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+}
+
+// 命令/参数块若渲染超过 3 行则默认折叠到前三行，并在框内右下角浮一枚「展开全文/收起」钮（仅折叠时出现）。
+// 纯视觉收起（max-height + overflow:hidden）——全文始终留在 pre.textContent 里，复制/读取不受影响。
+// pre 此刻已在 DOM 中（newInteractionBubble→addNote 已挂入 #chat-log），故可即时量高（钮在量高后才入框，不污染 scrollHeight）。
+function clampCmd(div, pre) {
+  const cs = getComputedStyle(pre);
+  const lineH = parseFloat(cs.lineHeight);
+  const padTop = parseFloat(cs.paddingTop) || 0;
+  const padBot = parseFloat(cs.paddingBottom) || 0;
+  if (!(lineH > 0)) return; // line-height 解析失败（如祖先 display:none）：放过，显示全文
+  const innerH = pre.scrollHeight - padTop - padBot; // 纯内容高度（去内边距）
+  if (innerH <= lineH * 3 + 1) return; // 不足/恰好三行：无需折叠
+  const three = lineH * 3 + "px"; // content-box：内容区限三行，原内边距照常渲染
+  const clamp = () => { pre.classList.add("clamped"); pre.style.maxHeight = three; };
+  clamp();
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "interaction-cmd-toggle";
+  let open = false;
+  const sync = () => { toggle.textContent = open ? t("interaction.cmdCollapse") : t("interaction.cmdExpand"); };
+  sync();
+  toggle.addEventListener("click", () => {
+    open = !open;
+    if (open) { pre.classList.remove("clamped"); pre.style.maxHeight = ""; }
+    else clamp();
+    sync();
+  });
+  pre.appendChild(toggle); // 浮在框内右下角（CSS：pre relative + 钮 absolute）
 }
 
 function renderAskRequest(p) {
@@ -993,9 +1023,32 @@ function resolveInteractionUI(p) {
   finalizeInteraction(rec.el, p.decision);
 }
 
+// 收尾一个已决气泡。
+// confirm 气泡：用户的显式选择（allow/allow_session/deny）→ 在对应按钮前打勾（CSS ::before）、不另起状态行；
+//   系统自决（timeout/stopped，无人点）→ 在「拒绝」钮后面内联一枚图标+文字。
+// ask 气泡：仍用一行状态（答案已回传）。
 function finalizeInteraction(div, decision) {
   stopCountdown(div);
   disableInteraction(div);
+  if (div.classList.contains("confirm")) {
+    const sel = { allow: ".allow", allow_session: ".allow-session", deny: ".deny" }[decision];
+    if (sel) {
+      const btn = div.querySelector(".interaction-btn" + sel);
+      if (btn) btn.classList.add("chosen"); // 选中项：前打勾 + 取消置灰，标出最终选择
+    } else {
+      // timeout / stopped：拒绝钮后面内联图标+文字（不增加一行）
+      const tag = document.createElement("span");
+      tag.className = "interaction-status inline";
+      tag.textContent = decision === "stopped" ? t("interaction.stopped")
+        : decision === "timeout" ? t("interaction.timedOut") : decision;
+      const deny = div.querySelector(".interaction-btn.deny");
+      if (deny) deny.insertAdjacentElement("afterend", tag);
+      else div.appendChild(tag);
+    }
+    if (decision === "allow_session") showAutoModeNote(); // 翻 auto：给「恢复逐次确认」一键
+    $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+    return;
+  }
   const status = document.createElement("div");
   status.className = "interaction-status";
   const labels = {
@@ -1008,7 +1061,6 @@ function finalizeInteraction(div, decision) {
   };
   status.textContent = labels[decision] || decision;
   div.appendChild(status);
-  if (decision === "allow_session") showAutoModeNote(); // 翻 auto：给「恢复逐次确认」一键
   $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
 }
 
