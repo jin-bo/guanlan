@@ -111,7 +111,9 @@ body {
   word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: .72rem; line-height: 1.5;
 }
-.msg.note .interaction-cmd.clamped { overflow: hidden; } /* 折叠：max-height 由 JS 按三行高度内联给出 */
+/* 折叠：max-height 由 JS 按「三行+上内边距+边框」内联给出；padding-bottom:0 让裁剪边界（padding box 底）
+   正好落在第三行末，否则底内边距区会透出第 4 行一截。展开时 .clamped 摘除，padding 复原。 */
+.msg.note .interaction-cmd.clamped { overflow: hidden; padding-bottom: 0; }
 /* 折叠钮浮在参数框内右下角；不透明白底遮住其后的命令文字（等宽 pre 里强制回 UI 字体）。 */
 .msg.note .interaction-cmd-toggle {
   position: absolute; right: .35rem; bottom: .3rem; padding: 0 .35rem;

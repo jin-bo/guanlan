@@ -937,10 +937,15 @@ function clampCmd(div, pre) {
   const lineH = parseFloat(cs.lineHeight);
   const padTop = parseFloat(cs.paddingTop) || 0;
   const padBot = parseFloat(cs.paddingBottom) || 0;
+  const bTop = parseFloat(cs.borderTopWidth) || 0;
+  const bBot = parseFloat(cs.borderBottomWidth) || 0;
   if (!(lineH > 0)) return; // line-height 解析失败（如祖先 display:none）：放过，显示全文
-  const innerH = pre.scrollHeight - padTop - padBot; // 纯内容高度（去内边距）
+  const innerH = pre.scrollHeight - padTop - padBot; // 纯内容高度（scrollHeight 含内边距、不含边框）
   if (innerH <= lineH * 3 + 1) return; // 不足/恰好三行：无需折叠
-  const three = lineH * 3 + "px"; // content-box：内容区限三行，原内边距照常渲染
+  // 全局 box-sizing:border-box（app.css），max-height 量的是边框盒；且 overflow:hidden 裁在 padding box，
+  // 故必须把 padTop+边框加回、但**不含 padBot**——否则底内边距区会透出第 4 行一截。配合 .clamped{padding-bottom:0}
+  // 让 padding box 底正好落在第三行末尾：三行完整、零透出、底部齐平（见 docs 截图实测 B/D）。
+  const three = lineH * 3 + padTop + bTop + bBot + "px";
   const clamp = () => { pre.classList.add("clamped"); pre.style.maxHeight = three; };
   clamp();
   const toggle = document.createElement("button");
