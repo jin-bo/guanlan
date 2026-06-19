@@ -16,6 +16,8 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # 默认 job 超时是 6h；卡死的跑（死锁/等网络）别白烧满额度——全套测试 ~1 分钟，15 分钟极宽裕。
+    timeout-minutes: 15
     # requires-python = ">=3.10"：在下限 3.10 到 3.12 全跑，确保最低支持版本不破。
     strategy:
       fail-fast: false
@@ -44,3 +46,16 @@ jobs:
 
       - name: 跑测试
         run: uv run --extra web --extra mcp --python ${{ matrix.python-version }} pytest -q
+
+  # 改 workflow 时校验：YAML 语法 / action input / ${{ }} 表达式，并对 run: 里的内联 shell 跑 shellcheck
+  # （release.yml 那段抽 CHANGELOG 的 awk/bash 由此受检）。单跑一次、不进 Python 矩阵。
+  # 钉到 actionlint v1.7.12 的镜像 digest（SHA 钉版、可复现，非浮动 :latest）；镜像自带 shellcheck。
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: actionlint
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: -color

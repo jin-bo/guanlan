@@ -13,6 +13,7 @@ permissions: {}
 jobs:
   pypi-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: pypi
       url: https://pypi.org/p/guanlan-wiki
@@ -41,6 +42,7 @@ jobs:
   github-release:
     needs: pypi-publish
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write # 建 GitHub Release 必需
     steps:
