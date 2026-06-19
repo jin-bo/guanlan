@@ -15,6 +15,18 @@
   **内联**图标+文字。ask 提问气泡仍走原状态行。smoke `scripts/smoke_p415.py` 三处确认断言随之更新
   (查 `.chosen` 取代查状态行)。新增两条 i18n 键 `interaction.cmdExpand` / `cmdCollapse`(中英平价)。
 
+### 内部
+
+- **CI 卫生:job 超时上限 + actionlint 校验 workflow** —— 纯仓库基建、与里程碑无关、零功能改动:
+  ① 给 `ci.yml` 的 test job 与 `release.yml` 的 pypi-publish / github-release 各加 `timeout-minutes`
+  (15 / 15 / 10),卡死的跑(死锁 / 等网络)十几分钟内被杀、不白烧 GitHub 默认 **6h** job 超时的额度;
+  ② `ci.yml` 新增独立 `actionlint` job(单跑、不进 3×Python 矩阵),用**钉到 v1.7.12 镜像 digest**
+  (`docker://rhysd/actionlint@sha256:b1934ee5…`、SHA 钉版可复现、非浮动 `:latest`)校验 workflow
+  YAML 语法 / action input / `${{ }}` 表达式,并经镜像自带 shellcheck 检 `run:` 内联 shell
+  (`release.yml` 抽 CHANGELOG 的 awk/bash 由此受检)。`concurrency` ci.yml 早已有、不动;release.yml
+  故意不加(不在发布到一半被取消)。落地前以**钉版 actionlint v1.7.12 + shellcheck** 对两 workflow
+  跑过、零 finding。
+
 ## [0.1.14] - 2026-06-17
 
 ### 新增
