@@ -4,6 +4,8 @@
 >
 > **进展更新（实现后回填）**：本笔记 §10 推荐排期的**四条零-LLM 借鉴全部已实现**——§2 检索 backlink 重排 = **P5.3** ✅、§3 finding 因果排序 ✅、§4 schema detect 漂移侦测 = **P3.10** ✅、§5 源撤回恢复窗 = **P3.9** ✅；§6 检索质量回放 = `tests/test_search_quality.py` ✅、§7 矛盾检测 = **P3.7** ✅。余下 §6 成本闸（存疑借）、§7 autopilot/SkillOpt（park=E3/P6）、§8 别借（E1/E2）未变。
 > 关联：[`openkb-反向评审结论.md`](openkb-反向评审结论.md)（同类反向评审先例）、[`next-milestone-and-graph-viz.md`](next-milestone-and-graph-viz.md)（反向评审收口先例）、[`cjk-retrieval-enhancements.md`](cjk-retrieval-enhancements.md)（检索增强线，§3 借点并入此线）、[`../../P5.0-检索层.md`](../../P5.0-检索层.md)、[`../../P3.7-语义审计.md`](../../P3.7-语义审计.md)、[`p3.7-语义审计-raw_digest写入主体未决.md`](p3.7-语义审计-raw_digest写入主体未决.md)、[`../../P6-技能蒸馏-草案.md`](../../P6-技能蒸馏-草案.md)、DESIGN §8（语义维护 / CJK 检索 / graph 增强）/ §7（路线表 E1·E2·E3）。
+>
+> **增量评审（2026-06-18 pull，commit `4ee530f3→9bf96db8`，v0.42.43–v0.42.51，9 版本 ~13K 行）**：见 **§11**。净新增可借两条——push-based `volunteer_context`（§11.1，强借）+ `advisor` 聚合器（§11.2，借）；外加 CI 卫生快赢（§11.3）。其余佐证或归并既有结论：spend controls 并入 §6 成本闸；honest freshness **观澜已领先**（同 §9）；git durability / federated read / DB pacing 别借（越界 / E2 / E1）。**本次同样只借形状、不借实现**。
 
 ## 0. 一句话 / 为什么记
 
@@ -93,3 +95,40 @@ gbrain 与观澜**同源不同量级**（同 Karpathy LLM Wiki 模式，但 gbra
 4. **源撤回恢复窗（§5）** —— ✅ **已实现 = P3.9**（[`P3.9-源撤回.md`](../../P3.9-源撤回.md)，`guanlan remove` 移 `.trash/` 恢复窗）。
 
 其余（§6 成本闸 实证驱动 / §7 已在路上[P3.7 已实现]或已 park[E3/P6] / §8 别借[E1/E2]）不主动排。
+
+## 11. 增量评审：v0.42.43–v0.42.51（2026-06-18 pull）
+
+> 范围：本次 pull `4ee530f3→9bf96db8`，9 版本 ~13K 行。绝大部分是 gbrain 的 Postgres/jobs/minions/sync 重型管线（撞 E1/E2，无 DB 映射不过来）。过红线后净新增可借两条（§11.1/§11.2）+ 一条基建快赢（§11.3），其余佐证或归并既有结论。
+
+| 条款（gbrain 本次） | 结论 | 落点 |
+|---|---|---|
+| **push-based context / `volunteer_context`**（v0.42.43，零-LLM 主动献页） | 🟢 **强借**（零-LLM、查询期算、不落派生物、复用 index/aliases + 现成只读 MCP） | §11.1 → 候选 P6.x，并入检索增强线 |
+| **`gbrain advisor`**（v0.42.47，只读排序"接下来做什么"+ fix 命令） | 🟢 **借**（展示/聚合层，零-LLM，聚合 check/health/lint/audit） | §11.2 → health/lint 家族聚合，承 §3 |
+| **CI 卫生**（v0.42.50，concurrency 取消旧跑 / job timeout / actionlint） | 🟢 **快赢**（纯仓库基建，已有 ci.yml/release.yml） | §11.3 |
+| **brain-resident skillpack**（v0.42.47，脑库自带 skill 包） | 🔵 **关联 P6**（与"引擎装一次"张力，只借"脑带操作手册"形状） | §11.4 → P6 |
+| **spend controls / delta-aware 估价**（v0.42.45） | 🟡 **并入 §6 成本闸**（新增可借：自描述闸消息 + 非交互 auto-defer；仍待 agentao 1 行确认） | §6 |
+| **honest freshness / checkpoint**（v0.42.51） | 🔵 **观澜已领先**（`raw_digest`+`audit` 更干净；gbrain 新意仅"live lock 区分跑/卡"= 并发长 sync，同步 CLI 无此场景） | §9 |
+| git durability 自托管（v0.42.48）/ federated read scope（v0.42.46）/ DB-contention pacing（v0.42.49） | 🅴 **别借** | 越界（不替用户管 git）/ E2（单本地用户无授权）/ E1（无 DB） |
+
+### 11.1 🟢 push-based context / `volunteer_context`（强借，零-LLM）
+
+- **形状**：gbrain 把检索从 pull-only 反转——零-LLM、确定性地从近 N 轮对话抽实体（大写串 / `@handle` / 近期+频次显著性）→ 经 alias 表 / 精确标题 / slug 后缀解析 → 带**诚实置信度**（alias 0.9 / 精确标题 0.8 / slug 后缀 0.6，多轮或最新轮 +0.05）主动"献出"页指针 + 一句模板 rationale；门槛 0.7、最多 3 页（硬顶 5）、去重已出现 slug。三通道（reflex 引擎内自动 / `volunteer_context` op / `watch` 流）共享同一零-LLM 核。
+- **真实缺口**：观澜 `query` 仍是纯 pull——Agent 得"想到去问"才读 index；这恰是 Karpathy wiki"别每次重 RAG"卖点里观澜尚缺的主动面。
+- **只借形状的落法**：零-LLM `guanlan volunteer-context` + **挂到 P4.10 已有的只读 MCP server**（加 `volunteer_context` 工具，几乎零架构成本）。解析表**直接复用 `index.md` + 各页 `aliases`**（观澜天然就有 gbrain 的 alias 表 / 标题表）；置信度刻度照抄起步。**全程查询期算、不落任何派生物**（守 P5.0 边界）；reader/MCP 皆可用（符 P5.1 `is_read_only`）；byte-stable 输出。
+- **暂缓**：gbrain 的 volunteered-vs-used 反馈日志依赖 DB——观澜无库，先不做或轻量文件日志，低优先；privacy fence strip 观澜无对应物，N/A。
+- **决策**：值得做，是本次 pull **最干净的净新增**（同 §2 backlink 重排的成色）。候选并入 [`cjk-retrieval-enhancements.md`](cjk-retrieval-enhancements.md) 检索增强线 / 候选 P6.x。
+
+### 11.2 🟢 `gbrain advisor`（借，展示/聚合层，零-LLM）
+
+- **形状**：`gbrain advisor` 读脑库状态，回**排序的只读"接下来该做什么"**——每条带 severity + 现成 `fix.command_argv`；`--json` + 按严重度 exit code；配薄 SKILL + weekly cron recipe（只报"自上次以来新增"、动手前必问）。严格只读、`--apply` 也要显式确认。
+- **真实缺口**：观澜 `check` / `health` / `lint` / `audit` 是**四个各自独立**的诊断命令，各吐平铺 findings，**无一个跨命令、按杠杆排序的"这本 KB 现在最该做的 1-3 件事"聚合器 + 可粘贴 fix 命令**。这是 §3 finding 因果排序（已实现，单命令内排序）的**跨命令上卷**。
+- **只借形状的落法**：零-LLM 聚合器，归并已有信号并按严重度排序，每条配现成命令——stub/孤儿/断链（health/lint）、missing-entity≥N→`heal`、index 漂移→`reindex`、source-drift（audit `raw_digest` 对不上）→ re-ingest、未 convert 的 `raw/`、未 resolved 的 `## ⚠️ 矛盾与存疑`。复用 `--strict` exit 6 口径。薄 SKILL + cron"新增 delta"。只读、动手前问——对齐 P4.15 `ask_user` 人在环。
+- **决策**：值得做，落在 health/lint 家族（聚合命令或 `health --advise`），非重活。承 §3 因果排序。
+
+### 11.3 🟢 CI 卫生（快赢，纯基建）
+
+观澜有 `.github/workflows/{ci,release}.yml`。直接抄三样低成本：`concurrency` 按 PR 取消被取代的旧跑、每 job `timeout-minutes`（避免卡死 job 跑满 6h）、`actionlint`(SHA-pin) 在改 workflow 时校验 YAML。十几行纯收益，与里程碑无关、随手可落。
+
+### 11.4 🔵 brain-resident skillpack（关联 P6）
+
+gbrain 让脑库**自带 skillpack**（随该库版本化、连入的 harness 即被 offer）。与观澜"引擎装一次、不随每个库复制"（`SCHEMA.md` 才是每库配置）**有张力**，不照搬。但"脑库随身带操作手册"的**形状**与 [`../../P6-技能蒸馏-草案.md`](../../P6-技能蒸馏-草案.md)（把 wiki 子集蒸馏成可分发 skill）邻接——记一笔，park 到 P6 选型时连同 [`p6-技能蒸馏-工作法归属未决.md`](p6-技能蒸馏-工作法归属未决.md) 一并拍。
