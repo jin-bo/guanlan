@@ -205,17 +205,25 @@ function submitChat(override) {
   // 一轮在飞时不重复发送：回车与「发送」共用此守卫，避免在同一会话上叠起并发轮次（服务端
   // conv.lock 会把第二轮挂住、前端则堆出空 bot 气泡）。停止只由按钮点击触发（见下），回车
   // 流式中一律按空操作处理——不让回车误把当前轮停掉。输入保留不清。
-  if (chatStreaming) return;
   // override（如「让 Agent 修复」发的 REPAIR_PROMPT）直接作消息发，不读输入框、不走斜杠解析。
-  if (typeof override === "string" && override) { sendChat(override); return; }
+  if (typeof override === "string" && override) {
+    if (chatStreaming) return;
+    sendChat(override);
+    return;
+  }
   const input = $("#chat-input");
   const msg = input.value.trim();
   const atts = pendingAttachments.slice(); // 快照本轮附件（仅已上传成功者在册）
   if (!msg && !atts.length) return; // 空消息且无附件 → 不发
   // 斜杠命令前置解析（决策P4.4-1）：以 `/` 开头**一律**本地处理、**绝不进 /api/chat**——不打 LLM、
   // 不占对话轮次、不入历史。**即便有待发附件**也走本地（绝不把斜杠命令当消息连同附件发给 LLM）；
-  // 附件保留 pending、留给下一条真消息。
+  // 附件保留 pending、留给下一条真消息。**斜杠命令在流式中也可达**（评审 #10）：goal 续跑期
+  // `chatStreaming=true`，须让 /goal pause·show·budget 等瞬时命令仍能输入（它们不发新 chat 轮；
+  // /goal set·resume 则由服务端 is_busy 409 / sendGoalRun 的 chatStreaming 守卫兜住）。**但会撕毁在飞流的
+  // 生命周期命令**（/new·/clear·/mode <值>）在 handleSlash 里按 chatStreaming 单独拦下（评审 #1）——故此处
+  // 放行斜杠到 handleSlash 是安全的：危险副作用在命令层兜住，而非这里粗暴全拦（那会误杀 /goal pause）。
   if (msg.startsWith("/")) { input.value = ""; autoGrowInput(); handleSlash(msg); return; }
+  if (chatStreaming) return; // 非斜杠新消息：一轮/一目标在飞时不重复发送
   input.value = "";
   autoGrowInput();
   // 附件已快照，清 composer 徽章行；不回收缩略图 blob URL（气泡回显沿用）。
@@ -228,8 +236,13 @@ function submitChat(override) {
 // 展示类（/help）纯客户端；生命周期类（/new /clear）复用既有逻辑；自省类（/status /context
 // /skills /tools /mode）调只读端点（有会话 GET /api/chat/{id}/info，否则 app 级 GET /api/info），
 // 按命令取字段渲染成 note 气泡。/compact 与未知命令一律本地「未知命令」提示（决策P4.4-5）。
+// 需活动 agent 的命令（/tools·/skills·/context·/goal 设目标·/mode <值>）于无活动会话时经
+// `ensureActiveConversation` 先开一个 warm 空会话并采纳为当前会话（决策P4.4-7 的 UX 反转），
+// 不再生硬提示「先提一个问题」；/status·/mode（无参）仍 app 级如实作答、不强开。**reader 下不自动
+// 开会话**（端点亦 reader 不注册，决策P4.9-2）：各命令回退到原 no-session 提示。`/goal` 的 show/pause/
+// resume/clear/edit/budget 是对既有目标的操作，无会话即无目标 → 直接提示、不空建 agent。
 
-// /help 列这 8 条（**无** /compact，决策P4.4-5）。函数式：每次按当前语言取词（P4.7）。
+// /help 列这 9 条（含 P4.16 的 /goal；**无** /compact，决策P4.4-5）。函数式：每次按当前语言取词（P4.7）。
 function slashHelpLines() {
   return [
     t("slash.help.help"),
@@ -240,6 +253,7 @@ function slashHelpLines() {
     t("slash.help.skills"),
     t("slash.help.tools"),
     t("slash.help.mode"),
+    t("slash.help.goal"),
   ];
 }
 
@@ -269,6 +283,18 @@ async function handleSlash(raw) {
   const body = raw.trim();
   const cmd = (body.slice(1).split(/\s+/)[0] || "").toLowerCase();
   addMsg("cmd", body); // 回显键入的命令（cmd 样式），与其只读输出 note 区分
+  // 流式中（普通轮或 goal 续跑在飞，chatStreaming=true）拦下会**撕毁在飞流**的生命周期命令（评审 #1）：
+  // /new·/clear 会清屏 + 置 conversationId=null（/clear 还 DELETE 这一在飞会话）、/mode <值> 会在 turn 中途
+  // 翻姿态——任一都会把正在流式的这轮/这个 goal 撕成「半清屏半流式」的错乱态（旧 SSE 续往已脱离的气泡追
+  // token、chatStreaming 滞留在 null 会话上）。一律先要求按停止结束当前轮再执行。只读自省（/help·/status·
+  // /context·/skills·/tools·/mode 无参）与 goal 控制（/goal …；其中 set·resume 另由 sendGoalRun 的
+  // chatStreaming 守卫 + 服务端 is_busy 兜住）**不**撕毁在飞流、仍放行（决策P4.4-1 斜杠流式中可达的本意）。
+  if (chatStreaming) {
+    const modeArg = body.slice(1).split(/\s+/)[1] || "";
+    if (cmd === "new" || cmd === "clear" || (cmd === "mode" && modeArg)) {
+      return noteLines([t("slash.busyLifecycle", cmd)]);
+    }
+  }
   switch (cmd) {
     case "help":
       return noteLines(slashHelpLines());
@@ -288,6 +314,8 @@ async function handleSlash(raw) {
     case "skills":
     case "tools":
       return slashInfo(cmd);
+    case "goal":  // P4.16 长任务目标续跑
+      return slashGoal(body);
     default:  // 含 /compact（决策P4.4-5）与一切未知命令
       return noteLines([t("slash.unknown", body)]);
   }
@@ -318,7 +346,8 @@ async function slashSetMode(arg) {
     return noteLines([t("slash.modeInvalidArg", arg)]);
   }
   if (!conversationId) {
-    return noteLines([t("slash.modeNoSession")]);
+    if (readerMode) return noteLines([t("slash.modeNoSession")]); // reader 不自动开会话，保留原提示
+    if (!(await ensureActiveConversation())) return; // 无会话先开一个空活会话再切姿态（决策P4.4-7 反转）
   }
   let res;
   try {
@@ -340,9 +369,65 @@ async function slashSetMode(arg) {
   ]);
 }
 
-// 自省类：有会话取会话级 info、否则取 app 级 info，按命令渲染。冷会话（live:false）的
-// context/skills/tools 为 null → 提示「续聊一轮以恢复」（决策P4.4-7）。
+let ensureSessionInflight = null; // 合并并发建会话调用：杜绝两条斜杠命令各 POST 一次、双建孤儿会话（评审）
+
+// 无活动会话时先开一个 warm 空会话并**采纳为当前会话**（决策P4.4-7 的 UX 反转）：使需活动 agent 的
+// 命令（/tools·/skills·/context·/goal·/mode <值>）不再生硬提示「先提一个问题」，而是按需开一个空活会话。
+// POST /api/conversations 纯建会话（零 LLM、零盘写），成功即置 conversationId（连带写 ?c=，刷新可经
+// 内存命中续）+ 据回报姿态置徽标。返回 true=已有/已开成功；false=开失败或 reader（已落一条提示或调用方
+// 自处理，调用方应中止）。**不**清屏/不重置视图：调用时用户正键入命令、chat-log 已回显该命令，保留即可。
+// **reader 闸**：匿名多用户部署里不自动开会话（端点亦 reader 下不注册，决策P4.9-2）——直接返回 false，
+// 由调用方回退到各自的「先提一个问题」原提示。**并发合一**：多条命令在首个 POST 未回前争相调用，复用同
+// 一在飞 Promise，只建一个会话。
+async function ensureActiveConversation() {
+  if (conversationId) return true;
+  if (readerMode) return false; // reader 不自动开会话（调用方回退原 no-session 提示）
+  if (ensureSessionInflight) return ensureSessionInflight; // 复用在飞调用，避免双建
+  ensureSessionInflight = (async () => {
+    let res;
+    try {
+      res = await fetch("/api/conversations", { method: "POST" });
+    } catch (e) {
+      noteLines([t("slash.openFail", e.message)]);
+      return false;
+    }
+    if (res.status === 503) {
+      noteLines([t("slash.openFull")]);
+      return false;
+    }
+    if (!res.ok) {
+      noteLines([t("slash.openFailHttp", res.status)]);
+      return false;
+    }
+    let data;
+    try {
+      data = await res.json(); // 200 但响应体损坏/截断（代理）：当作开失败、落提示，不抛未捕获 reject
+    } catch (e) {
+      noteLines([t("slash.openFail", e.message)]);
+      return false;
+    }
+    setConversation(data.conversation_id); // 采纳为当前会话（连带写 ?c=）：随后第一条真问题进同一会话
+    setModeBadge(data.mode || defaultMode);
+    return true;
+  })();
+  try {
+    return await ensureSessionInflight;
+  } finally {
+    ensureSessionInflight = null;
+  }
+}
+
+// 自省类：有会话取会话级 info、否则取 app 级 info，按命令渲染。tools/skills/context 是 agent 级事实，
+// 无会话时（**非 reader**）先开一个 warm 空会话（采纳为当前会话）再取会话级 info——不再落到 app 级的
+// 「需活动会话」提示（决策P4.4-7 的 UX 反转）。**reader 下不自动开会话**：落到 app 级 info →
+// renderSlashInfo 的 `slash.needSession` 提示（与原 reader 行为一致，决策P4.9）。status/mode（无参）能
+// app 级如实作答、不强开会话。冷会话（live:false）的 context/skills/tools 仍为 null → 维持「续聊一轮以
+// 恢复」（决策P4.4-7，冷会话不自动重恢复）。
 async function slashInfo(cmd) {
+  const needsAgent = cmd === "tools" || cmd === "skills" || cmd === "context";
+  if (!conversationId && needsAgent && !readerMode) {
+    if (!(await ensureActiveConversation())) return; // 开失败：helper 已落提示
+  }
   const url = conversationId
     ? `/api/chat/${encodeURIComponent(conversationId)}/info`
     : "/api/info";
@@ -631,20 +716,10 @@ async function sendChat(message, attachments) {
 }
 
 function handleSSE(frame, botEl) {
-  // 按 SSE 规范：一个事件可有多条 data: 行，按 \n 拼接；每行剥去一个前导空格。
-  let event = null;
-  const dataLines = [];
-  for (const line of frame.split("\n")) {
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
-  }
-  if (!event || dataLines.length === 0) return;
-  let payload;
-  try {
-    payload = JSON.parse(dataLines.join("\n"));
-  } catch {
-    return; // 跳过坏帧，绝不让单帧解析失败中断整条流、抹掉已上屏的答案
-  }
+  // 解析归口到唯一的 `parseSSE`（与 goal 续跑流共用同一份，杜绝两份解析逻辑漂移，评审 #11）。
+  // 坏帧 / 空帧 / JSON 解析失败 → event 为 null，跳过：绝不让单帧解析失败中断整条流、抹掉已上屏的答案。
+  const { event, payload } = parseSSE(frame);
+  if (!event) return;
   const log = $("#chat-log");
   if (event === "start") {
     // 服务端尽早回填会话 id：首轮请求里 id 为 null，拿到它「停止」按钮才能在首轮就生效。
@@ -1099,4 +1174,443 @@ function rerenderPendingInteractions(pending) {
     if (p.kind === "confirm") renderConfirmRequest(p);
     else if (p.kind === "ask") renderAskRequest(p);
   }
+}
+
+
+// ───────────────────────── P4.16 长任务目标续跑（/goal） ─────────────────────────
+//
+// `/goal <objective> [--for 30m] [--turns 10] [--unbounded]` 设一个长任务目标，由宿主反复驱动
+// 多轮直至 Agent 自报 complete/blocked、撞时间/轮数预算、或用户 /goal pause。设目标/恢复/复活
+// limit_reached **驱动续跑 SSE 流**（POST /goal/run），把每内层轮渲成独立气泡 + 一个 goal 横幅
+// （受控偏离 P4.4-1）；show/pause/clear/edit/budget(非复活) 瞬时端点 + note 气泡。命令分类镜像
+// agentao `_classify`（无参子命令 vs objective）。confirm/ask 渲染**完全复用**（自动组合，§9）。
+
+const GOAL_NOTICE_KEY = "guanlan.goal.noticed"; // 一次性默认上限提示（决策P4.16-17，存 localStorage）
+
+// localStorage 读写包 try/catch（评审 #11）：Safari 隐私模式下抛异常（同 i18n_apply.js 的处理）。
+function goalNoticeSeen() {
+  try { return !!localStorage.getItem(GOAL_NOTICE_KEY); } catch { return false; }
+}
+function markGoalNoticeSeen() {
+  try { localStorage.setItem(GOAL_NOTICE_KEY, "1"); } catch { /* 隐私模式禁写，忽略 */ }
+}
+
+// 首轮附件暂存（决策P4.16-18，评审 #9）：设 goal 时记下其首轮附件；首轮被中断（turns_used 仍 0）→
+// /goal resume 据 info.goal.turns_used==0 **重附**。**同会话 best-effort**：页面刷新后丢失（v1）。
+// **按 cid 作用域**（评审）：否则在会话 A 设带附件目标、首轮中断后切到会话 B 再 resume，B 会误收
+// A 的附件。取用前校 `goalFirstImages.cid === conversationId`。
+let goalFirstImages = { cid: null, atts: [] };
+
+// 取本会话暂存的首轮附件（cid 不符则空）。
+function takeGoalFirstImages() {
+  return goalFirstImages.cid === conversationId ? goalFirstImages.atts : [];
+}
+
+// SSE 帧解析（与 handleSSE 同口径）：返回 {event, payload}；坏帧返回 {event:null}。
+// SSE 帧解析的**唯一**实现（聊天流经 handleSSE、goal 续跑流经 sendGoalRun 共用，评审 #11）：按 SSE 规范
+// 一个事件可有多条 data: 行、按 \n 拼接，每行剥去一个前导空格；坏帧 / 空帧 / JSON 解析失败一律回
+// `{ event: null }`，由调用方据 `event` 为空跳过。改解析规则只动这一处，两条流自动一致。
+function parseSSE(frame) {
+  let event = null;
+  const dataLines = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (!event || dataLines.length === 0) return { event: null };
+  try {
+    return { event, payload: JSON.parse(dataLines.join("\n")) };
+  } catch {
+    return { event: null };
+  }
+}
+
+// flag 解析（镜像 agentao _parse_goal_flags）：--for <时长> / --turns <n> / --unbounded，其余 objective。
+function parseGoalFlags(args) {
+  const toks = args.split(/\s+/).filter(Boolean);
+  const obj = [];
+  let forDur = null;
+  let turns = null;
+  let unbounded = false;
+  let err = null;
+  // value 缺失判定：下个 token 不存在**或本身是 flag**（以 -- 开头）都算缺值——否则 `--for --turns 5`
+  // 会把 `--turns` 当时长吞掉、再让服务端 parse_duration 抛出令人困惑的 400（评审 #15）。
+  const missingValue = (i) => i + 1 >= toks.length || toks[i + 1].startsWith("--");
+  for (let i = 0; i < toks.length; i++) {
+    const tk = toks[i];
+    if (tk === "--for") {
+      if (missingValue(i)) { err = t("goal.errForArg"); break; }
+      forDur = toks[++i];
+    } else if (tk === "--turns") {
+      if (missingValue(i)) { err = t("goal.errTurnsArg"); break; }
+      const n = parseInt(toks[++i], 10);
+      if (!(n > 0)) { err = t("goal.errTurnsInt"); break; }
+      turns = n;
+    } else if (tk === "--unbounded") {
+      unbounded = true;
+    } else {
+      obj.push(tk);
+    }
+  }
+  return { objective: obj.join(" ").trim(), forDur, turns, unbounded, err };
+}
+
+function goalApi(path, bodyObj) {
+  return fetch(`/api/chat/${encodeURIComponent(conversationId)}/goal${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(bodyObj || {}),
+  });
+}
+
+function goalStatusLabel(status) {
+  const map = {
+    active: t("goal.st.active"), paused: t("goal.st.paused"), blocked: t("goal.st.blocked"),
+    complete: t("goal.st.complete"), limit_reached: t("goal.st.limit"),
+  };
+  return map[status] || status;
+}
+
+function fmtDur(s) {
+  s = Math.floor(s || 0);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return m ? `${h}h${m}m` : `${h}h`;
+  if (m) return sec ? `${m}m${sec}s` : `${m}m`;
+  return `${sec}s`;
+}
+
+function goalBudgetSummary(g) {
+  if (!g) return "";
+  const parts = [];
+  if (g.max_turns != null) parts.push(t("goal.turnsFmt", g.turns_used || 0, g.max_turns));
+  if (g.time_budget_seconds != null) {
+    parts.push(`${fmtDur(g.time_used_seconds)}/${fmtDur(g.time_budget_seconds)}`);
+  }
+  return parts.length ? parts.join(", ") : t("goal.unbounded");
+}
+
+async function slashGoal(body) {
+  const rest = body.replace(/^\/goal\s*/, "");
+  const sub = (rest.split(/\s+/)[0] || "").toLowerCase();
+  const arg = rest.slice((rest.match(/^\s*\S*/) || [""])[0].length).trim();
+  // 无会话时：只有「设新目标」（下方 dispatch 的 fallthrough = slashGoalSet）值得开一个空活会话；
+  // show/pause/resume/clear/edit/budget 都是对**既有目标**的操作，无会话即无目标 → 直接提示、不空建
+  // agent（评审：避免为只读/无操作命令白建一个 agent 占槽）。reader 一律不自动开会话（决策P4.9）。
+  const existingGoalOp =
+    rest === "" ||
+    (sub === "show" && arg === "") ||
+    (sub === "pause" && arg === "") ||
+    (sub === "resume" && arg === "") ||
+    (sub === "clear" && arg === "") ||
+    sub === "edit" ||
+    sub === "budget";
+  if (!conversationId) {
+    if (existingGoalOp || readerMode) return noteLines([t("goal.needSession")]);
+    if (!(await ensureActiveConversation())) return; // 设目标前开一个空活会话（决策P4.4-7 反转）
+  }
+  // 无参子命令（show/pause/resume/clear）须**无尾随文本**——否则当 objective（镜像 agentao _classify）。
+  if (rest === "" || (sub === "show" && arg === "")) return slashGoalShow();
+  if (sub === "pause" && arg === "") return slashGoalPause();
+  if (sub === "resume" && arg === "") return slashGoalResume();
+  if (sub === "clear" && arg === "") return slashGoalClear();
+  if (sub === "edit") return slashGoalEdit(arg);
+  if (sub === "budget") return slashGoalBudget(arg);
+  return slashGoalSet(rest); // 其余当新 objective
+}
+
+async function slashGoalShow() {
+  let info;
+  try {
+    info = await (await fetch(`/api/chat/${encodeURIComponent(conversationId)}/info`)).json();
+  } catch (e) {
+    return noteLines([t("goal.fail", e.message)]);
+  }
+  const g = info.goal;
+  if (!g) return noteLines([t("goal.none")]);
+  return noteLines([
+    t("goal.showLine", goalStatusLabel(g.status), g.objective),
+    t("goal.budgetLine", goalBudgetSummary(g)),
+  ]);
+}
+
+async function slashGoalSet(rest) {
+  const f = parseGoalFlags(rest);
+  if (f.err) return noteLines([f.err]);
+  if (!f.objective) return noteLines([t("goal.usage")]);
+  const atts = pendingAttachments.slice(); // 首轮附件（决策P4.16-18）：随 /goal/run 发
+  const bodyObj = { objective: f.objective };
+  if (f.forDur) bodyObj.for = f.forDur;
+  if (f.turns != null) bodyObj.turns = f.turns;
+  if (f.unbounded) bodyObj.unbounded = true;
+  let res;
+  try {
+    res = await goalApi("", bodyObj);
+  } catch (e) {
+    return noteLines([t("goal.fail", e.message)]);
+  }
+  if (res.status === 403) return noteLines([t("goal.disabled")]);
+  if (res.status === 409) return noteLines([t("goal.activeExists")]);
+  if (res.status === 400) {
+    const d = await res.json().catch(() => ({}));
+    return noteLines([t("goal.badArg", d.detail || "")]);
+  }
+  if (!res.ok) return noteLines([t("goal.failHttp", res.status)]);
+  const data = await res.json();
+  // 一次性默认上限提示（决策P4.16-17）：仅未显式给 flag 且首次设 goal 时（localStorage 包 try/catch）。
+  if (!f.forDur && f.turns == null && !f.unbounded && !goalNoticeSeen()) {
+    markGoalNoticeSeen();
+    noteLines([t("goal.defaultNotice")]);
+  }
+  noteLines([t("goal.set", data.goal.objective, goalBudgetSummary(data.goal))]);
+  goalFirstImages = { cid: conversationId, atts }; // 按 cid 记首轮附件，供首轮被中断后 resume 重附（评审 #9）
+  if (atts.length) clearAttachments({ revoke: false });
+  sendGoalRun(atts);
+}
+
+async function slashGoalPause() {
+  let res;
+  try {
+    res = await goalApi("/pause");
+  } catch (e) {
+    return noteLines([t("goal.fail", e.message)]);
+  }
+  if (res.status === 404) return noteLines([t("goal.none")]);
+  const d = await res.json();
+  return noteLines([d.paused ? t("goal.paused") : t("goal.pauseFail")]);
+}
+
+async function slashGoalResume() {
+  let res;
+  try {
+    res = await goalApi("/resume");
+  } catch (e) {
+    return noteLines([t("goal.fail", e.message)]);
+  }
+  if (res.status === 403) return noteLines([t("goal.disabled")]);
+  if (res.status === 409) return noteLines([t("goal.busy")]);
+  if (res.status === 404) return noteLines([t("goal.none")]);
+  const d = await res.json();
+  if (d.active) {
+    noteLines([t("goal.resumed")]);
+    // 首轮被中断（turns_used 仍 0）→ 重附本会话首轮附件（决策P4.16-18，评审 #9）；否则纯文本续跑。
+    const reattach = d.goal && d.goal.turns_used === 0 ? takeGoalFirstImages() : [];
+    return sendGoalRun(reattach);
+  }
+  return noteLines([t("goal.resumeFail")]);
+}
+
+async function slashGoalClear() {
+  let res;
+  try {
+    res = await goalApi("/clear");
+  } catch (e) {
+    return noteLines([t("goal.fail", e.message)]);
+  }
+  if (res.status === 409) return noteLines([t("goal.clearActive")]);
+  if (res.status === 404) return noteLines([t("goal.none")]);
+  const d = await res.json();
+  goalFirstImages = { cid: null, atts: [] }; // 目标清除：丢弃暂存的首轮附件（评审 #9）
+  return noteLines([d.cleared ? t("goal.cleared") : t("goal.none")]);
+}
+
+async function slashGoalEdit(arg) {
+  if (!arg) return noteLines([t("goal.editUsage")]);
+  let res;
+  try {
+    res = await goalApi("/edit", { objective: arg });
+  } catch (e) {
+    return noteLines([t("goal.fail", e.message)]);
+  }
+  if (res.status === 404) return noteLines([t("goal.none")]);
+  if (!res.ok) return noteLines([t("goal.failHttp", res.status)]);
+  return noteLines([t("goal.edited", arg)]);
+}
+
+async function slashGoalBudget(arg) {
+  const f = parseGoalFlags(arg);
+  if (f.err) return noteLines([f.err]);
+  const bodyObj = {};
+  if (/(^|\s)--clear(\s|$)/.test(arg)) bodyObj.clear = true;
+  else {
+    if (f.unbounded) bodyObj.unbounded = true;
+    if (f.forDur) bodyObj.for = f.forDur;
+    if (f.turns != null) bodyObj.turns = f.turns;
+  }
+  let res;
+  try {
+    res = await goalApi("/budget", bodyObj);
+  } catch (e) {
+    return noteLines([t("goal.fail", e.message)]);
+  }
+  if (res.status === 404) return noteLines([t("goal.none")]);
+  if (res.status === 400) return noteLines([t("goal.budgetUsage")]);
+  if (!res.ok) return noteLines([t("goal.failHttp", res.status)]);
+  const d = await res.json();
+  noteLines([t("goal.budgetUpdated", goalBudgetSummary(d.goal))]);
+  if (d.revived) {
+    noteLines([t("goal.resumed")]);
+    // 复活后若仍停在首轮（罕见）→ 重附本会话首轮附件；否则纯文本续跑（评审 #9）。
+    const reattach = d.goal && d.goal.turns_used === 0 ? takeGoalFirstImages() : [];
+    return sendGoalRun(reattach);
+  }
+}
+
+// 驱动续跑 SSE 流（POST /goal/run）：横幅 + 每内层轮独立气泡。复用 setChatSending（按钮切「停止」，
+// 点击 → /stop 打断当前内层轮 → 整 goal 收为 paused）。
+async function sendGoalRun(attachments) {
+  if (chatStreaming) return; // 一轮/一目标在飞时不重复驱动
+  setChatSending(true);
+  const banner = renderGoalBanner();
+  const ctx = { botEl: null, banner };
+  try {
+    const reqBody = {};
+    if (attachments && attachments.length) reqBody.attachments = attachments.map((a) => a.rel);
+    const res = await fetch(`/api/chat/${encodeURIComponent(conversationId)}/goal/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(reqBody),
+    });
+    if (res.status === 409) return setGoalBannerNote(banner, t("goal.runBusy"));
+    if (res.status === 403) return setGoalBannerNote(banner, t("goal.disabled"));
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        handleGoalSSE(frame, ctx);
+      }
+    }
+  } catch (e) {
+    if (ctx.botEl) clearHeartbeat(ctx.botEl);
+    setGoalBannerNote(banner, t("goal.fail", e.message));
+  } finally {
+    if (ctx.botEl) clearHeartbeat(ctx.botEl);
+    setChatSending(false);
+  }
+}
+
+function handleGoalSSE(frame, ctx) {
+  const { event, payload } = parseSSE(frame);
+  if (!event) return;
+  const log = $("#chat-log");
+  if (event === "goal_start") {
+    updateGoalBanner(ctx.banner, payload);
+  } else if (event === "turn_start") {
+    const lab = document.createElement("div");
+    lab.className = "goal-turn-label";
+    lab.textContent = payload.kind === "wrap_up"
+      ? t("goal.wrapUpLabel")
+      : t("goal.turnLabel", (payload.idx || 0) + 1);
+    log.appendChild(lab);
+    ctx.botEl = addMsg("bot", "");
+    if (payload.kind === "wrap_up") ctx.botEl.dataset.kind = "wrap_up";
+  } else if (event === "token") {
+    if (ctx.botEl) {
+      clearHeartbeat(ctx.botEl);
+      ctx.botEl.textContent += payload;
+      log.scrollTop = log.scrollHeight;
+    }
+  } else if (event === "heartbeat") {
+    if (ctx.botEl) {
+      if (!ctx.botEl._hb) {
+        ctx.botEl._hb = document.createElement("div");
+        ctx.botEl._hb.className = "chat-hb";
+        ctx.botEl.after(ctx.botEl._hb);
+      }
+      ctx.botEl._hb.textContent = t("chat.working", payload.elapsed || 0);
+      log.scrollTop = log.scrollHeight;
+    }
+  } else if (event === "turn_done") {
+    const el = ctx.botEl;
+    if (el) {
+      clearHeartbeat(el);
+      if (payload.answer_html !== undefined) {
+        el.classList.add("rendered");
+        el.innerHTML = payload.answer_html;
+        enhanceContent(el);
+      } else if (payload.answer) {
+        el.textContent = payload.answer;
+      }
+      appendCopyButton(el, payload.answer);
+      renderWritableReceipts(payload); // 可写 goal 轮收尾：check/撤销/告警（逐轮）
+      if (payload.stopped) {
+        const note = document.createElement("span");
+        note.className = "stop-note";
+        note.textContent = t("chat.stopped");
+        el.appendChild(note);
+      }
+    }
+    refreshStagingIfOpen();
+    log.scrollTop = log.scrollHeight;
+  } else if (event === "goal_done") {
+    finalizeGoalBanner(ctx.banner, payload);
+    log.scrollTop = log.scrollHeight;
+  } else if (event === "confirm_request") {
+    if (ctx.botEl) clearHeartbeat(ctx.botEl);
+    renderConfirmRequest(payload);
+  } else if (event === "ask_request") {
+    if (ctx.botEl) clearHeartbeat(ctx.botEl);
+    renderAskRequest(payload);
+  } else if (event === "interaction_resolved") {
+    resolveInteractionUI(payload);
+  } else if (event === "error") {
+    if (ctx.botEl) {
+      clearHeartbeat(ctx.botEl);
+      ctx.botEl.classList.replace("bot", "err");
+      ctx.botEl.textContent = t("chat.error", payload.message);
+    }
+    renderWritableReceipts(payload);
+    setGoalBannerNote(ctx.banner, t("chat.error", payload.message));
+  }
+}
+
+// goal 横幅：落在对话流里的一块状态条（objective + status + 预算进度），随 goal_start/done 更新。
+function renderGoalBanner() {
+  const div = document.createElement("div");
+  div.className = "goal-banner running";
+  const title = document.createElement("div");
+  title.className = "goal-banner-title";
+  title.textContent = t("goal.banner.title");
+  const obj = document.createElement("div");
+  obj.className = "goal-banner-obj";
+  const meta = document.createElement("div");
+  meta.className = "goal-banner-meta";
+  div.appendChild(title);
+  div.appendChild(obj);
+  div.appendChild(meta);
+  div._obj = obj;
+  div._meta = meta;
+  const log = $("#chat-log");
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+function updateGoalBanner(banner, g) {
+  if (!banner || !g) return;
+  banner._obj.textContent = g.objective || "";
+  banner._meta.textContent = `${goalStatusLabel(g.status)} · ${goalBudgetSummary(g)}`;
+}
+
+function setGoalBannerNote(banner, text) {
+  if (!banner) return;
+  banner.classList.remove("running");
+  banner._meta.textContent = text;
+}
+
+function finalizeGoalBanner(banner, payload) {
+  if (!banner) return;
+  banner.classList.remove("running");
+  banner.classList.add("done");
+  if (payload.status) banner.classList.add(`goal-${payload.status}`);
+  banner._meta.textContent = `${goalStatusLabel(payload.status)} · ${payload.summary || ""}`;
 }

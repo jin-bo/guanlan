@@ -58,6 +58,7 @@ from ..paths import count_files_modified_since
 from ..runtime import HEARTBEAT_INTERVAL_S, AgentRunner
 from ..search import CorpusCache, search_result_dict, tokenize
 from .chat import IDLE_TTL_SECONDS, MAX_CONVERSATIONS, ConversationStore
+from .conversation import GoalActiveError
 from .helpers import (
     _audit_preview,
     _heal_preview,
@@ -110,6 +111,48 @@ from .workspace import (
 # 会话还活着；token 正常流动时永不触发（每来一帧就重置等待）。
 _CHAT_HEARTBEAT_INTERVAL_S = HEARTBEAT_INTERVAL_S
 
+# P4.16 安全上限默认（对齐 agentao cli/commands/goal.py，决策P4.16-17/§11）：省略 --for/--turns 时
+# 套这两个值；`--turns` 是主防跑飞（25 轮已是大量工作），`--for` 只防墙钟病态、设在轮数正常跑完点
+# 之上（120m）。`--unbounded` 显式退出。
+_GOAL_DEFAULT_MAX_TURNS = 25
+_GOAL_DEFAULT_TIME_BUDGET_S = 120 * 60
+
+
+def _resolve_goal_budget(
+    for_: str | None, turns: int | None, unbounded: bool
+) -> tuple[int | None, int | None]:
+    """把 `--for/--turns/--unbounded` 解析为 `(time_budget_seconds, max_turns)`，省略套默认
+    （镜像 agentao `_resolve_budget` + `_parse_turns`，复用 `parse_duration`）。非法值抛
+    `DurationParseError`/`ValueError`（端点转 400）。`unbounded` → 双 None。"""
+    from agentao.cli.duration import parse_duration
+
+    if unbounded:
+        # --unbounded 与显式 --for/--turns 冲突：静默丢弃后者会让用户以为设了上限其实没有（评审 #14）。
+        if for_ or turns is not None:
+            raise ValueError("--unbounded 不能与 --for/--turns 同用（要么无上限、要么给具体上限）。")
+        return None, None
+    time_budget = parse_duration(for_) if for_ else _GOAL_DEFAULT_TIME_BUDGET_S
+    if turns is None:
+        max_turns: int | None = _GOAL_DEFAULT_MAX_TURNS
+    else:
+        if turns <= 0:
+            raise ValueError(f"--turns 须为正整数，收到 {turns!r}")
+        max_turns = turns
+    return time_budget, max_turns
+
+
+def _resolve_goal_budget_partial(
+    for_: str | None, turns: int | None
+) -> tuple[int | None, int | None]:
+    """解析 `/goal budget` 的 `--for/--turns`——**省略的轴留 None**（=不改该轴，由 `set_budget`
+    保持原值），**不**套默认（与设目标不同）。非法值抛 `DurationParseError`/`ValueError`。"""
+    from agentao.cli.duration import parse_duration
+
+    time_budget = parse_duration(for_) if for_ else None
+    if turns is not None and turns <= 0:
+        raise ValueError(f"--turns 须为正整数，收到 {turns!r}")
+    return time_budget, turns
+
 
 class IngestBody(BaseModel):
     """`POST /api/ingest` 请求体。`target` 仍由 run_ingest 内部 _resolve_raw_target 兜底校验。"""
@@ -154,6 +197,37 @@ class ChatBody(BaseModel):
     message: str
     conversation_id: str | None = None
     model: str | None = None
+    attachments: list[str] | None = None
+
+
+class GoalBody(BaseModel):
+    """`POST /api/chat/{id}/goal` 请求体（设目标，P4.16 §8.2）。`for`/`turns` 省略 → 套安全默认
+    （25 轮 / 120m，决策P4.16-17）；`unbounded` → 双 None（无上限）。`for` 是 Python 关键字，故
+    别名映射到 `for_`（前端发 JSON 键 `for`）。"""
+
+    objective: str
+    for_: str | None = Field(default=None, alias="for")
+    turns: int | None = None
+    unbounded: bool = False
+
+    model_config = {"populate_by_name": True}
+
+
+class GoalBudgetBody(BaseModel):
+    """`POST /api/chat/{id}/goal/budget` 请求体（改/清上限）。`clear`/`unbounded` → 双 None。"""
+
+    for_: str | None = Field(default=None, alias="for")
+    turns: int | None = None
+    unbounded: bool = False
+    clear: bool = False
+
+    model_config = {"populate_by_name": True}
+
+
+class GoalRunBody(BaseModel):
+    """`POST /api/chat/{id}/goal/run` 请求体（驱动续跑 SSE 流）。`attachments` 同 ChatBody——仅
+    **首轮**经 `arun(images=)` 走视觉通道（决策P4.16-18），base64 不入 GoalState/sidecar。"""
+
     attachments: list[str] | None = None
 
 
@@ -316,6 +390,7 @@ def create_app(
     max_conversations: int | None = None,
     confirm: str = "ask",
     confirm_timeout: float = 120.0,
+    goal_enabled: bool = True,
 ) -> FastAPI:
     """构造绑定到知识库 `root` 的 FastAPI app。
 
@@ -336,6 +411,9 @@ def create_app(
             逃生舱。每会话开局继承、之后可经气泡②或 `/confirm-mode` 翻（决策P4.15-7/13）。
         confirm_timeout: confirm/ask 等待超时秒数（P4.15，默认 120）。无人应答即默认拒绝（§4.2），
             兜「人走开 → 写锁永占」。
+        goal_enabled: `/goal` 长任务续跑总开关（P4.16，默认开；`--goal off` 关，决策P4.16-17）。
+            关时设/恢复/复活目标的端点 403；瞬时只读端点（show/pause/clear/edit/budget 非复活）仍可用。
+            `reader`（匿名多用户只读部署）下**强制关**——无鉴权下放任自动续跑是 LLM 成本陷阱（见下）。
     """
     # 权威校验（决策P4.9-18）：任何 caller（CLI/serve/嵌入/测试直建）显式传 < 1 都早失败，
     # 不下沉 ConversationStore（那时 app 已建、太晚）。CLI/serve 可另作友好早提示，但权威点在此。
@@ -351,6 +429,7 @@ def create_app(
     if reader:
         session_persist = False
         mode = "read-only"
+        goal_enabled = False  # P4.16：匿名多用户只读部署不放任自动续跑（无鉴权 LLM 成本陷阱）
     app = FastAPI(title="观澜 Web 宿主", docs_url=None, redoc_url=None)
     # 配置挂在 app.state：后续提交的端点（报告/写作业/会话）从这里读 root/model/runner，
     # 避免在模块级全局变量上分裂状态（与 workers=1 单进程单事件循环假设一致，决策P4-2）。
@@ -443,14 +522,22 @@ def create_app(
             info["max_conversations"] = effective_max
         return info
 
-    def _reject_if_writable_active() -> None:
+    def _reject_if_writable_active(exclude_id: str | None = None) -> None:
         """层③ 时序互斥（决策P4.5-10）：可写 turn 活跃期间宿主写端点一律 `423 Locked`。
 
         兜「shell `curl http://127.0.0.1/api/raw` 让宿主替 agent 写 `raw/`」的旁路——curl 在可写
         turn 内到达即被拒、根本不入队。用 `423`（非 `409`）以与 `/api/raw` 既有「不覆盖冲突」`409`
         区分。read-only turn 不计数、不触发。
+
+        **P4.16 决策P4.16-20**：把「正在跑的可写 goal」也算 writable-active，且判定**进程级**（扫全体
+        会话）——使**进程内至多一个活跃可写 goal**。可写 turn 进行期 `active_writable_turns>0` 已拒；
+        但 goal 轮间窄缝里 `active_writable_turns` 归 0，故须另查 `has_active_writable_goal`，否则会话 A
+        的 goal 轮间会话 B 能起第二个可写 goal、二者争 `write_lock`。`exclude_id` 让「驱动本会话自己的
+        goal」不被自己拦（只读 goal 不持写锁、不在此列）。
         """
-        if write_gate.active_writable_turns > 0:
+        if write_gate.active_writable_turns > 0 or conversations.has_active_writable_goal(
+            exclude_id
+        ):
             raise HTTPException(
                 status_code=423, detail="可写会话进行中，请稍后重试。"
             )
@@ -987,6 +1074,13 @@ def create_app(
                     raise HTTPException(
                         status_code=404, detail=f"未知会话：{body.conversation_id}"
                     )
+            # 正被 goal 续跑驱动的会话不接普通 turn（评审 #12）：否则普通 turn 在 goal 内层轮之间的
+            # 缝里抢 conv.lock 跑，可能在 run_goal finally 摘除 update_goal 后才调它 → 未知工具错；且
+            # 把 goal 专用工具暴露给非 goal 轮。先停 goal（/goal pause）再普通对话。
+            if conv.in_goal():
+                raise HTTPException(
+                    status_code=409, detail="目标续跑进行中，先 /goal pause 再普通对话。"
+                )
             # 已知会话：仅当它会跑可写 turn（取 write_lock / 自锁 conv.lock）才按层③ 拒（评审 P1/P2）。
             # 恢复的冷会话开局 = 进程默认姿态，故 conv.mode 已反映本 turn 将以何姿态跑。
             if conv.mode == "workspace-write":
@@ -1155,6 +1249,267 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
         return {"confirm_mode": conv.set_confirm_mode(body.confirm_mode)}
 
+    # ── P4.16 长任务目标续跑（docs/P4.16-Web目标续跑.md §8）──────────────────────────
+    #
+    # **状态端点瞬返 + 一条驱动端点走 SSE**：set/budget/pause/resume/clear/edit 只改 GoalState（瞬返
+    # JSON、loop 线程、只取 `_goal_lock`，绝不取 conv.lock/write_lock，同 P4.15 /confirm 锁纪律）；
+    # `/goal/run` 是**唯一**驱动续跑的 SSE 端点（设/恢复/复活 limit_reached 后由前端链式发起，决策
+    # P4.16-8）。写权限三分（§2 表）：端点=user 面（绝不置 complete/blocked）、UpdateGoalTool=agent
+    # 面、run_goal 预检=host 面（limit_reached）。
+
+    def _require_goal_enabled() -> None:
+        if not goal_enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="/goal 长任务续跑已禁用（--goal off / 只读部署）。",
+            )
+
+    async def _get_or_restore_conv(cid: str):
+        """内存命中即返回，否则懒恢复盘上会话（同 `/api/chat`，off-loop）。冷会话恢复后其
+        `__init__` 已 reload goal sidecar（§10）——故重启/idle 回收后盘上 stranded 目标可经
+        `/goal/resume` 复活（评审 codex P2：goal 端点须像 chat 一样懒恢复，否则恢复永远 404）。
+        返回 None → 端点 404；内存满 → 503。"""
+        conv = conversations.get(cid)
+        if conv is not None:
+            return conv
+        try:
+            return await anyio.to_thread.run_sync(conversations.restore, cid)
+        except RuntimeError as exc:  # 恢复时内存已满 → 503（同 /api/chat）
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/api/chat/{conversation_id}/goal")
+    async def chat_goal_set(conversation_id: str, body: GoalBody) -> dict:
+        """设目标（user 面，瞬返）。active 目标存在 → 409（先 pause）；本会话有在飞轮 → 409
+        （决策P4.16-19）。**不**驱动——前端据返回的 goal 再 POST `/goal/run` 起 SSE（决策P4.16-8）。"""
+        _require_goal_enabled()
+        conv = await _get_or_restore_conv(conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        objective = body.objective.strip()
+        if not objective:
+            raise HTTPException(status_code=400, detail="objective 不能为空。")
+        if conv.is_busy():  # 同会话已有 turn/goal 在飞 → 先停（决策P4.16-19）
+            raise HTTPException(status_code=409, detail="本会话有进行中的轮次，先停再设目标。")
+        # 可写姿态：进程内至多一个活跃可写 goal（决策P4.16-20）——设之前先拦（驱动时再查一次）。
+        if conv.mode == "workspace-write":
+            _reject_if_writable_active(exclude_id=conv.id)
+        try:
+            time_budget, max_turns = _resolve_goal_budget(
+                body.for_, body.turns, body.unbounded
+            )
+        except Exception as exc:  # DurationParseError / ValueError → 400
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            conv.create_goal(
+                objective, time_budget_seconds=time_budget, max_turns=max_turns
+            )
+        except GoalActiveError as exc:  # active 目标存在 → 先 pause（决策P4.16-15）
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"goal": conv.goal_snapshot()}
+
+    @app.post("/api/chat/{conversation_id}/goal/budget")
+    async def chat_goal_budget(conversation_id: str, body: GoalBudgetBody) -> dict:
+        """改/清 live 目标上限（user 面，瞬返）。limit_reached 且新上限有余量 → 复活（返回
+        `revived:true`，前端随后 POST `/goal/run` 续跑，决策P4.16-8）。"""
+        conv = await _get_or_restore_conv(conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        if not (body.clear or body.unbounded or body.for_ or body.turns is not None):
+            raise HTTPException(
+                status_code=400,
+                detail="用法：/goal budget [--for <时长>] [--turns <n>] | --clear",
+            )
+        # --clear/--unbounded（清上限）与显式 --for/--turns（给上限）冲突：旧实现径取 (None, None)
+        # 静默丢弃后者，留下「以为设了上限其实无上限」的假象（codex 评审 P2）。对齐设目标
+        # `_resolve_goal_budget` 的 #14 校验：宁可 400，让用户二选一。
+        if (body.clear or body.unbounded) and (body.for_ or body.turns is not None):
+            raise HTTPException(
+                status_code=400,
+                detail="--clear/--unbounded 不能与 --for/--turns 同用（要么清上限、要么给具体上限）。",
+            )
+        try:
+            time_budget, max_turns = (
+                (None, None)
+                if (body.clear or body.unbounded)
+                else _resolve_goal_budget_partial(body.for_, body.turns)
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 何时允许把 limit_reached 复活成 active（否则只改上限）——三道闸，任一不满足都不复活，
+        # 避免留下「active 却无 driver / 无法 clear」的 stranded active：
+        #   ① goal_enabled：`--goal off`/只读部署下复活无意义（/goal/run·resume 皆 403，评审 codex P2）；
+        #   ② not in_goal：本会话正被驱动（如 wrap-up 轮在飞）时复活会与在飞循环抢状态（评审 #6）；
+        #   ③ 可写 goal 须进程内独占：别处有活跃可写 goal 时复活后 /goal/run 必 423（评审 #8）。
+        allow_reactivate = goal_enabled and not conv.in_goal()
+        if conv.mode == "workspace-write":
+            allow_reactivate = (
+                allow_reactivate
+                and not conversations.has_active_writable_goal(exclude_id=conv.id)
+            )
+        result = conv.set_budget(
+            time_budget_seconds=time_budget,
+            max_turns=max_turns,
+            unbounded=body.unbounded,
+            clear=body.clear,
+            allow_reactivate=allow_reactivate,
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="无目标可改预算。")
+        revived, summary = result
+        return {"revived": revived, "summary": summary, "goal": conv.goal_snapshot()}
+
+    @app.post("/api/chat/{conversation_id}/goal/pause")
+    async def chat_goal_pause(conversation_id: str) -> dict:
+        """暂停目标（user 面，瞬返）。锁内 pause + `request_stop()` 即时打断在飞内层轮（§8.2）。"""
+        conv = await _get_or_restore_conv(conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        return {"paused": conv.pause_goal(), "goal": conv.goal_snapshot()}
+
+    @app.post("/api/chat/{conversation_id}/goal/resume")
+    async def chat_goal_resume(conversation_id: str) -> dict:
+        """恢复 paused/blocked（或 stranded active）→ active（user 面，瞬返）。本会话有在飞轮 →
+        409（决策P4.16-19）。返回 `active:true` 时前端随后 POST `/goal/run` 驱动续跑。"""
+        _require_goal_enabled()
+        conv = await _get_or_restore_conv(conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        if conv.is_busy():
+            raise HTTPException(status_code=409, detail="本会话有进行中的轮次，先停再恢复目标。")
+        # 进程内至多一个活跃可写 goal（决策P4.16-20）：别处有活跃可写 goal 时**先 423**，绝不先把本
+        # 目标 resume 成 active 再让随后的 /goal/run 423 —— 那会留下 active-but-undriven（评审 pass 6）。
+        # 与 set 同序（set 在 create 前查、run 也查），故 resume→run 一致。
+        if conv.mode == "workspace-write":
+            _reject_if_writable_active(exclude_id=conv.id)
+        return {"active": conv.resume_goal(), "goal": conv.goal_snapshot()}
+
+    @app.post("/api/chat/{conversation_id}/goal/edit")
+    async def chat_goal_edit(conversation_id: str, body: GoalBody) -> dict:
+        """改 objective（保 status + 上限，user 面，瞬返）。"""
+        conv = await _get_or_restore_conv(conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        objective = body.objective.strip()
+        if not objective:
+            raise HTTPException(status_code=400, detail="objective 不能为空。")
+        if not conv.edit_goal(objective):
+            raise HTTPException(status_code=404, detail="无目标可编辑。")
+        return {"goal": conv.goal_snapshot()}
+
+    @app.post("/api/chat/{conversation_id}/goal/clear")
+    async def chat_goal_clear(conversation_id: str) -> dict:
+        """删目标（user 面，瞬返）。active → 409（先 pause，决策P4.16-15）。"""
+        conv = await _get_or_restore_conv(conversation_id)
+        if conv is None:
+            # 会话不可恢复（无 session 快照），但 goal sidecar 可能是孤儿（评审 #5）→ 兜底删它；
+            # 删到 → cleared，否则纯未知 id → 404。
+            if conversations.clear_orphan_goal(conversation_id):
+                return {"cleared": True}
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        try:
+            cleared = conv.clear_goal()
+        except GoalActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"cleared": cleared}
+
+    @app.post("/api/chat/{conversation_id}/goal/run")
+    async def chat_goal_run(
+        conversation_id: str, body: GoalRunBody | None = None
+    ) -> StreamingResponse:
+        """驱动续跑 SSE 流（host 面）。会话有 active 目标 + 无在飞轮才驱动；可写 goal 须过进程级
+        `_reject_if_writable_active`（决策P4.16-20）。begin_turn/end_turn/断线 finally 只在此最外层
+        包一次——inner turn 的 shield/排空全归 `conv.run_goal`（§4）。"""
+        _require_goal_enabled()
+        conv = await _get_or_restore_conv(conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        if not conv.goal_is_active():
+            raise HTTPException(status_code=409, detail="无活跃目标可驱动（先设目标或恢复）。")
+        if conv.mode == "workspace-write":  # 进程内至多一个活跃可写 goal（决策P4.16-20）
+            _reject_if_writable_active(exclude_id=conv.id)
+        if conv.is_busy():  # 同会话两条 SSE 流抢 conv.lock/串 begin_turn → 拒（决策P4.16-19）
+            raise HTTPException(status_code=409, detail="本会话有进行中的轮次，先停再驱动目标。")
+        # **原子预订**（评审 codex P2）：is_busy 检查与 reserve_goal_run 之间**绝无 await**（单事件
+        # 循环下二者原子）——故两条近乎同时的 /goal/run 不会都过 is_busy 再各起一个 _drive 驱动同一
+        # GoalState。reserve = begin_turn（整个 goal run 期 _inflight=1：停止打到内层令牌、idle 不回收，
+        # §9）**并立刻置 in_goal**，使进程级可写 goal 互斥在下方 await 附件读盘期间已生效（否则别的可写
+        # 会话能在该窗口溜过 _reject_if_writable_active 起第二个）。预订后、起流前失败须回滚（下方 try）；
+        # _drive **不再** begin_turn、只配对 end_turn。
+        conv.reserve_goal_run()
+
+        # 首轮附件 → first_images（决策P4.16-18）：仅首轮经 arun(images=) 走视觉通道，base64 不入
+        # GoalState/sidecar。空消息只为复用 _augment_with_attachments 的图像读盘（标签文本丢弃）。
+        images: list[dict[str, str]] = []
+        try:
+            if body is not None and body.attachments:
+                _msg, images = await anyio.to_thread.run_sync(
+                    _augment_with_attachments, root, "", body.attachments
+                )
+        except BaseException:  # incl. CancelledError——预订后、起流前任何失败都回滚（否则预订泄漏）
+            conv.release_goal_run()
+            raise
+
+        queue: asyncio.Queue[tuple[str, object] | None] = asyncio.Queue()
+
+        def emit(kind: str, data: object) -> None:
+            queue.put_nowait((kind, data))
+
+        async def _render(answer: str) -> str:
+            return await anyio.to_thread.run_sync(render_markdown, answer, root / "wiki")
+
+        async def _drive() -> None:
+            # begin_turn/in_goal 已在端点同步预订（见上），释放经 task 的 done_callback（见下）——**不**在
+            # 此 finally 里 end_turn：否则若响应体迭代器从未启动（客户端在 return 后、`async for` 前断开），
+            # event_stream 永不跑、_drive 也不会被 gather → 预订永久泄漏、进程级写锁永锁（评审 #2/codex P3-2）。
+            emit("goal_start", conv.goal_snapshot() or {})
+            try:
+                await conv.run_goal(emit, first_images=images or None, render=_render)
+            except asyncio.CancelledError:
+                raise  # 客户端断开：流没了，不再 emit（run_goal 已收为 paused 落盘，§5.3）
+            except Exception as exc:  # noqa: BLE001 — 任何失败转 error 帧（不泄 traceback 到流）
+                emit(
+                    "error",
+                    {"message": f"{type(exc).__name__}: {exc}", "conversation_id": conv.id},
+                )
+            finally:
+                queue.put_nowait(None)  # 哨兵：通知流结束
+
+        # **在端点（而非 event_stream）建 _drive task + done_callback 释放预订**（评审 #2）：task 一经
+        # `ensure_future` 即被事件循环调度，其终态（完成/取消/异常）**必**触发 done_callback——与响应体
+        # 迭代器是否启动无关，故 `reserve_goal_run` 的 begin_turn/in_goal 绝不泄漏。`release_goal_run`
+        # 幂等于 run_goal finally 已清的 in_goal（再清一次无害），并配对预订的 end_turn（仅此一次）。
+        task: asyncio.Future = asyncio.ensure_future(_drive())
+        task.add_done_callback(lambda _t: conv.release_goal_run())
+
+        async def event_stream() -> AsyncIterator[str]:
+            started = time.monotonic()
+            try:
+                while True:
+                    try:
+                        item = await asyncio.wait_for(
+                            queue.get(), _CHAT_HEARTBEAT_INTERVAL_S
+                        )
+                    except asyncio.TimeoutError:
+                        yield _sse(
+                            "heartbeat", {"elapsed": int(time.monotonic() - started)}
+                        )
+                        continue
+                    if item is None:
+                        break
+                    kind, data = item
+                    yield _sse(kind, data)
+            finally:
+                # 断线处理（§5.3，扩展 P4.15）：goal 运行期断线即 request_stop（trip 当前轮令牌 +
+                # 置 _stop_requested），run_goal 的 except 收为 paused 落盘；再 cancel 外层 task →
+                # 穿到 run_goal 的 await shield 处（其 except CancelledError 排空 inner + pause + 传播）。
+                if conv.in_goal() or conv.has_pending():
+                    conv.request_stop()
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
     # 运行时翻姿态（P4.5 决策P4.5-5）：read-only ↔ workspace-write 真切换（只翻两点置位、不重建
     # agent、不动层① wrapper）。持会话锁与在飞 turn 串行。404 未知 id；409 冷会话（未激活、无 live
     # agent 可翻）；422 非法 mode（含 full-access/plan/full）。逻辑落 chat.py，本端点只分流（决策P4.5-9）。
@@ -1224,6 +1579,24 @@ def create_app(
         if result["conflicts"]:  # 部分文件已被后续写改动 → 409（前端标红，其余仍还原）
             return JSONResponse(status_code=409, content=result)
         return result
+
+    # 建一个 warm 空会话但**不起 turn**（决策P4.4-7 的 UX 反转）：供前端在 /tools·/skills·/context·
+    # /goal·/mode 等「需活动 agent」的斜杠命令于无活动会话时先开一个空活会话，免去「先提一个问题以开启
+    # 会话」的生硬提示。纯建会话**零 LLM、零盘写**（agent 构造期注册工具/激活 skill，`_save` 仅成功轮后
+    # 才落盘），故空会话只在内存、未进盘上枚举；用户随后第一条真问题进同一会话、不二次新建。
+    # **不**取 write_lock、不跑 turn，故无须层③ writable-active 拒（与 POST /api/chat 起 turn 前的拒不同，
+    # 决策P4.5-10）；满则同 chat 转 503。
+    # **reader 下不注册**（决策P4.9-2，评审）：匿名多用户部署里，一个**零 LLM、可匿名循环调用**的建会话
+    # 端点会让攻击者廉价占满 MAX_CONVERSATIONS、把真实读者顶成 503；且 reader 开 idle 回收，未落盘的空
+    # 会话被回收后前端 `?c=` 续聊会 404。reader 读者仍可经 `POST /api/chat`（首条消息）隐式建会话——前端在
+    # reader 下也不自动开会话、保留「先提一个问题」原提示（见 chat.js `ensureActiveConversation` 的 reader 闸）。
+    @_writer_only(app.post("/api/conversations"))  # reader 下不注册（建会话占槽、防匿名占满，决策P4.9-2）
+    async def create_conversation() -> dict:
+        try:
+            conv = await anyio.to_thread.run_sync(conversations.create)
+        except RuntimeError as exc:  # 会话数达上限（同 chat）
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {"conversation_id": conv.id, "mode": conv.mode}
 
     @_writer_only(app.get("/api/conversations"))  # reader 下不注册：防枚举他人会话 id（决策P4.9-3）
     async def list_conversations() -> dict:

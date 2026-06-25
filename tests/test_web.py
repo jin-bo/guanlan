@@ -1723,7 +1723,28 @@ def _default_tools() -> list[_FakeTool]:
 
 class _FakeToolRegistry:
     def __init__(self, tools) -> None:
-        self._tools = tools
+        self._tools = list(tools)
+
+    @property
+    def tools(self) -> dict:
+        # 镜像真 agentao registry.tools（name→tool dict）：_snapshot_prior_update_goal 读它（P4.16 §3）。
+        return {t.name: t for t in self._tools}
+
+    def get(self, name):
+        return self.tools.get(name)
+
+    def add(self, tool, *, replace: bool = False) -> None:
+        # 镜像真 ToolRegistry.register：replace=False + 同名 → 抛（P4.16 loop 作用域注入用 replace=True）。
+        if any(t.name == tool.name for t in self._tools):
+            if not replace:
+                raise ValueError(f"tool {tool.name!r} already registered")
+            self._tools = [t for t in self._tools if t.name != tool.name]
+        self._tools.append(tool)
+
+    def remove(self, name: str) -> bool:
+        before = len(self._tools)
+        self._tools = [t for t in self._tools if t.name != name]
+        return len(self._tools) != before
 
     def list_tools(self) -> list:
         return list(self._tools)
@@ -1798,6 +1819,13 @@ class _FakeAgent:
 
     def _build_system_prompt(self) -> str:
         return "SYS"  # _context_stats 前置它入 messages_with_system（验 system 分项被计入）
+
+    def add_tool(self, tool, *, replace: bool = False) -> None:
+        # 镜像真 Agentao.add_tool（replace 关键字）：P4.16 loop 作用域注入 update_goal 用。
+        self.tools.add(tool, replace=replace)
+
+    def remove_tool(self, name: str) -> bool:
+        return self.tools.remove(name)
 
     async def arun(self, msg: str, images=None, **_kw) -> str:
         self.images_seen.append(images)
@@ -2195,6 +2223,38 @@ def test_chat_info_cold_404_when_persist_off(chat_env, kb) -> None:
     with TestClient(create_app(kb, session_persist=False)) as client:
         assert client.get(f"/api/chat/{leftover}/info").status_code == 404
         assert client.get("/api/info").json()["persist"] is False
+
+
+def test_create_conversation_warm_empty_no_turn(chat_client) -> None:
+    """`POST /api/conversations`：建一个 warm 空会话但**不起 turn**——回 {conversation_id, mode}、
+    建恰一个 agent、live 计数 +1，且其 `/info` 即 live（turns=0/messages=0、tools 齐备），供前端在
+    无活动会话时为 /tools·/skills·/context 先开空活会话（决策P4.4-7 的 UX 反转）。"""
+    client, captured = chat_client
+    resp = client.post("/api/conversations")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {"conversation_id", "mode"}
+    cid = body["conversation_id"]
+    assert uuid.UUID(cid)  # 规范 UUID（与 chat 同 id 体系）
+    assert body["mode"] == "read-only"  # 进程默认开局姿态
+    assert len(captured["agents"]) == 1  # 建恰一个 warm agent（零 LLM、零 turn）
+    assert client.get("/api/info").json()["conversations"] == 1  # in-memory 计数 +1
+    # 纯建会话即 live：其 /info 全量自省可答（无须先发问），turns/messages 皆 0、tools 非空。
+    info = client.get(f"/api/chat/{cid}/info").json()
+    assert info["live"] is True
+    assert info["turns"] == 0 and info["messages"] == 0
+    assert [t["name"] for t in info["tools"]]  # 构造期注册 + guanlan_search → 非空
+    assert captured["agents"][0].messages == []  # 未起 turn → 无副作用
+
+
+def test_create_conversation_absent_in_reader(chat_env, kb) -> None:
+    """reader 下 `POST /api/conversations` **不注册**（决策P4.9-2，评审）：匿名多用户部署里一个零-LLM、
+    可循环调用的建会话端点会让攻击者廉价占满会话槽顶掉真实读者；reader 读者改经 `POST /api/chat`（首条
+    消息）隐式建会话、前端 reader 下也不自动开会话。POST/GET `/api/conversations` 皆 404（路由不存在）。"""
+    _kb, _captured = chat_env
+    with TestClient(create_app(kb, reader=True)) as client:
+        assert client.post("/api/conversations").status_code == 404  # 建会话端点 reader 不注册
+        assert client.get("/api/conversations").status_code == 404  # 枚举端点 reader 不注册（决策P4.9-3）
 
 
 def test_chat_error_event_on_failure(kb, monkeypatch) -> None:
@@ -6032,3 +6092,724 @@ def test_normal_long_turn_not_killed_on_disconnect(chat_env) -> None:
             release.set()
             time.sleep(0.5)
             assert done.get("ran") is True  # 普通长轮断开后仍后台跑完（未被误杀）
+
+
+# ───────────────────────── P4.16 长任务目标续跑（/goal） ─────────────────────────
+#
+# 复用 agentao `GoalState`/`parse_duration`/`UpdateGoalTool`（不重测状态机，那有 agentao 自带
+# 测试）——这里只测 guanlan **Web 编排层**：续跑循环 / SSE 帧 / 端点 / 持久化 / 并发取消。
+# fake agent 经 `action`（executor 线程跑，镜像真 arun 写时机）在指定 goal 轮调 update_goal
+# 或阻塞，逼出真实跨线程并发（工具改 GoalState 经 _GoalProxy 取 _goal_lock）。
+
+
+def _new_conv(client) -> str:
+    """起一轮普通 chat 物化一个 live 会话（goal 端点需 live conv），返回其 id。"""
+    _t, done, _e = _chat(client, "hi")
+    assert done is not None
+    return done["conversation_id"]
+
+
+def _goal_marker(mark_at: dict):
+    """fake action：在「第 N 个 goal 轮」（本闭包自计、独立于先前 'hi' 轮）调 update_goal(status)。"""
+    state = {"n": 0}
+
+    def action(agent):
+        state["n"] += 1
+        status = mark_at.get(state["n"])
+        if status is not None:
+            tool = agent.tools.get("update_goal")
+            assert tool is not None, "update_goal 未注入"
+            tool.execute(status)
+
+    return action
+
+
+def _block_on_first_goal_turn(started: threading.Event, release: threading.Event):
+    """fake action：仅第 1 个 goal 轮阻塞（started→release），供停止/断线/in-flight 并发测试。"""
+    state = {"n": 0}
+
+    def action(_agent):
+        state["n"] += 1
+        if state["n"] == 1:
+            started.set()
+            release.wait(timeout=5)
+
+    return action
+
+
+def _drive_goal(client, cid, *, attachments=None, on_request=None):
+    """POST /goal/run 读 SSE，返回 frames=[(event,payload)]。"""
+    body: dict = {}
+    if attachments is not None:
+        body["attachments"] = attachments
+    frames: list[tuple[str, object]] = []
+    with client.stream("POST", f"/api/chat/{cid}/goal/run", json=body) as resp:
+        assert resp.status_code == 200
+        event = None
+        for line in resp.iter_lines():
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                payload = json.loads(line.split(":", 1)[1].strip())
+                frames.append((event, payload))
+                if on_request and event in ("confirm_request", "ask_request"):
+                    on_request(client, event, payload)
+    return frames
+
+
+def test_goal_basic_continuation_hits_turn_budget(chat_client):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    r = client.post(f"/api/chat/{cid}/goal", json={"objective": "do X", "turns": 3})
+    assert r.status_code == 200
+    assert r.json()["goal"]["status"] == "active"
+    frames = _drive_goal(client, cid)
+    assert frames[0][0] == "goal_start"
+    starts = [p for e, p in frames if e == "turn_start"]
+    assert len(starts) == 4  # 3 work + 1 wrap-up
+    assert starts[-1].get("kind") == "wrap_up"
+    assert sum(1 for p in starts if p.get("kind") == "wrap_up") == 1
+    done = _first(frames, "goal_done")
+    assert done is not None and done["status"] == "limit_reached"
+
+
+def test_goal_agent_marks_complete_stops_early(chat_client):
+    client, captured = chat_client
+    cid = _new_conv(client)
+    captured["agents"][-1].action = _goal_marker({2: "complete"})  # 第 2 个 goal 轮标 complete
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "do X", "turns": 5})
+    frames = _drive_goal(client, cid)
+    starts = [p for e, p in frames if e == "turn_start"]
+    assert len(starts) == 2  # turn0 + turn1 后 complete → break，无 wrap-up
+    assert all(p.get("kind") != "wrap_up" for p in starts)
+    assert _first(frames, "goal_done")["status"] == "complete"
+
+
+def test_goal_agent_marks_blocked(chat_client):
+    client, captured = chat_client
+    cid = _new_conv(client)
+    captured["agents"][-1].action = _goal_marker({1: "blocked"})
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 5})
+    frames = _drive_goal(client, cid)
+    assert len([p for e, p in frames if e == "turn_start"]) == 1
+    assert _first(frames, "goal_done")["status"] == "blocked"
+
+
+def test_goal_turn_done_carries_answer(chat_client):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 1})
+    frames = _drive_goal(client, cid)
+    td = _first(frames, "turn_done")
+    assert td is not None and "answer" in td  # 每轮答案随 turn_done 出帧（render 缺省也带纯文本）
+
+
+def test_goal_tool_is_read_only_and_loop_scoped(chat_client):
+    """复用的 UpdateGoalTool 带 is_read_only=True（只读会话可用）；loop 作用域：设目标不注入、
+    goal 结束后 remove（决策P4.16-3）。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+    agent = captured["agents"][-1]
+    seen = {}
+
+    def action(a):
+        seen["tool"] = a.tools.get("update_goal")
+
+    agent.action = action
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 1})
+    assert agent.tools.get("update_goal") is None  # 设目标不注入（注入在 run 期）
+    _drive_goal(client, cid)
+    assert seen["tool"] is not None and seen["tool"].is_read_only is True
+    assert agent.tools.get("update_goal") is None  # goal 结束后已 remove（loop 作用域）
+
+
+def test_goal_pause_sets_paused(chat_client):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 3})
+    r = client.post(f"/api/chat/{cid}/goal/pause")
+    assert r.status_code == 200 and r.json()["paused"] is True
+    assert r.json()["goal"]["status"] == "paused"
+
+
+def test_goal_clear_active_409_then_pause_clears(chat_client):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 3})
+    assert client.post(f"/api/chat/{cid}/goal/clear").status_code == 409  # active → 先 pause
+    client.post(f"/api/chat/{cid}/goal/pause")
+    r = client.post(f"/api/chat/{cid}/goal/clear")
+    assert r.status_code == 200 and r.json()["cleared"] is True
+
+
+def test_goal_set_while_active_409_paused_replaceable(chat_client):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    assert client.post(f"/api/chat/{cid}/goal", json={"objective": "a"}).status_code == 200
+    assert client.post(f"/api/chat/{cid}/goal", json={"objective": "b"}).status_code == 409
+    client.post(f"/api/chat/{cid}/goal/pause")
+    r = client.post(f"/api/chat/{cid}/goal", json={"objective": "b"})  # paused 可替换
+    assert r.status_code == 200 and r.json()["goal"]["objective"] == "b"
+
+
+def test_goal_resume_then_drive(chat_client):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 2})
+    client.post(f"/api/chat/{cid}/goal/pause")
+    r = client.post(f"/api/chat/{cid}/goal/resume")
+    assert r.status_code == 200 and r.json()["active"] is True
+    frames = _drive_goal(client, cid)
+    assert _first(frames, "goal_done") is not None
+
+
+def test_goal_rebudget_revives_limit_reached(chat_client):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 1})
+    frames = _drive_goal(client, cid)
+    assert _first(frames, "goal_done")["status"] == "limit_reached"
+    r = client.post(f"/api/chat/{cid}/goal/budget", json={"turns": 5})
+    assert r.status_code == 200 and r.json()["revived"] is True
+    assert r.json()["goal"]["status"] == "active"
+
+
+def test_goal_budget_partial_and_clear(chat_client):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "for": "30m", "turns": 10})
+    client.post(f"/api/chat/{cid}/goal/pause")
+    r = client.post(f"/api/chat/{cid}/goal/budget", json={"turns": 7})  # 只改轮数、时间不变
+    g = r.json()["goal"]
+    assert g["max_turns"] == 7 and g["time_budget_seconds"] == 1800
+    r = client.post(f"/api/chat/{cid}/goal/budget", json={"clear": True})  # 清上限 → 双 None
+    g = r.json()["goal"]
+    assert g["max_turns"] is None and g["time_budget_seconds"] is None
+    assert client.post(f"/api/chat/{cid}/goal/budget", json={}).status_code == 400  # 空参 → 400
+
+
+def test_goal_flag_parsing(chat_client):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    r = client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "for": "1h30m", "turns": 10})
+    g = r.json()["goal"]
+    assert g["time_budget_seconds"] == 5400 and g["max_turns"] == 10
+    client.post(f"/api/chat/{cid}/goal/pause")
+    client.post(f"/api/chat/{cid}/goal/clear")
+    r = client.post(f"/api/chat/{cid}/goal", json={"objective": "y", "unbounded": True})
+    g = r.json()["goal"]
+    assert g["time_budget_seconds"] is None and g["max_turns"] is None
+    client.post(f"/api/chat/{cid}/goal/pause")
+    client.post(f"/api/chat/{cid}/goal/clear")
+    assert client.post(f"/api/chat/{cid}/goal", json={"objective": "z", "for": "30"}).status_code == 400
+
+
+def test_goal_defaults_applied(chat_client):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    r = client.post(f"/api/chat/{cid}/goal", json={"objective": "x"})  # 省略 flag → 套默认
+    g = r.json()["goal"]
+    assert g["max_turns"] == 25 and g["time_budget_seconds"] == 120 * 60
+
+
+def test_goal_disabled_403(chat_env):
+    kb, _ = chat_env
+    with TestClient(create_app(kb, goal_enabled=False)) as client:
+        cid = _new_conv(client)
+        assert client.post(f"/api/chat/{cid}/goal", json={"objective": "x"}).status_code == 403
+        assert client.post(f"/api/chat/{cid}/goal/run").status_code == 403
+
+
+def test_goal_run_without_active_goal_409(chat_client):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    assert client.post(f"/api/chat/{cid}/goal/run").status_code == 409  # 无目标可驱动
+
+
+def test_goal_persists_sidecar_and_info(chat_client, kb):
+    client, _ = chat_client
+    cid = _new_conv(client)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "persist me", "turns": 3})
+    side = kb / ".agentao" / "goals" / f"{cid}.json"
+    assert side.exists()
+    data = json.loads(side.read_text())
+    assert data["objective"] == "persist me" and data["status"] == "active"
+    info = client.get(f"/api/chat/{cid}/info").json()
+    assert info["goal"]["objective"] == "persist me"
+
+
+def test_goal_two_conversations_isolated(chat_client, kb):
+    client, _ = chat_client
+    cid1 = _new_conv(client)
+    cid2 = _new_conv(client)
+    client.post(f"/api/chat/{cid1}/goal", json={"objective": "one"})
+    client.post(f"/api/chat/{cid2}/goal", json={"objective": "two"})
+    assert json.loads((kb / ".agentao" / "goals" / f"{cid1}.json").read_text())["objective"] == "one"
+    assert json.loads((kb / ".agentao" / "goals" / f"{cid2}.json").read_text())["objective"] == "two"
+    assert client.get(f"/api/chat/{cid1}/info").json()["goal"]["objective"] == "one"
+    assert client.get(f"/api/chat/{cid2}/info").json()["goal"]["objective"] == "two"
+
+
+def test_goal_unknown_conversation_404(chat_client):
+    client, _ = chat_client
+    assert client.post("/api/chat/not-a-uuid/goal", json={"objective": "x"}).status_code == 404
+    assert client.post("/api/chat/not-a-uuid/goal/pause").status_code == 404
+
+
+def test_goal_resume_after_restart_restores_cold(chat_env, kb):
+    """重启/idle 回收后盘上 stranded 目标可恢复（评审 codex P2）：cold_info 出 goal 概要，
+    /goal/resume 懒恢复会话再激活——而非 404。"""
+    kb, _ = chat_env
+    with TestClient(create_app(kb)) as c1:
+        cid = _new_conv(c1)  # 落 session 快照（persist 默认开）
+        c1.post(f"/api/chat/{cid}/goal", json={"objective": "survive restart", "turns": 3})
+        assert c1.post(f"/api/chat/{cid}/goal/pause").json()["paused"] is True
+    # 模拟重启：全新 app/store，会话不在内存
+    with TestClient(create_app(kb)) as c2:
+        info = c2.get(f"/api/chat/{cid}/info").json()  # 冷会话经 sidecar 出 goal 概要
+        assert info["goal"]["objective"] == "survive restart"
+        assert info["goal"]["status"] == "paused"
+        r = c2.post(f"/api/chat/{cid}/goal/resume")  # 须懒恢复会话再 resume，非 404
+        assert r.status_code == 200 and r.json()["active"] is True
+        frames = _drive_goal(c2, cid)  # 恢复后可驱动续跑
+        assert _first(frames, "goal_done") is not None
+
+
+def test_goal_stop_breaks_whole_goal(chat_client):
+    client, captured = chat_client
+    cid = _new_conv(client)
+    agent = captured["agents"][-1]
+    started, release = threading.Event(), threading.Event()
+    agent.action = _block_on_first_goal_turn(started, release)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 5})
+    frames: list = []
+
+    def drive():
+        frames.extend(_drive_goal(client, cid))
+
+    t = threading.Thread(target=drive)
+    t.start()
+    assert started.wait(timeout=3)
+    assert client.post(f"/api/chat/{cid}/stop").json()["stopped"] is True
+    release.set()
+    t.join(timeout=5)
+    assert len([p for e, p in frames if e == "turn_start"]) == 1  # 停后不起第 2 轮
+    assert _first(frames, "goal_done")["status"] == "paused"
+
+
+def test_goal_run_while_busy_409(chat_client):
+    client, captured = chat_client
+    cid = _new_conv(client)
+    agent = captured["agents"][-1]
+    started, release = threading.Event(), threading.Event()
+    agent.action = _block_on_first_goal_turn(started, release)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 3})
+
+    def drive():
+        _drive_goal(client, cid)
+
+    t = threading.Thread(target=drive)
+    t.start()
+    try:
+        assert started.wait(timeout=3)
+        # goal 运行中（_inflight>0）→ 再驱动 / 设目标 → 409（决策P4.16-19）
+        assert client.post(f"/api/chat/{cid}/goal/run").status_code == 409
+        assert client.post(f"/api/chat/{cid}/goal", json={"objective": "y"}).status_code == 409
+    finally:
+        release.set()
+        t.join(timeout=5)
+
+
+def test_goal_combines_with_confirm(chat_env):
+    """goal 内某轮触发 ASK shell → confirm_request；allow 后继续（P4.15 自动组合）。
+
+    测法同 P4.15：**后台线程**流式驱动 goal（内层 confirm_tool 阻塞在 executor 线程等应答），
+    **主线程**轮询 conv.pending 拿 interaction_id 后 POST /confirm 解阻塞（绝不在同一线程的流读
+    中途再发请求——那会死锁，见 §P4.15 注）。"""
+    kb, captured = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid = _new_conv(client)
+        agent = captured["agents"][-1]
+        st = {"n": 0}
+
+        def action(a):
+            st["n"] += 1
+            if st["n"] == 1:  # 第 1 个 goal 轮触发确认
+                a.confirm_results.append(
+                    a.transport.confirm_tool(
+                        "run_shell_command", "rm tmp", {"command": "rm tmp"}
+                    )
+                )
+
+        agent.action = action
+        client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 1})
+
+        frames: dict = {"v": []}
+
+        def drive():
+            frames["v"] = _drive_goal(client, cid)
+
+        th = threading.Thread(target=drive)
+        th.start()
+        try:
+            conv = app.state.conversations.get(cid)
+            env = _wait_pending(conv, kind="confirm", timeout=10)
+            assert env is not None and env["tool"] == "run_shell_command"
+            r = client.post(
+                f"/api/chat/{cid}/confirm",
+                json={"interaction_id": env["interaction_id"], "decision": "allow"},
+            )
+            assert r.status_code == 200
+        finally:
+            th.join(timeout=10)
+        assert _first(frames["v"], "confirm_request") is not None
+        assert _first(frames["v"], "goal_done") is not None
+        assert agent.confirm_results == [True]  # 人点允许 → confirm_tool 回 True
+
+
+# ── 进程级 / 单元层（直接构造，注入 fake clock；不打 LLM）──
+
+
+class _StepClock:
+    """每次调用返回当前值再 +step（决定性时间预算测试用）。"""
+
+    def __init__(self, step: float = 30.0) -> None:
+        self.t = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        v = self.t
+        self.t += self.step
+        return v
+
+
+def test_goal_time_budget_wrap_up_unit(chat_env, kb):
+    from guanlan.web.conversation import Conversation
+
+    conv = Conversation("u-time", kb, None, persist=False, clock=_StepClock(30.0))
+    conv.create_goal("x", time_budget_seconds=50, max_turns=None)
+    frames: list = []
+    asyncio.run(conv.run_goal(lambda k, d: frames.append((k, d))))
+    starts = [p for e, p in frames if e == "turn_start"]
+    assert any(p.get("kind") == "wrap_up" for p in starts)  # 时间轴 trip → 一次 wrap-up
+    done = next(p for e, p in frames if e == "goal_done")
+    assert done["status"] == "limit_reached"
+
+
+def test_goal_disconnect_pauses_unit(chat_env, kb):
+    from guanlan.web.conversation import Conversation
+    from guanlan.web.goal_io import goal_sidecar_path, read_goal
+
+    conv = Conversation("u-disc", kb, None, persist=False)
+    conv.create_goal("x", time_budget_seconds=None, max_turns=5)
+    started, release = threading.Event(), threading.Event()
+    conv.agent.action = _block_on_first_goal_turn(started, release)
+
+    async def scenario():
+        task = asyncio.ensure_future(conv.run_goal(lambda k, d: None))
+        for _ in range(150):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.02)
+        assert started.is_set()
+        task.cancel()  # 模拟客户端断线 → 外层取消
+        await asyncio.sleep(0.05)  # 让 run_goal 进 except CancelledError + 开始 gather
+        release.set()  # 放行 inner turn → gather 完成
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    g = read_goal(goal_sidecar_path(kb, "u-disc"))
+    assert g is not None and g.status_label() == "paused"  # 断线必落 paused（评审 High #2）
+    assert conv.agent.tools.get("update_goal") is None  # 排空后 remove（评审 High）
+
+
+def test_persist_goal_atomic_under_concurrency(chat_env, kb):
+    from guanlan.web.conversation import Conversation
+
+    conv = Conversation("u-persist", kb, None, persist=False)
+    conv.create_goal("x", time_budget_seconds=None, max_turns=10_000)
+    errors: list = []
+
+    def writer():
+        for _ in range(150):
+            try:
+                with conv._goal_lock:
+                    conv._goal.turns_used += 1
+                conv._persist_goal()
+                json.loads(conv._goal_sidecar.read_text())  # 永不见半写/截断
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    threads = [threading.Thread(target=writer) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+    assert not errors
+    assert json.loads(conv._goal_sidecar.read_text())["status"] == "active"
+
+
+def test_has_active_writable_goal_unit(chat_env, kb):
+    from guanlan.web.conversation_store import ConversationStore
+    from guanlan.web.jobs import WriteGate
+
+    store = ConversationStore(
+        kb, None, persist=False, default_mode="workspace-write", write_gate=WriteGate()
+    )
+    a = store.create()
+    b = store.create()
+    assert store.has_active_writable_goal() is False
+    a._in_goal = True  # 模拟 A 在跑可写 goal
+    assert store.has_active_writable_goal() is True
+    assert store.has_active_writable_goal(exclude_id=a.id) is False  # 排除自己（驱动本会话不自拦）
+    a._mode = "read-only"  # 只读 goal 不持写锁、不在此列
+    assert store.has_active_writable_goal() is False
+    assert b.in_goal() is False
+
+
+def test_reserve_goal_run_marks_in_goal_before_drive(chat_env, kb):
+    """预订即刻置 in_goal（评审 codex P2）：进程级可写 goal 互斥在 await 附件读盘期间已生效，
+    不靠 _drive 真正进 run_goal 才置位。"""
+    from guanlan.web.conversation import Conversation
+
+    conv = Conversation("u-reserve", kb, None, persist=False, mode="workspace-write")
+    assert conv.in_goal() is False and conv.is_busy() is False
+    conv.reserve_goal_run()
+    assert conv.in_goal() is True and conv.is_busy() is True  # 预订后即占用
+    conv.release_goal_run()
+    assert conv.in_goal() is False and conv.is_busy() is False  # 回滚后释放
+
+
+def test_goal_budget_no_revive_when_disabled(chat_env, kb):
+    """`--goal off` 下 re-budget **不**复活 limit_reached（评审 codex P2）：否则留下
+    /goal/run·resume 皆 403、clear 又 409 的 stranded active。"""
+    kb, _ = chat_env
+    # 先在 enabled app 跑到 limit_reached（落 sidecar）
+    with TestClient(create_app(kb)) as c1:
+        cid = _new_conv(c1)
+        c1.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 1})
+        frames = _drive_goal(c1, cid)
+        assert _first(frames, "goal_done")["status"] == "limit_reached"
+    # 同库以 --goal off 重开：budget 加预算 → 不复活，仍 limit_reached
+    with TestClient(create_app(kb, goal_enabled=False)) as c2:
+        r = c2.post(f"/api/chat/{cid}/goal/budget", json={"turns": 5})
+        assert r.status_code == 200
+        assert r.json()["revived"] is False
+        assert r.json()["goal"]["status"] == "limit_reached"  # 未被复活成 active
+
+
+def test_goal_unbounded_with_caps_rejected(chat_client):
+    """--unbounded 与 --for/--turns 同用 → 400（不静默丢弃上限，评审 #14）。"""
+    client, _ = chat_client
+    cid = _new_conv(client)
+    assert client.post(
+        f"/api/chat/{cid}/goal", json={"objective": "x", "unbounded": True, "for": "30m"}
+    ).status_code == 400
+    assert client.post(
+        f"/api/chat/{cid}/goal", json={"objective": "x", "unbounded": True, "turns": 5}
+    ).status_code == 400
+
+
+def test_goal_budget_conflicting_flags_rejected(chat_client):
+    """/goal budget：--clear/--unbounded 与显式 --for/--turns 同用 → 400（不静默丢弃上限，
+    codex 评审 P2）。镜像设目标的 test_goal_unbounded_with_caps_rejected。"""
+    client, _ = chat_client
+    cid = _new_conv(client)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "for": "30m", "turns": 10})
+    client.post(f"/api/chat/{cid}/goal/pause")
+    for body in (
+        {"unbounded": True, "for": "30m"},
+        {"unbounded": True, "turns": 5},
+        {"clear": True, "turns": 5},
+        {"clear": True, "for": "30m"},
+    ):
+        assert (
+            client.post(f"/api/chat/{cid}/goal/budget", json=body).status_code == 400
+        ), body
+    # 上限未被这些被拒请求改动（仍是设目标时的 30m / 10 轮）
+    g = client.post(f"/api/chat/{cid}/goal/budget", json={"turns": 7}).json()["goal"]
+    assert g["time_budget_seconds"] == 1800 and g["max_turns"] == 7
+
+
+def test_goal_counts_time_on_interrupt_unit(chat_env, kb):
+    """被中断（断线）轮的真实墙钟仍计入 time_used_seconds（评审 #4：否则反复 stop/resume 让 --for 永不 trip）。"""
+    from guanlan.web.conversation import Conversation
+    from guanlan.web.goal_io import goal_sidecar_path, read_goal
+
+    conv = Conversation("u-time-int", kb, None, persist=False, clock=_StepClock(40.0))
+    conv.create_goal("x", time_budget_seconds=None, max_turns=5)
+    started, release = threading.Event(), threading.Event()
+    conv.agent.action = _block_on_first_goal_turn(started, release)
+
+    async def scenario():
+        task = asyncio.ensure_future(conv.run_goal(lambda k, d: None))
+        for _ in range(150):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.02)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    g = read_goal(goal_sidecar_path(kb, "u-time-int"))
+    assert g is not None and g.status_label() == "paused"
+    assert g.time_used_seconds > 0  # 中断轮墙钟已计入
+
+
+def test_goal_clear_orphan_sidecar(chat_client, kb):
+    """孤儿 goal sidecar（无 session 快照、不可恢复）可经 /goal/clear 删除（评审 #5）。"""
+    import uuid as _uuid
+
+    from agentao.cli.goal_state import GoalState
+
+    from guanlan.web.goal_io import goal_sidecar_path, write_goal_atomic
+
+    client, _ = chat_client
+    cid = str(_uuid.uuid4())  # 规范 UUID，但无对应 live/盘上会话
+    side = goal_sidecar_path(kb, cid)
+    write_goal_atomic(side, GoalState(objective="orphan").to_dict())
+    assert side.exists()
+    r = client.post(f"/api/chat/{cid}/goal/clear")
+    assert r.status_code == 200 and r.json()["cleared"] is True
+    assert not side.exists()
+    assert client.post(f"/api/chat/{cid}/goal/clear").status_code == 404  # 已无 → 404
+
+
+def test_chat_rejected_during_goal_run(chat_client):
+    """goal 续跑中，同会话普通 /api/chat → 409（不与 goal 内层轮交错，评审 #12）。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+    agent = captured["agents"][-1]
+    started, release = threading.Event(), threading.Event()
+    agent.action = _block_on_first_goal_turn(started, release)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 3})
+
+    def drive():
+        _drive_goal(client, cid)
+
+    t = threading.Thread(target=drive)
+    t.start()
+    try:
+        assert started.wait(timeout=3)
+        assert client.post(
+            "/api/chat", json={"message": "hi", "conversation_id": cid}
+        ).status_code == 409
+    finally:
+        release.set()
+        t.join(timeout=5)
+
+
+def test_goal_budget_no_revive_while_in_goal(chat_env, kb):
+    """目标正被驱动（in_goal，如 wrap-up 在飞）时 re-budget **不**复活（评审 #6）。"""
+    kb, _ = chat_env
+    app = create_app(kb)
+    with TestClient(app) as client:
+        cid = _new_conv(client)
+        client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 1})
+        _drive_goal(client, cid)  # → limit_reached
+        conv = app.state.conversations.get(cid)
+        conv._in_goal = True  # 模拟在飞驱动
+        try:
+            r = client.post(f"/api/chat/{cid}/goal/budget", json={"turns": 5})
+            assert r.json()["revived"] is False
+            assert r.json()["goal"]["status"] == "limit_reached"
+        finally:
+            conv._in_goal = False
+
+
+def test_goal_budget_no_revive_when_other_writable_goal(chat_env, kb):
+    """另一会话在跑可写 goal 时，re-budget 复活会 423 → 故**不**复活、留 limit_reached（评审 #8）。"""
+    kb, _ = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid_a = _new_conv(client)
+        client.post(f"/api/chat/{cid_a}/goal", json={"objective": "a", "turns": 1})
+        _drive_goal(client, cid_a)  # A → limit_reached（已非 in_goal）
+        cid_b = _new_conv(client)
+        conv_b = app.state.conversations.get(cid_b)
+        conv_b._in_goal = True  # B 跑可写 goal
+        try:
+            r = client.post(f"/api/chat/{cid_a}/goal/budget", json={"turns": 5})
+            assert r.json()["revived"] is False
+            assert r.json()["goal"]["status"] == "limit_reached"
+        finally:
+            conv_b._in_goal = False
+
+
+def test_goal_sidecar_deleted_with_conversation(chat_client, kb):
+    """删会话连带删 goal sidecar（评审）：goal 在 .agentao/goals/、不在 sessions/，delete_session
+    不覆盖——若不连带删则目标/状态长留盘上。"""
+    client, _ = chat_client
+    cid = _new_conv(client)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "del me"})
+    side = kb / ".agentao" / "goals" / f"{cid}.json"
+    assert side.exists()
+    r = client.delete(f"/api/conversations/{cid}")
+    assert r.status_code == 200
+    assert not side.exists()  # 连带删除
+
+
+def test_goal_resume_blocked_by_other_writable_goal(chat_env, kb):
+    """另一会话在跑可写 goal 时 /goal/resume 本会话可写目标 → **423**（先拒，不先 resume 成 active
+    再让 /goal/run 423 留下 stranded active，评审 pass 6）。"""
+    kb, _ = chat_env
+    app = create_app(kb, mode="workspace-write")
+    with TestClient(app) as client:
+        cid_a = _new_conv(client)
+        client.post(f"/api/chat/{cid_a}/goal", json={"objective": "a", "turns": 2})
+        assert client.post(f"/api/chat/{cid_a}/goal/pause").json()["paused"] is True
+        cid_b = _new_conv(client)
+        conv_b = app.state.conversations.get(cid_b)
+        conv_b._in_goal = True  # B 跑可写 goal
+        try:
+            assert client.post(f"/api/chat/{cid_a}/goal/resume").status_code == 423
+            # A 未被 resume 成 active（仍 paused、无 stranded）
+            assert (
+                client.get(f"/api/chat/{cid_a}/info").json()["goal"]["status"] == "paused"
+            )
+        finally:
+            conv_b._in_goal = False
+
+
+def test_persist_goal_skips_after_discard_unit(chat_env, kb):
+    """删会话后迟到的 _persist_goal 不 resurrect sidecar（评审 pass7）。"""
+    from guanlan.web.conversation import Conversation
+
+    conv = Conversation("u-discard", kb, None, persist=False)
+    conv.create_goal("x", time_budget_seconds=None, max_turns=5)
+    side = conv._goal_sidecar
+    assert side.exists()
+    conv.discard_goal_sidecar()  # 模拟删会话（持 _goal_io_lock + 置 _goal_deleted）
+    assert not side.exists()
+    conv._persist_goal()  # goal 循环轮间迟到的 persist
+    assert not side.exists()  # 不 resurrect
+
+
+def test_delete_during_goal_run_no_resurrect(chat_client, kb):
+    """goal 第一轮阻塞中删会话 → goal 循环停、sidecar 不被 resurrect（评审 pass7 P1）。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+    agent = captured["agents"][-1]
+    started, release = threading.Event(), threading.Event()
+    agent.action = _block_on_first_goal_turn(started, release)
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 3})
+    side = kb / ".agentao" / "goals" / f"{cid}.json"
+    assert side.exists()
+
+    def drive():
+        _drive_goal(client, cid)
+
+    t = threading.Thread(target=drive)
+    t.start()
+    try:
+        assert started.wait(timeout=3)
+        assert client.delete(f"/api/conversations/{cid}").status_code == 200
+    finally:
+        release.set()
+        t.join(timeout=5)
+    assert not side.exists()  # goal 循环未 resurrect 已删 sidecar

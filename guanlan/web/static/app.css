@@ -546,3 +546,22 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 
 .muted { color: var(--lan-ink-soft); font-size: .85rem; }
 .hidden { display: none; }
+
+/* P4.16 长任务目标续跑（/goal）：对话流里的目标横幅 + 每内层轮的轮次标签 */
+.goal-banner {
+  align-self: stretch; margin: .5rem 0 .2rem; padding: .5rem .7rem;
+  border: 1px solid var(--lan-ripple); border-left: 3px solid var(--lan-ripple);
+  border-radius: 8px; background: var(--lan-foam);
+}
+.goal-banner.running { border-left-color: #e0a800; }
+.goal-banner.done.goal-complete { border-left-color: #2e7d32; }
+.goal-banner.done.goal-blocked { border-left-color: #e0a800; }
+.goal-banner.done.goal-paused { border-left-color: var(--lan-ink-soft); }
+.goal-banner.done.goal-limit_reached { border-left-color: #c0671c; }
+.goal-banner-title { font-weight: 600; color: var(--lan-deep); font-size: .78rem; }
+.goal-banner-obj { color: var(--lan-ink); font-size: .86rem; margin: .15rem 0; word-break: break-word; }
+.goal-banner-meta { color: var(--lan-ink-soft); font-size: .74rem; }
+.goal-turn-label {
+  align-self: flex-start; color: var(--lan-ink-soft); font-size: .72rem;
+  margin: .35rem 0 -.1rem; padding-left: .15rem; font-weight: 600;
+}
