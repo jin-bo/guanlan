@@ -5,6 +5,72 @@
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-06-24
+
+### 新增
+
+- **Web 自省斜杠命令无会话时自动开空活会话（P4.4 UX）** —— `/tools`·`/skills`·`/context`·`/goal 设目标`·
+  `/mode <值>` 在**无活动会话**时不再回「需要活动会话：先提一个问题以开启会话」的死提示，而是先经新端点
+  `POST /api/conversations` 开一个 **warm 空会话**并**采纳为当前会话**（写 `?c=`、刷新可经内存命中续），
+  再正常渲染。建会话**零 LLM、零盘写**（agent 构造期注册工具 / 激活 skill，`_save` 仅成功轮后落盘）——
+  故空会话只在内存、未进盘上枚举，用户随后第一条真问题进同一会话、不二次新建；满则同 chat 转 503。这是
+  早期「纯自省不值当建 agent」（决策P4.4-7）的 UX 反转，仅作用于「完全无会话」一路；**冷会话**（盘上有
+  历史未载入）维持「续聊一轮以恢复」、不自动重恢复。新端点**不**取 write_lock / 不跑 turn，故无须层③
+  writable-active 拒。
+  - **reader 部署不暴露此端点 / 不自动开会话**（决策P4.9-2）：匿名多用户下一个零-LLM、可循环调用的建会话
+    端点会让攻击者廉价占满 `MAX_CONVERSATIONS` 顶掉真实读者，且 reader 开 idle 回收、未落盘空会话被回收后
+    `?c=` 续聊会 404——故 `POST /api/conversations` 套 `_writer_only`（reader 不注册）、前端
+    `ensureActiveConversation` 亦有 reader 闸；reader 读者仍可经 `POST /api/chat`（首条消息）隐式建会话，
+    各斜杠命令在 reader 下回退到原 `goal.needSession`/`slash.modeNoSession`/`slash.needSession` 提示（这三键
+    由此复用、不成死键）。`/goal` 仅「设新目标」开会话；show/pause/resume/clear/edit/budget 是对既有目标的
+    操作、无会话即无目标 → 直接提示、不空建 agent。`ensureActiveConversation` 并发合一（杜绝双建孤儿）、
+    `res.json()` 纳入 try（损坏响应体不抛未捕获 reject）。
+  - 新增三条 i18n 键 `slash.openFail{,Http}` / `slash.openFull`（中英平价）；测试见 `tests/test_web.py`。
+
+- **Web 长任务目标与自动续跑 `/goal`（P4.16）** —— 在浏览器对话框设一个长任务目标，由**宿主拥有**的
+  `while goal.is_active` 外层循环反复驱动 `Conversation.turn()`，每轮注入续跑 prompt、host 侧记时间/轮数
+  预算、撞预算跑恰好一次收尾轮；agent 仅经注入的 `update_goal` 工具自报 `complete`/`blocked`，用户经
+  `/goal [<目标>|show|pause|resume|edit|budget|clear]` 控制（见 [`docs/P4.16-Web目标续跑.md`](docs/P4.16-Web目标续跑.md)）。
+  **最大化复用 agentao 已落地原语**——`cli.goal_state.GoalState` / `cli.duration.parse_duration` /
+  `tools.goal.UpdateGoalTool`（故依赖上提至 `agentao[cli]>=0.4.13`），guanlan 只建 Web 编排层：
+  per-conversation `.agentao/goals/<id>.json` sidecar（`os.replace` 原子写）、async `run_goal` 续跑循环
+  （每内层轮 `ensure_future + asyncio.shield`、`_goal_lock` + `_GoalProxy` 串行 GoalState 读写、`_goal_io_lock`
+  串行落盘）、`POST /api/chat/{id}/goal{,/budget,/pause,/resume,/edit,/clear,/run}` 端点（`/run` 走 SSE 续跑流：
+  `goal_start`/`turn_start`/`turn_done`/`goal_done` 轮边界帧 + 每内层轮独立气泡 + goal 横幅）、前端
+  `/goal` 斜杠支线、`guanlan web --goal {on,off}` 开关（reader 部署强制关）。
+  - **不放宽任何边界**：goal 每内层可写轮照走 P4.5 层①②③ + 写后 check + 撤销 + 单写者写锁（逐轮取放、
+    绝不跨整个 goal 持锁）；与 P4.15 confirm/ask 人在环**完全复用、自动组合**；**进程内至多一个活跃可写
+    goal**（set/budget/resume/run 一致互斥）；停止断**整个** goal、断线收为 `paused`、重启盘上 active 显示
+    为「可恢复」不自动续。`--turns`（外层续跑轮数）与 `max_iterations`（单轮内层工具循环）正交、不混淆；
+    不走 `force_continue`、零 agentao 内核改动。
+  - **并发/取消硬化**（设计三轮评审 + 实现后 xhigh 工作流 + 多轮 codex 评审收敛至零 finding）：`_in_goal`/
+    预订经 `try/finally` + task done-callback 零泄漏（杜绝「进程级写端点永久 423」）、被中断轮墙钟计入
+    （`--for` 不被反复 stop/resume 架空）、删会话与 goal 循环经 `_goal_deleted` + `_goal_io_lock` 串行（不
+    resurrect 已删 sidecar）+ 删会话连带删 sidecar、冷会话 goal 端点懒恢复、孤儿 sidecar 可清。测试在
+    `tests/test_web.py`（goal 套件，注入消息驱动 fake agent、不打真实 LLM）。
+  - **流式中拦下撕毁在飞流的生命周期斜杠命令**（评审 #1）：为让 `/goal pause·show·budget` 在 goal 续跑
+    （`chatStreaming=true`）期可输入，`submitChat` 把斜杠分发提到 `chatStreaming` 守卫之前——但这也放行了
+    `/new`·`/clear`·`/mode <值>`，它们会清屏 + 置 `conversationId=null`（`/clear` 还 DELETE 这一在飞会话）、
+    或在 turn 中途翻姿态，把正在流式的这轮/这个 goal 撕成「半清屏半流式」错乱态。改为在 `handleSlash`
+    按 `chatStreaming` **单独拦下这三条生命周期命令**（落 `slash.busyLifecycle` 提示、要求先停止），只读
+    自省（/help·/status·/context·/skills·/tools·/mode 无参）与 goal 控制仍放行——危险副作用兜在命令层、
+    不粗暴全拦（那会误杀 /goal pause）。新增 i18n 键 `slash.busyLifecycle`（中英平价）。
+  - **SSE 帧解析归口单一实现**（评审 #11）：P4.16 的 goal 续跑流另抄了一份与 `handleSSE` 字节相同的帧解析
+    循环（`event:`/`data:` 前缀剥离 + 多行 data 拼接 + `JSON.parse` 容错），两份须人手保持同步、改一处忘
+    另一处会让 goal 流静默错帧。改为 `handleSSE` 也走唯一的 `parseSSE`、随后只管分发渲染——解析规则只动
+    一处、两条流自动一致；纯重构、行为零变化。
+  - **`/goal budget` 拒绝冲突的清/设上限组合**（codex 评审 P2）：`--clear`/`--unbounded`（清上限）与显式
+    `--for`/`--turns`（给上限）同用时，旧实现径取 `(None, None)` **静默丢弃后者**，留下「以为设了上限其实
+    无上限」的假象（前端 `/goal budget --unbounded --turns 5` 即可触发）。改为先校验冲突 → 400，对齐设目标
+    `_resolve_goal_budget` 既有的 #14 同款校验，让用户二选一。
+  - **真浏览器端到端冒烟 `scripts/smoke_p416.py`**（承 P4.13/P4.14/P4.15 同骨架）：`test_web.py` 的 ASGI
+    `TestClient` 验后端 + SSE 帧，但验不了 goal 横幅/每内层轮独立气泡的真渲染、`/goal` 斜杠支线、以及
+    「自省/设目标命令无会话时自动开空活会话」这条纯前端路径。脚本起真 socket Web 宿主 + 目标驱动的
+    fake agent（objective 嵌 `[complete@N]`/`[slow]` 标记位驱动提前 complete / 慢流），Playwright headless
+    Chromium 端到端验五景：设目标自动开会话 + 续跑 + 提前 complete、撞轮数预算 + wrap-up 收尾轮、续跑中途
+    `/goal pause` 打断在飞轮、`/goal show` 无会话不自动开会话、`/tools` 无会话自动开会话。不入 pytest（需
+    浏览器 + 真 socket）；`uv run --extra web python scripts/smoke_p416.py`，5/5 通过。
+
 ## [0.1.15] - 2026-06-19
 
 ### 优化

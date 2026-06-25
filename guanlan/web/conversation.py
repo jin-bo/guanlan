@@ -18,9 +18,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 import anyio
-from agentao.cancellation import CancellationToken
+from agentao.cancellation import AgentCancelledError, CancellationToken
+from agentao.cli.goal_state import GoalState, GoalStatus, budget_summary
 from agentao.embedding.compat import build_compat_transport
 from agentao.permissions import PermissionMode
+from agentao.tools.goal import UpdateGoalTool
 
 from ..gate import REPAIR_PROMPT, _render_violations
 from ..search import CorpusCache
@@ -35,6 +37,12 @@ from .chat_support import (
     _violation_key,
     make_guanlan_search_tool,
 )
+from .goal_io import (
+    clear_goal_sidecar,
+    goal_sidecar_path,
+    read_goal,
+    write_goal_atomic,
+)
 from .jobs import WriteGate
 from .policy_fs import (
     AgentaoSnapshot,
@@ -43,6 +51,72 @@ from .policy_fs import (
     restore_path,
     snapshot_agentao,
 )
+
+
+# ── P4.16 长任务目标续跑（见 docs/P4.16-Web目标续跑.md）──────────────────────────
+#
+# 续跑/收尾 prompt **镜像** agentao `input_loop._continuation_prompt`/`_wrap_up_prompt`
+# （私有不可 import）+ 加 wiki 语境。两者**只吃 objective 串**（=循环在 `_goal_lock` 内快照出
+# 的那份，§4），不接 `g` 对象——杜绝在锁外读 GoalState（评审 Medium #1，§4.1）。
+
+
+class GoalActiveError(RuntimeError):
+    """活动期对 goal 做了须先 pause 的操作（设新 / clear / 替换）。端点转 409（决策P4.16-15/19）。"""
+
+
+def _continuation_prompt(objective: str) -> str:
+    return (
+        "Continue working toward this goal:\n\n"
+        f"<goal>\n{objective}\n</goal>\n\n"
+        "Keep making concrete progress. When the objective is fully achieved, call "
+        "the update_goal tool with status='complete'. If you are genuinely blocked "
+        "and cannot proceed without the user (missing credentials, an ambiguous "
+        "decision that is the user's to make), call update_goal with status='blocked' "
+        "and explain what you need. Otherwise keep going — do not stop merely to ask "
+        "whether to continue.\n\n"
+        "观澜语境：优先用 guanlan_search 召回已有页面、维护 [[wikilink]] 交叉链接、"
+        "遵 `## ⚠️ 矛盾与存疑` 约定标注存疑。"
+    )
+
+
+def _wrap_up_prompt(objective: str) -> str:
+    return (
+        "You have reached this goal's time/turn budget. Do not start new substantive "
+        "work. Summarize the progress made toward this goal, list the remaining work "
+        "or blockers, and give the user a clear next step.\n\n"
+        f"<goal>\n{objective}\n</goal>"
+    )
+
+
+class _GoalProxy:
+    """喂给 `UpdateGoalTool` 的 lock-aware 代理（§3.1，评审 Medium #4）。
+
+    工具 duck-type 只调 `is_active`/`mark_complete`/`mark_blocked`/`status_label` 四个面——这里把
+    每个面都裹进 `_goal_lock`，使 **agent**（executor 线程、arun 期）经工具改 GoalState 与
+    **端点/循环**（loop 线程）对同一对象的读写**同锁串行**。否则把裸 `GoalState` 传给工具，
+    `_goal_lock` 只串行了端点与循环、没串行 agent 的写，锁形同虚设。
+    """
+
+    def __init__(self, goal: GoalState, lock: threading.Lock) -> None:
+        self._g = goal
+        self._lock = lock
+
+    @property
+    def is_active(self) -> bool:
+        with self._lock:
+            return self._g.is_active
+
+    def mark_complete(self) -> bool:
+        with self._lock:
+            return self._g.mark_complete()
+
+    def mark_blocked(self) -> bool:
+        with self._lock:
+            return self._g.mark_blocked()
+
+    def status_label(self) -> str:
+        with self._lock:
+            return self._g.status_label()
 
 
 class Conversation:
@@ -111,6 +185,23 @@ class Conversation:
         self._confirm_timeout = confirm_timeout
         self._pending: dict[str, dict] = {}
         self._pending_lock = threading.Lock()
+
+        # P4.16（见 docs/P4.16-Web目标续跑.md）：长任务目标与自动续跑。`_goal` 挂当前会话的
+        # GoalState（复用 agentao 状态机，None=无目标）。**两把锁分工**——`_goal_lock` 串行 GoalState
+        # 的一切内存读写（run_goal 循环 / `/goal*` 端点 / UpdateGoalTool 代理回调，§3 并发模型），
+        # `_goal_io_lock` 串行 sidecar 文件写盘（§10 不变量⑩，杜绝两线程并发写同一文件 + 陈旧覆盖）。
+        # executor 线程（工具）与 loop 线程（端点/循环）真并发，故二锁皆正确性所必需。锁序固定
+        # `_goal_io_lock → _goal_lock`（仅 `_persist_goal` 碰 IO 锁，其余只碰 `_goal_lock`，无反序→无死锁）。
+        # `_in_goal` 标记 run_goal 是否正在驱动本会话（含 wrap-up 轮）——纯 loop-thread 读写、无锁
+        # （单事件循环），供断线处理 + 进程级可写 goal 互斥（§5.3/§6）。sidecar **per-conversation**
+        # （不用 agentao 单文件），构造期 reload：新建无文件得 None、懒恢复则捡回盘上目标（§10）。
+        self._goal_lock = threading.Lock()
+        self._goal_io_lock = threading.Lock()
+        self._goal_sidecar = goal_sidecar_path(kb, cid)
+        self._goal: GoalState | None = read_goal(self._goal_sidecar)
+        self._in_goal = False
+        # 会话被删后钉死，防 goal 循环轮间迟到的 _persist_goal resurrect 已删 sidecar（评审 pass7）。
+        self._goal_deleted = False
 
         chat.ensure_skill_available(kb)  # 嵌入式同样需保证 skill 可发现（坑②前置）
 
@@ -671,6 +762,342 @@ class Conversation:
             return True
         return False
 
+    # ── P4.16 长任务目标续跑（docs/P4.16-Web目标续跑.md §2/§4/§8/§10）────────────────
+
+    def _persist_goal(self) -> None:
+        """把当前 GoalState 落 per-conversation sidecar（§10 不变量⑩）。
+
+        被 **loop 线程**（`run_goal`/端点）与 **executor 线程**（`UpdateGoalTool.on_change`）**双路**
+        调用，调用方一律**不**持 `_goal_lock`/`_goal_io_lock`。三重纪律：① `_goal_io_lock` 串行整个
+        「快照→写盘」（杜绝并发写同一文件，且写序==快照序、无陈旧覆盖）；② 锁内 `to_dict()` 快照后
+        即释 `_goal_lock`，**绝不**持它跨 IO；③ 临时文件 `os.replace` 原子替换（reader 永不见半写
+        文件）。落盘失败仅记日志、不毁本轮（同 agentao `save_goal` 容错 + §4.4 降级精神）。
+        """
+        with self._goal_io_lock:
+            # 会话已删（`discard_goal_sidecar` 在同一 `_goal_io_lock` 内置 `_goal_deleted` + 删文件）→
+            # 绝不重建 sidecar（评审 pass7：goal 循环轮间若与删会话竞态，迟到的 persist 会 resurrect
+            # 已删的 goal 数据）。二者经 `_goal_io_lock` 串行，故无 TOCTOU。
+            if self._goal_deleted:
+                return
+            with self._goal_lock:
+                if self._goal is None:
+                    return
+                data = self._goal.to_dict()
+            try:
+                write_goal_atomic(self._goal_sidecar, data)
+            except OSError:
+                _logger.warning("会话 %s goal 落盘失败", self.id, exc_info=True)
+
+    def discard_goal_sidecar(self) -> None:
+        """删会话时清本会话 goal sidecar 并钉死「已删」（评审 pass7）。经 `_goal_io_lock` 与
+        `_persist_goal` 串行——删后任何迟到的 `_persist_goal`（goal 循环轮间）见 `_goal_deleted` 即
+        跳过，绝不 resurrect。由 `ConversationStore.delete` 调（live 会话有正在跑的 goal 循环时尤需）。"""
+        with self._goal_io_lock:
+            self._goal_deleted = True
+            clear_goal_sidecar(self._goal_sidecar)
+
+    def in_goal(self) -> bool:
+        """`run_goal` 是否正在驱动本会话（含 wrap-up 轮）。纯 loop-thread 读、无锁（单事件循环）。
+
+        供断线处理（§5.3：goal 运行期断线即 `request_stop`）与进程级可写 goal 互斥（§6）。
+        """
+        return self._in_goal
+
+    def _pause_active_goal(self) -> None:
+        """轮间中断/异常时收为 paused 并落盘（§4 不变量⑤/⑥）：active → pause，再 `_persist_goal`
+        （自取锁、不在 `_goal_lock` 内做 IO）。供 `run_goal` 的 render-await cancel 与轮内异常分支复用。"""
+        with self._goal_lock:
+            if self._goal is not None and self._goal.is_active:
+                self._goal.pause()
+        self._persist_goal()
+
+    def is_busy(self) -> bool:
+        """是否有在飞轮（普通 turn 或 goal 驱动）。供 `/goal*` 驱动端点的 in-flight 409 守卫
+        （决策P4.16-19）。loop-thread 读。"""
+        return self._inflight > 0
+
+    def reserve_goal_run(self) -> None:
+        """端点驱动 `/goal/run` 前的**原子预订**（loop 线程，评审 codex P2）：`begin_turn()` **并**
+        立刻置 `_in_goal=True`——使进程级 `has_active_writable_goal` 在 `_drive` 真正进 `run_goal`
+        **之前**（含 `await` 附件读盘那段窗口）即见本会话占用，杜绝并发可写 goal 抢同一窗口起第二个。
+        与 is_busy 检查之间须无 await（端点已保证）。"""
+        self.begin_turn()
+        self._in_goal = True
+
+    def release_goal_run(self) -> None:
+        """预订后、起流前失败（如附件读盘抛错）→ 回滚预订（清 `_in_goal` + `end_turn`）。"""
+        self._in_goal = False
+        self.end_turn()
+
+    def goal_is_active(self) -> bool:
+        """当前是否有 active 目标（持 `_goal_lock` 瞬读）。"""
+        with self._goal_lock:
+            return self._goal is not None and self._goal.is_active
+
+    def goal_snapshot(self) -> dict | None:
+        """当前 GoalState 的 `to_dict()` 快照（持 `_goal_lock`），无目标 → None。喂 `info()`/帧。"""
+        with self._goal_lock:
+            return self._goal.to_dict() if self._goal is not None else None
+
+    def create_goal(
+        self,
+        objective: str,
+        *,
+        time_budget_seconds: int | None,
+        max_turns: int | None,
+    ) -> GoalState:
+        """设新目标（user 面，§2 表）。**active 目标存在 → `GoalActiveError`**（端点转 409，先
+        `/goal pause`；决策P4.16-15）：活动期 `self._goal` 不换/删，使 `run_goal` 的 `g` 不悬挂。
+        paused/终态目标可直接替换。返回新 GoalState（端点据 `goal_snapshot` 出帧）。"""
+        with self._goal_lock:
+            if self._goal is not None and self._goal.is_active:
+                raise GoalActiveError("已有活跃目标，请先 /goal pause 再设新目标")
+            self._goal = GoalState(
+                objective=objective,
+                time_budget_seconds=time_budget_seconds,
+                max_turns=max_turns,
+            )
+            goal = self._goal
+        self._persist_goal()
+        return goal
+
+    def pause_goal(self) -> bool:
+        """暂停目标（user 面）。锁内 `g.pause()` **+** `request_stop()` 即时打断在飞轮（§8.2，
+        决策P4.16-15）：在飞轮被 trip → `run_goal` except 见 `is_active` 已 False → 不重复 pause、
+        直接 break；轮间 pause 则下一轮顶部 `if not g.is_active: break` 拦下。返回是否成功暂停。"""
+        with self._goal_lock:
+            ok = self._goal is not None and self._goal.pause()
+        if ok:
+            self._persist_goal()
+            self.request_stop()  # 即时打断在飞内层轮（线程安全、幂等）
+        return ok
+
+    def resume_goal(self) -> bool:
+        """恢复 paused/blocked 目标 → active（user 面）；**stranded active**（重启后盘上 active、
+        实未被驱动）直接驱动（对齐 agentao `_resume_goal`）。返回是否应驱动续跑（端点据此走 SSE）。"""
+        with self._goal_lock:
+            if self._goal is None:
+                return False
+            drive = self._goal.is_active or self._goal.resume()  # active 原样驱动；paused/blocked→active
+        if drive:
+            self._persist_goal()
+        return drive
+
+    def edit_goal(self, objective: str) -> bool:
+        """改 objective（保 status + 上限，user 面）。active 期也允许（只改文字、不换对象，下一轮
+        `run_goal` 在锁内快照即生效）。返回是否有目标可改。"""
+        with self._goal_lock:
+            if self._goal is None:
+                return False
+            self._goal.objective = objective
+            self._goal._touch()
+        self._persist_goal()
+        return True
+
+    def clear_goal(self) -> bool:
+        """删目标（user 面）。**active → `GoalActiveError`**（端点转 409，先 pause；决策P4.16-15）。
+        非活动则删内存 + sidecar，回普通单轮会话。返回是否清除（False=本无目标）。"""
+        with self._goal_lock:
+            if self._goal is None:
+                return False
+            if self._goal.is_active:
+                raise GoalActiveError("目标进行中，请先 /goal pause 再 clear")
+            self._goal = None
+        with self._goal_io_lock:
+            clear_goal_sidecar(self._goal_sidecar)
+        return True
+
+    def set_budget(
+        self,
+        *,
+        time_budget_seconds: int | None = None,
+        max_turns: int | None = None,
+        unbounded: bool = False,
+        clear: bool = False,
+        allow_reactivate: bool = True,
+    ) -> tuple[bool, str] | None:
+        """改/清 live 目标上限（user 面）。镜像 agentao `_set_budget`/`_post_budget`：limit_reached
+        且新上限有余量 → `reactivate_from_limit`（返回 `revived=True`，端点据此驱动续跑）。返回
+        `(revived, summary)`；无目标 → None（端点转 404）。
+
+        `allow_reactivate=False`（端点在 `--goal off`/只读部署下传，评审 codex P2）时**只改上限、不
+        复活**——否则 disabled 部署会把 limit_reached 复活成 active，而 `/goal/run`·`/goal/resume`
+        皆 403、`/goal/clear` 又因 active 409，留下无法收拾的 stranded active 目标。"""
+        with self._goal_lock:
+            g = self._goal
+            if g is None:
+                return None
+            if clear or unbounded:
+                g.time_budget_seconds = None
+                g.max_turns = None
+            else:
+                if time_budget_seconds is not None:
+                    g.time_budget_seconds = time_budget_seconds
+                if max_turns is not None:
+                    g.max_turns = max_turns
+            revived = False
+            if (
+                allow_reactivate
+                and g.status is GoalStatus.LIMIT_REACHED
+                and not g.budget_tripped()
+            ):
+                revived = g.reactivate_from_limit()
+            else:
+                g._touch()
+            summary = budget_summary(g)
+        self._persist_goal()
+        return revived, summary
+
+    def _snapshot_prior_update_goal(self):
+        """快照已注册的同名 `update_goal` 工具（若 host 自带），供 finally 还原而非永久摘除（镜像
+        agentao `run_goal_continuation`）。guanlan 现不自带，故一般为 None。"""
+        registry = getattr(self.agent, "tools", None)
+        if registry is None:
+            return None
+        tools = getattr(registry, "tools", None)
+        if isinstance(tools, dict):
+            return tools.get("update_goal")
+        try:  # 兜底：扫 list_tools 按名
+            return next(
+                (t for t in registry.list_tools() if getattr(t, "name", None) == "update_goal"),
+                None,
+            )
+        except Exception:  # noqa: BLE001 — 自省失败当无 prior
+            return None
+
+    def _restore_or_remove_update_goal(self, prior) -> None:
+        """loop 作用域工具收尾（§3）：有 prior 则还原、否则 `remove_tool`。**调用方须保证无 in-flight
+        轮**（评审 High：工具仅两轮间增删、执行按 live 注册表解析）——`run_goal` finally 已先排空。
+        会话被删（close 后注册表可能已废）时 best-effort 吞错——清理失败不连累收尾（评审 pass7）。"""
+        try:
+            if prior is not None:
+                self.agent.add_tool(prior, replace=True)
+            else:
+                self.agent.remove_tool("update_goal")
+        except Exception:  # noqa: BLE001 — closed agent / 注册表已废：清理 best-effort
+            pass
+
+    async def run_goal(
+        self,
+        emit: Emit,
+        *,
+        first_images: list[dict[str, str]] | None = None,
+        render: "Callable[[str], object] | None" = None,
+    ) -> None:
+        """host-owned 续跑循环（§4，镜像 agentao `run_goal_continuation`）。
+
+        **复用现有 `turn()` 跑每内层轮**（锁 / 写门禁 / P4.15 确认 / 落盘全继承），且每内层轮照搬
+        `_run_turn` 的 `ensure_future + asyncio.shield` 不变量（评审 High #1/#2）。注入 `UpdateGoalTool`
+        （loop 作用域，§3）让 agent 自报 complete/blocked。预算**轮前**检、撞顶产**恰好一次** wrap-up
+        （wrap-up 只计时间不计轮数，对齐 agentao）。中断（停止/断线）/轮内异常 → `pause()` 再传播。
+
+        `first_images` 仅**首轮**（`turns_used==0`、非 wrap-up）带（决策P4.16-18）；「成功才消费」靠
+        `turns_used`（首轮成功 0→1，下轮 None；被中断则仍 0，由 `/goal resume` 重附——前端**同会话
+        best-effort** 据 `info.goal.turns_used==0` 重附，页面刷新后丢失，v1）。`render`（可选）
+        把每轮答案渲成安全 HTML 进 `turn_done`（复用宿主 `render_markdown`，零流式改造）。
+        """
+        g = self._goal
+        if g is None:
+            return
+        idx = 0
+        turn_task: asyncio.Future | None = None
+        prior = None
+        # `_in_goal=True` 紧贴 try（其间无可抛点），使 finally **必**清——否则任何早退/异常（g is None
+        # 已在上方先判、add_tool 抛、render cancel）都会泄漏 `_in_goal=True`：对可写会话即令进程级
+        # `has_active_writable_goal` 永真、所有宿主写端点永久 423，直至重启（评审 #1/#2/#3）。prior 快照
+        # 与 add_tool 也移进 try，故其抛错也走 finally 清理（评审 #3）。
+        self._in_goal = True
+        try:
+            prior = self._snapshot_prior_update_goal()
+            # 工具收 **_GoalProxy(g, _goal_lock)**：agent 的 mark_* 与端点 pause/budget 同锁串行（§3.1）。
+            self.agent.add_tool(
+                UpdateGoalTool(_GoalProxy(g, self._goal_lock), self._persist_goal),
+                replace=True,
+            )
+            while True:
+                if self.closed:  # 会话被删（delete 已 close agent + discard sidecar）：停循环，绝不
+                    break        # 在 closed agent 上起新轮、绝不再 persist resurrect（评审 pass7）
+                with self._goal_lock:  # 状态读 + 快照都在锁内（评审 Medium #1：绝不锁外读 g.*）
+                    if not g.is_active:
+                        break
+                    tripped = g.budget_tripped()
+                    if tripped:
+                        g.mark_limit_reached()
+                    objective, turns_used = g.objective, g.turns_used  # ← 快照，prompt/帧只用快照
+                if tripped:
+                    self._persist_goal()  # 自取 _goal_lock 快照后再写盘（绝不锁内 IO）
+                prompt = (
+                    _wrap_up_prompt(objective)
+                    if tripped
+                    else objective
+                    if turns_used == 0
+                    else _continuation_prompt(objective)
+                )
+                # 首轮（仅 turns_used==0、非 wrap-up）带附件；后续轮纯文本（对齐 agentao，§4 决策P4.16-18）。
+                images = first_images if (turns_used == 0 and not tripped) else None
+                emit("turn_start", {"idx": idx, **({"kind": "wrap_up"} if tripped else {})})
+                t0 = self._clock()
+                turn_meta: dict = {}  # 每内层轮独立 meta（check/undo/immutable），随本轮 turn_done 出帧
+                turn_task = asyncio.ensure_future(
+                    self.turn(prompt, emit, turn_meta, images=images)
+                )
+                try:
+                    await asyncio.shield(turn_task)  # shield：断线 cancel 不穿透进 turn()/arun（High #1）
+                except AgentCancelledError:  # 停止/令牌 trip：inner turn 已收尾、自身 finally 释写锁
+                    with self._goal_lock:
+                        g.time_used_seconds += self._clock() - t0  # 计入被中断轮真实墙钟（评审 #4）
+                        if g.is_active:
+                            g.pause()
+                    self._persist_goal()
+                    emit("turn_done", {"idx": idx, "stopped": True, **turn_meta})
+                    break
+                except asyncio.CancelledError:  # 客户端断线：cancel 打到 run_goal 的 await（shield 处）
+                    with self._goal_lock:
+                        g.time_used_seconds += self._clock() - t0  # 计入被中断轮真实墙钟（评审 #4：
+                        if g.is_active:                            # 否则反复 stop/resume 让 --for 永不 trip）
+                            g.pause()
+                    self._persist_goal()  # 同步落盘，保证收为 paused（评审 High #2）
+                    # ★ 排空仍在后台的 inner turn，**再**让 finally 动工具注册表（评审 High：tool 增删
+                    #   须「无 in-flight 轮」时；`gather` 一并消费 inner 终态异常，免 "Task exception
+                    #   never retrieved" 噪声）。
+                    await asyncio.gather(turn_task, return_exceptions=True)
+                    raise  # 流已断，向上传播
+                answer = turn_task.result()
+                with self._goal_lock:
+                    g.time_used_seconds += self._clock() - t0
+                    done = False
+                    if not tripped:  # wrap-up 轮只计时间、不计轮数（对齐 agentao）
+                        g.turns_used += 1
+                        done = g.status in (GoalStatus.COMPLETE, GoalStatus.BLOCKED)
+                self._persist_goal()
+                frame: dict = {"idx": idx, "answer": answer, **turn_meta}
+                if render is not None:
+                    try:
+                        frame["answer_html"] = await render(answer)
+                    except asyncio.CancelledError:  # 断线 cancel 落在轮间 render await（评审 #7/codex P3）：
+                        self._pause_active_goal()      # 仍收为 paused（否则留 active-but-undriven，违 §5.3）
+                        raise
+                    except Exception:  # noqa: BLE001 — 渲染失败降级用纯文本 answer
+                        pass
+                emit("turn_done", frame)
+                if tripped or done:  # 收尾轮跑完即停；agent 标终态即停
+                    break
+                idx += 1
+        except Exception:  # 轮内异常 → 暂停 active 目标再抛（对齐 agentao，不让异常搁浅 active 目标）
+            self._pause_active_goal()
+            raise
+        finally:
+            self._in_goal = False
+            # tool 增删前 inner turn 必 done（评审 High）：CancelledError 路径已在上面 gather 排空；
+            # 其余路径 turn_task 在离开 try 前 shield 已 resolve。兜底再判一次，绝不在 inner turn 仍跑
+            # 时碰注册表。
+            if turn_task is not None and not turn_task.done():
+                await asyncio.gather(turn_task, return_exceptions=True)
+            self._restore_or_remove_update_goal(prior)  # 还原 prior / remove_tool（loop 作用域，§3）
+        with self._goal_lock:  # goal_done 帧字段也在锁内快照（评审 Medium #1）
+            final = {"status": g.status_label(), "summary": budget_summary(g)}
+        emit("goal_done", final)
+
     def _save(self) -> None:
         """把本会话当前 `messages` 落 `<kb>/.agentao/sessions/`（每轮新建一份快照，决策P4.2-1/2）。
 
@@ -729,6 +1156,9 @@ class Conversation:
             # 「逐次确认中 / 本会话已自动放行（可恢复）」。
             "confirm_mode": self.confirm_mode,
             "pending": self.pending_snapshot(),
+            # P4.16：当前目标快照（None=无目标）。喂 `/goal show` + 断线/重启重渲染横幅与「恢复」按钮
+            # （§8.3）；重启后盘上 active 目标显示为「可恢复」、不自动续（决策P4.16-7）。
+            "goal": self.goal_snapshot(),
             "messages": len(msgs),
             # context：headline（messages-only / api）+ 含 system prompt & tools schema 的精确 breakdown，
             # 完全对齐 agentao get_conversation_summary（否则 system/tools 分项被低报，codex 评审）。

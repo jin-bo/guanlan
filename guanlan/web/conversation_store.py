@@ -21,6 +21,7 @@ from agentao.embedding import delete_session, list_sessions
 from ..search import CorpusCache
 from ..skill import SKILL_NAME
 from .chat_support import IDLE_TTL_SECONDS, _is_canonical_uuid
+from .goal_io import clear_goal_sidecar, goal_sidecar_path, read_goal
 from .jobs import WriteGate
 
 
@@ -161,6 +162,21 @@ class ConversationStore:
         with self._lock:
             return len(self._convs)
 
+    def has_active_writable_goal(self, exclude_id: str | None = None) -> bool:
+        """进程内是否有（别的）会话在跑可写 goal（P4.16 决策P4.16-20，§6）。loop 线程瞬读。
+
+        `_reject_if_writable_active` 据此把「正在跑的可写 goal」也算 writable-active——使**进程内
+        至多一个活跃可写 goal**（否则会话 A 的 goal 轮间窄缝里会话 B 可起第二个可写 goal、二者争
+        `write_lock` 破坏单写者语义）。只读 goal 不持写锁、不在此列。锁内只拍会话快照、随即释锁再读
+        各会话的 `in_goal()`/`mode`（皆 loop-thread 瞬读、无副作用）。
+        """
+        with self._lock:
+            convs = list(self._convs.values())
+        return any(
+            c.id != exclude_id and c.mode == "workspace-write" and c.in_goal()
+            for c in convs
+        )
+
     def cold_info(self, cid: str) -> dict | None:
         """盘上-only 会话的部分自省（决策P4.4-7）：title/model/messages 取自即时 catalog，
         `context`/`skills`/`tools` 置 `null`、`live:false`，**不建 agent**（纯自省不值当一次重恢复）。
@@ -187,7 +203,24 @@ class ConversationStore:
             "context": None,
             "skills": None,
             "tools": None,
+            # P4.16：冷会话经 sidecar 出 goal 概要（不建 agent，§10）——重启后盘上 active/paused/blocked
+            # 目标据此显示为「可恢复」、弹恢复提示（决策P4.16-7）。
+            "goal": self._cold_goal(cid),
         }
+
+    def _cold_goal(self, cid: str) -> dict | None:
+        """读 per-conversation goal sidecar 出概要（不建 agent，§10）。缺失/坏文件 → None。"""
+        g = read_goal(goal_sidecar_path(self._kb, cid))
+        return g.to_dict() if g is not None else None
+
+    def clear_orphan_goal(self, cid: str) -> bool:
+        """删一个**孤儿** goal sidecar（评审 #5）：goal 落了盘但其会话快照缺失（首轮 _save 失败/
+        快照被轮转删）→ 会话已不可懒恢复（restore 返 None），该 goal 无法驱动/恢复，sidecar 却长留。
+        `/goal/clear` 在 `_get_or_restore_conv` 失败时兜底调本方法删它。仅规范 UUID 才动（防越界删）。
+        返回是否删到文件。"""
+        if not _is_canonical_uuid(cid):
+            return False
+        return clear_goal_sidecar(goal_sidecar_path(self._kb, cid))
 
     def messages_for(self, cid: str) -> list[dict] | None:
         """返回某会话的原始 `messages` 供 UI 回放气泡：内存命中读内存，否则**读盘但不建 agent**。
@@ -303,6 +336,11 @@ class ConversationStore:
                 delete_session(cid, project_root=self._kb)  # best-effort 级联删盘
             except OSError:
                 pass
+        # P4.16（评审 pass7）：连带删 goal sidecar——它在 `.agentao/goals/`、不在 sessions/，故
+        # delete_session 不覆盖；否则删会话后 goal 目标/状态长留盘上。经 conv.discard_goal_sidecar()
+        # （持 `_goal_io_lock` + 置 `_goal_deleted`）而**非**裸 clear——使正在跑的 goal 循环轮间任何
+        # 迟到 `_persist_goal` 见 `_goal_deleted` 即跳过，不 resurrect 已删 sidecar。
+        conv.discard_goal_sidecar()
         return True
 
     def delete_disk(self, cid: str) -> bool:
@@ -316,9 +354,11 @@ class ConversationStore:
         if not _is_canonical_uuid(cid) or self._disk_session(cid) is None:
             return False
         try:
-            return delete_session(cid, project_root=self._kb)
+            ok = delete_session(cid, project_root=self._kb)
         except OSError:
-            return False
+            ok = False
+        clear_goal_sidecar(goal_sidecar_path(self._kb, cid))  # P4.16：连带删 goal sidecar（评审）
+        return ok
 
     def list(self) -> list[dict]:
         """合并视图：内存现存 ∪ 盘上即时 catalog（按 `session_id` 去重，内存态优先，决策P4.2-3）。

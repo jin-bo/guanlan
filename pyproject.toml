@@ -27,7 +27,9 @@ classifiers = [
 dependencies = [
     # [cli] extra 带 rich/prompt-toolkit/readchar/pygments —— `agentao run` 控制台脚本预检需要，
     # wrapper 经子进程调它（见 guanlan/runtime.py），缺 extra 则 ingest/query 立即失败。
-    "agentao[cli]>=0.4.9",
+    # >=0.4.13：P4.16 复用 agentao 已落地的 `/goal` 原语（cli.goal_state / cli.duration /
+    # tools.goal，PR #109 起），见 docs/P4.16-Web目标续跑.md §1.3 复用矩阵。
+    "agentao[cli]>=0.4.13",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
 ]
 

@@ -152,6 +152,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             max_conversations=args.max_conversations,
             confirm=args.confirm,
             confirm_timeout=args.confirm_timeout,
+            goal_enabled=args.goal != "off",
         )
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
@@ -439,6 +440,13 @@ def _add_web_parser(sub, dir_parent) -> None:
         type=float,
         default=120.0,
         help="confirm/ask 等待用户应答的超时秒数（P4.15，默认 120）；无人应答即默认拒绝，兜「人走开 → 写锁永占」",
+    )
+    p.add_argument(
+        "--goal",
+        choices=["on", "off"],
+        default="on",
+        help="`/goal` 长任务自动续跑总开关（P4.16，默认 on）：浏览器内设一个长任务目标，由宿主反复"
+        "驱动多轮直至 Agent 自报完成/阻塞、撞时间/轮数预算、或用户暂停；off 关闭该入口（reader 强制关）",
     )
     p.set_defaults(func=_cmd_web)
 

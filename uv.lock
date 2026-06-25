@@ -8,7 +8,7 @@ resolution-markers = [
 
 [[package]]
 name = "agentao"
-version = "0.4.9"
+version = "0.4.13"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock" },
@@ -20,9 +20,9 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f2/6f/a5b946db6d1c4345022ce2a3a71c4dfadb501485c9b26ccb8dd4d5a76c3b/agentao-0.4.9.tar.gz", hash = "sha256:bd152a7ce1876b530e04f4dc8cadcebbb2c61792bd2f5968d615b7ed14d80fc8", size = 982633, upload-time = "2026-06-10T10:01:26.963Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ce/ec/3c5e22a42b154a52600291828ab386285a9a731bbdc0405e0656cd58420a/agentao-0.4.13.tar.gz", hash = "sha256:d446582f5c8f80af099cd33e608e83479920b7cefe80c30367997c30143318d4", size = 992079, upload-time = "2026-06-24T08:47:58.655Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e4/55/ae26800ac1f3a1977adebb0240e46f3b50b5b8c95ec96ac79be03de7ca85/agentao-0.4.9-py3-none-any.whl", hash = "sha256:a08f3f457aa8aa8d2d28a164456e2375a039217ce5facedb1ed8d84b1d3c8795", size = 772471, upload-time = "2026-06-10T10:01:25.294Z" },
+    { url = "https://files.pythonhosted.org/packages/d8/ed/e37aad04f5609e5ee8423dee41e68a7c6e29acf64344a0b0d841f9ca8b44/agentao-0.4.13-py3-none-any.whl", hash = "sha256:674bc879d6b18ad96ad7dda848968df5a3f3b2b955a538115375328e7b139c2c", size = 805557, upload-time = "2026-06-24T08:47:56.863Z" },
 ]
 
 [package.optional-dependencies]
@@ -407,7 +407,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentao", extras = ["cli"], specifier = ">=0.4.9" },
+    { name = "agentao", extras = ["cli"], specifier = ">=0.4.13" },
     { name = "anyio", marker = "extra == 'mcp'", specifier = ">=4.1" },
     { name = "anyio", marker = "extra == 'web'", specifier = ">=4.1" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },

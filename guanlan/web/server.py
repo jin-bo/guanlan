@@ -80,6 +80,7 @@ def serve(
     max_conversations: int = MAX_CONVERSATIONS,
     confirm: str = "ask",
     confirm_timeout: float = 120.0,
+    goal_enabled: bool = True,
 ) -> int:
     """起本地 Web 宿主，长驻直到 Ctrl-C；正常停服返回 `EXIT_OK`。
 
@@ -99,6 +100,7 @@ def serve(
     `max_conversations`（P4.9-18，默认 100）= 内存会话硬上限；权威校验在 `create_app`，此处另作友好早提示。
     `confirm`（P4.15，默认 `ask`）= workspace-write 下 ASK 决策是「弹给人确认」还是「沿用 P4.5
     静默放行」；`confirm_timeout`（默认 120s）= 确认/提问等待超时，无人应答即默认拒绝（兜写锁永占）。
+    `goal_enabled`（P4.16，默认开；`--goal off` 关）= `/goal` 长任务续跑总开关；reader 强制关。
     """
     if reader and mode == "workspace-write":
         raise GuanlanError(
@@ -145,6 +147,7 @@ def serve(
         max_conversations=max_conversations,
         confirm=confirm,
         confirm_timeout=confirm_timeout,
+        goal_enabled=goal_enabled,
     )
     if open_browser:
         _open_browser_when_ready(HOST, port)
