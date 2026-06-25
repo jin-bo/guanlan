@@ -2,7 +2,7 @@
 
 > 状态：**候选集成设计，非排期项**。研判"guanlan 经 tools/skill 对接 SAG（如 1000 万条结构化知识用 SAG 组织、guanlan 取用）"的可行性、正确姿势与红线边界，供后续排期参照。**本笔记不改变现状**。落地前须按 DESIGN line 286「真做时另开实现方案文档」展开。
 >
-> 关联：[`sag-反向评审结论.md`](sag-反向评审结论.md)（本笔记是其 §5"DB/向量别借"的**互补面**——别借代码 ≠ 别对接服务）、[`gbrain-反向评审结论.md`](gbrain-反向评审结论.md)（§6"待 1 行确认 agentao 能力"同款未决；federated 多源作先例）、[`openkb-反向评审结论.md`](openkb-反向评审结论.md)、[`../../DESIGN.md`](../../DESIGN.md) §1 第22条 / §5.1（**Tool 注入** = Agentao 作 MCP 客户端）/ line 27（markdown 唯一真相）/ line 262（零-LLM·LLM 分档）/ line 286（Tool 注入 = P4 之后按需项、须另开文档）、[`../../P4.10-MCP宿主.md`](../../P4.10-MCP宿主.md)（§21-23 两方向辨析）、[`../../P4.11-信任边界.md`](../../P4.11-信任边界.md)（信任边界）、[`../../P3.7-语义审计.md`](../../P3.7-语义审计.md)（`raw_digest` provenance / source-drift）、[`../../P5.0-检索层.md`](../../P5.0-检索层.md)、[`../../P5.4-检索冷启动性能.md`](../../P5.4-检索冷启动性能.md)。
+> 关联：[`sag-反向评审结论.md`](sag-反向评审结论.md)（本笔记是其 §5"DB/向量别借"的**互补面**——别借代码 ≠ 别对接服务）、[`gbrain-反向评审结论.md`](gbrain-反向评审结论.md)（§6"待 1 行确认 agentao 能力"同款未决；federated 多源作先例）、[`gbrain-知识库访问-tools设计.md`](gbrain-知识库访问-tools设计.md)（§5.5 写工具薄壳约束的依据：gbrain 把业务智能塞进 `put_page`，观澜须反着来）、[`openkb-反向评审结论.md`](openkb-反向评审结论.md)、[`../../DESIGN.md`](../../DESIGN.md) §1 第22条 / §5.1（**Tool 注入** = Agentao 作 MCP 客户端）/ line 27（markdown 唯一真相）/ line 262（零-LLM·LLM 分档）/ line 286（Tool 注入 = P4 之后按需项、须另开文档）、[`../../P4.10-MCP宿主.md`](../../P4.10-MCP宿主.md)（§21-23 两方向辨析）、[`../../P4.11-信任边界.md`](../../P4.11-信任边界.md)（信任边界）、[`../../P3.7-语义审计.md`](../../P3.7-语义审计.md)（`raw_digest` provenance / source-drift）、[`../../P5.0-检索层.md`](../../P5.0-检索层.md)、[`../../P5.4-检索冷启动性能.md`](../../P5.4-检索冷启动性能.md)。
 
 ## 0. 一句话 / 为什么记
 
@@ -21,10 +21,10 @@
 | 模式 | 做法 | 判定 |
 |---|---|---|
 | **A. 上游底料，guanlan 蒸馏** | ingest 时 Agent 查 SAG 取支撑材料 → 蒸馏成交叉链接 wiki 页（entities/concepts/syntheses），provenance 指向 SAG event ID | ✅ **正解**·守题旨·解规模 |
-| **B. 查询期广度兜底** | wiki 未覆盖时 Agent fall through 到 SAG 在 700 万语料里捞 | ✅ 可作**次路** |
+| **B. 查询期广度兜底** | wiki 未覆盖时 Agent fall through 到 SAG 在 1000 万语料里捞 | ✅ 可作**次路** |
 | **C. 查询后端全权替代** | 每次 query 直接打 SAG、wiki 被旁路 | ⚠️ **陷阱** |
 
-- **A 才是对的**：SAG = 规模化检索底料（强项：700 万动态语料多跳 RAG）；guanlan wiki = 在"要紧那一小片"上的**精炼、可导航的'编译真相'层**（几千页，稳在范围内，见 [`../../P5.4-检索冷启动性能.md`](../../P5.4-检索冷启动性能.md) 的规模边界）。Karpathy 模式不变——只是 raw 源从本地文件**扩成了 SAG-scale 上游**。
+- **A 才是对的**：SAG = 规模化检索底料（强项：1000 万动态语料多跳 RAG）；guanlan wiki = 在"要紧那一小片"上的**精炼、可导航的'编译真相'层**（几千页，稳在范围内，见 [`../../P5.4-检索冷启动性能.md`](../../P5.4-检索冷启动性能.md) 的规模边界）。Karpathy 模式不变——只是 raw 源从本地文件**扩成了 SAG-scale 上游**。
 - **C 是借尸还魂**：wiki 被旁路 → guanlan 退化成 SAG 之上的薄聊天壳 = **把"每次 fresh RAG"又请回来**，恰是 guanlan 存在要替换的东西。机制可行、**哲学自毁**，明令避免。
 
 ## 3. 模式 A 的 ingest 工作法（落在 skill，不进 wrapper）
@@ -55,6 +55,7 @@
 2. **零-LLM / LLM 分档（line 262）**：SAG = 网络 + 内部模型 = **非确定、非离线**。故 SAG 调用**只能待在 ingest/query 的 Agentao LLM 道**，**绝不进** check/health/lint/graph/reindex 那些确定性、可离线的零-LLM 闸——这些命令**必须 SAG-free、离线可跑**。边界与现状一致。✅
 3. **信任边界（P4.11）**：SAG 灌外部不可信内容入 Agent 上下文 = prompt-injection 面，按不可信源隔离 + 注入戒备（§3.4）。
 4. **薄壳**：对接逻辑住 skill 工作法 + provenance 约定，wrapper 侧只做"Tool 注入接线 + 门控"，不携带业务智能。✅
+5. **写工具须守薄壳（前瞻约束）**：本次 SAG 对接是**只读取用**（§1，不让 guanlan 往 SAG 写），不引入写工具；但 **Tool 注入是将来给 guanlan 加"写工具"的同一机制**，须先钉死一条边界——**别学 gbrain 把业务智能塞进写工具**。gbrain `put_page` 一步内含分块/embed/建链（业务智能住工具里，见 [`gbrain-知识库访问-tools设计.md`](gbrain-知识库访问-tools设计.md) §4.3）；观澜的等价物是「Agent 用**通用** `write_file` 写 markdown + `[[wikilink]]` → 零-LLM 脚本（`graph`/`reindex`/`check`）**确定性派生**链接/索引 + wrapper 门禁」——业务智能住 skill 工作流 + 脚本，**不住工具**。故任何注入或新增的写工具应是**薄文件原语**（写一个文件、记一条 provenance），把"分块/建链/索引"留给现有零-LLM 脚本幂等重建；否则业务智能从脚本漂移进工具，直接破「wrapper 不携带业务智能」+「markdown 唯一真相·派生物可重建」两条不变式。✅ 守此即安。
 
 ## 6. 要建什么（Tool 注入半阶段 scope）
 
