@@ -386,6 +386,242 @@ def test_render_markdown_code_wrapped_wikilink_is_tolerated(client, kb) -> None:
     assert "wikilink" not in fenced
 
 
+# ───────────── raw/ 源引用联链（正文/对话里点 a.rawlink → 右栏只读看 raw 源） ─────────────
+
+
+def test_render_markdown_raw_ref_linkifies_existing(client, kb) -> None:
+    """raw/<slug>.md 引用（裸路径串 / 行内 code / [[raw/…]] 三写法）→ a.rawlink[data-raw]，仅存在文件联链。"""
+    from guanlan.web.render import render_markdown
+
+    (kb / "raw" / "某案例.md").write_text("# 案例\n正文足够长。", encoding="utf-8")
+    wiki = kb / "wiki"
+
+    for text in (
+        "材料见 raw/某案例.md 一节。",  # 裸路径串
+        "源出处：`raw/某案例.md`",  # 行内 code
+        "见 [[raw/某案例]]",  # wikilink（不带 .md）
+        "见 [[raw/某案例.md]]",  # wikilink（带 .md）
+    ):
+        html = render_markdown(text, wiki)
+        assert 'class="rawlink"' in html, text
+        assert 'data-raw="某案例.md"' in html, text
+        assert html.count("<a ") == 1, f"不应套出嵌套 <a>（AtomicString 防自我重入）：{html}"
+        assert "rawlink broken" not in html, text
+
+    # 别名写法显示别名、仍联到该源
+    html = render_markdown("见 [[raw/某案例|看这个案例]]", wiki)
+    assert 'data-raw="某案例.md"' in html and ">看这个案例</a>" in html
+
+
+def test_render_markdown_raw_ref_missing_greyed(client, kb) -> None:
+    """指向不存在 raw 文件的引用 → span.rawlink.broken（标灰、不可点、无 data-raw）。"""
+    from guanlan.web.render import render_markdown
+
+    wiki = kb / "wiki"
+    for text in ("材料见 raw/不存在.md。", "源：`raw/missing.md`", "见 [[raw/ghost]]"):
+        html = render_markdown(text, wiki)
+        assert "rawlink broken" in html, text
+        assert "data-raw" not in html, text  # 断链不可点
+
+
+def test_render_markdown_raw_ref_not_confused_with_wiki_page(client, kb) -> None:
+    """`raw/x.md` 即便存在同名 wiki 页，也联到 raw 源（rawlink）、绝不误链 wiki（data-page）。"""
+    from guanlan.web.render import render_markdown
+
+    (kb / "raw" / "夜审.md").write_text("原始笔录", encoding="utf-8")
+    write_page(kb, "wiki/sources/夜审.md", type="source", body="摘要正文足够长。")
+    wiki = kb / "wiki"
+
+    html = render_markdown("源出处：`raw/夜审.md`", wiki)
+    assert 'class="rawlink"' in html and 'data-raw="夜审.md"' in html
+    assert "data-page" not in html  # 没有误链到同名 wiki 页
+
+    # 而裸 [[夜审]]（无 raw/ 前缀）仍按 wiki 页解析，不受影响
+    html2 = render_markdown("见 [[夜审]]", wiki)
+    assert 'data-page="wiki/sources/夜审.md"' in html2 and "rawlink" not in html2
+
+
+def test_render_markdown_raw_ref_markdown_link_rewritten(client, kb) -> None:
+    """`[文字](raw/x.md)` 的 href 改写为 rawlink（保留链接文字/内联格式）；命中链 / 缺失标灰 / 外链不动。"""
+    from guanlan.web.render import render_markdown
+
+    (kb / "raw" / "案卷.md").write_text("x", encoding="utf-8")
+    wiki = kb / "wiki"
+
+    link = render_markdown("[看案例](raw/案卷.md)", wiki)
+    assert 'class="rawlink"' in link and 'data-raw="案卷.md"' in link
+    assert ">看案例</a>" in link and "href=" not in link  # 保留链接文字、丢 href（改站内导航）
+
+    # 链接文字含内联格式 → 格式不丢；且不套出嵌套 <a>（曾是 inline 处理器的隐患）
+    fmt = render_markdown("[**强调**](raw/案卷.md)", wiki)
+    assert "<strong>强调</strong>" in fmt and fmt.count("<a ") == 1
+
+    # 文字本身就是 raw 路径（作者常这么写）也只出一个 <a>，无嵌套
+    same = render_markdown("[raw/案卷.md](raw/案卷.md)", wiki)
+    assert same.count("<a ") == 1 and 'data-raw="案卷.md"' in same
+
+    # ./ 前缀容错
+    dot = render_markdown("[看](./raw/案卷.md)", wiki)
+    assert 'data-raw="案卷.md"' in dot
+
+    # 指向不存在 raw 文件的链接 → 标灰 span（保留文字、不可点）
+    miss = render_markdown("[缺失源](raw/不存在.md)", wiki)
+    assert "rawlink broken" in miss and ">缺失源</span>" in miss and "data-raw" not in miss
+
+    # 外链 / 绝对路径不动（href 含 raw/ 但非库内相对 raw/ 前缀）
+    ext = render_markdown("[外链](https://x.com/raw/y.md)", wiki)
+    assert 'href="https://x.com/raw/y.md"' in ext and "rawlink" not in ext
+
+
+def test_render_markdown_raw_ref_command_and_fenced_literal(client, kb) -> None:
+    """`cat raw/x.md` 命令 code 不联（整段非 raw 路径）；围栏代码块字面保留（决策P4-3）。"""
+    from guanlan.web.render import render_markdown
+
+    (kb / "raw" / "案卷.md").write_text("x", encoding="utf-8")
+    wiki = kb / "wiki"
+    cmd = render_markdown("跑 `cat raw/案卷.md`", wiki)
+    assert "<code>cat raw/案卷.md</code>" in cmd and "rawlink" not in cmd
+    fenced = render_markdown("```\nraw/案卷.md\n```", wiki)
+    assert "rawlink" not in fenced
+
+
+def test_render_markdown_raw_ref_no_clickable_inside_broken(client, kb) -> None:
+    """评审修复：断链 span 内不得再联出可点 rawlink（`span` 已入 _RAW_SKIP_SUBTREE）。
+
+    `[raw/exists.md](raw/missing.md)`：① 先把缺失 md 链接转成 broken span，② 不得再钻进去把其文字
+    `raw/exists.md` 联成嵌在灰 span 里、却指向**另一个**源的可点 rawlink。`[[raw/ghost.md]]` 同理。
+    """
+    from guanlan.web.render import render_markdown
+
+    (kb / "raw" / "存在.md").write_text("x", encoding="utf-8")
+    wiki = kb / "wiki"
+    html = render_markdown("[raw/存在.md](raw/缺失.md)", wiki)
+    assert "rawlink broken" in html
+    assert "<a " not in html  # 灰 span 内无可点 <a>（修复前会嵌一个 data-raw=存在.md 的 rawlink）
+    assert "data-raw" not in html
+    # 灰 wikilink span（display 含 .md 路径）同样不被二次联
+    g = render_markdown("见 [[raw/ghost.md]]", wiki)
+    assert "rawlink broken" in g and "<a " not in g
+
+
+def test_render_markdown_raw_ref_nonmd_asset_link_preserved(client, kb) -> None:
+    """评审修复：markdown 链接指向**非 .md 资产**（现存或不存）→ 原样保留 href，不毁成断链 span。"""
+    from guanlan.web.render import render_markdown
+
+    (kb / "raw" / "report.pdf").write_text("x", encoding="utf-8")
+    (kb / "raw" / "images").mkdir(exist_ok=True)
+    (kb / "raw" / "images" / "diagram.png").write_text("x", encoding="utf-8")
+    wiki = kb / "wiki"
+    for text, href in (
+        ("[报告](raw/report.pdf)", "raw/report.pdf"),
+        ("[图](raw/images/diagram.png)", "raw/images/diagram.png"),
+    ):
+        html = render_markdown(text, wiki)
+        assert f'href="{href}"' in html and "rawlink" not in html, text
+
+
+def test_render_markdown_raw_ref_internal_dot_stem_and_title(client, kb) -> None:
+    """评审修复：含内部点的 stem 省略 .md 仍命中（按存在性试 `<名>` 与 `<名>.md`）；markdown 链接 title 保留。"""
+    from guanlan.web.render import render_markdown
+
+    (kb / "raw" / "1.示例报告.md").write_text("x", encoding="utf-8")
+    wiki = kb / "wiki"
+    # [[raw/1.示例报告]]（无 .md，内部点）命中 1.示例报告.md
+    html = render_markdown("见 [[raw/1.示例报告]]", wiki)
+    assert 'data-raw="1.示例报告.md"' in html
+    # markdown 链接 title 不被 attrib.clear 丢掉
+    titled = render_markdown('[看](raw/1.示例报告.md "作者备注")', wiki)
+    assert 'class="rawlink"' in titled and 'title="作者备注"' in titled
+
+
+def test_render_markdown_raw_ref_trailing_period_linkifies(client, kb) -> None:
+    """评审修复：句末紧跟 ASCII 句号的裸路径 `raw/x.md.` 仍联链，只把句号留在锚外。"""
+    from guanlan.web.render import render_markdown
+
+    (kb / "raw" / "案例.md").write_text("x", encoding="utf-8")
+    wiki = kb / "wiki"
+    html = render_markdown("See the file raw/案例.md.", wiki)
+    assert 'class="rawlink"' in html and 'data-raw="案例.md"' in html
+    assert html.rstrip().endswith(".</p>")  # 句号留在 rawlink 之外
+
+
+def test_render_markdown_wikilink_alias_keeps_inline_formatting(client, kb) -> None:
+    """评审修复（既有 wikilink 行为回归）：[[页|**别名**]] 的别名 markdown 仍渲染（去掉 AtomicString）。"""
+    from guanlan.web.render import render_markdown
+
+    write_page(kb, "wiki/entities/Foo.md", type="entity", body="正文足够长。")
+    wiki = kb / "wiki"
+    html = render_markdown("见 [[Foo|**重点**]]", wiki)
+    assert "<strong>重点</strong>" in html and 'data-page="wiki/entities/Foo.md"' in html
+
+
+def test_raw_name_index_case_collision_exact_first(client, kb) -> None:
+    """评审修复：大小写敏感盘上 raw/Foo.md 与 raw/foo.md 并存时，各按真实名精确解析、零串台。
+
+    大小写不敏感盘（macOS 默认）两次写命中同一文件、无法构造同名异写 → 跳过；大小写匹配仍由
+    `test_raw_name_index_case_insensitive_fallback` 覆盖。
+    """
+    from guanlan.web.render import _lookup_raw, _raw_name_index
+
+    (kb / "raw" / "Foo.md").write_text("X", encoding="utf-8")
+    (kb / "raw" / "foo.md").write_text("y", encoding="utf-8")
+    if sorted(p.name for p in (kb / "raw").glob("*.md")) != ["Foo.md", "foo.md"]:
+        pytest.skip("文件系统大小写不敏感，无法构造 Foo.md / foo.md 并存")
+    idx = _raw_name_index(kb)
+    assert _lookup_raw("foo.md", idx) == "foo.md"  # 精确命中、不串到 Foo.md
+    assert _lookup_raw("Foo.md", idx) == "Foo.md"
+
+
+def test_raw_name_index_case_insensitive_fallback(client, kb) -> None:
+    """评审修复：无冲突时小写兜底键仍命中——`raw/Foo.md` 误写成 `foo.md` 也解析到真实名 `Foo.md`。"""
+    from guanlan.web.render import _lookup_raw, _raw_name_index
+
+    (kb / "raw" / "Foo.md").write_text("x", encoding="utf-8")
+    idx = _raw_name_index(kb)
+    assert _lookup_raw("Foo.md", idx) == "Foo.md"  # 精确
+    assert _lookup_raw("foo.md", idx) == "Foo.md"  # 小写兜底（无冲突时）
+
+
+def test_render_markdown_raw_ref_inert_without_wiki(client, kb) -> None:
+    """不给 wiki（对话裸渲染无库路径）时不做 raw 联链——保 P4 既有姿态。"""
+    from guanlan.web.render import render_markdown
+
+    assert "rawlink" not in render_markdown("材料见 raw/某案例.md。")
+
+
+def test_api_page_links_existing_raw_source(client, kb) -> None:
+    """端到端：/api/page 渲染的 wiki 页正文引用现存 raw/<slug>.md → 输出可点 a.rawlink[data-raw]。"""
+    (kb / "raw" / "s01-夜审笔录.md").write_text("原始笔录正文。", encoding="utf-8")
+    write_page(
+        kb,
+        "wiki/sources/s01-夜审笔录.md",
+        type="source",
+        body="原始材料：`raw/s01-夜审笔录.md`，详见正文足够长。",
+    )
+    resp = client.get("/api/page", params={"path": "wiki/sources/s01-夜审笔录.md"})
+    assert resp.status_code == 200
+    html = resp.json()["html"]
+    assert 'class="rawlink"' in html and 'data-raw="s01-夜审笔录.md"' in html
+
+
+def test_api_raw_file_renders_source(client, kb) -> None:
+    """raw 源只读渲染端点（右栏 {kind:"raw"} 调它）：渲染 .md、越界/缺失 4xx。"""
+    (kb / "raw" / "s01-夜审笔录.md").write_text("# 夜审\n正文。", encoding="utf-8")
+    resp = client.get("/api/raw/file", params={"name": "s01-夜审笔录.md"})
+    assert resp.status_code == 200 and "<h1>" in resp.json()["html"]
+    assert client.get("/api/raw/file", params={"name": "../wiki/index.md"}).status_code in (404, 409)
+    assert client.get("/api/raw/file", params={"name": "nope.md"}).status_code == 404
+
+
+def test_frontend_wires_raw_link_navigation() -> None:
+    """前端把 a.rawlink[data-raw] 点击路由到右栏 {kind:"raw"} 视图（右栏 wiki-view + 左栏 chat-log 两处委托）。"""
+    src = _FRONTEND_JS_SRC
+    assert "a.rawlink[data-raw]" in src
+    assert 'kind: "raw"' in src
+    assert "/api/raw/file?name=" in src  # 右栏 raw 视图复用只读渲染端点
+    assert src.count("a.rawlink[data-raw]") >= 2  # 右栏 + 对话气泡两处点击委托
+
+
 def test_configure_agent_log_writes_and_is_idempotent(kb) -> None:
     """会话日志像 CLI 那样落 <kb>/agentao.log；重复配置不重挂 handler（不会把每行写多遍）。"""
     from guanlan.web import chat as chatmod

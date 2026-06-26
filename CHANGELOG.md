@@ -5,6 +5,37 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **Web 正文/对话里的 `raw/<slug>.md` 引用联成只读 raw 源链** —— wiki 单页（`/api/page`）与对话答案
+  渲染时，把指向**现存** `raw/<slug>.md` 的引用联成可点的 `a.rawlink[data-raw]`：点击在**右栏内联**
+  调既有 `/api/raw/file` 只读渲染那篇原始素材（复用单页历史栈，一键「←」回引用它的原页；左栏对话气泡
+  里点亦切右栏，与既有 `[[wikilink]]` 行为一致）。识别**四种写法**（口径由用户敲定）：① 裸路径串
+  `raw/x.md`（plain text 行内）；② 整段恰好是 `raw/x.md` 的行内 code；③ `[[raw/x]]`（wikilink，带/不带
+  `.md`、支持 `|别名`）；④ markdown 链接 `[文字](raw/x.md)`（改写 `<a href>`、保留链接文字/内联格式、容
+  `./` 前缀）。与 `[[wikilink]]` 同纪律——**仅真实存在**的 raw 文件联链，缺失标灰 `span.rawlink.broken`
+  （dashed 下划线区别于 wikilink 的 dotted）。
+  - **纯前端复用既有只读端点**：`render.py` 三处处理器共用 `raw/*.md` 真实文件名集（`wiki.parent/raw`
+    推出、每渲染重扫，同 `_stem_to_path` 纪律）——`_RawPathTreeprocessor`（裸路径串 + markdown 链接 href，
+    **树上处理**故按祖先跳过 `a`/`code`/`pre`）、`_CodePathLinkTreeprocessor` 内 raw 分支、`_resolve_wikilink`
+    内 `raw/` 前缀拦截；右栏新增 `{kind:"raw"}` 视图（banner 标明「原始素材·只读」+ raw/ 路径 +
+    「在新标签打开」逃生口经 `/?raw=` 弹出 SPA，供并排对照源）。后端 `/api/raw/file`·`/api/raw` 零改动
+    （reader 下仍注册）。
+  - **关键正确性**：`raw/x.md` 即便存在同名 wiki 页也联到 raw 源、绝不误链 wiki（raw 分支先于 `link_stem`
+    页解析）；裸路径串改用 treeprocessor（而非 inline）按祖先跳过 `<a>`——根除 `[raw/x.md](url)` 在链接
+    文字里被回灌再联、套出**非法嵌套 `<a>`** 的隐患；`[**强调**](raw/x.md)` 内联格式不丢；外链/绝对路径
+    （`https://…/raw/y.md`、`/raw/x.md`）不动；`cat raw/x.md` 命令 code 与围栏块字面保留；不给 `wiki` 时
+    不联链（保 P4 既有姿态）。新增 4 条 i18n 键 `raw.{banner,openInTab,loading,openFail}`（中英平价）；
+    测试见 `tests/test_web.py`。
+  - **多智能体评审修复**（同一变更内）：`span` 纳入 `_RAW_SKIP_SUBTREE`——杜绝 `[raw/exists.md](raw/missing.md)`
+    在断链灰 span 内再联出**可点且指向另一源**的 rawlink；basename 解析改为「按存在性试 `<名>` 与 `<名>.md`」
+    （`_lookup_raw`）——含内部点的 stem（`raw/1.示例报告`）正确命中，且 markdown 链接指向**非 `.md` 资产**
+    （`raw/report.pdf`、`raw/images/x.png`）时**原样保留 href**、不再毁成断链 span；去掉 wikilink display 的
+    `AtomicString` 包裹——恢复 `[[页|**别名**]]` 别名内联格式渲染（旧实现的既有 wikilink 回归）；裸路径尾界
+    `(?![\w\-])` 放行句末 `.`（`raw/x.md.` 仍联链）；`_raw_name_index` 精确文件名键 + 无冲突小写兜底（镜像
+    `link_resolution_index` fold 纪律）——大小写敏感盘上 `raw/Foo.md`/`raw/foo.md` 各按真实名解析、零串台；
+    markdown 链接改写保留作者 `title`；`_linkify` 尾段插入改 O(n) 偏移跟踪（去 `list.index` 的 O(n²)）。
+
 ## [0.1.16] - 2026-06-24
 
 ### 新增

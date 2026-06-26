@@ -219,6 +219,9 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .msg.bot.rendered a { color: var(--lan-deep); }
 .msg.bot.rendered a.wikilink { color: var(--lan-deep); text-decoration: none; border-bottom: 1px dotted var(--lan-deep); cursor: pointer; }
 .msg.bot.rendered a.wikilink.broken { color: var(--lan-ink-soft); border-bottom-color: var(--lan-mist); cursor: default; }
+/* raw 源链：dashed 下划线区别于 wikilink 的 dotted（点 → 右栏只读渲染那篇 raw 源）。 */
+.msg.bot.rendered a.rawlink { color: var(--lan-deep); text-decoration: none; border-bottom: 1px dashed var(--lan-deep); cursor: pointer; }
+.msg.bot.rendered a.rawlink.broken { color: var(--lan-ink-soft); border-bottom-color: var(--lan-mist); cursor: default; }
 
 /* mermaid 渲染图（P4.13）：```mermaid 块经 enhanceMermaid 换成的 <figure>。SVG 自适应宽、不溢出；
    渲染失败时 .mermaid-error 徽标贴在保留的 <pre> 源码上方。wiki 单页 / 对话气泡 / 预览共用。 */
@@ -284,6 +287,18 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .wiki-view a.wikilink { color: var(--lan-ripple); text-decoration: none; border-bottom: 1px dotted var(--lan-ripple); cursor: pointer; transition: color .15s; }
 .wiki-view a.wikilink:hover { color: var(--lan-deep); }
 .wiki-view .wikilink.broken { color: var(--lan-ink-soft); border-bottom: 1px dotted var(--lan-mist); cursor: default; } /* 水静无澜 */
+/* raw 源链：dashed 区别于 wikilink 的 dotted（点 → 右栏 {kind:"raw"} 只读渲染 raw 源）；断链同款灰。 */
+.wiki-view a.rawlink { color: var(--lan-deep); text-decoration: none; border-bottom: 1px dashed var(--lan-ripple); cursor: pointer; transition: color .15s; }
+.wiki-view a.rawlink:hover { color: var(--lan-ripple); }
+.wiki-view .rawlink.broken { color: var(--lan-ink-soft); border-bottom: 1px dashed var(--lan-mist); cursor: default; }
+
+/* raw 只读源视图（{kind:"raw"}）：banner 标明「原始素材·只读」+ raw/ 路径 + 「在新标签打开」逃生口；
+   正文 .raw-body 复用 .rendered 富排版。banner 用 foam 底 + 深澜左纲，把 raw/wiki 边界标清楚。 */
+.wiki-view .raw-banner { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin: 0 0 .7rem; padding: .4rem .6rem; background: var(--lan-foam); border-left: 3px solid var(--lan-deep); border-radius: 0 4px 4px 0; font-size: .82rem; }
+.wiki-view .raw-banner-label { font-weight: 600; color: var(--lan-deep); }
+.wiki-view .raw-banner-path { color: var(--lan-ink-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.wiki-view .raw-banner-pop { margin-left: auto; border: 1px solid var(--lan-mist); background: var(--lan-surface); color: var(--lan-deep); border-radius: 5px; padding: .15rem .5rem; font-size: .78rem; cursor: pointer; white-space: nowrap; }
+.wiki-view .raw-banner-pop:hover { background: var(--lan-ripple); border-color: var(--lan-ripple); color: #fff; }
 
 /* ── 对话输入框（底部满宽，OpenAI 风格圆角 composer，承观澜水墨 + 澜配色） ──
    外层 .composer 是带边框/圆角的卡片（focus-within 时下沉澜纹边）；内含附件徽章行、
