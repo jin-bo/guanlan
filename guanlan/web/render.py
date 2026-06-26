@@ -15,6 +15,7 @@ from __future__ import annotations
 import html as html_lib
 import re
 import xml.etree.ElementTree as _etree  # stdlib，始终可用；只有 markdown 是可选 extra。
+from collections import defaultdict
 from html.parser import HTMLParser as _HTMLParser
 from pathlib import Path
 
@@ -167,6 +168,117 @@ def _wikilink_display(raw: str) -> str:
 _stem_to_path = link_resolution_index
 
 
+# ── raw/ 源引用 → 只读 raw 查看链接 ──────────────────────────────────────────────
+# 正文里指向 `raw/<slug>.md` 的引用，联成前端 `a.rawlink[data-raw]`（点 → 右栏调 `/api/raw/file`
+# 只读内联渲染那篇 raw 源）。与 `[[wikilink]]` 同纪律：**仅真实存在**的 raw 文件联链、其余标灰
+# `span.rawlink.broken`（决策：raw/ 是只读不可变源，引用它的多是 `wiki/sources/` 摘要页 frontmatter/
+# 正文，点链即回看原始素材）。四种写法共用下面的解析归口：
+#   ① 裸路径串（plain text 行内，如「材料见 raw/某案例.md」）—— `_RawPathTreeprocessor` ②路
+#   ② 行内 code（整段恰好是 `raw/<slug>.md`）—— `_CodePathLinkTreeprocessor` 内新分支
+#   ③ `[[raw/<slug>]]`（wikilink 写法，可带/不带 .md）—— `_resolve_wikilink` 内 raw 前缀拦截
+#   ④ markdown 链接 `[文字](raw/<slug>.md)` —— `_RawPathTreeprocessor` ①路（改写 <a href>）
+# 裸路径串正则：`raw/` 须前邻非词/非斜杠（杜绝 `wiki/sources/raw/x.md`、`araw/x.md` 误命中）；
+# slug 字符集对齐 rawio.raw_slug 的 `[\w.\-]`（`\w` 含 CJK）；尾界 `(?![\w\-])` 只挡「`.md` 后接更多
+# 词字/连字符」（防把 `notes.mdx`/`x.mdown` 误截成 `.md`），但**允许后随 `.`**——故句末紧跟 ASCII 句号
+# 的 `raw/x.md.` 仍联链、只把句号留在外面（评审修复：旧的 `(?![\w.\-])` 把句末句号也挡了）。
+# `_RAW_REF_FULL_RE` 供「整段 code / 整段路径」fullmatch（无需边界，靠整体消费定界）。
+_RAW_PATH_RE = re.compile(r"(?<![\w/])raw/[\w.\-]+?\.md(?![\w\-])")
+_RAW_REF_FULL_RE = re.compile(r"raw/([\w.\-]+\.md)")
+
+# rawlink 命中/缺失的样式归口（单点定义，杜绝多处 class/title 字面漂移，评审 reuse）。
+_RAWLINK_BROKEN_TITLE = "raw/ 源不存在"
+
+
+def _raw_name_index(root: Path) -> dict[str, str]:
+    """`raw/*.md` 真实文件名解析表：**精确文件名键**（保大小写）→ 真实名，叠加**无冲突的小写兜底键**
+    （大小写不敏感匹配，但精确优先、撞则不折叠——镜像 `pages.link_resolution_index` 的 fold 纪律）。
+
+    **每次渲染重建**（同 `_stem_to_path` 纪律，不缓存）：投喂/晋级随时增删 raw 源，重扫保新源即时可点、
+    删则标灰。只 `glob("*.md")` 取 raw/ **顶层**（`raw/images/` 等子树非源、天然不入），不读内容。
+    精确优先使「`raw/Foo.md` 与 `raw/foo.md` 在大小写敏感盘上并存」时各按真实名解析、零串台（评审修复
+    旧的纯小写键把二者撞成一个、`raw/foo.md` 误开 `Foo.md`）；小写兜底使「误写大小写」在大小写不敏感盘
+    上仍命中（与 `_safe_raw_file` 行为一致）。
+    """
+    raw = root / "raw"
+    exact: dict[str, str] = {}
+    if raw.is_dir():
+        for path in sorted(raw.glob("*.md")):
+            if path.is_file():
+                exact.setdefault(path.name, path.name)
+    index = dict(exact)
+    groups: dict[str, set[str]] = defaultdict(set)
+    for name in exact:
+        lower = name.lower()
+        if lower not in exact:  # 小写键撞任意精确键 → 不新增（精确优先、撞则不折叠）
+            groups[lower].add(name)
+    for lower, names in groups.items():
+        if len(names) == 1:  # 小写组唯一拥有者才作兜底键；≥2（真撞名）→ 丢弃、保歧义断链不猜
+            index[lower] = next(iter(names))
+    return index
+
+
+def _raw_ref_basename(target: str) -> str | None:
+    """把引用串解析为 `raw/` 顶层文件名 basename（**保大小写、保原扩展名**），非 raw/ 前缀 → None。
+
+    剥 `|别名`/`#锚点`（兼容 `[[raw/x|看案例]]`）、归一斜杠；须 `raw/` 前缀（大小写不敏感）+ 非空尾段；
+    取 basename（raw/ 顶层平铺，`raw/a/b.md` 退化取 `b.md`）。**不**补 `.md`、**不**小写——补 `.md` 与
+    大小写兜底都交给 `_lookup_raw`（按存在性试 `<名>` 与 `<名>.md`）。如此含内部点的 stem（`raw/1.示例报告`）
+    与非 `.md` 资产（`raw/images/x.png`）能被正确区分：前者补 `.md` 命中、后者两试皆空 → 不认领（评审修复
+    旧的「无条件补 `.md`」把 `raw/report.pdf` 之类合法资产链接毁成断链 span）。
+    """
+    head = target.split("|", 1)[0].split("#", 1)[0].strip().replace("\\", "/")
+    prefix, sep, rest = head.partition("/")
+    if not sep or prefix.lower() != "raw" or not rest:
+        return None
+    return rest.rsplit("/", 1)[-1] or None
+
+
+def _lookup_raw(basename: str, raw_index: dict[str, str]) -> str | None:
+    """basename（保大小写、可能带/不带 `.md`）→ 现存 raw 真实文件名 or None。
+
+    依次试：精确 → 小写兜底；若不以 `.md` 结尾，再补 `.md` 试 精确 → 小写。覆盖「含内部点的 stem 省略
+    `.md`」（`1.示例报告`→`1.示例报告.md`）与大小写不敏感匹配；非 `.md` 资产（`x.png`）两试皆空 → None。
+    """
+    cands = [basename] if basename.lower().endswith(".md") else [basename, basename + ".md"]
+    for cand in cands:
+        hit = raw_index.get(cand) or raw_index.get(cand.lower())
+        if hit is not None:
+            return hit
+    return None
+
+
+def _is_raw_md_form(basename: str) -> bool:
+    """basename 形如 raw `.md` 源引用（以 `.md` 结尾、或无扩展名纯 stem）→ True；非 `.md` 扩展名
+    （`.png`/`.pdf` 等资产）→ False。markdown 链接据此决定缺失时「标灰」还是「原样保留 href」——
+    避免把指向 `raw/images/x.png` 之类合法资产链接误毁成断链 span。
+    """
+    return basename.lower().endswith(".md") or "." not in basename
+
+
+def _raw_ref_in_code(content: str) -> str | None:
+    """行内 code 整段（规整后）恰好是 `raw/<slug>.md` → 返回 basename（保大小写），否则 None。
+
+    与裸路径串同口径但用 fullmatch（整段消费定界，无需前后边界）；命令/多 token 代码（`cat raw/x.md`）
+    整体不等于 `raw/<slug>.md` 形 → 不误判（同 `_code_ref_target` 末步整体相等的安全纪律）。
+    """
+    m = _RAW_REF_FULL_RE.fullmatch(content.strip().replace("\\", "/"))
+    return m.group(1) if m is not None else None
+
+
+def _resolve_raw_link(
+    basename: str | None, raw_index: dict[str, str], display: str
+) -> tuple[str, dict[str, str], str] | None:
+    """raw basename（保大小写）→ `(tag, attrib, display)`：命中现存源 `a.rawlink[data-raw]`、缺失
+    `span.rawlink.broken`。`basename` 为 None（非 raw/ 前缀）→ None，交回调用方续判（不拦截）。
+    """
+    if basename is None:
+        return None
+    actual = _lookup_raw(basename, raw_index)
+    if actual is not None:
+        return "a", {"class": "rawlink", "data-raw": actual}, display
+    return "span", {"class": "rawlink broken", "title": _RAWLINK_BROKEN_TITLE}, display
+
+
 def _code_ref_target(content: str, stem_to_path: dict[str, str]) -> str | None:
     """`content` 是【对某现有页的忠实整体引用】才返回其相对路径，否则 None（行内 code 兜底用）。
 
@@ -194,15 +306,24 @@ def _code_ref_target(content: str, stem_to_path: dict[str, str]) -> str | None:
     return target if want in (base, base.removeprefix("wiki/"), base.rsplit("/", 1)[-1]) else None
 
 
-def _resolve_wikilink(raw: str, stem_to_path: dict[str, str]) -> tuple[str, dict[str, str], str]:
+def _resolve_wikilink(
+    raw: str, stem_to_path: dict[str, str], raw_index: dict[str, str]
+) -> tuple[str, dict[str, str], str]:
     """把 `[[…]]` 内部 raw 解析为 `(tag, attrib, display)`：命中现有页 → `a.wikilink[data-page]`，
     断链 → `span.wikilink.broken`。行内 `[[…]]` 与 code 兜底两路共用，杜绝两处样式/类名漂移。
+
+    **`raw/` 前缀优先拦截**：`[[raw/<slug>]]`（可带/不带 .md）指向 raw/ 顶层源——存在 →
+    `a.rawlink[data-raw]`、缺失 → `span.rawlink.broken`（决策：raw/ 只读源引用单列一档、不落到 wiki
+    页解析；`raw/` 是不会与 wiki 页 stem 撞的明确前缀，故拦截无歧义）。非 raw/ 前缀才续走 wiki 解析。
 
     P3.8：经 `resolve_owner`（精确 `link_stem` + fold 兜底）解析，与 check/graph/heal 同一张表、同
     口径——`[[multi_head_attention]]` 命中 `multi-head-attention.md`。**仅 `[[wikilink]]` 走 fold**；
     行内 code 引用（`_code_ref_target`）按精确路径/文件名判定、**不接 fold**（决策P3.8-7 边界）。
     """
     display = _wikilink_display(raw) or raw.strip()
+    raw_link = _resolve_raw_link(_raw_ref_basename(raw), raw_index, display)
+    if raw_link is not None:  # `[[raw/…]]`：raw 源引用单列一档（命中链 / 缺失标灰），不落 wiki 解析
+        return raw_link
     target = resolve_owner(raw, stem_to_path)
     if target is not None:
         return "a", {"class": "wikilink", "data-page": target}, display
@@ -311,29 +432,165 @@ if _HAS_MARKDOWN:
             md.preprocessors.register(_TableHtmlPreprocessor(md), "guanlan_table_html", 24)
 
     class _WikiLinkInlineProcessor(_InlineProcessor):
-        """把 `[[…]]` 渲染为站内锚链（resolved）或标灰 span（断链）。"""
+        """把 `[[…]]` 渲染为站内锚链（resolved）/ raw 源链（`[[raw/…]]`）/ 标灰 span（断链）。"""
 
-        def __init__(self, pattern: str, md, stem_to_path: dict[str, str]) -> None:
+        def __init__(
+            self, pattern: str, md, stem_to_path: dict[str, str], raw_index: dict[str, str]
+        ) -> None:
             super().__init__(pattern, md)
             self._stem_to_path = stem_to_path
+            self._raw_index = raw_index
 
         def handleMatch(self, m, data):  # noqa: N802 (markdown API 命名)
-            tag, attrib, display = _resolve_wikilink(m.group(1), self._stem_to_path)
-            el = _etree.Element(tag, attrib)  # 命中→a[data-page]（前端站内导航，无 href 跳转）
+            tag, attrib, display = _resolve_wikilink(
+                m.group(1), self._stem_to_path, self._raw_index
+            )
+            el = _etree.Element(tag, attrib)  # 命中→a[data-page|data-raw]（前端站内导航，无 href 跳转）
+            # display 不包 AtomicString：让 `[[页|**别名**]]` 的内联格式（强调/code 等）照常渲染（评审修复
+            # 旧的 AtomicString 把别名 markdown 渲成字面）。无嵌套之忧——裸 raw/ 路径串已改走跳过 `<a>` 子树的
+            # `_RawPathTreeprocessor`（树阶段），inline 阶段已无任何模式会回灌 display 套出嵌套 `<a>`。
             el.text = display
             return el, m.start(0), m.end(0)
 
     class _WikiLinkExtension(_Extension):
-        def __init__(self, stem_to_path: dict[str, str]) -> None:
+        def __init__(self, stem_to_path: dict[str, str], raw_index: dict[str, str]) -> None:
             super().__init__()
             self._stem_to_path = stem_to_path
+            self._raw_index = raw_index
 
         def extendMarkdown(self, md) -> None:  # noqa: N802 (markdown API 命名)
             # 优先级 175 高于内置 'link'(160)，确保 [[…]] 先于普通 [text](url) 被吃掉。
             md.inlinePatterns.register(
-                _WikiLinkInlineProcessor(WIKILINK_RE.pattern, md, self._stem_to_path),
+                _WikiLinkInlineProcessor(
+                    WIKILINK_RE.pattern, md, self._stem_to_path, self._raw_index
+                ),
                 "guanlan_wikilink",
                 175,
+            )
+
+    # 不在这些标签的子树里联裸路径串：`a`（链接文字——否则 `[raw/x.md](url)` 会在链接内套出嵌套锚）、
+    # `code`/`pre`（行内代码/代码块——保字面，同决策P4-3）、`span`（断链/rawlink.broken 标灰节点——
+    # 否则 `[raw/exists.md](raw/missing.md)` 经 ① 成 broken span 后，② 会在其内再联出**可点 rawlink 嵌在
+    # 灰 span 里**、且指向另一个源；`[[raw/ghost.md]]` 的灰 span 同理，评审修复）。
+    _RAW_SKIP_SUBTREE = frozenset({"a", "code", "pre", "span"})
+
+    class _RawPathTreeprocessor(_Treeprocessor):
+        """把指向 raw/ 源的引用联成 raw 源链——**两路在树上处理**（非 inline），故可按祖先精确避让：
+
+        ① **markdown 链接** `[文字](raw/<slug>.md)`：命中现存 raw 源 → 改写 `<a href>` 为 `a.rawlink[data-raw]`
+           （**保留链接文字、内联格式如 `<strong>`、作者 title**）；`.md` 形但缺失 → `span.rawlink.broken`；
+           **非 `.md` 扩展名资产**（`raw/images/x.png` 等）→ **原样保留**（不毁合法资产链接）。外链 / 绝对
+           路径 / 非 raw/ 前缀一律不动。
+        ② **裸路径串** `raw/<slug>.md`（正文 plain text）：切文本节点联链，但**跳过 `a`/`code`/`pre`/`span`
+           子树**——这是改用 treeprocessor（而非 inline）的关键：inline 处理器看不到祖先，链接文字
+           `[raw/x.md](url)` 会被回灌再联、套出非法嵌套 `<a>`；树上按祖先跳过则从根上杜绝（含跳过 ① 产出的
+           断链 `span`，否则会在灰 span 里再联出可点 rawlink）。
+
+        ① 先于 ② 跑：① 把命中的 raw/ 链接转成 `a.rawlink`（tag 仍 `a`）、缺失的转成 `span`，② 随即把它们
+        当 `a`/`span` 子树跳过，不会再进去联其链接文字。
+        """
+
+        def __init__(self, md, raw_index: dict[str, str]) -> None:
+            super().__init__(md)
+            self._raw_index = raw_index
+
+        def _split(self, text):
+            """把一段文本按裸 `raw/<slug>.md` 切成 `[str, <a|span>, str, …]`（首尾恒为 str）；无命中 → None。"""
+            if not text or "raw/" not in text:
+                return None
+            matches = list(_RAW_PATH_RE.finditer(text))
+            if not matches:
+                return None
+            frags: list = []
+            last = 0
+            for m in matches:
+                frags.append(text[last : m.start()])
+                tag, attrib, _ = _resolve_raw_link(
+                    _raw_ref_basename(m.group(0)), self._raw_index, m.group(0)
+                )
+                node = _etree.Element(tag, attrib)
+                node.text = m.group(0)
+                frags.append(node)
+                last = m.end()
+            frags.append(text[last:])
+            return frags
+
+        @staticmethod
+        def _insert_nodes(parent, frags, at):
+            """把 `_split` 的 frags 的**元素段**（frags[1],frags[3],…，各以其后字符串作 tail）依次插到
+            `parent` 的 `at` 位置起；首段字符串（frags[0]）由调用方自行安置到 el.text 或前邻 tail。
+            返回插入的元素数（供调用方推进插入锚点，避免 list.index 的 O(n²) 再扫）。"""
+            count = 0
+            i = 1
+            while i < len(frags):
+                node = frags[i]
+                node.tail = frags[i + 1]
+                parent.insert(at + count, node)
+                count += 1
+                i += 2
+            return count
+
+        def _linkify(self, el):
+            # Comment/PI 节点 .tag 是 callable（非字符串）→ 显式跳过（不进其文本联链，纵深防御）。
+            if callable(el.tag) or el.tag in _RAW_SKIP_SUBTREE:
+                return  # 整个子树跳过（链接文字 / 行内代码 / 代码块 / 断链 span）
+            original = list(el)
+            for child in original:  # 先递归子元素（其内部 text）
+                self._linkify(child)
+            # ① 联本元素 .text（新元素插到所有原子元素之前）。
+            inserted = 0
+            frags = self._split(el.text)
+            if frags is not None:
+                el.text = frags[0]
+                inserted = self._insert_nodes(el, frags, 0)
+            # ② 联每个原子元素的 .tail（插到该元素之后）。pos 跟踪当前原 child 在 el 中的实时下标
+            # （= 原序 + 已插入数），免每轮 list(el).index(child) 的 O(n²) 线性再扫（评审 efficiency 修复）。
+            pos = inserted
+            for child in original:
+                frags = self._split(child.tail)
+                if frags is not None:
+                    child.tail = frags[0]
+                    pos += self._insert_nodes(el, frags, pos + 1)
+                pos += 1  # 跳过 child 本身，下一个原 child 紧随其后（含其间已插入的锚）
+
+        def run(self, root):  # noqa: N802 (markdown API 命名)
+            # ① markdown 链接 href 指向 raw/ 源 → rawlink（命中）/ broken（.md 形但缺失）；先于 ② 跑。
+            # list(...) 物化：① 内把 broken 链接的 tag 由 `a`→`span`，避免边迭代边改 iter("a") 匹配标签。
+            for el in list(root.iter("a")):
+                href = el.get("href")
+                if not href:
+                    continue
+                norm = href[2:] if href.startswith("./") else href  # 容 `./raw/x.md`
+                basename = _raw_ref_basename(norm)
+                if basename is None:
+                    continue  # 外链 / 绝对 / 非 raw/ 前缀 → 不动
+                actual = _lookup_raw(basename, self._raw_index)
+                if actual is not None:  # 命中现存 raw 源 → rawlink（保留链接文字/格式与作者 title）
+                    title = el.get("title")
+                    el.attrib.clear()  # 丢 href（改站内导航，无 href 跳转）
+                    el.set("class", "rawlink")
+                    el.set("data-raw", actual)
+                    if title:  # 保留作者 title 提示（评审修复：旧的 attrib.clear 把 title 一并丢了）
+                        el.set("title", title)
+                elif _is_raw_md_form(basename):  # `.md` 形（或无扩展名 stem）但不存在 → 标灰
+                    el.attrib.clear()
+                    el.tag = "span"
+                    el.set("class", "rawlink broken")
+                    el.set("title", _RAWLINK_BROKEN_TITLE)
+                # else: 非 `.md` 扩展名资产（raw/images/x.png 等）→ 链接原样保留，不毁 href（评审修复）。
+            # ② 裸路径串 → rawlink/broken（按祖先跳过 a/code/pre/span，杜绝在链接文字/代码/断链 span 里联）。
+            self._linkify(root)
+
+    class _RawPathExtension(_Extension):
+        def __init__(self, raw_index: dict[str, str]) -> None:
+            super().__init__()
+            self._raw_index = raw_index
+
+        def extendMarkdown(self, md) -> None:  # noqa: N802 (markdown API 命名)
+            # 优先级 6 > safelink(5)：在 safelink 前把 raw/ href 转成无 href 的 rawlink（raw/ 本就安全，
+            # 顺序其实无碍，取 6 只为在同族 treeprocessor 中先跑、语义清晰）。核心 inline(20) 早已建好 <a>。
+            md.treeprocessors.register(
+                _RawPathTreeprocessor(md, self._raw_index), "guanlan_rawpath", 6
             )
 
     class _CodePathLinkTreeprocessor(_Treeprocessor):
@@ -350,9 +607,10 @@ if _HAS_MARKDOWN:
         若再把内层 code 转成 `<a>` 会产生嵌套锚（非法 HTML，浏览器会拆链、连累内外两个链接）。
         """
 
-        def __init__(self, md, stem_to_path: dict[str, str]) -> None:
+        def __init__(self, md, stem_to_path: dict[str, str], raw_index: dict[str, str]) -> None:
             super().__init__(md)
             self._stem_to_path = stem_to_path
+            self._raw_index = raw_index
 
         def run(self, root):  # noqa: N802 (markdown API 命名)
             # 排除已在 <pre>（缩进代码块）或 <a>（code 作链接文字）内的 code：前者保字面，
@@ -367,8 +625,17 @@ if _HAS_MARKDOWN:
                     continue  # 代码块内 / 链接内 / 含子元素 / 空 → 不碰
                 raw_wikilink = _code_wikilink_raw(el.text)
                 if raw_wikilink is not None:
-                    # 整段就是 `[[…]]`：与行内 [[…]] 完全同路（_resolve_wikilink），就地改写。
-                    _retag(el, *_resolve_wikilink(raw_wikilink, self._stem_to_path))
+                    # 整段就是 `[[…]]`：与行内 [[…]] 完全同路（_resolve_wikilink，含 `[[raw/…]]` 拦截）。
+                    _retag(
+                        el, *_resolve_wikilink(raw_wikilink, self._stem_to_path, self._raw_index)
+                    )
+                    continue
+
+                # 整段恰好是 `raw/<slug>.md`：raw 源引用（存在链 / 缺失标灰），**先于** wiki 页解析判定——
+                # 否则 `raw/x.md` 的 link_stem=`x` 可能误命中同名 wiki 页 `x.md`，把 raw 引用错链到 wiki。
+                raw_key = _raw_ref_in_code(el.text)
+                if raw_key is not None:
+                    _retag(el, *_resolve_raw_link(raw_key, self._raw_index, el.text.strip()))
                     continue
 
                 # 仅当整段是【对某现有页的忠实引用】才联链：放行含空格的合法页名，
@@ -381,14 +648,15 @@ if _HAS_MARKDOWN:
             return None
 
     class _CodePathLinkExtension(_Extension):
-        def __init__(self, stem_to_path: dict[str, str]) -> None:
+        def __init__(self, stem_to_path: dict[str, str], raw_index: dict[str, str]) -> None:
             super().__init__()
             self._stem_to_path = stem_to_path
+            self._raw_index = raw_index
 
         def extendMarkdown(self, md) -> None:  # noqa: N802 (markdown API 命名)
-            # 树处理阶段跑（行内 code 节点此时已生成）；data-page 无 href，与 safelink 不冲突。
+            # 树处理阶段跑（行内 code 节点此时已生成）；data-page/data-raw 无 href，与 safelink 不冲突。
             md.treeprocessors.register(
-                _CodePathLinkTreeprocessor(md, self._stem_to_path),
+                _CodePathLinkTreeprocessor(md, self._stem_to_path, self._raw_index),
                 "guanlan_codepathlink",
                 4,
             )
@@ -401,7 +669,9 @@ def render_markdown(
 
     始终带两道安全闸：`_EscapeHtmlExtension`（关原始 HTML 透传）+ `_SafeLinkExtension`
     （中和 javascript:/data: 链接）。给了 `wiki` 才挂 `[[wikilink]]` 重写（解析到该库页面），
-    并对【整段精确解析到现有页】的行内 `<code>` 破例联链（兜底 LLM 把源出处写成路径+反引号）。
+    并对【整段精确解析到现有页】的行内 `<code>` 破例联链（兜底 LLM 把源出处写成路径+反引号）；
+    同时把指向 `raw/<slug>.md` 的引用（裸路径串 / 行内 code / `[[raw/…]]` 三写法）联成只读 raw 源链
+    `a.rawlink[data-raw]`（仅真实存在的 raw 文件，缺失标灰），raw 目录由 `wiki.parent/raw` 推出。
     给了 `image_src`（`(相对路径) -> URL` 可调用）才挂库内相对 `<img>` 改写——供 raw 预览把
     `images/<slug>/…` 指向本地图片端点。`allow_tables=True` 才对原始 `<table>` HTML 破例
     （allowlist 消毒后还原，供 raw 预览显示 mineru/marker 的复杂表）——两者都默认关，wiki/chat
@@ -416,9 +686,11 @@ def render_markdown(
         _SafeLinkExtension(),  # 安全：中和 javascript:/data: 链接。
     ]
     if wiki is not None:
-        stem_map = _stem_to_path(wiki)  # 单次扫库，两个扩展共享（避免重复 rglob）。
-        extensions.append(_WikiLinkExtension(stem_map))
-        extensions.append(_CodePathLinkExtension(stem_map))
+        stem_map = _stem_to_path(wiki)  # 单次扫库，wiki/code 两扩展共享（避免重复 rglob）。
+        raw_index = _raw_name_index(wiki.parent)  # raw/ 顶层 .md 真实文件名集（每渲染重扫，同 stem_map 纪律）。
+        extensions.append(_WikiLinkExtension(stem_map, raw_index))
+        extensions.append(_CodePathLinkExtension(stem_map, raw_index))
+        extensions.append(_RawPathExtension(raw_index))  # 裸 raw/<slug>.md 路径串 + markdown 链接 href→rawlink。
     if image_src is not None:
         extensions.append(_RawImageExtension(image_src))
     if allow_tables:

@@ -22,6 +22,7 @@ function rerenderDynamic() {
   const cur = currentView();
   if (cur && cur.kind === "index") renderIndex(cur);
   else if (cur && cur.kind === "page") repaintPageChrome();
+  else if (cur && cur.kind === "raw") repaintRawChrome(); // raw 源态：纯重绘 banner（吃缓存，不重拉）
   // 搜索态：用缓存结果纯重绘头部（命中/检索计数）+ 空/失败态文案（吃 view.results，不重拉 /api/search，
   // P5.1）。在飞搜索（尚无 results）无需在此重绘——其 doSearch 回调落地时按当时语言 t() 自然出新语言。
   else if (cur && cur.kind === "search" && cur.results) paintSearch(cur);

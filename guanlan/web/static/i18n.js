@@ -49,6 +49,11 @@ window.I18N = {
     "wiki.loadFail": "加载页面失败：{0}（请重试或检查服务端）",
     "wiki.emptyAll": "暂无页面",
     "wiki.emptyMatch": "无匹配页面",
+    // —— raw 只读源视图（正文/对话里点 a.rawlink 进来）——
+    "raw.banner": "原始素材 · 只读",
+    "raw.openInTab": "在新标签打开",
+    "raw.loading": "加载原始素材…",
+    "raw.openFail": "打开原始素材失败：{0}",
     "search.searching": "检索中…",
     "search.head": "命中 {0} 页 · 检索 {1} 页",
     "search.empty": "无命中：{0}",
@@ -420,6 +425,11 @@ window.I18N = {
     "wiki.loadFail": "Failed to load pages: {0} (retry or check the server)",
     "wiki.emptyAll": "No pages yet",
     "wiki.emptyMatch": "No matching pages",
+    // —— raw read-only source view (reached via a.rawlink in body / chat) ——
+    "raw.banner": "Source material · read-only",
+    "raw.openInTab": "Open in new tab",
+    "raw.loading": "Loading source material…",
+    "raw.openFail": "Failed to open source material: {0}",
     "search.searching": "Searching…",
     "search.head": "{0} hits · {1} pages searched",
     "search.empty": "No hits: {0}",

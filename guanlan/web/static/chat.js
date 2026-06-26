@@ -670,10 +670,13 @@ function clearHeartbeat(botEl) {
   }
 }
 
-// 对话气泡里的 [[wikilink]]（来自渲染后的答案）点了切到右栏 wiki 单页。
+// 对话气泡里的 [[wikilink]] / raw 源链（来自渲染后的答案）点了切到右栏：wiki 单页 / 只读 raw 源。
+// 左栏=对话、右栏=查看器（与既有 wikilink 行为一致，气泡滚动位置不丢；断链 span 无 data-* 不可点）。
 $("#chat-log").addEventListener("click", (e) => {
   const a = e.target.closest("a.wikilink[data-page]");
-  if (a) { e.preventDefault(); navigate({ kind: "page", path: a.dataset.page }); }
+  if (a) { e.preventDefault(); navigate({ kind: "page", path: a.dataset.page }); return; }
+  const r = e.target.closest("a.rawlink[data-raw]");
+  if (r) { e.preventDefault(); navigate({ kind: "raw", name: r.dataset.raw }); }
 });
 
 async function sendChat(message, attachments) {

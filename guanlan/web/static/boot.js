@@ -57,10 +57,14 @@
 $("#lang-btn").addEventListener("click", toggleLang);
 initLang();
 
-// 先拉页面再进"列表"视图（首页）——启动即显示 Concept 列表。
-// 仅当用户尚未导航时才进首页：否则页面慢加载期间用户已输入的搜索会被这次空首页覆盖
-// （loadPages 解析后会就地重渲染当前 index 条目，故用户的搜索结果照常出现）。
-loadPages().then(() => { if (histPos < 0) navigate({ kind: "index", query: "" }); });
+// 先拉页面再进初始视图——默认显示 Concept 列表；`?raw=<name>` 弹出页则直开该 raw 源（「在新标签
+// 打开」用，供边看 wiki 边对照原始素材）。仅当用户尚未导航时才进，否则页面慢加载期间用户已输入的
+// 搜索会被覆盖（loadPages 解析后会就地重渲染当前 index 条目，故用户的搜索结果照常出现）。
+loadPages().then(() => {
+  if (histPos >= 0) return; // 用户已自行导航（搜索/点页）→ 不覆盖
+  const wantRaw = new URL(window.location.href).searchParams.get("raw");
+  navigate(wantRaw ? { kind: "raw", name: wantRaw } : { kind: "index", query: "" });
+});
 
 // 启动协调（P4.9）：先拉一次 /api/info 取进程默认姿态 + reader 标志，**再**按模式恢复 ?c= 会话——
 // 二者本是两段独立异步、会赛跑；合一后 reader 标志在恢复策略选择前就绪（reader 走按-id 探针、不枚举）。

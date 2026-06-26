@@ -50,6 +50,8 @@ function renderView(view) {
   } else if (view.kind === "search") {
     $("#wiki-search").value = view.query || "";
     renderSearch(view);
+  } else if (view.kind === "raw") {
+    renderRaw(view.name); // 只读 raw 源（正文/对话里点 a.rawlink 进来），复用历史栈、一键「←」回原页
   } else {
     renderPage(view.path);
   }
@@ -220,6 +222,61 @@ async function renderPage(path) {
   }
 }
 
+// ── 只读 raw 源视图（{kind:"raw", name}）─────────────────────────────────────
+// 正文/对话里指向现存 raw/<slug>.md 的 a.rawlink 点击落到这里：复用 /api/raw/file（与 ingest 选单
+// 预览同一只读渲染端点、同形 {meta,html}）内联渲染进右栏，压历史栈、一键「←」回引用它的原页。
+// banner 标明「只读原始素材」把 raw/wiki 边界标清楚，并给个「在新标签打开」逃生口供并排对照源。
+let lastRaw = null; // {name, data}：当前 raw 源态缓存，供语言切换纯重绘 banner（不重拉 /api/raw/file）
+
+function paintRaw(data, name) {
+  const view = $("#wiki-view");
+  const banner = document.createElement("div"); // 只读原始素材横幅（chrome 走 t()）
+  banner.className = "raw-banner";
+  const label = document.createElement("span");
+  label.className = "raw-banner-label";
+  label.textContent = t("raw.banner");
+  const path = document.createElement("span");
+  path.className = "raw-banner-path";
+  path.textContent = `raw/${name}`; // textContent：文件名按字面显示，无注入
+  const pop = document.createElement("button"); // 「在新标签打开」：开 /?raw= 弹出页，供边看 wiki 边对照源
+  pop.type = "button";
+  pop.className = "raw-banner-pop";
+  pop.textContent = t("raw.openInTab");
+  pop.title = t("raw.openInTab");
+  pop.addEventListener("click", () =>
+    window.open(`/?raw=${encodeURIComponent(name)}`, "_blank", "noopener")
+  );
+  banner.append(label, path, pop);
+  const body = document.createElement("div");
+  body.className = "raw-body rendered";
+  body.innerHTML = data.html; // render_page 已 sanitize（同 /api/page）
+  view.innerHTML = "";
+  view.append(banner, body);
+  enhanceContent(body); // 富渲染正文：```mermaid→图 / ```X→高亮 / $…$→公式（同 paintPage，仅作用于正文非 banner）
+}
+
+// 语言切换时纯重绘当前 raw 源的 banner（吃缓存数据，绝不重拉 /api/raw/file，同 repaintPageChrome）。
+function repaintRawChrome() {
+  const cur = currentView();
+  if (cur && cur.kind === "raw" && lastRaw && lastRaw.name === cur.name) paintRaw(lastRaw.data, cur.name);
+}
+
+async function renderRaw(name) {
+  const tok = ++renderToken; // 复用单页渲染序号：导航走（回退/搜索/续进）即丢弃迟到响应
+  searchToken++; // 导航离开搜索 → 作废在飞的远端搜索响应（同 renderPage，防 stale-overwrite）
+  const view = $("#wiki-view");
+  view.innerHTML = `<p class="muted">${escapeHtml(t("raw.loading"))}</p>`;
+  try {
+    const data = await getJSON(`/api/raw/file?name=${encodeURIComponent(name)}`);
+    if (tok !== renderToken) return;
+    lastRaw = { name, data }; // 缓存供语言切换纯重绘
+    paintRaw(data, name);
+  } catch (e) {
+    if (tok !== renderToken) return;
+    view.innerHTML = `<p class="muted">${escapeHtml(t("raw.openFail", e.message))}</p>`;
+  }
+}
+
 $("#wiki-home").addEventListener("click", () => navigate({ kind: "index", query: "" }));
 $("#wiki-back").addEventListener("click", goBack);
 $("#wiki-fwd").addEventListener("click", goForward);
@@ -239,8 +296,10 @@ $("#wiki-search").addEventListener("input", (e) => {
   }
 });
 
-// 站内 wikilink 导航：事件委托到合并视图，续进单页历史。
+// 站内 wikilink / raw 源链导航：事件委托到合并视图，续进历史（断链 span 无 data-* → 不命中、不可点）。
 $("#wiki-view").addEventListener("click", (e) => {
   const a = e.target.closest("a.wikilink[data-page]");
-  if (a) { e.preventDefault(); navigate({ kind: "page", path: a.dataset.page }); }
+  if (a) { e.preventDefault(); navigate({ kind: "page", path: a.dataset.page }); return; }
+  const r = e.target.closest("a.rawlink[data-raw]");
+  if (r) { e.preventDefault(); navigate({ kind: "raw", name: r.dataset.raw }); }
 });
