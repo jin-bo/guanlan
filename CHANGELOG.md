@@ -36,6 +36,18 @@
     `link_resolution_index` fold 纪律）——大小写敏感盘上 `raw/Foo.md`/`raw/foo.md` 各按真实名解析、零串台；
     markdown 链接改写保留作者 `title`；`_linkify` 尾段插入改 O(n) 偏移跟踪（去 `list.index` 的 O(n²)）。
 
+### 变更
+
+- **Web 翻 auto 后的确认 UI 收进单框** —— 用户点「本会话起自动放行」（confirm_mode 翻 auto）后，原先
+  「恢复逐次确认」按钮与「本会话已自动放行 ASK 操作（仍只写 wiki/workspace，raw/ 与 AGENTAO.md 仍只读）」
+  安全提示是确认框下方另起的一条独立黄条；现把两者都**并进**「Agent 请求执行操作（请审阅）」确认框内：
+  恢复钮就近放在置灰的「拒绝」钮前，提示文案作为框内一行（`.interaction-automode-inline`）。点「恢复逐次
+  确认」后框内如实回滚——`note.remove()` 撤掉已失真的提示行、去掉「本会话起自动放行」前的 `✓`（移除
+  `.chosen`）、钮后内联「已恢复逐次确认。」。冷启刷新时页面已是 auto（无对应确认框可挂钮）仍走原来的独立
+  黄条带钮路径不变。实现上抽出共享的 `makeRestoreButton()` 工厂（确认框内一处、独立黄条一处共用），
+  `scripts/smoke_p415.py` 同步把定位从独立 `.interaction-automode` 改为框内 `.interaction-automode-inline`。
+  纯前端、零服务端改动；写边界与 `/confirm-mode {ask}` 可逆语义不变。
+
 ## [0.1.16] - 2026-06-24
 
 ### 新增

@@ -148,6 +148,7 @@ body {
 .msg.note .interaction-status.inline { margin-top: 0; } /* timeout/stopped：贴在「拒绝」钮后内联，不另起一行 */
 .msg.note .interaction-status.stale { color: #c0392b; }
 .msg.note.interaction-automode { border-color: #e0a800; background: #fff8e1; color: #6b4e00; }
+.msg.note .interaction-automode-inline { margin-top: .5rem; font-size: .74rem; color: #6b4e00; } /* 翻 auto 后并进确认框的安全提示行 */
 
 /* ── 主体：grid（chat │split│ wiki / input 满宽） ──
    右栏宽度由 --wiki-w 驱动（默认 26rem），中间一条可拖动的分隔条改写它；JS 持久化到 localStorage。 */

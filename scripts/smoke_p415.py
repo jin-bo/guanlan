@@ -264,8 +264,9 @@ class Smoke:
         b1.locator(".interaction-btn.allow-session").click()
         # 新交互：在「本会话起自动放行」钮上打勾（.chosen），不增状态行。
         b1.locator(".interaction-btn.allow-session.chosen").wait_for(state="visible", timeout=8000)
-        # 翻 auto：出现自动放行提示 + 「恢复逐次确认」钮
-        self.page.locator(".interaction-automode").last.wait_for(state="visible", timeout=8000)
+        # 翻 auto：自动放行提示 + 「恢复逐次确认」钮都并进确认框（不再另起黄条）
+        b1.locator(".interaction-automode-inline").wait_for(state="visible", timeout=8000)
+        b1.locator(".interaction-btn.restore").wait_for(state="visible", timeout=8000)
         self.wait_idle()
         # 第二条：auto 下静默放行——不该再弹 confirm 气泡
         before = self.page.locator(".msg.interaction.confirm").count()

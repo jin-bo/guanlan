@@ -1128,7 +1128,25 @@ function finalizeInteraction(div, decision) {
       if (deny) deny.insertAdjacentElement("afterend", tag);
       else div.appendChild(tag);
     }
-    if (decision === "allow_session") showAutoModeNote(); // 翻 auto：给「恢复逐次确认」一键
+    if (decision === "allow_session") {
+      // 翻 auto：把「恢复逐次确认」一键就近放进本框（置灰的「拒绝」钮前），安全提示文案也并入本框（不另起黄条）。
+      const note = document.createElement("div");
+      note.className = "interaction-automode-inline"; // 「仍只写 wiki/workspace，raw/ 与 AGENTAO.md 仍只读」就近提示
+      note.textContent = t("interaction.autoNote");
+      const restore = makeRestoreButton(div, (b) => {
+        const tag = document.createElement("span");
+        tag.className = "interaction-status inline";
+        tag.textContent = t("interaction.restored"); // 「已恢复逐次确认」贴在钮后内联
+        b.insertAdjacentElement("afterend", tag);
+        note.remove(); // 已恢复逐次确认：撤掉已失真的「已自动放行」提示
+        const sess = div.querySelector(".interaction-btn.allow-session");
+        if (sess) sess.classList.remove("chosen"); // 自动放行已撤销：去掉「本会话起自动放行」前的 ✓
+      });
+      const deny = div.querySelector(".interaction-btn.deny");
+      if (deny) deny.insertAdjacentElement("beforebegin", restore);
+      else div.querySelector(".interaction-actions").appendChild(restore);
+      div.appendChild(note);
+    }
     $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
     return;
   }
@@ -1147,26 +1165,33 @@ function finalizeInteraction(div, decision) {
   $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
 }
 
-// 本会话起自动放行后的提示 + 「恢复逐次确认」（/confirm-mode {ask}）。镜像 CLI 第 2 项的安全版：
-// 仅松「问不问」、姿态仍 workspace-write、层①②③ 不动、可逆（§6）。
+// 「恢复逐次确认」按钮工厂（/confirm-mode {ask}）：点击即置灰自身、POST 成功后回调 onRestored(b) 落反馈。
+// box 仅供失败时 markInteractionStale 归属。镜像 CLI 第 2 项的安全版：仅松「问不问」、姿态仍
+// workspace-write、层①②③ 不动、可逆（§6）。
+function makeRestoreButton(box, onRestored) {
+  const b = document.createElement("button");
+  b.className = "interaction-btn restore";
+  b.textContent = t("interaction.restoreConfirm");
+  b.addEventListener("click", () => {
+    b.disabled = true;
+    interactionPost("/confirm-mode", { confirm_mode: "ask" }, box, () => onRestored(b));
+  });
+  return b;
+}
+
+// 冷启刷新时已是 auto（无对应确认框可挂钮）：单独一条黄色提示带「恢复逐次确认」一键。翻 auto 的当场
+// 走的是 finalizeInteraction——钮与文案都就近并进确认框，不来这里。
 function showAutoModeNote() {
-  addNote((div) => {
+  return addNote((div) => {
     div.classList.add("interaction-automode");
     const p = document.createElement("div");
     p.textContent = t("interaction.autoNote");
     div.appendChild(p);
-    const b = document.createElement("button");
-    b.className = "interaction-btn restore";
-    b.textContent = t("interaction.restoreConfirm");
-    b.addEventListener("click", () => {
-      b.disabled = true;
-      interactionPost("/confirm-mode", { confirm_mode: "ask" }, div, () => {
-        const done = document.createElement("div");
-        done.textContent = t("interaction.restored");
-        div.appendChild(done);
-      });
-    });
-    div.appendChild(b);
+    div.appendChild(makeRestoreButton(div, () => {
+      const done = document.createElement("div");
+      done.textContent = t("interaction.restored");
+      div.appendChild(done);
+    }));
   });
 }
 
