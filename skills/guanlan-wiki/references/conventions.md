@@ -59,6 +59,21 @@ last_updated: YYYY-MM-DD
 
 > Web 端 wiki 页**当前不渲染**这种 `../../raw/images/` 引用（图片改写仅在 raw 预览开启，见 `render.py`）；本节只保证 markdown/Obsidian 层引用不悬空、知识不丢。让 wiki 页也显示嵌图属 P4.6 机会性优化（同 P5.2.1 决策-12），与本约定正交。
 
+## 图表（mermaid 直绘）
+
+表达流程 / 时序 / 状态 / 类 / 架构 / 实体关系等结构时，Agent **可直接在页面正文写 ` ```mermaid ` 围栏块**（标准 mermaid DSL），**无需任何外部画图 / 生图工具**——围栏块就是事实来源的一部分（「markdown 唯一事实」不破）。Web 宿主（P4.13）在浏览器内 `securityLevel:'strict'` 渲染成 SVG；CLI / 无渲染端回退到字面源码，零信息损失。
+
+```mermaid
+graph TD
+  A[编码器] --> B[自注意力]
+  B --> C[解码器]
+```
+
+- **何时用 mermaid vs 图片引用**：你新综合出来表达关系 / 流程 / 论证的图用 mermaid 直绘；`raw/` 源里已有的插图按上节走 `![](../../raw/images/…)` 引用——**不要把源图重画成 mermaid**（失真 + 臆造）。
+- **承载知识才画**（同图片的选择性原则）：流程 / 架构 / 关系 / 状态机等画；装饰性、一句话能说清的不画。wiki 是摘要层，不是图册。
+- 图里出现的实体 / 概念，正文**仍用 `[[wikilink]]` 互链**——mermaid 节点文本不参与 wikilink 解析与 query 召回，图不能替代链接（否则断了交叉引用与建图）。
+- 用**标准 mermaid DSL**，避开渲染器交互指令（`click` / 图内超链接被 Web 端 `strict` 关掉；站内导航走 `[[wikilink]]`）。与 `guanlan graph` 产出的 `graph.json/graph.html`（确定性生成的 wikilink 关系图）是两回事，勿混。
+
 ## 别名（aliases）
 
 entity/concept 页可在 frontmatter 声明 `aliases`，把「同义不同名」的变体收敛到同一页（AI 领域高发：「大模型」/「LLM」/「大语言模型」、「自注意力」/「self-attention」、中英缩写混用）。**别名进入 `[[wikilink]]` 解析命名空间**（与页面 stem 同口径、大小写不敏感、零 LLM）：
