@@ -105,11 +105,16 @@ class Finding:
     """单条审计建议（`health`/`lint` 用）；字段形状同 `Violation`，但语义是**建议**而非门禁违规。
 
     跨页聚合的全局 finding（如 `lint.missing_entity`）`page` 留空串，消费侧据此识别。
+
+    `suggestion`（P3.11）：可选的「疑似已有页」相对路径，由 `lint` 对断链 target 做确定性
+    token-overlap 算得（零 LLM）。默认 None；`report_dict` 序列化时丢弃为 None 的可选键，故不附
+    建议的 finding 其 JSON 与未引入本字段前**字节一致**（决策P3.11-5）。
     """
 
     page: str
     kind: str
     detail: str
+    suggestion: str | None = None
 
 
 def split_frontmatter(text: str) -> tuple[str | None, str]:
@@ -444,8 +449,18 @@ def report_dict(*, ok: bool, pages_checked: int, items_key: str, items: list) ->
     `report_json` 在此之上做序列化；MCP 宿主的 `health`/`lint` 工具**直接拿这份 dict**喂结构化输出
     （决策P4.10-10），不再 `json.loads(format_report(...))` 绕字符串往返。`items` 是 `Violation`/
     `Finding` 同形 dataclass 列表；`items_key` 为 `"violations"`（check）或 `"findings"`（health/lint）。
+
+    **丢弃值为 `None` 的可选键**（P3.11，决策P3.11-5）：`Finding.suggestion` 不附建议时为 None，
+    剔除后该 finding 的 JSON 与未引入 `suggestion` 字段前**字节一致**；`Violation` 三字段恒非 None、
+    不受影响（故 check 序列化不变）。
     """
-    return {"ok": ok, "pages_checked": pages_checked, items_key: [asdict(i) for i in items]}
+    return {
+        "ok": ok,
+        "pages_checked": pages_checked,
+        items_key: [
+            {k: v for k, v in asdict(i).items() if v is not None} for i in items
+        ],
+    }
 
 
 def report_json(*, ok: bool, pages_checked: int, items_key: str, items: list) -> str:
