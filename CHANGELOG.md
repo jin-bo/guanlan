@@ -7,6 +7,16 @@
 
 ### 新增
 
+- **指令层：告知 Agent 可直接写 ` ```mermaid ` 围栏图** —— `AGENTAO.md` 新增「图表（流程图等直接写
+  mermaid）」节、`conventions.md` 新增「§图表（mermaid 直绘）」（带最小示例）、`SKILL.md` ingest 工作流补
+  指针：表达流程/时序/状态/类/架构/关系等结构时，Agent **直接在正文写 mermaid 围栏块即可**，无需调用任何
+  外部画图/生图工具——围栏块本身就是产物，Web 宿主（P4.13）浏览器内 `strict` 渲染成图、CLI 回退字面源码
+  （markdown 唯一事实不破）。明确边界：**新综合**的关系图用 mermaid 直绘，`raw/` 源里**已有**的插图仍按图片
+  引用、**不重画**；图里实体/概念正文仍须 `[[wikilink]]` 互链（mermaid 节点文本不进 wikilink/召回解析）；
+  与 `guanlan graph` 的 `graph.json/html`（确定性 wikilink 关系图）无关。**纯指令/文档，零代码改动**，解锁的
+  是 P4.13 已落地的既有渲染能力。同步补 `examples/AGENTAO.md`（init 模板单源）与本地库 `kbs/{jindu,jingzhen}`
+  的 `AGENTAO.md`（`init` 不覆盖既有文件，存量库需就地补）。
+
 - **Web 正文/对话里的 `raw/<slug>.md` 引用联成只读 raw 源链** —— wiki 单页（`/api/page`）与对话答案
   渲染时，把指向**现存** `raw/<slug>.md` 的引用联成可点的 `a.rawlink[data-raw]`：点击在**右栏内联**
   调既有 `/api/raw/file` 只读渲染那篇原始素材（复用单页历史栈，一键「←」回引用它的原页；左栏对话气泡
