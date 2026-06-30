@@ -240,3 +240,207 @@ def test_ordering_does_not_change_finding_set_or_exit_code(tmp_path: Path):
     }
     assert lint_entrypoint(tmp_path, json_output=False, strict=False) == 0
     assert lint_entrypoint(tmp_path, json_output=False, strict=True) == 6
+
+
+# ---------- P3.11 断链「最近页」建议（零 LLM token overlap） ----------
+
+
+def _broken(report, target_stem: str):
+    """取 detail 指向给定 target stem 的唯一 broken_link finding。"""
+    hits = [
+        f
+        for f in report.findings
+        if f.kind == "lint.broken_link" and f"[[{target_stem}]]" in f.detail
+    ]
+    assert len(hits) == 1, f"期望唯一 broken_link for {target_stem}，得 {len(hits)}"
+    return hits[0]
+
+
+def test_suggestion_cjk_overlap(tmp_path: Path):
+    """CJK 2-gram 重叠：断链 [[多头注意力机制]] → 既有页 多头注意力.md（决策P3.11-3）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/多头注意力.md", title="多头注意力", body="正文")
+    _page(wiki, "concepts/ref.md", title="引用页", body="见 [[多头注意力机制]]")
+
+    f = _broken(run_lint(wiki), "多头注意力机制")
+    assert f.suggestion == "wiki/concepts/多头注意力.md"
+    assert "疑似已有页" in f.detail and "多头注意力.md" in f.detail
+
+
+def test_suggestion_not_diluted_by_mixed_language_stem(tmp_path: Path):
+    """分字段打分：英文 kebab slug stem 不稀释 CJK title 的强匹配（决策P3.11-3a，Codex 复审 P2）。
+
+    页 multi-head-attention.md（title 多头注意力）应被 [[多头注意力机制]] 命中——title 单算
+    4/6=0.67 ≥ 阈值；若把英文 stem token 并进同一分母会跌到 4/9 被压掉。
+    """
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/multi-head-attention.md", title="多头注意力", body="正文")
+    _page(wiki, "concepts/ref.md", title="引用页", body="见 [[多头注意力机制]]")
+
+    f = _broken(run_lint(wiki), "多头注意力机制")
+    assert f.suggestion == "wiki/concepts/multi-head-attention.md"
+
+
+def test_suggestion_ascii_shared_token(tmp_path: Path):
+    """共享整词：断链 [[attention]] → self-attention.md（Jaccard 0.5 ≥ 阈值）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/self-attention.md", title="Self-Attention", body="正文")
+    _page(wiki, "concepts/ref.md", title="引用页", body="见 [[attention]]")
+
+    f = _broken(run_lint(wiki), "attention")
+    assert f.suggestion == "wiki/concepts/self-attention.md"
+
+
+def test_no_suggestion_for_typo(tmp_path: Path):
+    """不纠拼写：断链 [[Atention]] 与 attention.md 无共享 token → 不建议（决策P3.11-3）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/attention.md", title="Attention", body="正文")
+    _page(wiki, "concepts/ref.md", title="引用页", body="见 [[Atention]]")
+
+    f = _broken(run_lint(wiki), "atention")  # link_stem 小写化
+    assert f.suggestion is None
+    assert "疑似已有页" not in f.detail
+
+
+def test_no_suggestion_of_referencing_page(tmp_path: Path):
+    """候选只看 stem/title、不扫正文：正文含 [[ghost]] 的引用页不被建议为目标（§0.1#1）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    # 两张引用页正文都含 ghost，但其 stem/title 与 ghost 无 overlap。
+    _page(wiki, "concepts/alpha.md", title="阿尔法", body="见 [[ghost]] ghost ghost")
+    _page(wiki, "concepts/beta.md", title="贝塔", body="也见 [[ghost]] ghost")
+
+    report = run_lint(wiki)
+    me = [f for f in report.findings if f.kind == "lint.missing_entity"]
+    assert len(me) == 1 and "[[ghost]]" in me[0].detail
+    assert me[0].suggestion is None  # 引用页正文含 ghost 却不被建议
+    assert all(
+        f.suggestion is None for f in report.findings if f.kind == "lint.broken_link"
+    )
+
+
+def test_no_self_suggestion_for_own_broken_link(tmp_path: Path):
+    """不把写有断链的页建议成它自己的解析目标（决策P3.11-4a，review CONFIRMED）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    # 页自身 stem/title 与断链 target 高度重叠，但它正是该断链的源页 → 不得自荐；无第三方候选 → 无建议。
+    _page(wiki, "concepts/多头注意力机制.md", title="多头注意力机制", body="见 [[多头注意力]]")
+
+    f = _broken(run_lint(wiki), "多头注意力")
+    assert f.suggestion is None
+    assert "疑似已有页" not in f.detail
+
+
+def test_missing_entity_excludes_referencing_pages_even_if_overlapping(tmp_path: Path):
+    """缺失实体的建议排除**所有引用页**——即便引用页 title 与 target 高度重叠（决策P3.11-4a）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    # 两页 title 都与 target 高度重叠且都引用它 → 都是引用页 → 都被排除；无第三方候选 → 无建议。
+    # （若不排除引用页，p1/p2 会被高分自荐——正是 review 指出的反模式。）
+    _page(wiki, "concepts/p1.md", title="多头注意力机制甲", body="见 [[多头注意力机制]]")
+    _page(wiki, "concepts/p2.md", title="多头注意力机制乙", body="也见 [[多头注意力机制]]")
+
+    me = [f for f in run_lint(wiki).findings if f.kind == "lint.missing_entity"]
+    assert len(me) == 1
+    assert me[0].suggestion is None
+
+
+def test_suggestion_below_threshold_omitted(tmp_path: Path):
+    """低于 Jaccard 阈值不建议：[[deep-learning-model]](3 token) vs deep.md(1) = 0.33 < 0.5。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/deep.md", title="Deep", body="正文")
+    _page(wiki, "concepts/ref.md", title="引用页", body="见 [[deep-learning-model]]")
+
+    assert _broken(run_lint(wiki), "deep-learning-model").suggestion is None
+
+
+def test_missing_entity_also_gets_suggestion(tmp_path: Path):
+    """缺失实体（≥2 页引用）同样附建议；结构化字段与 detail 一致。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/多头注意力.md", title="多头注意力", body="正文")
+    _page(wiki, "concepts/A.md", title="甲", body="见 [[多头注意力机制]]")
+    _page(wiki, "concepts/B.md", title="乙", body="也见 [[多头注意力机制]]")
+
+    me = [f for f in run_lint(wiki).findings if f.kind == "lint.missing_entity"]
+    assert len(me) == 1
+    assert me[0].suggestion == "wiki/concepts/多头注意力.md"
+    assert "疑似已有页" in me[0].detail
+
+
+def test_json_byte_stable_when_no_suggestion(tmp_path: Path):
+    """report_dict 丢 None：无建议 finding 的 JSON 无 suggestion 键、仍为三字段（决策P3.11-5）。"""
+    from guanlan.pages import report_dict
+
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/Lonely.md", body="孤儿 + 断链 [[毫不相干的词]]")  # 无候选
+
+    report = run_lint(wiki)
+    d = report_dict(
+        ok=report.ok,
+        pages_checked=report.pages_checked,
+        items_key="findings",
+        items=report.findings,
+    )
+    assert d["findings"], "本用例应有 finding"
+    for item in d["findings"]:
+        assert "suggestion" not in item
+        assert set(item) == {"page", "kind", "detail"}
+
+
+def test_json_includes_suggestion_when_present(tmp_path: Path):
+    """有建议时 JSON 多出 suggestion 键（值为相对路径）。"""
+    from guanlan.pages import report_dict
+
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/self-attention.md", title="Self-Attention", body="正文")
+    _page(wiki, "concepts/ref.md", title="引用页", body="见 [[attention]]")
+
+    report = run_lint(wiki)
+    d = report_dict(
+        ok=report.ok,
+        pages_checked=report.pages_checked,
+        items_key="findings",
+        items=report.findings,
+    )
+    broken = [
+        i
+        for i in d["findings"]
+        if i["kind"] == "lint.broken_link" and "[[attention]]" in i["detail"]
+    ]
+    assert len(broken) == 1
+    assert broken[0]["suggestion"] == "wiki/concepts/self-attention.md"
+
+
+def test_violation_json_unaffected_by_none_drop():
+    """回归：report_dict 丢 None 不影响 Violation 序列化（三字段恒非 None，check 不变）。"""
+    from guanlan.pages import Violation, report_dict
+
+    items = [Violation("wiki/x.md", "frontmatter.missing_key", "缺 title")]
+    d = report_dict(ok=False, pages_checked=1, items_key="violations", items=items)
+    assert d["violations"] == [
+        {"page": "wiki/x.md", "kind": "frontmatter.missing_key", "detail": "缺 title"}
+    ]
+
+
+def test_suggestion_deterministic_and_lint_avoids_heavy_paths(tmp_path: Path):
+    """建议确定性可重放；lint 模块不引检索召回/语料/别名扫描（决策P3.11-2，只复用 tokenize）。"""
+    import guanlan.lint as lint_mod
+
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/多头注意力.md", title="多头注意力", body="正文")
+    _page(wiki, "concepts/ref.md", title="引用页", body="见 [[多头注意力机制]]")
+
+    a = [(f.kind, f.page, f.detail, f.suggestion) for f in run_lint(wiki).findings]
+    b = [(f.kind, f.page, f.detail, f.suggestion) for f in run_lint(wiki).findings]
+    assert a == b  # 字节稳定、可重放
+    for heavy in ("build_corpus", "search_pages", "alias_index"):
+        assert not hasattr(lint_mod, heavy)

@@ -44,6 +44,7 @@ from .graphstats import (
 )
 from .pages import Finding, order_findings, report_json
 from .paths import require_kb_root
+from .search import tokenize
 
 __all__ = [
     "LintReport",
@@ -58,6 +59,11 @@ __all__ = [
 # 缺失实体阈值：同一未解析目标被 ≥ 此数张**不同**页引用时，从零散断链升格为"该建页"的建议。
 # 2 = "被复述过一次以上"，是术语反复出现的最低信号；低于它的单次断链留给 broken_link。
 MISSING_ENTITY_MIN_REFS = 2
+
+# P3.11：断链「最近页」建议的 token-overlap（Jaccard）下限。低于它不附建议（宁缺勿误，决策P3.11-3）。
+# 0.5 = 候选键 token 集与断链 target 的交并比过半：CJK 2-gram 重叠（如 多头注意力机制↔多头注意力）
+# 与「共享整词」（如 attention↔self-attention）都能过，而拼写差异无共享 token、得 0、自然不建议。
+SUGGESTION_MIN_OVERLAP = 0.5
 
 
 @dataclass(frozen=True)
@@ -99,6 +105,70 @@ def missing_entities(
     return _aggregate_missing(build_graph(Path(wiki)), min_refs=min_refs)
 
 
+def _build_suggestion_index(
+    g: Graph,
+) -> dict[str, list[tuple[str, frozenset[str]]]]:
+    """倒排索引 `token → [(页路径, 该字段 token 集), …]`，作断链「最近页」候选（P3.11，零 LLM）。
+
+    候选字段 = 每页 stem(`Node.id`) / title(`Node.title`)——`g.nodes` 现成、**真零额外扫描**（决策P3.11-2）；
+    aliases 留可选后续（须另跑 `alias_index`，决策P3.11-2a，本阶段不取）。**按字段分开、不并袋**
+    （决策P3.11-3a）：否则英文 kebab slug stem 的无关 token 会稀释 CJK title 的强匹配（观澜「slug=ASCII、
+    title=中文」是常态）。**倒排**（决策P3.11-4a）让 `_suggest_nearest` 只比对与 target 共享 ≥1 token 的
+    候选字段、而非全库扫描——把成本从 O(断链数 × 页数) 降到 O(断链数 × 共享 token 的候选字段数)。
+    """
+    inverted: dict[str, list[tuple[str, frozenset[str]]]] = defaultdict(list)
+    for n in g.nodes:
+        for field in (frozenset(tokenize(n.id)), frozenset(tokenize(n.title))):
+            for tok in field:
+                inverted[tok].append((n.path, field))
+    return inverted
+
+
+def _suggest_nearest(
+    target: str,
+    inverted: dict[str, list[tuple[str, frozenset[str]]]],
+    *,
+    exclude: frozenset[str] = frozenset(),
+) -> str | None:
+    """对断链 `target` 找**任一字段** token-overlap（Jaccard）最高的既有页，≥ 阈值返回相对路径否则 None。
+
+    确定性、零 LLM：复用 `search.tokenize`（CJK-2-gram 单一归口，决策P5.0-18），**不做编辑距离**
+    （拼写差异无共享 token、得 0、自然不建议，决策P3.11-3）；逐字段算 Jaccard 取最大、不并袋（决策P3.11-3a）。
+    `exclude` = 引用该 target 的页（含写有该断链的源页本身）——**不把引用页/链接所在页建议成它自己的
+    解析目标**（决策P3.11-4a）。只比对与 target 共享 token 的候选字段；同最高分取**字典序最小 path**，
+    故与候选/token 的访问次序无关、输出稳定。
+    """
+    target_tokens = frozenset(tokenize(target))
+    if not target_tokens:
+        return None
+    seen: set[tuple[str, frozenset[str]]] = set()
+    best_path: str | None = None
+    best_score = 0.0
+    for tok in target_tokens:
+        for entry in inverted.get(tok, ()):
+            if entry in seen:  # 同一 (页, 字段) 可经多个共享 token 命中，只算一次。
+                continue
+            seen.add(entry)
+            path, field = entry
+            if path in exclude:
+                continue
+            score = len(target_tokens & field) / len(target_tokens | field)
+            if score > best_score or (
+                score == best_score and best_path is not None and path < best_path
+            ):
+                best_score, best_path = score, path
+    return best_path if best_score >= SUGGESTION_MIN_OVERLAP else None
+
+
+def _suggestion_suffix(path: str) -> str:
+    """断链/缺失实体 detail 的「疑似已有页」建议后缀（人读层；结构化值另进 `Finding.suggestion`）。
+
+    措辞把它定位为**与「建页」并列的可选项**（若同义则并入既有页、而非新建），避免 missing_entity 的
+    「建议建 entities/X.md」与本后缀读成两条矛盾指令（决策P3.11-3，review 质量项）。
+    """
+    return f"（疑似已有页 {path}：若同义，宜并入其 aliases 而非新建页）"
+
+
 @dataclass
 class LintReport:
     ok: bool
@@ -120,22 +190,40 @@ def run_lint(wiki: Path) -> LintReport:
             Finding(node.path, "lint.orphan", f"无任何入链（type={node.type}）")
         )
 
+    # P3.11：断链「最近页」建议（只读 advisory）。倒排候选索引 + 按 target 记忆化（决策P3.11-2/-3a/-4a）：
+    # 同一 target 的多条断链 / 缺失实体共用一次计算；排除集 = 引用该 target 的页（含写有该链接的源页本身），
+    # 故不把引用页 / 链接所在页建议成它自己的解析目标。refs_by_target 覆盖全部断链 target（missing 是其子集）。
+    sugg_index = _build_suggestion_index(g)
+    refs_by_target: dict[str, set[str]] = defaultdict(set)
+    for edge in g.broken:
+        refs_by_target[edge.target].add(node_path.get(edge.source, edge.source))
+    suggestion_by_target = {
+        target: _suggest_nearest(target, sugg_index, exclude=frozenset(srcs))
+        for target, srcs in refs_by_target.items()
+    }
+
     # 断链：源自 graph.broken（与 check.wikilink.broken 同口径，决策P3-6）。
     for edge in sorted(g.broken, key=lambda e: (e.source, e.target)):
         source_page = node_path.get(edge.source, edge.source)
+        suggestion = suggestion_by_target.get(edge.target)
+        detail = f"[[{edge.target}]] 无对应页面"
+        if suggestion:
+            detail += _suggestion_suffix(suggestion)
         findings.append(
-            Finding(source_page, "lint.broken_link", f"[[{edge.target}]] 无对应页面")
+            Finding(source_page, "lint.broken_link", detail, suggestion=suggestion)
         )
 
     # 缺失实体（断链的高价值子集）：跨页聚合、无单一归属页，page 留空串（消费侧据此识别全局 finding，§5.4）。
     # 走与 heal 共用的 `_aggregate_missing`（决策P3.2-1），target 升序输出不变。
     for me in _aggregate_missing(g, min_refs=MISSING_ENTITY_MIN_REFS):
+        suggestion = suggestion_by_target.get(me.target)
+        detail = (
+            f"[[{me.target}]] 被 {me.ref_count} 页引用却无页面，建议建 entities/{me.target}.md"
+        )
+        if suggestion:
+            detail += _suggestion_suffix(suggestion)
         findings.append(
-            Finding(
-                "",
-                "lint.missing_entity",
-                f"[[{me.target}]] 被 {me.ref_count} 页引用却无页面，建议建 entities/{me.target}.md",
-            )
+            Finding("", "lint.missing_entity", detail, suggestion=suggestion)
         )
 
     # P3.5 拓扑建议（接在 orphan/broken/missing_entity 之后，保既有顺序）：在**同一份 g** 上算
