@@ -239,9 +239,23 @@ class ConversationStore:
             return None
         try:
             messages, _model, _ = chat.load_session(cid, project_root=self._kb)
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            return None  # 竞态/坏文件 → 当未知 id（404）
+        except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
+            return None  # 竞态/坏文件（含非对象/坏字节毒快照）→ 当未知 id（404）
         return messages
+
+    def _safe_list_sessions(self) -> list[dict]:
+        """`list_sessions` 的毒值容错包装。agentao 的 per-file 解析对**非对象**快照（手改/半写成
+        `[]`/`null`/标量）做 `data.get(...)` 抛 `AttributeError`、对**坏 UTF-8 字节**抛 `UnicodeDecodeError`
+        （ValueError 子类），而其 `except (IOError, json.JSONDecodeError)` **都不接** → 异常逃逸会把
+        `GET /api/conversations`（整个侧栏）与冷会话 `restore`/`messages_for` 打成 **500**（一份坏快照
+        瘫痪所有会话，正是反向评审 code-review 抓出、本轮 `read_goal`/`_prune` 同类未覆盖的读路径）。
+        包成「坏快照 → 整盘 catalog 降级为空」（仍显示内存活会话），**绝不 500**。降级偏粗（一份坏文件
+        即隐去全部冷会话），但坏快照属手改/半写的病态，相较 500 整侧栏是严格改善；细粒度 per-file 跳过
+        须 agentao 侧支持（留 backlog）。口径同 `read_goal` 容 `(ValueError, TypeError)`。"""
+        try:
+            return list_sessions(self._kb)
+        except (AttributeError, ValueError, TypeError):
+            return []
 
     def _disk_session(self, cid: str) -> dict | None:
         """即时 catalog 精确匹配源（§2.2 闸②）：`session_id` 全等 + 属 Web 只读会话才认。
@@ -251,7 +265,7 @@ class ConversationStore:
         「作用域归属」一次性夹死，不依赖底层前缀语义恰好收敛，也把 `agentao` CLI 落的非 Web 会话
         拦在外（决策P4.2-6/7）。
         """
-        for e in list_sessions(self._kb):
+        for e in self._safe_list_sessions():
             if e.get("session_id") == cid and SKILL_NAME in (e.get("active_skills") or []):
                 return e
         return None
@@ -272,8 +286,8 @@ class ConversationStore:
             return None
         try:  # catalog 与文件间有竞态：命中后文件可能刚被删/轮转/读坏
             messages, _model, _ = chat.load_session(cid, project_root=self._kb)  # 全 UUID + 已确认存在
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            return None  # 竞态/坏文件 → 当未知 id（404），**绝不**冒泡成流式 error
+        except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
+            return None  # 竞态/坏文件（含非对象/坏字节毒快照）→ 当未知 id（404），绝不冒泡成流式 error
         evicted: list[Conversation] = []
         try:
             with self._lock:  # 同 create：构造慢但本地单用户罕见，换无并发绕过
@@ -369,7 +383,7 @@ class ConversationStore:
         """
         disk: dict[str, dict] = {}
         if self._persist:
-            for e in list_sessions(self._kb):  # newest-first
+            for e in self._safe_list_sessions():  # newest-first（毒快照 → 空盘 catalog，不 500）
                 sid = e.get("session_id")
                 if sid and sid not in disk and SKILL_NAME in (e.get("active_skills") or []):
                     disk[sid] = e  # 首见即最新（去重）

@@ -132,3 +132,9 @@ gbrain 与观澜**同源不同量级**（同 Karpathy LLM Wiki 模式，但 gbra
 ### 11.4 🔵 brain-resident skillpack（关联 P6）
 
 gbrain 让脑库**自带 skillpack**（随该库版本化、连入的 harness 即被 offer）。与观澜"引擎装一次、不随每个库复制"（`SCHEMA.md` 才是每库配置）**有张力**，不照搬。但"脑库随身带操作手册"的**形状**与 [`../../P6-技能蒸馏-草案.md`](../../P6-技能蒸馏-草案.md)（把 wiki 子集蒸馏成可分发 skill）邻接——记一笔，park 到 P6 选型时连同 [`p6-技能蒸馏-工作法归属未决.md`](p6-技能蒸馏-工作法归属未决.md) 一并拍。
+
+## 12. 增量评审：v0.42.52/53（2026-06-30 pull）—— 转入「审己」视角
+
+> 范围：本次 pull `9bf96db8→814258dd`，仅 2 commit（v0.42.52 autopilot 死任务风暴 / supervisor 楔死 / sync·status·minion 可靠性；v0.42.53 `op_checkpoints` jsonb 双编码致每次 sync 中止 + 全仓同类清扫 + CI 静态守卫）。**90% 是 gbrain 重型架构的运维修复，对观澜架构上不适用** —— 故本次不走 feature-borrow，而是把每类修复当**探针反向审观澜自己的代码**。
+
+把 gbrain 这批 bug 当审计清单钓出**观澜自身 6 条真缺陷 + 一批低危一致性**，并区分「设计上安全」的旁证 —— 详见专篇 **[`gbrain-v0.42.53-反向审计-guanlan缺陷.md`](gbrain-v0.42.53-反向审计-guanlan缺陷.md)**。摘要：**②**（`read_goal`/`_prune` 漏 `AttributeError` 致毒 sidecar 永久 500）+ **③**（convert 非 ASCII 路径走 locale 解码）**本次已修 + 回归测试**；**①**（续跑循环零前向进展感知，常态烧满 25 轮）/ **④**（convert 无超时）/ **⑤**（续跑路径 D 漏计时间）/ **⑥**（convert 真后端 pypdf+LANG parity 测试）/ **⑦**（非原子写等低危一致性）**落 backlog**。状态诚实 / `-C` 作用域 / `raw/` 只读 / 单写者 single-flight 等 gbrain 坑，观澜已结构性做对（旁证）。

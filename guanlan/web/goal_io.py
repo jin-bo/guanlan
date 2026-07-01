@@ -36,7 +36,14 @@ def read_goal(path: Path) -> GoalState | None:
     if not path.exists():
         return None
     try:
-        return GoalState.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        # 合法但**非对象**的 JSON（`null`/`[]`/标量）会让 `GoalState.from_dict` 首行 `data.items()`
+        # 抛 `AttributeError`——它不在下方 `(ValueError, TypeError)` 容错网内，会逃逸把 `restore()`/
+        # `cold_info` 打成持续 500（手改/半写 sidecar 的会话永久无法恢复，违本函数 docstring 承诺）。
+        # 先 isinstance 拦掉、退化为「无目标」（同 `runtime.py` 解析 stdout 的 dict 守卫口径）。
+        if not isinstance(data, dict):
+            return None
+        return GoalState.from_dict(data)
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
         return None
 
