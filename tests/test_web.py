@@ -6761,6 +6761,86 @@ def test_goal_disconnect_pauses_unit(chat_env, kb):
     assert conv.agent.tools.get("update_goal") is None  # 排空后 remove（评审 High）
 
 
+def test_read_goal_tolerates_non_object_json(kb):
+    """合法但**非对象**的 sidecar（`null`/`[]`/标量）退化为「无目标」而非抛 `AttributeError`——
+    `GoalState.from_dict` 首行 `data.items()` 对非 dict 抛的 `AttributeError` 原不在容错网内，会逃逸
+    把 restore/cold_info 打成持续 500（反向评审 ②，gbrain 毒值崩循环同构）。"""
+    from guanlan.web.goal_io import goal_sidecar_path, read_goal
+
+    p = goal_sidecar_path(kb, "u-poison")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    for poison in ("null", "[]", '"x"', "42", "true", "{bad json", ""):
+        p.write_text(poison, encoding="utf-8")
+        assert read_goal(p) is None, f"{poison!r} 应退化为 None、不抛"
+    p.write_text(json.dumps({"objective": "ok"}), encoding="utf-8")  # 对照：合法对象仍正常载入
+    g = read_goal(p)
+    assert g is not None and g.objective == "ok"
+
+
+def test_poison_goal_sidecar_degrades_cold_info_not_500(chat_env, kb):
+    """手改/半写成非对象 JSON 的 goal sidecar 不该让会话永久 500——冷会话 restore/cold_info 须退化为
+    「无目标的普通会话」继续服务，而非每次自省都崩（反向评审 ②）。"""
+    kb, _ = chat_env
+    with TestClient(create_app(kb)) as c1:
+        cid = _new_conv(c1)  # 落 session 快照（persist 默认开）
+        c1.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 3})
+    (kb / ".agentao" / "goals" / f"{cid}.json").write_text("[]", encoding="utf-8")  # 模拟手改成非对象
+    with TestClient(create_app(kb)) as c2:  # 全新 app/store，冷会话经 sidecar 自省
+        info = c2.get(f"/api/chat/{cid}/info")
+        assert info.status_code == 200  # 不 500
+        assert info.json().get("goal") is None  # 毒 sidecar 退化为无目标
+
+
+def test_prune_old_snapshots_tolerates_non_dict_session(kb):
+    """`.agentao/sessions/` 里合法但非 dict 的快照（`[]`/标量）不该让**每轮 save 前**的卫生步抛
+    `AttributeError`（`.get` on 非 dict）——一崩即形同 gbrain「整循环崩在 checkpoint 写」（反向评审 ②）。
+    坏文件须被跳过、且不阻断对真正匹配快照的删除。"""
+    from guanlan.web.chat_support import _prune_old_snapshots
+
+    sessions = kb / ".agentao" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "list.json").write_text("[]", encoding="utf-8")
+    (sessions / "scalar.json").write_text("42", encoding="utf-8")
+    (sessions / "broken.json").write_text("{not json", encoding="utf-8")
+    good = sessions / "good.json"
+    good.write_text(json.dumps({"session_id": "target-sid"}), encoding="utf-8")
+    _prune_old_snapshots(kb, "target-sid")  # 不抛
+    assert not good.exists()  # 匹配快照仍被删——坏文件未阻断后续
+    assert (sessions / "list.json").exists()  # 非 dict 坏文件原样保留（跳过）
+
+
+def test_prune_old_snapshots_tolerates_bad_utf8_bytes(kb):
+    """坏 UTF-8 字节的兄弟快照（半写截断多字节 / 非 UTF-8 编辑器存）→ `json.load` 抛 `UnicodeDecodeError`
+    （ValueError 子类，**不在** `json.JSONDecodeError` 内）；不并入 catch 则逃出每轮 save 前的卫生步、令
+    `_save` 静默不落盘（反向评审 code-review #4，`isinstance` 守卫的坏字节孪生）。"""
+    from guanlan.web.chat_support import _prune_old_snapshots
+
+    sessions = kb / ".agentao" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "badbytes.json").write_bytes(b'{"session_id": "\xff\xfe"}')  # 非法 UTF-8 起始字节
+    good = sessions / "good.json"
+    good.write_text(json.dumps({"session_id": "target-sid"}), encoding="utf-8")
+    _prune_old_snapshots(kb, "target-sid")  # 不抛
+    assert not good.exists()  # 坏字节文件未阻断真匹配删除
+    assert (sessions / "badbytes.json").exists()  # 坏字节文件原样保留（跳过）
+
+
+def test_poison_session_snapshot_degrades_list_not_500(chat_env, kb):
+    """`.agentao/sessions/` 里**非对象**（`[]`）或**坏字节**的会话快照让 agentao `list_sessions` 的
+    per-file `.get`/解码抛 `AttributeError`/`UnicodeDecodeError` 逃逸（其 `except` 只接 IOError/
+    JSONDecodeError）——若不容毒，会把**整个会话侧栏** `/api/conversations` 与冷会话 restore/messages
+    打成 500（一份坏快照瘫痪所有会话）。读路径须降级不崩（反向评审 code-review #3）。"""
+    kb, _ = chat_env
+    sessions = kb / ".agentao" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "poison-nondict.json").write_text("[]", encoding="utf-8")  # 合法非对象
+    (sessions / "poison-bytes.json").write_bytes(b'{"x": "\xff\xfe bad"}')  # 坏 UTF-8 字节
+    with TestClient(create_app(kb)) as c:
+        assert c.get("/api/conversations").status_code == 200  # 侧栏：毒快照 → 降级空盘，不 500
+        bogus = str(uuid.uuid4())  # 冷会话查看经 _disk_session（已容毒）→ 退化 404，不 500
+        assert c.get(f"/api/conversations/{bogus}/messages").status_code == 404
+
+
 def test_persist_goal_atomic_under_concurrency(chat_env, kb):
     from guanlan.web.conversation import Conversation
 

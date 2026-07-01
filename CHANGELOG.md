@@ -58,6 +58,32 @@
   `scripts/smoke_p415.py` 同步把定位从独立 `.interaction-automode` 改为框内 `.interaction-automode-inline`。
   纯前端、零服务端改动；写边界与 `/confirm-mode {ask}` 可逆语义不变。
 
+### 修复
+
+- **毒会话状态文件（goal sidecar / 会话快照）不再把会话或整个侧栏打成永久 500（反向评审 gbrain v0.42.53
+  探针 + 后续 code-review 加固）** —— 一份手改/半写成**非对象 JSON**（`null`/`[]`/标量）或**坏 UTF-8 字节**
+  的状态文件会让上层 `data.items()`/`data.get(...)` 抛 `AttributeError`/`UnicodeDecodeError`，逃逸出只接
+  `(OSError, JSONDecodeError)` 的容错网，把读它的端点打成 **500**。统一补齐三条读路径的毒值容错：
+  - `read_goal`（`web/goal_io.py`）加 `isinstance(data, dict)` 守卫 → 非对象 goal sidecar 退化为「无目标」，
+    不再经 `ConversationStore.restore()`/`cold_info`/`GET /api/info` 持续 500（违其 docstring 承诺）。
+  - `_prune_old_snapshots`（`web/chat_support.py`）加 `isinstance` 守卫 + 把 `UnicodeDecodeError` 并入 catch →
+    非对象/坏字节的兄弟快照在**每轮 save 前**的卫生步被跳过，不再崩 save（形同 gbrain「整循环崩在 checkpoint
+    写」）、不再令 `_save` 静默不落盘丢会话。
+  - `ConversationStore`（`web/conversation_store.py`）新增 `_safe_list_sessions` 包装 agentao `list_sessions`
+    的 per-file `.get` 毒值抛错（其 `except (IOError, JSONDecodeError)` 不接 `AttributeError`/`UnicodeDecodeError`），
+    `list`/`_disk_session`（喂 `restore`/`messages_for`）改走它 → 一份坏快照不再 500 **整个会话侧栏**
+    `GET /api/conversations` 与冷会话 restore/messages（降级为「该坏文件不计入盘 catalog」），并给两处
+    `load_session` catch 补 race 兜底。
+  - 回归测试：`test_read_goal_tolerates_non_object_json` / `test_poison_goal_sidecar_degrades_cold_info_not_500`
+    / `test_prune_old_snapshots_tolerates_non_dict_session` / `test_prune_old_snapshots_tolerates_bad_utf8_bytes`
+    / `test_poison_session_snapshot_degrades_list_not_500`。
+
+  （本轮另一处「convert 子进程强制 UTF-8 解码」的改动经 code-review 判定**方向错误并已回退**：skill 子进程裸
+  `print` 发 locale 编码字节，父端强解 UTF-8 反而打断 matched-locale 下的中文路径往返、且 stderr surrogateescape
+  会漏孤 surrogate 把 Web 解析端点 500 —— `_run_converter` 维持 `text=True` locale-faithful 行为。convert 编码
+  的真正修法（子进程两端协同强制 UTF-8 + stderr `errors=replace` + pypdf/LANG parity 测试验证）连同续跑循环无
+  进展探测 / convert 无超时等结论，见 `docs/backlog/notes/gbrain-v0.42.53-反向审计-guanlan缺陷.md`。）
+
 ## [0.1.16] - 2026-06-24
 
 ### 新增

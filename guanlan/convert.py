@@ -100,6 +100,12 @@ def _run_converter(
     mineru 分级回退日志在 stderr）、同时整体累计，stdout 累计到末行取产物路径。stdout 不回调
     （只末行有用），但仍 drain 以防满管道阻塞。
     """
+    # `text=True`（不指定 `encoding=`）按 **locale** 解码子进程管道——刻意与 skill 子进程 `print(out)`
+    # 的 locale 编码**对齐**：matched-locale（含非 UTF-8 如 `LANG=zh_CN.GBK`）下中文产物路径逐字往返。
+    # 注：曾试图强制 `encoding="utf-8"` 修「非 UTF-8 locale」，反而打断这条 matched-locale 往返
+    # （skill 裸 print 发 GBK 字节、父强解 UTF-8 → 乱码 → ConvertError），且 stderr surrogateescape 会
+    # 漏出孤 surrogate 把 Web 解析端点 500（反向评审 code-review 抓出）——已回退。真正的「子进程两端
+    # 协同强制 UTF-8 + stderr errors=replace + pypdf/LANG parity 测试」见 backlog 审计 note。
     if progress is None:
         proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
         return proc.returncode, proc.stdout, proc.stderr

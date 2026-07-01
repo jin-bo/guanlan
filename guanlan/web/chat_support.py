@@ -247,10 +247,17 @@ def _prune_old_snapshots(kb: Path, session_id: str) -> None:
     for p in sessions.glob("*.json"):
         try:
             with open(p, encoding="utf-8") as f:
-                sid = json.load(f).get("session_id")
+                obj = json.load(f)
+            # 合法但非 dict 的快照（`[]`/`null`/标量）`.get` 会抛 `AttributeError`——它不在 catch
+            # 元组内，会逃出循环、把**每轮 save 前**的本卫生步打崩（违 docstring「全程 best-effort」
+            # 承诺，且形同 gbrain「整循环崩在 checkpoint 写」）。isinstance 守卫后非 dict 即跳过。
+            sid = obj.get("session_id") if isinstance(obj, dict) else None
             if sid == session_id:
                 p.unlink()
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            # 坏 UTF-8 字节的快照（半写截断多字节 / 非 UTF-8 编辑器存）→ `json.load` 抛
+            # `UnicodeDecodeError`（ValueError 子类，不在 JSONDecodeError 内）；不并入则它逃出**每轮
+            # save 前**的卫生步、令 `_save` 静默不落盘（`read_goal` 同样容 ValueError，口径对齐）。
             continue  # 读坏 / 删失败：跳过，best-effort
 
 
