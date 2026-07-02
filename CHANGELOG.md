@@ -7,6 +7,27 @@
 
 ### 新增
 
+- **P4.17 MCP 远程传输 `guanlan mcp --transport http`（Streamable HTTP，见 `docs/P4.17-MCP远程传输.md`）**
+  —— 给 P4.10 stdio-only MCP 宿主补第二种传输：官方 **Streamable HTTP**（spec 2025-03-26 起、取代 legacy
+  HTTP+SSE）。**同一套只读工具、只换传输**：`tools.py` 零改、`build_mcp` 仅加一个 `allow_ask` 注册门（把
+  `ask` 的注册包进 `if allow_ask:`，六个零 LLM 工具无条件注册照旧），host/port/无状态/DNS-rebinding/token
+  校验全部接线收在 `serve_mcp` 的 http 分支（`_http_security`/`_BearerTokenMiddleware`/`_build_http_app`/
+  `_serve_http`）。**安全默认**：默认仍绑 `127.0.0.1`（沿用决策P4-4）、非环回强制 bearer token（从
+  `--auth-token-env` 指定的环境变量读、绝不命令行明文/落盘；最小 ASGI 中间件 `hmac.compare_digest` 常量
+  时间比对、失败 401、不引 OAuth）否则拒启 `EXIT_USAGE`、`ask` over http 默认关
+  （`allow_ask=(transport=='stdio' or --allow-ask)`：stdio 永远七工具、http 默认六、`--allow-ask` 才七，避
+  任意网络客户端触发付费 LLM 子进程的成本/DoS 放大 + 子进程写探问放大）、无状态 `stateless_http`（无
+  `Mcp-Session-Id`、无事件重放）、DNS-rebinding 白名单派生自 `--host`/`--allowed-host`（可重复，反代对外
+  域名须显式补入否则被拒）、TLS 外置。完整 OAuth（MCP 2025-06-18）/ 多租户 source 级 scoping **显式留给
+  E2**。**零依赖变更**——已实测装的 mcp SDK（`mcp>=1.27,<2`）原生支持 `transport="streamable-http"` 且自带
+  `starlette`/`uvicorn` 硬依赖，`[mcp]` extra 与 SDK 下界均不改。新增 CLI 旗标
+  `--transport {stdio,http}`/`--host`/`--port`/`--auth-token-env`/`--allowed-host`/`--allow-ask`（默认全部
+  向后兼容 P4.10：不带 `--transport` 即 stdio 字节等价）。测试：`tests/test_mcp.py` P4.17 套件（ask 门控、
+  绑定红线拒启、token 闸 401/放行、rebinding 白名单派生、真 uvicorn + streamable-http 客户端端到端往返）+
+  `tests/test_cli.py` 旗标解析。编号辨析：属 P4 宿主家族兄弟半阶段（非 P4.10.1 补漏、非新里程碑、非直接
+  E2）。连带更新 DESIGN §7（P4 行 + E2 前哨行改「已实现」）、CLAUDE.md status/命令注释、`docs/P4.17-MCP远程
+  传输.md`（标题去「· 草案」、状态改「已实现」）。
+
 - **指令层：告知 Agent 可直接写 ` ```mermaid ` 围栏图** —— `AGENTAO.md` 新增「图表（流程图等直接写
   mermaid）」节、`conventions.md` 新增「§图表（mermaid 直绘）」（带最小示例）、`SKILL.md` ingest 工作流补
   指针：表达流程/时序/状态/类/架构/关系等结构时，Agent **直接在正文写 mermaid 围栏块即可**，无需调用任何

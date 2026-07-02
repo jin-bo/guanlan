@@ -496,3 +496,366 @@ def test_direction_clarified_as_server():
     """方向不混（决策P4.10-6）：server instructions 写明『服务端』、区分『Tool 注入』反向。"""
     assert "服务端" in mcp_server._INSTRUCTIONS
     assert "Tool 注入" in mcp_server._INSTRUCTIONS
+
+
+# ═════════════════════ P4.17 Streamable HTTP 传输（见 docs/P4.17-MCP远程传输.md §7）═════════════════════
+
+
+# ───────────────────────── ask 门控（决策P4.17-6/11）─────────────────────────
+
+
+def test_build_mcp_allow_ask_gates_ask_only(kb_mcp):
+    """`allow_ask=False` → 六个零 LLM 工具、**无** ask；`True` → 七工具。六工具集合两档逐字节同。"""
+    six = _run(build_mcp(kb_mcp, runner=_ok_runner, allow_ask=False), lambda c: c.list_tools())
+    seven = _run(build_mcp(kb_mcp, runner=_ok_runner, allow_ask=True), lambda c: c.list_tools())
+    six_names = {t.name for t in six.tools}
+    seven_names = {t.name for t in seven.tools}
+    assert six_names == {"search", "read_page", "list_pages", "graph", "health", "lint"}
+    assert "ask" not in six_names
+    assert seven_names == six_names | {"ask"}
+
+
+def test_build_mcp_defaults_allow_ask_true(kb_mcp):
+    """`build_mcp` 默认 `allow_ask=True`（stdio 恒七工具，与 P4.10 等价、不因 P4.17 漂移）。"""
+    res = _run(build_mcp(kb_mcp, runner=_ok_runner), lambda c: c.list_tools())
+    assert "ask" in {t.name for t in res.tools}
+
+
+# ─────────────────── serve_mcp 传输分派 + ask 门控公式（决策P4.17-1/6）───────────────────
+
+
+def _capture_build(monkeypatch):
+    """打桩 build_mcp：记录 allow_ask、返回一个 run() 打桩过的假 mcp，避免真跑事件循环。"""
+    captured = {}
+    real_build = mcp_server.build_mcp
+
+    def fake_build(root, **kw):
+        captured["allow_ask"] = kw.get("allow_ask")
+        mcp = real_build(root, **kw)
+        monkeypatch.setattr(type(mcp), "run", lambda self, transport="stdio": captured.update(ran=transport), raising=False)
+        return mcp
+
+    monkeypatch.setattr(mcp_server, "build_mcp", fake_build)
+    return captured
+
+
+def test_serve_mcp_stdio_default_registers_ask(kb_mcp, monkeypatch):
+    """默认（stdio）：allow_ask 传 True（七工具）、`mcp.run("stdio")`（决策P4.17-1/6）。"""
+    from guanlan.errors import EXIT_OK
+
+    captured = _capture_build(monkeypatch)
+    assert serve_mcp(kb_mcp) == EXIT_OK
+    assert captured["allow_ask"] is True
+    assert captured["ran"] == "stdio"
+
+
+def test_serve_mcp_http_gates_ask_by_default(kb_mcp, monkeypatch):
+    """http 默认：allow_ask 传 False（六工具）；`--allow-ask` 才传 True（决策P4.17-6 公式）。"""
+    from guanlan.errors import EXIT_OK
+
+    captured = _capture_build(monkeypatch)
+    monkeypatch.setattr(mcp_server, "_serve_http", lambda mcp, **kw: None)
+    assert serve_mcp(kb_mcp, transport="http") == EXIT_OK
+    assert captured["allow_ask"] is False
+    assert serve_mcp(kb_mcp, transport="http", allow_ask=True) == EXIT_OK
+    assert captured["allow_ask"] is True
+
+
+def test_serve_mcp_unknown_transport_rejected(kb_mcp):
+    """未知 transport（直建调用绕过 argparse choices）→ GuanlanError(EXIT_USAGE)。"""
+    from guanlan.errors import EXIT_USAGE, GuanlanError
+
+    with pytest.raises(GuanlanError) as ei:
+        serve_mcp(kb_mcp, transport="sse")
+    assert ei.value.exit_code == EXIT_USAGE
+
+
+# ───────────────── 绑定红线 + token 闸（决策P4.17-2）：拒启不监听任何端口 ─────────────────
+
+
+def test_serve_mcp_nonloopback_without_token_refuses(kb_mcp, monkeypatch):
+    """`--host 0.0.0.0` 且无 token → 拒启 EXIT_USAGE，**且从不进 _serve_http**（不监听端口）。"""
+    from guanlan.errors import EXIT_USAGE, GuanlanError
+
+    served = {"n": 0}
+    monkeypatch.setattr(mcp_server, "_serve_http", lambda *a, **k: served.update(n=served["n"] + 1))
+    with pytest.raises(GuanlanError) as ei:
+        serve_mcp(kb_mcp, transport="http", host="0.0.0.0")
+    assert ei.value.exit_code == EXIT_USAGE
+    assert served["n"] == 0  # 拒启即零副作用，未起服
+
+
+def test_serve_mcp_empty_env_token_refuses(kb_mcp, monkeypatch):
+    """`--auth-token-env` 指向的环境变量未设置/为空 → 拒启 EXIT_USAGE（不当作『有 token』）。"""
+    from guanlan.errors import EXIT_USAGE, GuanlanError
+
+    monkeypatch.delenv("GUANLAN_MCP_TOKEN_TEST", raising=False)
+    monkeypatch.setattr(mcp_server, "_serve_http", lambda *a, **k: None)
+    with pytest.raises(GuanlanError) as ei:
+        serve_mcp(kb_mcp, transport="http", host="0.0.0.0", auth_token_env="GUANLAN_MCP_TOKEN_TEST")
+    assert ei.value.exit_code == EXIT_USAGE
+
+
+def test_serve_mcp_nonloopback_with_token_proceeds(kb_mcp, monkeypatch):
+    """`--host 0.0.0.0` + 有效 token env → 起服，token/host/allowed_hosts 正确透传给 _serve_http。"""
+    from guanlan.errors import EXIT_OK
+
+    monkeypatch.setenv("GUANLAN_MCP_TOKEN_TEST", "s3cr3t")
+    captured = {}
+    monkeypatch.setattr(mcp_server, "_serve_http", lambda mcp, **kw: captured.update(kw))
+    rc = serve_mcp(
+        kb_mcp,
+        transport="http",
+        host="0.0.0.0",
+        auth_token_env="GUANLAN_MCP_TOKEN_TEST",
+        allowed_host=["kb.example.internal"],
+    )
+    assert rc == EXIT_OK
+    assert captured["token"] == "s3cr3t"
+    assert captured["host"] == "0.0.0.0"
+    assert captured["allowed_hosts"] == ["kb.example.internal"]
+
+
+def test_serve_mcp_loopback_without_token_ok(kb_mcp, monkeypatch):
+    """默认环回 `127.0.0.1` 无 token 可起（与 Web 同姿态）；token 透传为 None。"""
+    from guanlan.errors import EXIT_OK
+
+    captured = {}
+    monkeypatch.setattr(mcp_server, "_serve_http", lambda mcp, **kw: captured.update(kw))
+    assert serve_mcp(kb_mcp, transport="http") == EXIT_OK
+    assert captured["token"] is None and captured["host"] == "127.0.0.1"
+
+
+def test_serve_mcp_whitespace_token_refuses(kb_mcp, monkeypatch):
+    """token env 为纯空白（' '）→ 拒启 EXIT_USAGE，不当作有效 token（决策P4.17-2 修正）。"""
+    from guanlan.errors import EXIT_USAGE, GuanlanError
+
+    monkeypatch.setenv("GUANLAN_MCP_TOKEN_TEST", "   ")
+    monkeypatch.setattr(mcp_server, "_serve_http", lambda *a, **k: None)
+    with pytest.raises(GuanlanError) as ei:
+        serve_mcp(kb_mcp, transport="http", host="0.0.0.0", auth_token_env="GUANLAN_MCP_TOKEN_TEST")
+    assert ei.value.exit_code == EXIT_USAGE
+
+
+def test_serve_mcp_token_is_stripped(kb_mcp, monkeypatch):
+    """token env 带首尾空白/尾换行 → strip 后透传（`$(cat)` 常带尾 \\n，须容错）。"""
+    from guanlan.errors import EXIT_OK
+
+    monkeypatch.setenv("GUANLAN_MCP_TOKEN_TEST", "  s3cr3t\n")
+    captured = {}
+    monkeypatch.setattr(mcp_server, "_serve_http", lambda mcp, **kw: captured.update(kw))
+    assert (
+        serve_mcp(
+            kb_mcp,
+            transport="http",
+            host="0.0.0.0",
+            auth_token_env="GUANLAN_MCP_TOKEN_TEST",
+            allowed_host=["kb.example.internal"],
+        )
+        == EXIT_OK
+    )
+    assert captured["token"] == "s3cr3t"
+
+
+def test_serve_mcp_wildcard_bind_requires_allowed_host(kb_mcp, monkeypatch):
+    """`--host 0.0.0.0`（绑定通配）有 token 但**无** --allowed-host → 拒启 EXIT_USAGE、不起服。
+
+    否则 DNS-rebinding 白名单只含环回、每个远程请求 421（起而不可达），故明确拒启（决策P4.17-5）。
+    """
+    from guanlan.errors import EXIT_USAGE, GuanlanError
+
+    monkeypatch.setenv("GUANLAN_MCP_TOKEN_TEST", "s3cr3t")
+    served = {"n": 0}
+    monkeypatch.setattr(mcp_server, "_serve_http", lambda *a, **k: served.update(n=served["n"] + 1))
+    with pytest.raises(GuanlanError) as ei:
+        serve_mcp(
+            kb_mcp, transport="http", host="0.0.0.0", auth_token_env="GUANLAN_MCP_TOKEN_TEST"
+        )
+    assert ei.value.exit_code == EXIT_USAGE
+    assert served["n"] == 0
+
+
+@pytest.mark.parametrize("bad_port", [0, -1, 70000, 99999])
+def test_serve_mcp_http_port_out_of_range_refuses(kb_mcp, monkeypatch, bad_port):
+    """越界 --port → 就地 EXIT_USAGE（不放到 uvicorn 抛 OverflowError → 裸 traceback）、不起服。"""
+    from guanlan.errors import EXIT_USAGE, GuanlanError
+
+    served = {"n": 0}
+    monkeypatch.setattr(mcp_server, "_serve_http", lambda *a, **k: served.update(n=served["n"] + 1))
+    with pytest.raises(GuanlanError) as ei:
+        serve_mcp(kb_mcp, transport="http", port=bad_port)
+    assert ei.value.exit_code == EXIT_USAGE
+    assert served["n"] == 0
+
+
+# ───────────────── DNS-rebinding 白名单派生（决策P4.17-5）─────────────────
+
+
+def test_http_security_derives_allowed_hosts():
+    """`_http_security`：环回三件套恒放行；具体 IP 补自身；--allowed-host 补精确+通配端口两档。"""
+    loop = mcp_server._http_security("127.0.0.1", None)
+    assert loop.enable_dns_rebinding_protection is True
+    assert set(loop.allowed_hosts) == {"127.0.0.1:*", "localhost:*", "[::1]:*"}
+    # 具体非环回 IP → 放行该地址（不写死 localhost）。
+    ip = mcp_server._http_security("192.168.1.5", None)
+    assert "192.168.1.5:*" in ip.allowed_hosts
+    # 反代域名：精确（TLS 终止后裸域名）+ 通配端口两档，且不误删环回默认。
+    rp = mcp_server._http_security("0.0.0.0", ["kb.example.internal"])
+    assert "kb.example.internal" in rp.allowed_hosts
+    assert "kb.example.internal:*" in rp.allowed_hosts
+    assert "127.0.0.1:*" in rp.allowed_hosts  # 环回默认仍在
+    # 0.0.0.0 绑定通配本身不作为 Host 放行（它不是可连的 Host 值）。
+    assert "0.0.0.0:*" not in rp.allowed_hosts
+
+
+def test_http_security_ipv6_and_case_normalization():
+    """IPv6 字面量 --host 加方括号（对上客户端 `[addr]:port`）；--allowed-host 大小写归一为小写。"""
+    # 具体 IPv6 绑定：Host 头是 `[fe80::1]:port`，白名单须是 `[fe80::1]:*`（决策P4.17-5 修正）。
+    v6 = mcp_server._http_security("fe80::1", None)
+    assert "[fe80::1]:*" in v6.allowed_hosts
+    assert "fe80::1:*" not in v6.allowed_hosts  # 不写无括号形（永不匹配）
+    # DNS 名大小写不敏感、SDK 却按字节精确匹配 → 混大小写的 --allowed-host 须被小写归一。
+    mixed = mcp_server._http_security("0.0.0.0", ["KB.Example.Internal:8443"])
+    assert "kb.example.internal:8443" in mixed.allowed_hosts
+    assert "kb.example.internal:*" in mixed.allowed_hosts  # 端口通配档
+    assert not any(h != h.lower() for h in mixed.allowed_hosts)  # 无残留大写
+
+
+# ───────────────── bearer token 中间件（决策P4.17-2）─────────────────
+
+
+def _drive_asgi(mw, authorization):
+    """驱动 ASGI 中间件一个 http 请求，返回响应 status（authorization=None 表示不带头）。"""
+
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"OK"})
+
+    mw._app = inner
+    headers = [(b"authorization", authorization)] if authorization is not None else []
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    asyncio.run(mw({"type": "http", "headers": headers}, receive, send))
+    return next(m["status"] for m in sent if m["type"] == "http.response.start")
+
+
+def test_bearer_token_middleware_gate():
+    """缺/错 token → 401；正确 → 放行 200（常量时间比对，决策P4.17-2）。"""
+    mw = mcp_server._BearerTokenMiddleware(None, "s3cr3t")
+    assert _drive_asgi(mw, None) == 401
+    assert _drive_asgi(mw, b"Bearer wrong") == 401
+    assert _drive_asgi(mw, b"s3cr3t") == 401  # 缺 "Bearer " 前缀也拒
+    assert _drive_asgi(mw, b"Bearer s3cr3t") == 200
+    # RFC 7235：auth-scheme 大小写不敏感——`bearer`/`BEARER` + 正确凭据须放行。
+    assert _drive_asgi(mw, b"bearer s3cr3t") == 200
+    assert _drive_asgi(mw, b"BEARER s3cr3t") == 200
+    # 容多空格；错 scheme 仍拒。
+    assert _drive_asgi(mw, b"Bearer   s3cr3t") == 200
+    assert _drive_asgi(mw, b"Basic s3cr3t") == 401
+
+
+def test_bearer_token_middleware_passes_lifespan():
+    """非 http scope（lifespan）原样透传——不拦掉 streamable_http_app 的 session_manager 生命周期。"""
+    seen = []
+
+    async def inner(scope, receive, send):
+        seen.append(scope["type"])
+
+    mw = mcp_server._BearerTokenMiddleware(inner, "s3cr3t")
+    asyncio.run(mw({"type": "lifespan"}, None, None))
+    assert seen == ["lifespan"]
+
+
+# ───────────────── http 端到端冒烟：真起 uvicorn + streamable-http 客户端 ─────────────────
+
+import contextlib  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+# 用旧名 `streamablehttp_client`：它在整个 `mcp>=1.27,<2` 区间恒在、且接受 `headers=`（新名 1.27.x 起
+# 改签名为 `http_client=` 且未必在下界存在）。它在新版告 DeprecationWarning，仅测试便利、就地 filter。
+from mcp.client.streamable_http import streamablehttp_client as _http_client  # noqa: E402
+
+
+@contextlib.contextmanager
+def _running_http(app, host="127.0.0.1"):
+    """在后台线程真起 uvicorn（端口 0 自选），yield base_url，退出时优雅停服。"""
+    import uvicorn
+
+    config = uvicorn.Config(app, host=host, port=0, log_level="warning")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.time() + 15
+        while not server.started and time.time() < deadline:
+            time.sleep(0.02)
+        if not server.started:
+            raise RuntimeError("uvicorn 未在超时内启动")
+        port = server.servers[0].sockets[0].getsockname()[1]
+        yield f"http://{host}:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=15)
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_http_end_to_end_roundtrip(kb_mcp):
+    """真 Streamable HTTP 往返：tools/list = 六个零 LLM 工具（无 ask）、search 结果与冷算同形。"""
+    from mcp import ClientSession
+
+    from guanlan.search import search_pages, search_result_dict
+
+    mcp = build_mcp(kb_mcp, runner=_ok_runner, allow_ask=False)
+    app = mcp_server._build_http_app(mcp, host="127.0.0.1", allowed_hosts=None, token=None)
+
+    async def roundtrip(base):
+        async with _http_client(f"{base}/mcp") as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                res = await session.call_tool("search", {"query": "去中心化金融"})
+                return tools, res
+
+    with _running_http(app) as base:
+        tools, res = asyncio.run(roundtrip(base))
+
+    names = {t.name for t in tools.tools}
+    assert names == {"search", "read_page", "list_pages", "graph", "health", "lint"}
+    assert "ask" not in names  # http 默认门控
+    cold = search_result_dict(search_pages(kb_mcp / "wiki", "去中心化金融"))
+    assert res.structuredContent == cold  # 只换传输、无逻辑分叉
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_http_end_to_end_token_gate(kb_mcp):
+    """裹 token 中间件后：缺/错 Authorization → 真 401；正确 Bearer → MCP 握手成功。"""
+    import httpx
+    from mcp import ClientSession
+
+    mcp = build_mcp(kb_mcp, runner=_ok_runner, allow_ask=False)
+    app = mcp_server._build_http_app(mcp, host="127.0.0.1", allowed_hosts=None, token="s3cr3t")
+
+    async def initialize_ok(base):
+        headers = {"Authorization": "Bearer s3cr3t"}
+        async with _http_client(f"{base}/mcp", headers=headers) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                return (await session.initialize()) is not None
+
+    with _running_http(app) as base:
+        # 缺 token / 错 token：token 中间件在最外层，直接 401（先于 MCP 内容协商）。
+        no_auth = httpx.post(f"{base}/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        wrong = httpx.post(
+            f"{base}/mcp",
+            headers={"Authorization": "Bearer nope"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        )
+        assert no_auth.status_code == 401 and wrong.status_code == 401
+        # 正确 token：MCP 握手成功。
+        assert asyncio.run(initialize_ok(base)) is True

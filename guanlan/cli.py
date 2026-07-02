@@ -173,7 +173,16 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     # 注：本命令把 guanlan 作 MCP **服务端**（把 wiki 只读暴露给外部 Agent），
     # 与「Agentao 作 MCP 客户端的 Tool 注入」方向相反（决策P4.10-6）。
     try:
-        return serve_mcp(args.dir, model=args.model)
+        return serve_mcp(
+            args.dir,
+            transport=args.transport,
+            host=args.host,
+            port=args.port,
+            auth_token_env=args.auth_token_env,
+            allowed_host=args.allowed_host,
+            allow_ask=args.allow_ask,
+            model=args.model,
+        )
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
@@ -455,10 +464,42 @@ def _add_mcp_parser(sub, dir_parent) -> None:
     p = sub.add_parser(
         "mcp",
         parents=[dir_parent],
-        help="起只读 MCP 服务端（stdio，可选叠加层，需 `pip install 'guanlan-wiki[mcp]'`）：把 wiki "
-        "检索/读页/图谱/体检暴露给任意 MCP 客户端（与『Agentao 作客户端的 Tool 注入』方向相反）",
+        help="起只读 MCP 服务端（默认 stdio；--transport http 为 Streamable HTTP，可选叠加层，需 "
+        "`pip install 'guanlan-wiki[mcp]'`）：把 wiki 检索/读页/图谱/体检暴露给任意 MCP 客户端"
+        "（与『Agentao 作客户端的 Tool 注入』方向相反）",
     )
     p.add_argument("--model", default=None, help="覆盖 ask 工具的 Agentao 模型（仅 ask 用）")
+    # ── P4.17 Streamable HTTP 传输（默认 stdio，向后兼容硬约束，决策P4.17-1）──
+    p.add_argument(
+        "--transport",
+        choices=("stdio", "http"),
+        default="stdio",
+        help="传输：stdio（默认，与既有行为字节等价）或 http（Streamable HTTP，默认绑 127.0.0.1:8766）",
+    )
+    p.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="http 绑定地址（默认 127.0.0.1；非环回须配 --auth-token-env，决策P4.17-2）",
+    )
+    p.add_argument("--port", type=int, default=8766, help="http 监听端口（默认 8766，与 web 8765 错开）")
+    p.add_argument(
+        "--auth-token-env",
+        default=None,
+        metavar="ENVVAR",
+        help="从该环境变量读 bearer token 作 http 鉴权（绝不命令行明文/落盘）；非环回绑定时必填",
+    )
+    p.add_argument(
+        "--allowed-host",
+        action="append",
+        default=None,
+        metavar="HOST[:PORT]",
+        help="额外放行的 Host 头（可重复）：反代对外域名须显式补入，否则被 DNS-rebinding 防护拒（决策P4.17-5）",
+    )
+    p.add_argument(
+        "--allow-ask",
+        action="store_true",
+        help="http 下显式暴露昂贵的 ask（LLM）工具（默认关；stdio 恒暴露，决策P4.17-6）",
+    )
     p.set_defaults(func=_cmd_mcp)
 
 
