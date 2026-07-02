@@ -160,10 +160,11 @@ In the browser: browse the wiki and follow `[[wikilink]]` navigation, run checkÂ
 
 ```bash
 pip install 'guanlan-wiki[mcp]'
-guanlan -C my-wiki mcp                 # read-only MCP server over stdio
+guanlan -C my-wiki mcp                    # read-only MCP server over stdio (default)
+guanlan -C my-wiki mcp --transport http   # or Streamable HTTP (defaults to 127.0.0.1:8766)
 ```
 
-See [MCP host](06-mcp-host.md).
+See [MCP host](06-mcp-host.md) for the HTTP transport's security defaults (localhost-first, bearer token for non-loopback, `ask` gating).
 
 ## Next
 

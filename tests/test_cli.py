@@ -137,11 +137,43 @@ def test_audit_rejects_non_positive_limit(bad):
 
 
 def test_mcp_parser_defaults():
-    """`mcp` 子命令：-C 透传、--model 默认 None（P4.10）。"""
+    """`mcp` 子命令：-C 透传、--model 默认 None（P4.10）；P4.17 http 旗标默认值（向后兼容，决策P4.17-1）。"""
     args = _parse(["-C", "/kb", "mcp"])
     assert args.command == "mcp" and args.dir == "/kb" and args.model is None
+    # P4.17 默认：stdio、绑 127.0.0.1:8766、无 token、无额外 host、ask 关（http 下）。
+    assert args.transport == "stdio"
+    assert args.host == "127.0.0.1" and args.port == 8766
+    assert args.auth_token_env is None and args.allowed_host is None and args.allow_ask is False
     args2 = _parse(["mcp", "--model", "M", "-C", "/kb"])
     assert args2.dir == "/kb" and args2.model == "M"
+
+
+def test_mcp_parser_http_flags():
+    """P4.17 http 旗标解析：--transport/--host/--port/--auth-token-env/--allowed-host(可重复)/--allow-ask。"""
+    args = _parse(
+        [
+            "-C", "/kb", "mcp",
+            "--transport", "http",
+            "--host", "0.0.0.0",
+            "--port", "9000",
+            "--auth-token-env", "GUANLAN_MCP_TOKEN",
+            "--allowed-host", "kb.example.internal",
+            "--allowed-host", "kb2.example.internal:8443",
+            "--allow-ask",
+        ]
+    )
+    assert args.transport == "http" and args.host == "0.0.0.0" and args.port == 9000
+    assert args.auth_token_env == "GUANLAN_MCP_TOKEN"
+    assert args.allowed_host == ["kb.example.internal", "kb2.example.internal:8443"]  # append 累积
+    assert args.allow_ask is True
+
+
+def test_mcp_parser_rejects_unknown_transport():
+    """--transport 只接受 stdio/http（argparse choices）；其余用法错、非零退出。"""
+    import pytest
+
+    with pytest.raises(SystemExit):
+        _parse(["-C", "/kb", "mcp", "--transport", "sse"])
 
 
 def test_mcp_missing_extra_degrades(tmp_path, monkeypatch, capsys):
