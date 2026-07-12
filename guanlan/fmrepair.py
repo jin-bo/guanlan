@@ -28,6 +28,7 @@ import yaml
 
 from .check import Violation
 from .pages import parse_frontmatter, split_frontmatter
+from .rawio import atomic_write_bytes  # 字节级原子覆盖写：保 CRLF 保真 + 避免半写坏页
 
 __all__ = ["repair_page_frontmatter", "repair_unparsable_pages"]
 
@@ -95,8 +96,10 @@ def repair_page_frontmatter(path: Path, wiki: Path) -> bytes | None:
     - **拒符号链接 / 越界路径**：`write_bytes` 跟随符号链接，而 `iter_pages` 经 `is_file()` 会把指向库外的
       `wiki/` 符号链接页纳入校验——若不挡，宿主代码会改动 KB 之外的文件。故页本身是符号链接、或解析后逃出
       `wiki/`（父目录符号链接）一律跳过、返回 None。
-    - **逐字节 I/O**：`read_bytes`/`write_bytes` 避开 `read_text` 换行翻译（否则 CRLF 被静默改成 LF、连带
-      改动正文与 `---` 分隔行）；只替换 frontmatter 块段，原 `---` 行与 body 逐字节不变。
+    - **逐字节 I/O**：`read_bytes` + `atomic_write_bytes` 避开 `read_text` 换行翻译（否则 CRLF 被静默改成
+      LF、连带改动正文与 `---` 分隔行）；只替换 frontmatter 块段，原 `---` 行与 body 逐字节不变。写经
+      `atomic_write_bytes`（同目录 tmp + `os.replace`）：崩在写一半也不留半写坏页（页已过符号链接闸，
+      故 rename 换名与旧 `write_bytes` 落点一致）。
     """
     # 安全闸：符号链接页 / 解析后逃出 wiki/ 的路径不修（修复是可选优化，越界即跳过、最差=现状）。
     if path.is_symlink():
@@ -124,7 +127,7 @@ def repair_page_frontmatter(path: Path, wiki: Path) -> bytes | None:
     lines = text.splitlines(keepends=True)
     close = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
     new_text = lines[0] + new_block + lines[close] + "".join(lines[close + 1:])
-    path.write_bytes(new_text.encode("utf-8"))
+    atomic_write_bytes(path, new_text.encode("utf-8"))  # 字节保真 + 原子换名，不留半写坏页
     return original
 
 

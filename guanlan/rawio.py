@@ -16,6 +16,12 @@
   （`EXIT_USAGE`→409「已存在」、`EXIT_AGENT_ERROR`→500「写盘失败」）；若也改成 raise，
   worker 会把异常归一成 agent error，409 退化成 500，破 P4.6「零行为变更」硬门。
 
+`atomic_write_raw` 的 tmp+`os.replace` 落盘骨架抽成两支公共原语（无门禁、允许覆盖、覆盖保留原权限位、
+只避免半写、不 raise `ValueError`）：**`atomic_write_bytes(target, data)`** 逐字节底座、
+**`atomic_write_text(target, content)`** 是其 UTF-8 文本外壳。既是 `atomic_write_raw` 的底座，也供
+`wiki/` + `.trash/` 的确定性写复用——`remove`/`reindex`/`provenance` 走文本壳，`fmrepair`（CRLF 保真）
+与 `gate` 回滚（原字节）走字节底座——单一实现，杜绝多处落盘规则漂移。
+
 本模块不含任何路由 / 可变状态，故可独立单测、与 web 解耦；`web/rawfeed.py` 保留薄壳
 re-export 旧名（`_raw_slug` / `_normalize_basename` / …）并把校验 `ValueError` 包成
 `HTTPException(400)`，字节行为不变。
@@ -184,25 +190,88 @@ def apply_origin(text: str, origin: str) -> str:
     return f"---\n{dumped}---\n{body}"
 
 
-def atomic_write_raw(target: Path, content: str, overwrite: bool) -> int:
-    """在**串行 worker turn 内**复检覆盖语义并原子落盘（决策P4.1-2/3）。返回退出码。
+def _preserve_metadata(tmp: str, target: Path) -> None:
+    """覆盖既有文件前，把 tmp 的**权限位 + 属主（uid/gid）**对齐目标现值（best-effort，不阻断写）。
 
-    两个并发同名投喂时端点的 existence 预检可能都放过；故这里在真正串行的临界区里再查一次
-    `overwrite`，第二个返回 `EXIT_USAGE`（端点转 409）。落盘写同目录临时文件再 `os.replace`
-    换名（原子）；IO 异常（`OSError`）向上抛——web 由 worker 归一为 EXIT_AGENT_ERROR（端点转
-    500），CLI `convert` 由命令壳 `except OSError` 转 EXIT_USAGE（决策P5.2-6）。**绝不抛
-    `ValueError`**：否则 worker 把同名冲突归一成 agent error，web 的 409 退化成 500。
+    `os.replace` 换入的是 `mkstemp` 的新 inode（`0600`、属主=写进程），会丢掉被覆盖文件原 inode 的
+    元数据，与被替换的就地 `Path.write_bytes`/`write_text`（改原 inode、保 mode+uid/gid）不符：
+    - **权限位**：不回填则既有 `0644` 页无声窄化到 owner-only。
+    - **属主**：写进程 uid ≠ 目标属主时（如 root 服务更新用户 KB），文件被改成写进程所有，用户反而失去
+      编辑权。故覆盖前 `chown` 回目标 uid/gid。
+
+    目标不存在（新建，如 `.trash/manifest.json`）→ `stat` 抛 → 直接返回、保持 `mkstemp` 默认。`chmod`/
+    `chown` 各自 `suppress(OSError)`：非 root 无权把 tmp `chown` 成他人属主时静默跳过（此时旧的就地写也
+    无法保留他人属主，行为相当）；Windows 无 `os.chown` → 跳过该步。
     """
-    if target.exists() and not overwrite:
-        print(f"raw/{target.name} 已存在。")  # 经 worker redirect_stdout → job.output（409 detail）
-        return EXIT_USAGE
+    try:
+        st = os.stat(target)
+    except OSError:
+        return  # 目标不存在 → 新建，保持 mkstemp 的 0600 + 写进程属主
+    with contextlib.suppress(OSError):
+        os.chmod(tmp, st.st_mode & 0o777)
+    if hasattr(os, "chown"):  # Windows 无 chown
+        with contextlib.suppress(OSError):
+            os.chown(tmp, st.st_uid, st.st_gid)
+
+
+def atomic_write_bytes(target: Path, data: bytes) -> None:
+    """字节级原子覆盖写 `target`：同目录临时文件 + `os.replace` 换名。**是本模块所有原子写的字节底座。**
+
+    **只保证「读者永不见半写文件」「写临时文件失败时旧文件原封不动」**——同目录 tmp 落盘、成功后
+    `os.replace` 单次换入（同文件系统内原子 rename）；写 tmp 中途 `OSError`（异常 / 磁盘满）→ 清理
+    tmp 后**继续上抛**，`target` 原文未触。
+
+    **明确不做**：不 `fsync`（故**不承诺断电后的持久性**）、不加锁、不做 journal / 事务 / 回滚。它
+    解决的是「避免部分写入」，**不是**完整 crash recovery（决策见 `docs/backlog/notes/openkb-2026-07-反向评审.md` §1/§2）。
+
+    **atomic-rename 的固有取舍（有意保留，同既有 `atomic_write_raw`）**：`os.replace` 换入的是新 inode，
+    故（a）**目标是符号链接时替换的是链接本身、不写穿到 referent**——对本模块所有调用方这更安全：
+    `fmrepair`/`provenance` 本就先 `is_symlink()` 拒链接（防写出 KB 外），`remove`/`reindex` 的页/index 若
+    为链接，不跟随即杜绝写逃逸（旧的就地 `write_text` 会写穿到 KB 外）；（b）**不保留 ACL / 扩展属性**
+    （POSIX ACL 无标准库、`os.*xattr` 在 macOS 本就不可用）——对纯 markdown 页无实义，且原子写通用如此。
+    需要写穿链接或保 ACL/xattr 的场景不在本原语职责内。
+
+    **逐字节写入**（`wb`，不做任何编码 / 行尾翻译）：供已自管编码/换行、需字节保真的调用方——
+    `fmrepair` 的 CRLF 保真页修复、`gate` 的原字节回滚；`atomic_write_text` 是它按 UTF-8 编码的文本外壳。
+    允许覆盖（与 `atomic_write_raw` 的不覆盖门禁语义不同）；`target.parent` 须已存在（`mkstemp` 前置，同
+    `Path.write_bytes`）。**覆盖既有文件时保留原权限位 + 属主**（`_preserve_metadata`，best-effort）：否则
+    `os.replace` 会把页无声窄化到 `0600` 并改掉 uid/gid；新建文件保持 `mkstemp` 的 `0600` + 写进程属主。
+    """
     fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-            f.write(content)  # UTF-8 原样：不渲染、不重写 [[wikilink]]（raw/ 是未加工源）。
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        _preserve_metadata(tmp, target)  # 覆盖时保留原权限位 + 属主（best-effort）
         os.replace(tmp, target)
     except OSError:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+
+
+def atomic_write_text(target: Path, content: str) -> None:
+    """UTF-8 原子覆盖写 `target`（`atomic_write_bytes` 的文本外壳，语义/保证与之相同）。
+
+    `content` 按 UTF-8、**逐字写盘**（不做行尾翻译，等价旧 `newline=""`）：自管 EOL 的调用方（如
+    `reindex._join_lines` 按探测 EOL 重组）原样保真，硬编码 `\\n` 的调用方在 POSIX 上字节等同。覆盖保留
+    原权限位、写失败旧文件不动、不 fsync/锁/journal——细节见 `atomic_write_bytes`。供 `wiki/` + `.trash/`
+    的确定性写（`remove` / `reindex` / `provenance`）替代裸 `Path.write_text`。
+    """
+    atomic_write_bytes(target, content.encode("utf-8"))
+
+
+def atomic_write_raw(target: Path, content: str, overwrite: bool) -> int:
+    """在**串行 worker turn 内**复检覆盖语义并原子落盘（决策P4.1-2/3）。返回退出码。
+
+    两个并发同名投喂时端点的 existence 预检可能都放过；故这里在真正串行的临界区里再查一次
+    `overwrite`，第二个返回 `EXIT_USAGE`（端点转 409）。通过后走 `atomic_write_text` 原子落盘
+    （同目录 tmp + `os.replace`，UTF-8 原样：不渲染、不重写 `[[wikilink]]`——raw/ 是未加工源）；IO
+    异常（`OSError`）向上抛——web 由 worker 归一为 EXIT_AGENT_ERROR（端点转 500），CLI `convert`
+    由命令壳 `except OSError` 转 EXIT_USAGE（决策P5.2-6）。**绝不抛 `ValueError`**：否则 worker 把
+    同名冲突归一成 agent error，web 的 409 退化成 500。
+    """
+    if target.exists() and not overwrite:
+        print(f"raw/{target.name} 已存在。")  # 经 worker redirect_stdout → job.output（409 detail）
+        return EXIT_USAGE
+    atomic_write_text(target, content)
     return EXIT_OK

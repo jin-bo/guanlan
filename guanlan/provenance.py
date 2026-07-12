@@ -25,6 +25,7 @@ from pathlib import Path
 import yaml
 
 from .pages import split_frontmatter
+from .rawio import atomic_write_text  # 原子覆盖写 source 页 frontmatter：stamp / 回滚均不留半写
 
 __all__ = [
     "RAW_DIGEST_KEY",
@@ -128,14 +129,14 @@ def stamp_raw_digest(source_page: Path, digest_value: str) -> bool:
     dumped = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False)
     new_text = f"---\n{dumped}---\n{body}"
     try:
-        source_page.write_text(new_text, encoding="utf-8")
+        atomic_write_text(source_page, new_text)  # 原子覆盖：崩在写一半不留坏页
     except OSError:
         return False
     if _verify_stamp(source_page, digest_value):
         return True
     # 写后 check 不过 → 回滚到写前字节（宁可不 stamp 也绝不留坏页）。
     try:
-        source_page.write_text(original, encoding="utf-8")
+        atomic_write_text(source_page, original)  # 回滚同样原子，不留半写
     except OSError:
         pass
     return False

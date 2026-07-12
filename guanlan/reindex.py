@@ -21,6 +21,7 @@ from pathlib import Path
 from .errors import EXIT_OK, GuanlanError
 from .pages import index_md_links, index_sync_state, iter_pages, load_page, page_title
 from .paths import require_kb_root
+from .rawio import atomic_write_text  # 原子覆盖写 index.md（避免半写），与 raw/ 写共用骨架
 
 __all__ = [
     "ReindexEntry",
@@ -249,7 +250,7 @@ def reindex_entrypoint(
     wiki = root / "wiki"
     result, new_text = run_reindex(wiki, prune=prune)
     if not dry_run and new_text is not None:
-        (wiki / "index.md").write_text(new_text, encoding="utf-8")
+        atomic_write_text(wiki / "index.md", new_text)
     print(format_result(result, dry_run=dry_run, json_output=json_output))
     return EXIT_OK
 
