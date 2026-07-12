@@ -33,7 +33,7 @@ from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .gate import _trusted_sources  # 读衍生页可信 sources 的单一归口（坏/缺 → None）
 from .pages import iter_pages, load_page, split_frontmatter
 from .paths import require_kb_root
-from .rawio import normalize_basename, raw_slug  # slug 归一：与投喂 / convert 建源同口径
+from .rawio import atomic_write_text, normalize_basename, raw_slug  # slug 归一 + 原子写（避免半写）同口径
 from .reindex import _join_lines, _prune_dangling, _split_lines  # index 行删除的单一归口
 
 __all__ = [
@@ -181,7 +181,7 @@ def _drop_slug_from_page(path: Path, slug: str) -> bool:
         return False  # 幂等：重跑时 slug 已不在 → no-op
     meta["sources"] = [s for s in sources if s != slug]
     dumped = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False)
-    path.write_text(f"---\n{dumped}---\n{body}", encoding="utf-8")
+    atomic_write_text(path, f"---\n{dumped}---\n{body}")  # 原子覆盖：崩溃不把内容页写成半截
     return True
 
 
@@ -192,7 +192,7 @@ def _prune_index_line(index_path: Path, slug: str) -> list[str]:
     lines, eol, trailing = _split_lines(index_path.read_text(encoding="utf-8"))
     kept, removed = _prune_dangling(lines, _index_target(slug))
     if removed:
-        index_path.write_text(_join_lines(kept, eol, trailing), encoding="utf-8")
+        atomic_write_text(index_path, _join_lines(kept, eol, trailing))  # 自管 EOL、逐字原子写
     return removed
 
 
@@ -239,8 +239,9 @@ def _execute(root: Path, plan: RemovePlan) -> Path:
         "orphaned": list(plan.orphans),  # 独源孤儿（未改动）——记入审计/blast-radius，非恢复所需
         "index_lines_removed": list(plan.index_lines),
     }
-    (trash_dir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    # 原子写：半写的恢复配方会让二期 restore 无法解析 JSON；新建文件下失败则不残留半截。
+    atomic_write_text(
+        trash_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
     )
 
     # ② 摘多源页 slug（幂等）→ ③ 删 index 行（从当前文件重算，幂等）→ ④ 最后移源

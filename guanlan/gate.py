@@ -29,6 +29,7 @@ from .errors import (
 )
 from .fmrepair import repair_unparsable_pages
 from .pages import iter_pages, load_page
+from .rawio import atomic_write_bytes  # 门禁回滚原字节：原子换名，回滚本身也不留半写
 from .runtime import AgentRunner, AgentRunResult, run_agent_task
 
 # 写入口门禁失败后的有界自愈轮数（决策7，见 docs/P2-最小闭环.md §10）。
@@ -475,7 +476,7 @@ def run_guarded_write_result(
             )
             stuck = {rel for rel in written if any(v.page == rel for v in probe.violations)}
             for rel in stuck:
-                (Path(root) / rel).write_bytes(written[rel])  # 仍阻断 → 回滚到原字节，最差=现状
+                atomic_write_bytes(Path(root) / rel, written[rel])  # 仍阻断 → 原子回滚到原字节，最差=现状
             kept = [rel for rel in sorted(written) if rel not in stuck]
             if kept:
                 print(
