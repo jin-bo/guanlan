@@ -4,7 +4,7 @@
 >
 > **评审修订（2026-07-11，收敛）**：初稿把 §2 的 4 信号关联评分定为"强借 + 候选 P3.12"，经评审**降级**——权重无观澜语料 precision 支撑（**未知类型默认亲和 0.5 → 几乎任意页对得正分**，配"全库打分"即 O(N²)、大量弱建议；**"零基建"≠低成本低噪声**），改为 **park + 一个离线小实验**；"图谱洞察（惊喜连接 / 知识缺口）"与现有拓扑 health/lint 重叠，**删除落地建议**。本篇收敛为 **两项立即小动作（§2）+ 一项仅观察（§3）+ 其余不做（§4）**。
 >
-> **进展更新（实现后回填，2026-07-11）**：§2 **两项立即动作均已实现**（见 [`CHANGELOG.md`](../../../CHANGELOG.md) 未发布段）——§2.1 query/Web 收敛提示 = `query.QUERY_PROMPT` + `web/conversation._continuation_prompt` 各补「不要重复等价检索；证据足够即回答」；§2.2 ingest 撞名守卫 = `ingest._reject_source_slug_collision`，经 xhigh code-review 从「按 basename 判」**收正为按 `raw_slug(stem)`（页身份归口）判、只比 `.md`**（review §1「basename 太窄」漏 `annual report`↔`annual-report` 等 slug-fold 撞页；只比 `.md` 避 convert `pdf`+`md` 误伤）。§3 仅观察、§4 不做 **均未动**。
+> **进展更新（实现后回填，2026-07-11）**：§2 **两项立即动作均已实现**（见 [`CHANGELOG.md`](../../../CHANGELOG.md) 未发布段）——§2.1 query/Web 收敛提示 = `query.QUERY_PROMPT` + `web/conversation._continuation_prompt` 各补「不要重复等价检索；证据足够即回答」；§2.2 ingest 撞名守卫 = `ingest._reject_source_slug_collision`，经 xhigh code-review 三轮收敛：① 从「按 basename 判」**收正为按 `raw_slug(stem)`（页身份归口）判、只比 `.md`**（review §1「basename 太窄」漏 `annual report`↔`annual-report` 等 slug-fold 撞页；只比 `.md` 避 convert `pdf`+`md` 误伤）；② **合法重摄豁免**（review §2）——目标页 `raw_digest` 确证归属本文件时放行（`_target_page_owned_by`），真撞改在摄入非属主旁支时当场拒，消假阳；③ 全树 `rglob` 为**已接受代价**（review §3，`gate.snapshot_raw` 本就同量级遍历 `raw/`）。§3 仅观察、§4 不做 **均未动**。
 >
 > 关联：[`nashsu-llm_wiki-反向评审结论.md`](nashsu-llm_wiki-反向评审结论.md)、[`../../P2.1-摄入写入纪律.md`](../../P2.1-摄入写入纪律.md)（决策P2.1-4：绝不让代码改写正文）、[`../../P5.0-检索层.md`](../../P5.0-检索层.md)（E1 边界 + 实证②）、[`../../P3.11-断链最近页建议.md`](../../P3.11-断链最近页建议.md)（"断链找近似页"，与 §1-A **不同轴**）、[`cjk-retrieval-enhancements.md`](cjk-retrieval-enhancements.md)、[`gbrain-反向评审结论.md`](gbrain-反向评审结论.md)。
 

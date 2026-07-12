@@ -11,8 +11,15 @@ from pathlib import Path
 
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .gate import run_guarded_write
+from .pages import load_page
 from .paths import require_kb_root
-from .provenance import compute_raw_digest, format_digest_value, stamp_raw_digest
+from .provenance import (
+    RAW_DIGEST_KEY,
+    compute_raw_digest,
+    format_digest_value,
+    parse_digest_value,
+    stamp_raw_digest,
+)
 from .rawio import find_source_page, raw_slug
 from .runtime import AgentRunner
 
@@ -55,7 +62,32 @@ def _resolve_raw_target(root: Path, target: str) -> Path:
     return tpath
 
 
-def _reject_source_slug_collision(raw_dir: Path, tpath: Path) -> None:
+def _target_page_owned_by(sources_dir: Path, tpath: Path, raw_dir: Path) -> bool:
+    """目标 source 页是否**已确证归属**正被摄入的这个 raw 文件（=合法重摄，可豁免撞名拒绝）。
+
+    仅当：源页存在（`find_source_page` 同 `_stamp_source_digest` 的定位归口）+ frontmatter 可解析出
+    `raw_digest` + 其 raw 相对路径 == 本次 `tpath`（review §2 所有权判定）时返回 True。页不存在 / 无或坏
+    `raw_digest`（未 stamp / 手写页 / stamp 曾失败）/ 指纹指向**别的** raw 文件 → False：**宁保守拒**
+    （所有权未确证时不放行，绝不因一个未 stamp 的同 slug 页而放任另一个 raw 覆盖它）。
+    """
+    page = find_source_page(sources_dir, tpath.stem)
+    if page is None:
+        return False
+    meta, _body = load_page(page)  # 容错档：坏/缺 frontmatter → meta=None
+    if meta is None:
+        return False
+    parsed = parse_digest_value(meta.get(RAW_DIGEST_KEY))
+    if parsed is None:
+        return False
+    owner_raw_rel, _sha = parsed  # 形如 "raw/a/summary.md"
+    try:
+        rel = tpath.relative_to(raw_dir).as_posix()
+    except ValueError:
+        return False
+    return owner_raw_rel == f"raw/{rel}"
+
+
+def _reject_source_slug_collision(raw_dir: Path, tpath: Path, sources_dir: Path) -> None:
     """摄入前挡「`raw/` 里多篇 `.md` 会落到同一张 wiki/sources 摘要页」（见 docs/backlog/notes/llm_wiki-反向评审-v0.6.md §1-C/§2.2）。
 
     source 摘要页由 `find_source_page` 按 **`raw_slug(stem)`**（=页身份归口）定位，故凡此键相同的两篇
@@ -65,6 +97,13 @@ def _reject_source_slug_collision(raw_dir: Path, tpath: Path) -> None:
     `raw_slug` 算键。**只比 `.md`**（唯一会被 ingest 建 source 页者），故不误伤 convert 的
     `report.pdf`+`report.md` 同源对。残留：`find_source_page` 的 `.`→`-` 回退（`1.报告`↔`1-报告`）
     键不同、不在此拦，属窄边角，留文档不追（不复刻 rawio 折叠逻辑以免漂移）。
+
+    **合法重摄豁免（review §2）**：目标页已存在且 `raw_digest` 确证归属**本文件**时放行——重摄既有源页
+    是常规操作，同 slug 旁支不是当前属主，不该挡它；真撞（拿一个**非属主**旁支去覆盖属主页）会在**摄入
+    那个旁支时**（`_target_page_owned_by` 判否）当场被拒，安全性不减、假阳大降。
+
+    **性能取舍（review §3，已接受）**：每次 ingest 全量 `rglob` 一遍 `raw/`；`run_guarded_write` 里的
+    `gate.snapshot_raw` 本就同量级遍历 `raw/`（还带哈希），故本遍历是同阶、更轻的附加成本，不另优化。
     """
     target_slug = raw_slug(tpath.stem)
     if not target_slug:
@@ -79,6 +118,8 @@ def _reject_source_slug_collision(raw_dir: Path, tpath: Path) -> None:
     ]
     if not dups:
         return
+    if _target_page_owned_by(sources_dir, tpath, raw_dir):
+        return  # 合法重摄既有属主页 → 放行（review §2）
     listing = "\n".join(
         f"  - raw/{p.relative_to(raw_dir).as_posix()}" for p in [tpath, *dups]
     )
@@ -102,7 +143,7 @@ def run_ingest(
         kb = require_kb_root(root, writable=True)
         tpath = _resolve_raw_target(kb, target)
         raw_dir = (kb / "raw").resolve()  # 单算一次：guard 与 rel 共用（review §cleanup）。
-        _reject_source_slug_collision(raw_dir, tpath)
+        _reject_source_slug_collision(raw_dir, tpath, kb / "wiki" / "sources")
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code

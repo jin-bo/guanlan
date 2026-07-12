@@ -15,10 +15,15 @@
   新增确定性 `_reject_source_slug_collision` 预检：摄入前扫 `raw/` 下**其余 `.md`**，凡 `raw_slug(stem)`
   与目标相同即 `EXIT_USAGE` 拒绝、列出冲突路径、要求改名。**零-LLM、只堵不重构**——复用既有 `raw_slug`
   （不新增 slug 方案/哈希/迁移），**只比 `.md`**（唯一会被 ingest 建 source 页者）故不误伤 convert 的
-  `report.pdf`+`report.md` 同源对。经 xhigh code-review 从初版「按 basename 判」收正为「按 `raw_slug`
-  判」（basename 太窄，漏 `annual report`↔`annual-report` 等异名同 slug 的真撞页）。残留：`find_source_page`
-  的 `.`→`-` 回退（`1.报告`↔`1-报告`）键不同、不在此拦（窄边角，不复刻 rawio 折叠逻辑以免漂移）。测试见
-  `tests/test_ingest.py`（撞页拒绝 / slug-fold 折叠拒绝 / pdf+md 同源对放行）。
+  `report.pdf`+`report.md` 同源对。经 xhigh code-review 三轮收敛：① 从初版「按 basename 判」收正为「按
+  `raw_slug` 判」（basename 太窄，漏 `annual report`↔`annual-report` 等异名同 slug 的真撞页）；② **合法重摄
+  豁免**——目标页已存在且其 `raw_digest` 确证归属**本文件**时放行（`_target_page_owned_by`，复用
+  `provenance.parse_digest_value` 归口），使「属主页长期维护、同 slug 旁支只是未摄草稿」时重摄不再假阳被挡；
+  真撞（拿**非属主**旁支覆盖属主页）改在**摄入那个旁支时**当场拒，安全性不减；③ 每次 ingest 全量 `rglob`
+  一遍 `raw/` 是**已接受代价**（`run_guarded_write` 的 `gate.snapshot_raw` 本就同量级遍历 `raw/`、还带哈希，
+  故此遍历同阶更轻）。残留：`find_source_page` 的 `.`→`-` 回退（`1.报告`↔`1-报告`）键不同、不在此拦（窄边角，
+  不复刻 rawio 折叠逻辑以免漂移）。测试见 `tests/test_ingest.py`（撞页拒绝 / slug-fold 折叠拒绝 / pdf+md 同源
+  对放行 / 属主重摄放行 / 非属主覆盖拒绝）。
 
 ### 优化
 
