@@ -21,6 +21,7 @@ QUERY_PROMPT = (
     "请按 `guanlan-wiki` skill 的 query 工作流回答：{question}。"
     "先用**可用的 search 入口**（宿主 `guanlan_search` 工具 / `guanlan search \"<关键词>\"` CLI）召回候选页"
     "（确定性整页 BM25 召回，CJK 走 2-gram、别名已纳入匹配面），读这些候选页 + `wiki/index.md` 综合；"
+    "**不要重复等价检索；证据足够即回答。**"
     "都不可用或空手而回时再扫相关目录或请我补关键词；"
     "综合出**带 `[[页]]` 引用**的答案；无可靠来源时明说、不编造。"
     "**默认只读，不要写 `wiki/`。**"

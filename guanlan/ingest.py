@@ -13,7 +13,7 @@ from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .gate import run_guarded_write
 from .paths import require_kb_root
 from .provenance import compute_raw_digest, format_digest_value, stamp_raw_digest
-from .rawio import find_source_page
+from .rawio import find_source_page, raw_slug
 from .runtime import AgentRunner
 
 # 薄 prompt：真正步骤在 skill。{rel} = 相对 raw/ 的 posix 路径。
@@ -55,6 +55,41 @@ def _resolve_raw_target(root: Path, target: str) -> Path:
     return tpath
 
 
+def _reject_source_slug_collision(raw_dir: Path, tpath: Path) -> None:
+    """摄入前挡「`raw/` 里多篇 `.md` 会落到同一张 wiki/sources 摘要页」（见 docs/backlog/notes/llm_wiki-反向评审-v0.6.md §1-C/§2.2）。
+
+    source 摘要页由 `find_source_page` 按 **`raw_slug(stem)`**（=页身份归口）定位，故凡此键相同的两篇
+    raw `.md`——`a/report.md` 与 `b/report.md`、`annual report.md` 与 `annual-report.md`、
+    `.report.md` 与 `report.md` ——都会误关联到**同一张**页：一张压另一张、`raw_digest` 只认得一个
+    版本（review §1「按 basename 判太窄」）。**只堵不重构**：不新增 slug 方案/哈希/迁移，直接复用既有
+    `raw_slug` 算键。**只比 `.md`**（唯一会被 ingest 建 source 页者），故不误伤 convert 的
+    `report.pdf`+`report.md` 同源对。残留：`find_source_page` 的 `.`→`-` 回退（`1.报告`↔`1-报告`）
+    键不同、不在此拦，属窄边角，留文档不追（不复刻 rawio 折叠逻辑以免漂移）。
+    """
+    target_slug = raw_slug(tpath.stem)
+    if not target_slug:
+        return
+    dups = [
+        p
+        for p in raw_dir.rglob("*")
+        if p.suffix.lower() == ".md"
+        and raw_slug(p.stem) == target_slug
+        and p.is_file()
+        and p.resolve() != tpath
+    ]
+    if not dups:
+        return
+    listing = "\n".join(
+        f"  - raw/{p.relative_to(raw_dir).as_posix()}" for p in [tpath, *dups]
+    )
+    raise GuanlanError(
+        f"raw/ 下多篇 `.md` 的 source 页 slug 都是 `{target_slug}`，摄入会撞进同一张 "
+        f"wiki/sources/{target_slug}.md：\n{listing}\n"
+        "请把其中之一改名（source 页 slug 需全库唯一）再 ingest。",
+        exit_code=EXIT_USAGE,
+    )
+
+
 def run_ingest(
     target: str,
     *,
@@ -66,11 +101,13 @@ def run_ingest(
     try:
         kb = require_kb_root(root, writable=True)
         tpath = _resolve_raw_target(kb, target)
+        raw_dir = (kb / "raw").resolve()  # 单算一次：guard 与 rel 共用（review §cleanup）。
+        _reject_source_slug_collision(raw_dir, tpath)
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
 
-    rel = tpath.relative_to((kb / "raw").resolve()).as_posix()
+    rel = tpath.relative_to(raw_dir).as_posix()
     # 开场提示（仅交互式终端，stderr 不污染 stdout 信封/管道）：摄入经 Agentao 跑 LLM，
     # 可能耗时数分钟且全程静默——配合 runtime 的心跳，让用户确认不是卡死（A+ 心跳方案）。
     if sys.stderr.isatty():

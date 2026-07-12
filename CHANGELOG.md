@@ -3,6 +3,31 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [未发布]
+
+### 新增
+
+- **ingest 摄入前挡「同一 source 页 slug 撞名」（源自 nashsu/llm_wiki v0.6 反向评审 §2.2，见 [`docs/backlog/notes/llm_wiki-反向评审-v0.6.md`](docs/backlog/notes/llm_wiki-反向评审-v0.6.md)）**
+  —— source 摘要页由 `rawio.find_source_page` 按 **`raw_slug(stem)`**（=页身份归口）定位，故两篇 raw
+  `.md` 只要 `raw_slug(stem)` 相同（`a/report.md` 与 `b/report.md`、`annual report.md` 与
+  `annual-report.md`、`.report.md` 与 `report.md`）就会误关联到**同一张** `wiki/sources/<slug>.md`——
+  一张压另一张、`raw_digest` 只认得一个版本（此前源命名仅约定 kebab、无子目录消歧防线）。`ingest.py`
+  新增确定性 `_reject_source_slug_collision` 预检：摄入前扫 `raw/` 下**其余 `.md`**，凡 `raw_slug(stem)`
+  与目标相同即 `EXIT_USAGE` 拒绝、列出冲突路径、要求改名。**零-LLM、只堵不重构**——复用既有 `raw_slug`
+  （不新增 slug 方案/哈希/迁移），**只比 `.md`**（唯一会被 ingest 建 source 页者）故不误伤 convert 的
+  `report.pdf`+`report.md` 同源对。经 xhigh code-review 从初版「按 basename 判」收正为「按 `raw_slug`
+  判」（basename 太窄，漏 `annual report`↔`annual-report` 等异名同 slug 的真撞页）。残留：`find_source_page`
+  的 `.`→`-` 回退（`1.报告`↔`1-报告`）键不同、不在此拦（窄边角，不复刻 rawio 折叠逻辑以免漂移）。测试见
+  `tests/test_ingest.py`（撞页拒绝 / slug-fold 折叠拒绝 / pdf+md 同源对放行）。
+
+### 优化
+
+- **query / Web 续跑提示补「检索收敛红线」（源自 v0.6 反向评审 §2.1）** —— CLI `query.QUERY_PROMPT` 与
+  Web 目标续跑 `web/conversation._continuation_prompt`（P4.16 循环，正是易空转处）各补一句「**不要重复等价
+  检索；证据足够即回答**」，压重复召回 / 空转。**纯提示词、零代码逻辑改动**——刻意不写进 `AGENTAO.md`
+  （会波及 ingest 等所有工作流，太宽）、不引 agentao 侧预算参数（保薄壳 + 循环真相源在 agentao）。测试见
+  `tests/test_query.py`（CLI 提示含红线）/ `tests/test_web.py`（Web 续跑提示含红线）。
+
 ## [0.1.17] - 2026-07-01
 
 ### 新增
