@@ -12,6 +12,11 @@ from guanlan.errors import (
     EXIT_USAGE,
 )
 from guanlan.ingest import run_ingest
+from guanlan.provenance import (
+    compute_raw_digest,
+    format_digest_value,
+    stamp_raw_digest,
+)
 
 
 def _put_raw(kb: Path, name="doc.md") -> str:
@@ -181,6 +186,45 @@ def test_ingest_same_stem_different_ext_not_rejected(kb: Path):
 
     rc = run_ingest("raw/report.md", root=kb, runner=make_runner(action))
     assert rc == EXIT_OK
+
+
+def _seed_owned_summary(kb: Path) -> Path:
+    """建 raw/2024/summary.md（属主）+ raw/2025/summary.md（同 slug 旁支草稿）+
+    既有 wiki/sources/summary.md，其 raw_digest 指向 raw/2024/summary.md（模拟先前摄入）。返回属主 raw。"""
+    (kb / "raw" / "2024").mkdir()
+    (kb / "raw" / "2025").mkdir()
+    owner = kb / "raw" / "2024" / "summary.md"
+    owner.write_text("2024 摘要\n", encoding="utf-8")
+    (kb / "raw" / "2025" / "summary.md").write_text("2025 草稿（未摄）\n", encoding="utf-8")
+    write_page(kb, "wiki/sources/summary.md", type="source", sources='["summary"]')
+    assert stamp_raw_digest(
+        kb / "wiki" / "sources" / "summary.md",
+        format_digest_value("raw/2024/summary.md", compute_raw_digest(owner)),
+    )
+    return owner
+
+
+def test_ingest_reingest_owner_not_blocked_by_sibling(kb: Path):
+    """合法重摄：既有属主页在（raw_digest 指向本文件），同 slug 旁支存在也放行（review §2 所有权豁免）。"""
+    _seed_owned_summary(kb)
+
+    def action(root: Path):  # 重摄：更新既有属主页
+        write_page(root, "wiki/sources/summary.md", type="source", sources='["summary"]')
+
+    rc = run_ingest("raw/2024/summary.md", root=kb, runner=make_runner(action))
+    assert rc == EXIT_OK
+
+
+def test_ingest_non_owner_into_owned_slug_rejected(kb: Path, capsys):
+    """真撞：拿非属主旁支去覆盖属主页 → 摄入时当场拒（review §2 安全性不减）。"""
+    _seed_owned_summary(kb)
+
+    def boom(root: Path):  # agent 不应被调用
+        raise AssertionError("非属主撞页应在跑 agent 前被拒")
+
+    rc = run_ingest("raw/2025/summary.md", root=kb, runner=make_runner(boom))
+    assert rc == EXIT_USAGE
+    assert "summary" in capsys.readouterr().err
 
 
 def test_ingest_not_a_kb_usage(tmp_path: Path):
