@@ -7129,3 +7129,10 @@ def test_delete_during_goal_run_no_resurrect(chat_client, kb):
         release.set()
         t.join(timeout=5)
     assert not side.exists()  # goal 循环未 resurrect 已删 sidecar
+
+
+def test_continuation_prompt_has_convergence_rule():
+    """Web 续跑提示（P4.16）的观澜语境含收敛红线：别重复等价检索、证据足够即答（llm_wiki v0.6 §2.1）。"""
+    from guanlan.web.conversation import _continuation_prompt
+
+    assert "不要重复等价检索" in _continuation_prompt("某目标")

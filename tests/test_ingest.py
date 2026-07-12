@@ -143,6 +143,46 @@ def test_ingest_missing_file_usage(kb: Path):
     assert rc == EXIT_USAGE
 
 
+def test_ingest_rejects_source_slug_collision(kb: Path, capsys):
+    """raw/ 子目录里两篇 `.md` 落到同一 source 页 slug → 摄入前确定性拒绝，不跑 agent。"""
+    (kb / "raw" / "a").mkdir()
+    (kb / "raw" / "b").mkdir()
+    (kb / "raw" / "a" / "report.md").write_text("甲\n", encoding="utf-8")
+    (kb / "raw" / "b" / "report.md").write_text("乙\n", encoding="utf-8")
+
+    def boom(root: Path):  # agent 不应被调用
+        raise AssertionError("撞页应在跑 agent 前被拒绝")
+
+    rc = run_ingest("raw/a/report.md", root=kb, runner=make_runner(boom))
+    assert rc == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "report" in err and "raw/a/report.md" in err and "raw/b/report.md" in err
+
+
+def test_ingest_rejects_slug_fold_collision(kb: Path, capsys):
+    """异 basename 但 `raw_slug` 相同（空格↔连字符）仍会撞同一张页 → 也须拒（review §1：按 basename 判太窄）。"""
+    (kb / "raw" / "a").mkdir()
+    (kb / "raw" / "b").mkdir()
+    (kb / "raw" / "a" / "annual report.md").write_text("甲\n", encoding="utf-8")
+    (kb / "raw" / "b" / "annual-report.md").write_text("乙\n", encoding="utf-8")
+
+    rc = run_ingest("raw/a/annual report.md", root=kb, runner=make_runner(None))
+    assert rc == EXIT_USAGE
+    assert "annual-report" in capsys.readouterr().err
+
+
+def test_ingest_same_stem_different_ext_not_rejected(kb: Path):
+    """convert 同源对 `report.pdf`+`report.md`（slug 同、但只 `.md` 参与判）不误伤：`.md` 仍可摄入。"""
+    (kb / "raw" / "report.pdf").write_text("源 PDF\n", encoding="utf-8")
+    (kb / "raw" / "report.md").write_text("转换后的 md\n", encoding="utf-8")
+
+    def action(root: Path):
+        write_page(root, "wiki/sources/report.md", type="source", sources='["report"]')
+
+    rc = run_ingest("raw/report.md", root=kb, runner=make_runner(action))
+    assert rc == EXIT_OK
+
+
 def test_ingest_not_a_kb_usage(tmp_path: Path):
     rc = run_ingest("raw/x.md", root=tmp_path, runner=make_runner(None))
     assert rc == EXIT_USAGE

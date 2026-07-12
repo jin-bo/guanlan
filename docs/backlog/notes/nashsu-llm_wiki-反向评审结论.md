@@ -5,6 +5,8 @@
 > **特殊性**：nashsu/llm_wiki 是观澜**最直接的架构孪生**（同 Karpathy 模式、同"本地 markdown + 增量 ingest"路线），历史上被**逐条散引**进多篇 P 文档（**P2.1** 整篇即对它的反向评审——re-ingest 合并不覆盖 / 正文不被改写 / 70% 缩水守卫）。本笔记是**首篇合并结论**，键定在 **2026-06-29 这次 pull**（`dda8768→c03c6be`，至 `v0.5.4`，151 文件 +12385/-1510），覆盖整个 delta。
 >
 > **进展更新（实现后回填）**：§2 lint 断链建议 = **[`../../P3.11-断链最近页建议.md`](../../P3.11-断链最近页建议.md)**（规格，已过两轮评审、可排期，落地清单见其 §9）；§3 finding 持久抑制 = **[`finding-持久抑制-未排期.md`](finding-持久抑制-未排期.md)**（backlog，未排期）。余条未排。
+>
+> **增量评审（2026-07-11 pull，`c03c6be→9b71ade`，v0.5.4→v0.6.3，102 文件 +22365/-4995）**：另篇 **[`llm_wiki-反向评审-v0.6.md`](llm_wiki-反向评审-v0.6.md)**（经评审收敛）。**两项立即小动作已实现**（回填见该篇进展更新 + [`CHANGELOG.md`](../../../CHANGELOG.md) 未发布段）——query/Web 各加一句收敛提示 + ingest 撞名守卫（`_reject_source_slug_collision`，经 code-review 收正为按 `raw_slug` 判）；**一项仅观察**——"共享 source 的未互链页对"离线小样本验 precision（暂不 P3.12）；4 信号加权 / 图谱洞察（惊喜连接·知识缺口，与拓扑 lint 重叠）/ 向量-RRF 全部**不排期**。**同样只借形状、不借实现**。
 > 关联：[`broken-link-handling-survey.md`](broken-link-handling-survey.md)（断链四参考实现总览，§2 的旧 llm_wiki 数据点在此）、[`../../P2.1-摄入写入纪律.md`](../../P2.1-摄入写入纪律.md)（既有 llm_wiki 反向评审）、[`openkb-反向评审结论.md`](openkb-反向评审结论.md) / [`gbrain-反向评审结论.md`](gbrain-反向评审结论.md) / [`sag-反向评审结论.md`](sag-反向评审结论.md)（同类先例）、DESIGN §3（参考实现对比）/ §8。
 
 ## 0. 一句话 / 为什么记

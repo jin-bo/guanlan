@@ -13,6 +13,16 @@ from guanlan.errors import (
 from guanlan.query import run_query
 
 
+# --- 召回收敛红线（llm_wiki v0.6 反向评审 §2.1）---
+
+
+def test_query_prompt_has_convergence_rule():
+    """CLI query 提示含收敛红线：别重复等价检索、证据足够即答。"""
+    from guanlan.query import QUERY_PROMPT
+
+    assert "不要重复等价检索" in QUERY_PROMPT
+
+
 # --- 默认只读路径 ---
 
 
