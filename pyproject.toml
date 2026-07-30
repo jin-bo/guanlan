@@ -49,10 +49,14 @@ web = [
     "anyio>=4.1",
 ]
 # MCP 宿主（P4.10，可选叠加层，见 docs/P4.10-MCP宿主.md 决策P4.10-2/14）：装了 `guanlan-wiki[mcp]`
-# 才有 `guanlan mcp`（只读 MCP 服务端，stdio）。官方 `mcp` SDK v1.x 为当前 stable、v2 尚 alpha，
-# 故加 `<2` 上界防破坏性升级；下界 1.27 取已验证支持结构化输出（协议 ≥2025-06-18）的稳定版。
+# 才有 `guanlan mcp`（只读 MCP 服务端，stdio + P4.17 Streamable HTTP）。
+# 下界 2：官方 SDK `2.0.0`（2026-07-28，随协议修订 2026-07-28 同日发布）为当前 stable，v1.x 同日
+# 转入**只收安全修复**的维护态；v2 删掉了整个 `mcp.server.fastmcp` 包（无 alias），故不做双大版本
+# 兼容而是硬切（决策P4.18-2，见 docs/P4.18-MCP2.0迁移.md §4）。上界 <3 防下一次大版本破坏。
+# 注：v2 服务端仍同时服务握手时代旧协议（实测 stdio/http 双传输上 `initialize` 2025-06-18 均正常），
+# 故已注册的客户端条目零改（决策P4.18-7）。ASGI 栈（starlette/uvicorn）仍随 SDK 到位（决策P4.17-4）。
 mcp = [
-    "mcp>=1.27,<2",
+    "mcp>=2,<3",
     # server.py 直接 import anyio（to_thread 卸 ask 子进程/读盘），显式声明而非靠 mcp 传递。
     "anyio>=4.1",
 ]

@@ -186,7 +186,7 @@ def test_mcp_missing_extra_degrades(tmp_path, monkeypatch, capsys):
 
     from guanlan.cli import main
 
-    # 同时清掉 guanlan.mcp* 与已缓存的 mcp.*：否则 `from mcp.server.fastmcp import FastMCP` 命中
+    # 同时清掉 guanlan.mcp* 与已缓存的 mcp.*：否则 `from mcp.server.mcpserver import MCPServer` 命中
     # 缓存的子模块、不重经父包 `mcp`（被打桩为 None）→ 降级路径不触发。monkeypatch 在 teardown 复原。
     for name in list(sys.modules):
         if (

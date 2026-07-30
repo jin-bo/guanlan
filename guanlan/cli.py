@@ -165,8 +165,11 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     try:
         from .mcp import serve_mcp
     except ImportError:
+        # 版本口径必须明示（决策P4.18-9）：装了 mcp 但是 **1.x** 时，`from mcp.server.mcpserver …` 抛的
+        # `ModuleNotFoundError` 也落进这条 `except`——只说"请装 extra"会让人重装一遍仍失败、无从自救。
         print(
-            "`guanlan mcp` 需要可选依赖：请先 `pip install 'guanlan-wiki[mcp]'`。",
+            "`guanlan mcp` 需要可选依赖：请先 `pip install 'guanlan-wiki[mcp]'`"
+            "（需要官方 SDK `mcp>=2`；v1.x 已不支持，装了旧版请一并升级：`pip install -U 'mcp>=2,<3'`）。",
             file=sys.stderr,
         )
         return EXIT_USAGE

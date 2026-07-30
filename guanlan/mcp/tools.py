@@ -3,10 +3,10 @@
 **零业务智能**——每个工具只把 `search`/`pages`/`graph`/`health`/`lint`/`runtime` 的只读能力包成
 一条 MCP 工具，绝不复制业务逻辑。所有工具：
 
-- **带返回类型注解（`TypedDict`）**：FastMCP 据此自动生成 output schema，使结果落 `structuredContent`
+- **带返回类型注解（`TypedDict`）**：SDK 据此自动生成 output schema，使结果落 `structuredContent`
   + JSON 文本块兜底（决策P4.10-10）；缺注解会退化为纯文本串、失对象契约。
 - **统一 in-band error 总壳**（决策P4.10-16）：`@_guard` 把任何核函数意外抛出收敛为 `ToolError`
-  ——FastMCP/lowlevel 把它转成 MCP in-band tool error 返回调用方，**绝不冒泡杀 server / 破 stdio 帧**。
+  ——MCPServer/lowlevel 把它转成 MCP in-band tool error 返回调用方，**绝不冒泡杀 server / 破 stdio 帧**。
 - **路径单一口径**（决策P4.10-9）：`page`/`path` 字段 = 相对库根、带 `wiki/` 前缀（如
   `wiki/entities/DeFi.md`），与 P5.0 `SearchHit.page` / Web 端点同口径；`read_page` 直接吃
   `search().results[i].page`，链路无拼接/剥前缀。
@@ -23,12 +23,13 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 # pydantic 在 Python < 3.12 上要求 `typing_extensions.TypedDict`（非 `typing.TypedDict`）才能为
-# TypedDict 生成 core schema——FastMCP 据返回类型注解生成 output schema 时正走这条路（决策P4.10-10/14）。
+# TypedDict 生成 core schema——SDK 据返回类型注解生成 output schema 时正走这条路（决策P4.10-10/14）。
 # 用 typing.TypedDict 会在 3.10/3.11 上 `PydanticUserError`、令全部工具注册失败（CI 下限 3.10）。
 # typing_extensions 由 mcp→pydantic 必带，mcp extra 装上即在；不引新直接依赖。
+# SDK v2（P4.18）上此约束不变——3.10 沙箱实测七工具 output schema 照旧全生成。
 from typing_extensions import TypedDict
 
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from ..graph import build_graph, graph_to_dict
 from ..health import run_health
@@ -60,8 +61,9 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 def _guard(name: str) -> Callable[[_F], _F]:
     """统一 in-band error 总壳（决策P4.10-16）：核函数任何意外抛出 → `ToolError`。
 
-    FastMCP 的 lowlevel `call_tool` handler 把 `ToolError`（及任何异常）转成 MCP in-band tool error
-    （`isError=True`）返回调用方、server 不崩、stdio 帧不破（已核对 SDK 1.27）。这层总壳只为给出
+    SDK 的 lowlevel `call_tool` handler 把 `ToolError`（及任何异常）转成 MCP in-band tool error
+    （wire `isError=True`）返回调用方、server 不崩、stdio 帧不破（已核对 SDK 2.0.0：消息前缀
+    `Error executing tool <name>: …` 与 v1 逐字同）。这层总壳只为给出
     **受控的中文消息**（不泄漏 traceback 到通道）、并显式兑现决策P4.10-16；`search` 的 limit/query
     坏类型防御（决策P4.10-12）是它之内的细化、不替代它。
     """

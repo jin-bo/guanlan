@@ -3,9 +3,16 @@
 主体在装有 `guanlan-wiki[mcp]` 时跑，缺 extra 整体 skip（镜像 test_web 的 `importorskip`）。依赖门控
 本身（缺 extra → CLI 优雅降级）在 `tests/test_cli.py::test_mcp_missing_extra_degrades`（不随本组 skip）。
 
-测试经官方 SDK 的 **in-memory client/server 会话**（`create_connected_server_and_client_session`）做
-真实 JSON-RPC 往返：验 `structuredContent` + 文本块 parsed-equal、in-band error、tools/list 等；坏类型
-防御（决策P4.10-12）直接调 `tools.tool_search` 同步核（绕过 FastMCP 入参校验，证防御逻辑本身）。
+测试经官方 SDK 的 **in-memory client/server 会话**做真实 JSON-RPC 往返：验 `structuredContent` +
+文本块 parsed-equal、in-band error、tools/list 等；坏类型防御（决策P4.10-12）直接调 `tools.tool_search`
+同步核（绕过 SDK 入参校验，证防御逻辑本身）。
+
+**SDK v2 的 in-memory 双 mode（决策P4.18-11，P4.18 迁移的要点）**：v1 的
+`create_connected_server_and_client_session` 已删除，替代品 `Client(server)` **默认 `mode="auto"` 走
+`DirectDispatcher` 直调——无流、无 JSON-RPC 帧、无握手**。故本文件全套语义回归挂
+`Client(mcp, mode="legacy")`（内存流 + 真 `JSONRPCDispatcher`，与 v1 覆盖逐条等价），另有
+`test_in_memory_modern_mode_parity` 用默认 mode 覆盖 2026 现代 per-request 路径；**真** JSON-RPC 字节 +
+stdout 洁净的终局证据是 `test_stdio_subprocess_emits_only_jsonrpc_frames`（真子进程逐帧解析）。
 """
 
 import asyncio
@@ -20,9 +27,7 @@ from guanlan.runtime import AgentRunResult
 
 pytest.importorskip("mcp")
 
-from mcp.shared.memory import (  # noqa: E402
-    create_connected_server_and_client_session as connect,
-)
+from mcp import Client  # noqa: E402
 
 from guanlan.mcp import server as mcp_server  # noqa: E402
 from guanlan.mcp import tools as mcp_tools  # noqa: E402
@@ -67,11 +72,17 @@ def _ok_runner(prompt, **kw):
     return AgentRunResult(ok=True, final_text="DeFi 是去中心化金融，见 [[DeFi]]。")
 
 
-def _run(mcp, coro_fn):
-    """开一个 in-memory client/server 会话、跑 `coro_fn(client)`、返回其结果。"""
+def _run(mcp, coro_fn, *, mode="legacy"):
+    """开一个 in-memory client/server 会话、跑 `coro_fn(client)`、返回其结果。
+
+    `mode="legacy"`（默认，决策P4.18-11）= 内存流 + 真 `JSONRPCDispatcher`，与 v1
+    `create_connected_server_and_client_session` 的覆盖等价（信封真序列化/反序列化一遍）。
+    `mode="auto"` = SDK v2 默认的 `DirectDispatcher` 直调（现代 per-request 路径，**不产生 JSON-RPC 帧**）
+    ——只在 `test_in_memory_modern_mode_parity` 里显式用，避免把全套断言悄悄降级成"没过传输"。
+    """
 
     async def _main():
-        async with connect(mcp) as client:
+        async with Client(mcp, mode=mode) as client:
             return await coro_fn(client)
 
     return asyncio.run(_main())
@@ -99,7 +110,35 @@ def test_every_tool_has_output_schema(kb_mcp):
     mcp = build_mcp(kb_mcp, runner=_ok_runner)
     res = _run(mcp, lambda c: c.list_tools())
     for t in res.tools:
-        assert t.outputSchema, f"{t.name} 缺 output schema（漏返回类型注解？）"
+        assert t.output_schema, f"{t.name} 缺 output schema（漏返回类型注解？）"
+
+
+# ───────────── SDK v2 in-memory 双 mode（P4.18，决策P4.18-11）─────────────
+
+
+def test_in_memory_modern_mode_parity(kb_mcp):
+    """默认 `Client(mcp)`（`mode="auto"` → 现代 per-request 路径）与 legacy mode 结果一致。
+
+    全套用例挂 legacy mode（保住 v1 那份"信封真序列化一遍"的 JSON-RPC 覆盖，决策P4.18-11）；本例专门
+    覆盖 SDK v2 默认走的 `DirectDispatcher` 直调路径，证两条 era 上工具行为无分叉——否则"迁移后默认
+    mode 其实没被任何用例走过"。
+    """
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+
+    async def probe(c):
+        tools = await c.list_tools()
+        res = await c.call_tool("search", {"query": "去中心化金融"})
+        return c.protocol_version, {t.name for t in tools.tools}, res
+
+    modern_ver, modern_names, modern_res = _run(mcp, probe, mode="auto")
+    legacy_ver, legacy_names, legacy_res = _run(mcp, probe, mode="legacy")
+
+    assert modern_names == legacy_names  # 同一工具集
+    assert modern_res.is_error is False
+    assert modern_res.structured_content == legacy_res.structured_content  # 同一结果，零分叉
+    # 两条 era 各自协商到自己的协议版本（现代 = 2026 起的 per-request 信封；legacy = 握手时代）。
+    assert modern_ver.startswith("2026-")
+    assert legacy_ver < "2026-"
 
 
 # ───────────────────────── 结构化输出契约 + 零 LLM 工具正确性 ─────────────────────────
@@ -112,13 +151,13 @@ def test_search_structured_and_text_parsed_equal(kb_mcp):
 
     mcp = build_mcp(kb_mcp, runner=_ok_runner)
     r = _run(mcp, lambda c: c.call_tool("search", {"query": "去中心化金融", "limit": 5}))
-    assert r.isError is False
-    assert r.structuredContent  # 结构化对象
-    assert json.loads(r.content[0].text) == r.structuredContent  # 文本块 parsed-equal
+    assert r.is_error is False
+    assert r.structured_content  # 结构化对象
+    assert json.loads(r.content[0].text) == r.structured_content  # 文本块 parsed-equal
     # 与冷算 search_pages 经 search_result_dict 同形（薄壳、无逻辑分叉）。
     cold = search_result_dict(search_pages(kb_mcp / "wiki", "去中心化金融", limit=5))
-    assert r.structuredContent == cold
-    assert r.structuredContent["results"][0]["page"] == "wiki/entities/DeFi.md"
+    assert r.structured_content == cold
+    assert r.structured_content["results"][0]["page"] == "wiki/entities/DeFi.md"
 
 
 def test_read_page_matches_core(kb_mcp):
@@ -128,7 +167,7 @@ def test_read_page_matches_core(kb_mcp):
     mcp = build_mcp(kb_mcp, runner=_ok_runner)
     r = _run(mcp, lambda c: c.call_tool("read_page", {"path": "wiki/entities/DeFi.md"}))
     meta, body = load_page(kb_mcp / "wiki/entities/DeFi.md")
-    assert r.structuredContent == {
+    assert r.structured_content == {
         "path": "wiki/entities/DeFi.md",
         "title": page_title(meta, "DeFi"),
         "content": body,
@@ -139,7 +178,7 @@ def test_list_pages_matches_core(kb_mcp):
     """list_pages 与 iter_pages + page_title/page_type 同源（非 config 页、带 wiki/ 前缀）。"""
     mcp = build_mcp(kb_mcp, runner=_ok_runner)
     r = _run(mcp, lambda c: c.call_tool("list_pages", {}))
-    paths = {p["path"] for p in r.structuredContent["pages"]}
+    paths = {p["path"] for p in r.structured_content["pages"]}
     assert paths == {"wiki/entities/DeFi.md", "wiki/concepts/Liquidity.md"}
     # config 页不在清单。
     assert not any("index.md" in p for p in paths)
@@ -151,7 +190,7 @@ def test_graph_matches_core(kb_mcp):
 
     mcp = build_mcp(kb_mcp, runner=_ok_runner)
     r = _run(mcp, lambda c: c.call_tool("graph", {}))
-    assert r.structuredContent == graph_to_dict(build_graph(kb_mcp / "wiki"))
+    assert r.structured_content == graph_to_dict(build_graph(kb_mcp / "wiki"))
 
 
 def test_health_lint_match_core_and_report_dict(kb_mcp):
@@ -165,10 +204,10 @@ def test_health_lint_match_core_and_report_dict(kb_mcp):
     rl = _run(mcp, lambda c: c.call_tool("lint", {}))
     hr = run_health(kb_mcp / "wiki")
     lr = run_lint(kb_mcp / "wiki")
-    assert rh.structuredContent == report_dict(
+    assert rh.structured_content == report_dict(
         ok=hr.ok, pages_checked=hr.pages_checked, items_key="findings", items=hr.findings
     )
-    assert rl.structuredContent == report_dict(
+    assert rl.structured_content == report_dict(
         ok=lr.ok, pages_checked=lr.pages_checked, items_key="findings", items=lr.findings
     )
 
@@ -199,14 +238,14 @@ def test_search_to_read_page_chain(kb_mcp):
 
     async def chain(c):
         s = await c.call_tool("search", {"query": "流动性"})
-        page = s.structuredContent["results"][0]["page"]
+        page = s.structured_content["results"][0]["page"]
         rp = await c.call_tool("read_page", {"path": page})
         return page, rp
 
     page, rp = _run(mcp, chain)
     assert page.startswith("wiki/")
-    assert rp.isError is False
-    assert rp.structuredContent["path"] == page  # 不读成 wiki/wiki/...
+    assert rp.is_error is False
+    assert rp.structured_content["path"] == page  # 不读成 wiki/wiki/...
 
 
 def test_list_pages_path_feeds_read_page(kb_mcp):
@@ -215,11 +254,11 @@ def test_list_pages_path_feeds_read_page(kb_mcp):
 
     async def chain(c):
         lp = await c.call_tool("list_pages", {})
-        path = lp.structuredContent["pages"][0]["path"]
+        path = lp.structured_content["pages"][0]["path"]
         return await c.call_tool("read_page", {"path": path})
 
     rp = _run(mcp, chain)
-    assert rp.isError is False and rp.structuredContent["path"].startswith("wiki/")
+    assert rp.is_error is False and rp.structured_content["path"].startswith("wiki/")
 
 
 # ───────────────────────── 路径越界 / error 总壳 ─────────────────────────
@@ -230,7 +269,7 @@ def test_read_page_traversal_blocked(kb_mcp, bad):
     """read_page 越界（../ / 绝对路径）→ in-band error，不读到 wiki/ 外（决策P4.10-9/16）。"""
     mcp = build_mcp(kb_mcp, runner=_ok_runner)
     r = _run(mcp, lambda c: c.call_tool("read_page", {"path": bad}))
-    assert r.isError is True
+    assert r.is_error is True
 
 
 def test_error_total_shell_server_survives(kb_mcp, monkeypatch):
@@ -251,8 +290,8 @@ def test_error_total_shell_server_survives(kb_mcp, monkeypatch):
         return bad, good
 
     bad, good = _run(mcp, seq)
-    assert bad.isError is True
-    assert good.isError is False and good.structuredContent["results"]  # server 存活、其余工具可用
+    assert bad.is_error is True
+    assert good.is_error is False and good.structured_content["results"]  # server 存活、其余工具可用
 
 
 # ───────────────────────── limit / query 坏类型自防（决策P4.10-12，直接调核） ─────────────────────────
@@ -314,7 +353,7 @@ def test_search_uses_persistent_cache(kb_mcp, monkeypatch):
     # 两页内容页，首搜各 build 一次；第二搜全命中 memo → 不再 build。
     assert calls["build_doc"] == 2
     cold = search_result_dict(search_pages(kb_mcp / "wiki", "去中心化金融"))
-    assert a.structuredContent == cold
+    assert a.structured_content == cold
 
 
 def test_concurrent_searches_consistent(kb_mcp):
@@ -326,10 +365,10 @@ def test_concurrent_searches_consistent(kb_mcp):
         return await asyncio.gather(*tasks)
 
     results = _run(mcp, many)
-    first = results[0].structuredContent
+    first = results[0].structured_content
     for r in results:
-        assert r.isError is False
-        assert r.structuredContent == first  # 并发不串、确定性一致
+        assert r.is_error is False
+        assert r.structured_content == first  # 并发不串、确定性一致
 
 
 # ───────────────────────── ask 路径（决策P4.10-5/7/15） ─────────────────────────
@@ -345,8 +384,8 @@ def test_ask_returns_cited_answer(kb_mcp):
 
     mcp = build_mcp(kb_mcp, runner=runner)
     r = _run(mcp, lambda c: c.call_tool("ask", {"question": "什么是 DeFi?"}))
-    assert r.isError is False
-    assert r.structuredContent == {"answer": "见 [[DeFi]]。"}
+    assert r.is_error is False
+    assert r.structured_content == {"answer": "见 [[DeFi]]。"}
     assert seen["permission_mode"] == "read-only"  # 只读姿态（与 CLI query 同源）
 
 
@@ -375,7 +414,7 @@ def test_ask_blank_question_rejected_without_calling_agent(kb_mcp, blank):
 
     mcp = build_mcp(kb_mcp, runner=runner)
     r = _run(mcp, lambda c: c.call_tool("ask", {"question": blank}))
-    assert r.isError is True
+    assert r.is_error is True
     assert called["n"] == 0  # 未白白拉起昂贵子进程
 
 
@@ -397,8 +436,8 @@ def test_ask_failure_is_in_band(kb_mcp, error_type):
         return ask, search
 
     ask, search = _run(mcp, seq)
-    assert ask.isError is True
-    assert search.isError is False  # 零 LLM 工具不受 ask 失败影响
+    assert ask.is_error is True
+    assert search.is_error is False  # 零 LLM 工具不受 ask 失败影响
 
 
 # ───────────────────────── stdout 通道洁净（决策P4.10-13） ─────────────────────────
@@ -426,6 +465,120 @@ def test_stdout_clean_during_full_suite(kb_mcp):
     with redirect_stdout(buf):
         _run(mcp, all_tools)
     assert buf.getvalue() == ""  # stdout 全程零字节
+
+
+def _stdio_exchange(kb: Path, requests: list[dict], *, timeout=60) -> tuple[list[str], str]:
+    """真起 `python -m guanlan.cli -C <kb> mcp`（stdio），喂 JSON-RPC 帧、收 (stdout 行, stderr)。
+
+    **逐帧一问一答**（不是"写完全部再 communicate"）：后者会让 stdin 的 EOF 追上仍在 to_thread 里跑的慢
+    调用（实测 `tools/call` 的响应就这样丢了一帧）。有 `id` 的请求读一行响应、通知（无 `id`）不读；整个
+    问答跑在工作线程里并 `join(timeout)`，超时即 kill + fail，绝不把 CI 挂死在 `readline` 上。
+    """
+    import subprocess
+    import sys
+    import threading
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "guanlan.cli", "-C", str(kb), "mcp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    lines: list[str] = []
+
+    def pump():
+        for req in requests:
+            proc.stdin.write(json.dumps(req) + "\n")
+            proc.stdin.flush()
+            if "id" not in req:  # 通知（notifications/*）无响应，不读、免阻塞
+                continue
+            line = proc.stdout.readline()
+            if not line:  # server 提前关流 → 交给调用方的帧数断言暴露
+                return
+            lines.append(line)
+
+    worker = threading.Thread(target=pump, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():  # pragma: no cover - 超时是环境异常，不进常规覆盖
+        proc.kill()
+        proc.wait(timeout=15)
+        pytest.fail(f"stdio server 未在 {timeout}s 内回完 {len(requests)} 个请求的响应")
+
+    # 由 communicate 关 stdin（它会先 flush；手工先 close 再 communicate 会 ValueError）→ EOF → server 收尾退出。
+    try:
+        rest_out, stderr = proc.communicate(timeout=15)
+    except subprocess.TimeoutExpired:  # pragma: no cover - 收尾卡住同属环境异常
+        proc.kill()
+        rest_out, stderr = proc.communicate()
+    lines.extend(rest_out.splitlines())  # 退出阶段若吐了字节，一并纳入洁净断言
+    return [ln for ln in lines if ln.strip()], stderr
+
+
+def test_stdio_subprocess_emits_only_jsonrpc_frames(kb_mcp):
+    """**真 stdio 传输**上逐帧断言（决策P4.18-6）：stdout 只承载合法 JSON-RPC 帧、无任何杂散字节。
+
+    此前只有 in-memory 的 `redirect_stdout` 断言——它抓的是我们核函数/降级文案的 print 泄漏（仍保留在
+    上一个用例），但**证明不了**传输启动阶段不污染 stdout；SDK v2 更默认发 OpenTelemetry span（只依赖
+    `opentelemetry-api`、无 exporter 故应为 no-op），必须在真传输上实证而非推断。
+
+    顺带覆盖决策P4.18-7（旧协议客户端不掉线）与决策P4.18-12（serverInfo 报 guanlan 自己的版本）。
+    ⚠️ **一条连接只测一个 era**——客户端首帧决定本连接 era，先发现代信封再发旧 `initialize` 会得
+    `-32022`（那是正确行为，不是兼容性缺陷）。本例首帧即旧 `initialize`。
+    """
+    from guanlan import __version__
+
+    lines, stderr = _stdio_exchange(
+        kb_mcp,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "legacy-client", "version": "1"},
+                },
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "search", "arguments": {"query": "去中心化金融"}},
+            },
+        ],
+    )
+
+    # ① stdout 每一行都必须是合法 JSON-RPC 帧（一个杂散 print / 一行日志即破帧）。
+    frames = []
+    for line in lines:
+        try:
+            frame = json.loads(line)
+        except json.JSONDecodeError:  # pragma: no cover - 破帧即失败，不需要覆盖
+            pytest.fail(f"stdout 出现非 JSON 字节（破帧）：{line[:200]!r}")
+        assert frame.get("jsonrpc") == "2.0", f"非 JSON-RPC 帧：{line[:200]!r}"
+        frames.append(frame)
+    assert len(frames) == 3  # initialize / tools/list / tools/call 三个响应（通知无响应）
+
+    by_id = {f["id"]: f for f in frames}
+    # ② 旧协议客户端不掉线（决策P4.18-7）：协商回它请求的修订，后续调用正常。
+    init = by_id[1]["result"]
+    assert init["protocolVersion"] == "2025-06-18"
+    # ③ serverInfo 报 guanlan 自己的名字与版本（决策P4.18-12；v1 曾在此回所装 mcp SDK 的版本）。
+    assert init["serverInfo"] == {"name": "guanlan", "version": __version__}
+    # ④ 工具集与信封形状在真传输上同样成立（wire 仍 camelCase）。
+    assert {t["name"] for t in by_id[2]["result"]["tools"]} == {
+        "search", "read_page", "list_pages", "graph", "health", "lint", "ask",
+    }
+    call = by_id[3]["result"]
+    assert call["isError"] is False and call["structuredContent"]["results"]
+    # ⑤ stderr 允许有日志，但不该有 traceback（起服即崩会被这条抓住）。
+    assert "Traceback" not in stderr
 
 
 # ───────────────────────── 只读保证：KB 零字节写入（决策P4.10-3） ─────────────────────────
@@ -484,7 +637,7 @@ def test_serve_mcp_readonly_require(kb_mcp, monkeypatch):
     (kb_mcp / "SCHEMA.md").unlink()
     ran = {}
     monkeypatch.setattr(
-        mcp_server.FastMCP, "run", lambda self, transport="stdio": ran.update(t=transport)
+        mcp_server.MCPServer, "run", lambda self, transport="stdio": ran.update(t=transport)
     )
     from guanlan.errors import EXIT_OK
 
@@ -778,9 +931,11 @@ import contextlib  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
-# 用旧名 `streamablehttp_client`：它在整个 `mcp>=1.27,<2` 区间恒在、且接受 `headers=`（新名 1.27.x 起
-# 改签名为 `http_client=` 且未必在下界存在）。它在新版告 DeprecationWarning，仅测试便利、就地 filter。
-from mcp.client.streamable_http import streamablehttp_client as _http_client  # noqa: E402
+# SDK v2 只留新名 `streamable_http_client`（旧名 `streamablehttp_client` 已删除），且：
+# ① yield **二元组** `(read, write)`——第三项 `get_session_id` 随协议 session 一起删除，仍按三元组解包会在
+#    进入握手**之前**就 ValueError（P4.18 B9）；
+# ② 不再收 `headers=`——要带 Authorization 须自建 `httpx2.AsyncClient(headers=…)` 传 `http_client=`（B6/B7）。
+from mcp.client.streamable_http import streamable_http_client as _http_client  # noqa: E402
 
 
 @contextlib.contextmanager
@@ -816,7 +971,7 @@ def test_http_end_to_end_roundtrip(kb_mcp):
     app = mcp_server._build_http_app(mcp, host="127.0.0.1", allowed_hosts=None, token=None)
 
     async def roundtrip(base):
-        async with _http_client(f"{base}/mcp") as (read, write, _):
+        async with _http_client(f"{base}/mcp") as (read, write):  # v2：二元组（B9）
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await session.list_tools()
@@ -830,28 +985,70 @@ def test_http_end_to_end_roundtrip(kb_mcp):
     assert names == {"search", "read_page", "list_pages", "graph", "health", "lint"}
     assert "ask" not in names  # http 默认门控
     cold = search_result_dict(search_pages(kb_mcp / "wiki", "去中心化金融"))
-    assert res.structuredContent == cold  # 只换传输、无逻辑分叉
+    assert res.structured_content == cold  # 只换传输、无逻辑分叉
+
+
+def test_http_serves_legacy_protocol_client(kb_mcp):
+    """http 上**明确旧修订**的客户端不掉线（决策P4.18-7）：`initialize` 报 `2025-06-18` → 协商回同一修订。
+
+    与上一个用例的区别：`ClientSession` 协商的是 SDK 自己的最新握手版本，证不了"钉在 2025-06-18 的现役
+    客户端仍能连"；这里直接手写该修订的 `initialize` 帧。顺带断言 `serverInfo` 报 guanlan 自己的版本
+    （决策P4.18-12）。一条连接只测一个 era（本例＝握手 era）。
+    """
+    import httpx2
+
+    from guanlan import __version__
+
+    mcp = build_mcp(kb_mcp, runner=_ok_runner, allow_ask=False)
+    app = mcp_server._build_http_app(mcp, host="127.0.0.1", allowed_hosts=None, token=None)
+
+    with _running_http(app) as base:
+        resp = httpx2.post(
+            f"{base}/mcp",
+            headers={"content-type": "application/json", "accept": "application/json, text/event-stream"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "legacy-client", "version": "1"},
+                },
+            },
+        )
+    assert resp.status_code == 200
+    # Streamable HTTP 默认以 SSE 回帧：取 `data:` 行。
+    frame = next(
+        json.loads(ln[len("data:") :].strip())
+        for ln in resp.text.splitlines()
+        if ln.startswith("data:")
+    )
+    result = frame["result"]
+    assert result["protocolVersion"] == "2025-06-18"
+    assert result["serverInfo"] == {"name": "guanlan", "version": __version__}
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_http_end_to_end_token_gate(kb_mcp):
     """裹 token 中间件后：缺/错 Authorization → 真 401；正确 Bearer → MCP 握手成功。"""
-    import httpx
+    import httpx2
     from mcp import ClientSession
 
     mcp = build_mcp(kb_mcp, runner=_ok_runner, allow_ask=False)
     app = mcp_server._build_http_app(mcp, host="127.0.0.1", allowed_hosts=None, token="s3cr3t")
 
     async def initialize_ok(base):
-        headers = {"Authorization": "Bearer s3cr3t"}
-        async with _http_client(f"{base}/mcp", headers=headers) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                return (await session.initialize()) is not None
+        # v2 的 `streamable_http_client` 不再收 `headers=`（B6）：带 Authorization 须自备 http 客户端。
+        async with httpx2.AsyncClient(headers={"Authorization": "Bearer s3cr3t"}) as http_client:
+            async with _http_client(f"{base}/mcp", http_client=http_client) as (read, write):
+                async with ClientSession(read, write) as session:
+                    return (await session.initialize()) is not None
 
     with _running_http(app) as base:
         # 缺 token / 错 token：token 中间件在最外层，直接 401（先于 MCP 内容协商）。
-        no_auth = httpx.post(f"{base}/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
-        wrong = httpx.post(
+        no_auth = httpx2.post(f"{base}/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        wrong = httpx2.post(
             f"{base}/mcp",
             headers={"Authorization": "Bearer nope"},
             json={"jsonrpc": "2.0", "id": 1, "method": "ping"},

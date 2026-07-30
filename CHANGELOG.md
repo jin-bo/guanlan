@@ -33,6 +33,42 @@
   （会波及 ingest 等所有工作流，太宽）、不引 agentao 侧预算参数（保薄壳 + 循环真相源在 agentao）。测试见
   `tests/test_query.py`（CLI 提示含红线）/ `tests/test_web.py`（Web 续跑提示含红线）。
 
+### 变更
+
+- **⚠️ 破坏性（可选 extra）：MCP 宿主底座迁到官方 SDK v2 + 协议 `2026-07-28`（P4.18，见
+  [`docs/P4.18-MCP2.0迁移.md`](docs/P4.18-MCP2.0迁移.md)）** —— `guanlan-wiki[mcp]` 的 SDK 依赖从
+  `mcp>=1.27,<2` **硬切到 `mcp>=2,<3`**：官方 SDK `2.0.0`（2026-07-28，与协议修订同日）转 stable、**v1.x 转入
+  只收安全修复的维护态**，且 v2 **删掉了整个 `mcp.server.fastmcp` 包（无 alias）**，故不做双大版本兼容层而是
+  硬切（决策P4.18-2；前置依据：guanlan 的核心依赖 `agentao` 已自带探针式 1.x/2.x 兼容，Tool 注入反方向不受影响，
+  决策P4.18-10）。**装了 `mcp` 1.x 的环境须一并升级**——`guanlan mcp` 会以 `EXIT_USAGE` 明示需要 `mcp>=2`
+  （决策P4.18-9）。
+  - **定性：等价迁移**（决策P4.18-1）——命令契约（`--transport`/`--host`/`--port`/`--auth-token-env`/
+    `--allowed-host`/`--allow-ask` 与全部默认值）、七工具集与信封形状、`page`/`path` 口径、只读 + KB 零写契约、
+    退出码**逐字保留**；已注册在 `~/.claude.json` / `mcp.json` 里的 stdio & http 条目**零改**——v2 仍服务握手
+    时代旧修订，**stdio / http 双传输均实测** `initialize` 报 `2025-06-18` 时正常协商并可继续 `tools/list`、
+    `tools/call`（客户端首帧决定本连接 era，同一连接不得混 era，决策P4.18-7）。
+  - **唯一主动引入的 wire 变化**：`initialize.serverInfo.version` 现报 **guanlan 自身版本**（单一来源
+    `guanlan/__init__.py`）。此前 SDK v1 在此回的是**所装 mcp SDK 的版本**（实测 `1.29.0`）、v2 默认回空串
+    ——两者都不是 guanlan 的版本，故一次钉正（决策P4.18-12）。
+  - **代码面**：`mcp.server.fastmcp.FastMCP` → `mcp.server.mcpserver.MCPServer`（含三处类型注解）、
+    `ToolError` 换 `mcp.server.mcpserver.exceptions`；http 姿态从 `mcp.settings` 后置赋值改走
+    `streamable_http_app(stateless_http=…, transport_security=…, host=…)` **kwargs**——v2 的 `Settings` 已无这些
+    字段（后置赋值直接 `ValueError`，决策P4.18-4）。`tools.py` 七个工具逻辑、`_http_security` /
+    `_BearerTokenMiddleware` / `_serve_http`、`to_thread` 卸载姿态（决策P4.18-5）全部逐字节不动。
+  - **协议红利与刻意不做**：无状态核心 / `server/discover` / 标准错误码**白拿**（我们本就 `stateless_http` +
+    零服务端会话）；`Mcp-Method`/`Mcp-Name` 路由头服务端不强制、仅在 P4.17 §5 补注为反代限流手段；
+    **cache hints 与 tasks 扩展显式不做**——前者的 `CacheableMethod` 只覆盖 list/read/discover 类方法
+    （`tools/call` 不在其列，救不了 `list_pages`/`graph` 的大 payload），后者在 SDK 2.0.0 里无现成实现且与无状态
+    姿态冲突（决策P4.18-8）；OAuth 面（RFC 9207 `iss`、DCR→CIMD）仍属 E2。
+  - **测试**：in-memory 会话改 `Client(mcp, mode="legacy")`——v1 的
+    `create_connected_server_and_client_session` 已删除，而 v2 默认 `mode="auto"` 走 `DirectDispatcher` 直调
+    （**无流、无 JSON-RPC 帧、无握手**），无脑替换会静默丢掉全套用例的序列化覆盖（决策P4.18-11）；另加
+    `test_in_memory_modern_mode_parity`（默认 mode 覆盖 2026 现代路径、与 legacy 结果一致）、
+    `test_stdio_subprocess_emits_only_jsonrpc_frames`（**真 stdio 子进程逐帧解析**，把决策P4.10-13 的 stdout
+    洁净红线从"in-memory 推断"升级为传输级实证——v2 默认发 OTel span，但只依赖 `opentelemetry-api`、无
+    exporter 故 no-op，决策P4.18-6）、`test_http_serves_legacy_protocol_client`（http 上钉 `2025-06-18` 的现役
+    客户端不掉线）。`tests/test_mcp.py` 59 例、全套 643 通过 / 3 skip。
+
 ## [0.1.17] - 2026-07-01
 
 ### 新增

@@ -50,7 +50,7 @@ pip install guanlan-wiki
 
 ```bash
 pip install 'guanlan-wiki[web]'    # 浏览器宿主 guanlan web
-pip install 'guanlan-wiki[mcp]'    # 只读 MCP 服务端 guanlan mcp
+pip install 'guanlan-wiki[mcp]'    # 只读 MCP 服务端 guanlan mcp（需官方 SDK mcp>=2）
 ```
 
 ## 快速开始
