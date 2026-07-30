@@ -50,7 +50,7 @@ Optional hosts (add-on layers, install on demand):
 
 ```bash
 pip install 'guanlan-wiki[web]'    # browser host: guanlan web
-pip install 'guanlan-wiki[mcp]'    # read-only MCP server: guanlan mcp
+pip install 'guanlan-wiki[mcp]'    # read-only MCP server: guanlan mcp (needs the official SDK mcp>=2)
 ```
 
 ## Quickstart

@@ -88,6 +88,25 @@
     可能泄漏处。原先"在真传输上实证 OTel 不污染 stdout"的说法说过头了，已按实测改写（决策P4.18-6）。
   - `tests/test_mcp.py` 63 例、全套 1141 通过 / 1 skip。
 
+### 修复
+
+- **`wiki/` 与 `.trash/` 的确定性写全部走原子覆盖，消除半写坏页（源自 OpenKB 反向评审 §2，见
+  [`docs/backlog/notes/openkb-2026-07-反向评审.md`](docs/backlog/notes/openkb-2026-07-反向评审.md)）** ——
+  此前 `wiki/` 的零 LLM 写用裸 `Path.write_text`/`write_bytes`：进程中断 / 磁盘满卡在写一半，会把
+  **权威 markdown**（内容页、`index.md`、撤回恢复配方、frontmatter 修复页）截成半截；而 `rawio` 早有的
+  `atomic_write_raw`（tmp + `os.replace`）此前只用在 `raw/`。现抽两支公共原语——`atomic_write_bytes`
+  逐字节底座 + `atomic_write_text` UTF-8 文本外壳（`atomic_write_raw` 重构为复用文本壳，字节级行为不变），
+  **单一实现杜绝多处落盘规则漂移**；7 处确定性写改用原语：`remove` 的 `_drop_slug_from_page`（内容页）/
+  `_prune_index_line`（`index.md`）/ `.trash` manifest、`reindex` 的 `index.md` 回填、
+  `fmrepair.repair_page_frontmatter`（CRLF 保真故走字节底座）、`gate` 门禁回滚原字节、
+  `provenance.stamp_raw_digest` 的 stamp 与回滚。**覆盖既有文件时 `_preserve_metadata` 保留原权限位 +
+  属主 uid/gid**（best-effort）——否则 `os.replace` 换新 inode 会把 0644 页窄化成 0600 并改掉属主
+  （经两轮 codex 评审的 P2 项）。**有意保留的固有取舍**（同既有 `atomic_write_raw`，均记在原语 docstring）：
+  符号链接**不写穿**——对本模块反而更安全（`fmrepair`/`provenance` 本就先拒链接，`remove`/`reindex` 不跟随
+  即杜绝写逃逸出 KB，旧的就地写反而会写穿）；**不保 ACL/xattr**——`os.*xattr` 在 macOS 不可用、POSIX ACL
+  无标准库，对纯 markdown 无实义。测试见 `tests/test_atomic_write.py`（14 例：三类失败模式 × 文本/字节两路
+  + CRLF 逐字 + 权限/属主保留 + 新建跳过 + 经 `_drop_slug_from_page`/`fmrepair`/`provenance` 的集成证明）。
+
 ## [0.1.17] - 2026-07-01
 
 ### 新增
