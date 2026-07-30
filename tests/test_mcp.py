@@ -11,8 +11,12 @@
 `create_connected_server_and_client_session` 已删除，替代品 `Client(server)` **默认 `mode="auto"` 走
 `DirectDispatcher` 直调——无流、无 JSON-RPC 帧、无握手**。故本文件全套语义回归挂
 `Client(mcp, mode="legacy")`（内存流 + 真 `JSONRPCDispatcher`，与 v1 覆盖逐条等价），另有
-`test_in_memory_modern_mode_parity` 用默认 mode 覆盖 2026 现代 per-request 路径；**真** JSON-RPC 字节 +
-stdout 洁净的终局证据是 `test_stdio_subprocess_emits_only_jsonrpc_frames`（真子进程逐帧解析）。
+`test_in_memory_modern_mode_parity` 用默认 mode 覆盖 2026 现代 per-request 路径。
+
+⚠️ 对 in-process server 而言，**只有** `mode="legacy"` 走真帧：`_connect_inproc` 里除 `"legacy"` 外的
+任何 mode（含显式传 `mode="2026-07-28"`）都落到 `DirectDispatcher`。故现代 era 的**真帧**覆盖只能走
+真实传输，即 `test_http_serves_modern_protocol_client`（手写 2026 per-request 信封 POST）；真 JSON-RPC
+字节 + stdout 洁净的终局证据是 `test_stdio_subprocess_emits_only_jsonrpc_frames`（真子进程逐帧解析）。
 """
 
 import asyncio
@@ -25,7 +29,10 @@ import pytest
 
 from guanlan.runtime import AgentRunResult
 
-pytest.importorskip("mcp")
+# 探针必须钉到 **v2 才有**的模块：光探顶层 `mcp` 在装着 1.x 的环境会「探针通过、下面 `from mcp import
+# Client` 炸 collection ImportError」，而 collection error 会**中断整场** pytest（连 test_cli.py 里那条
+# 1.x 降级用例都跑不到），而不是本文件承诺的整体 skip。
+pytest.importorskip("mcp.server.mcpserver")
 
 from mcp import Client  # noqa: E402
 
@@ -136,9 +143,15 @@ def test_in_memory_modern_mode_parity(kb_mcp):
     assert modern_names == legacy_names  # 同一工具集
     assert modern_res.is_error is False
     assert modern_res.structured_content == legacy_res.structured_content  # 同一结果，零分叉
-    # 两条 era 各自协商到自己的协议版本（现代 = 2026 起的 per-request 信封；legacy = 握手时代）。
-    assert modern_ver.startswith("2026-")
-    assert legacy_ver < "2026-"
+    # 两条 era 各自协商到自己那一档协议版本（现代 = per-request 信封；legacy = 握手时代）。
+    # **按 SDK 自己的集合断言、不按日期前缀**：`[mcp] = mcp>=2,<3` 允许任意 2.x，写死 `startswith("2026-")`
+    # 会在 SDK 发出下一个修订（该协议大致按年修订）时把测试搞红，而 guanlan 一行没改——正是 91dd9de
+    # 那次 ruff 钉版要消除的「上游浮动 → 未改代码变红」时间炸弹，别在这里重新装一颗。
+    from mcp.types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS
+
+    assert modern_ver in MODERN_PROTOCOL_VERSIONS
+    assert legacy_ver in HANDSHAKE_PROTOCOL_VERSIONS
+    assert modern_ver != legacy_ver  # 两条 era 确实不同，不是都退化到同一档
 
 
 # ───────────────────────── 结构化输出契约 + 零 LLM 工具正确性 ─────────────────────────
@@ -266,10 +279,17 @@ def test_list_pages_path_feeds_read_page(kb_mcp):
 
 @pytest.mark.parametrize("bad", ["../outside.md", "/etc/passwd", "wiki/../../x.md"])
 def test_read_page_traversal_blocked(kb_mcp, bad):
-    """read_page 越界（../ / 绝对路径）→ in-band error，不读到 wiki/ 外（决策P4.10-9/16）。"""
+    """read_page 越界（../ / 绝对路径）→ in-band error，不读到 wiki/ 外（决策P4.10-9/16）。
+
+    并断言错误**出自我们的** `_safe_wiki_file`（受控中文文案）：SDK v2 起默认带
+    `ResourceSecurity(reject_path_traversal=True, reject_absolute_paths=True)`，若某个 2.x minor 把它扩到
+    tool 入参，越界就会被 SDK 先拦下、换成英文/协议级错误——决策P4.10-9 承诺的消息形状悄悄变了，而只断言
+    `is_error` 的用例照旧全绿。故把「守卫仍在我们手里」写成断言，而不是只写在文档里。
+    """
     mcp = build_mcp(kb_mcp, runner=_ok_runner)
     r = _run(mcp, lambda c: c.call_tool("read_page", {"path": bad}))
     assert r.is_error is True
+    assert "路径越界（须在 wiki/ 内）" in r.content[0].text
 
 
 def test_error_total_shell_server_survives(kb_mcp, monkeypatch):
@@ -468,25 +488,43 @@ def test_stdout_clean_during_full_suite(kb_mcp):
 
 
 def _stdio_exchange(kb: Path, requests: list[dict], *, timeout=60) -> tuple[list[str], str]:
-    """真起 `python -m guanlan.cli -C <kb> mcp`（stdio），喂 JSON-RPC 帧、收 (stdout 行, stderr)。
+    """真起 `python -u -m guanlan.cli -C <kb> mcp`（stdio），喂 JSON-RPC 帧、收 (stdout 行, stderr)。
 
-    **逐帧一问一答**（不是"写完全部再 communicate"）：后者会让 stdin 的 EOF 追上仍在 to_thread 里跑的慢
-    调用（实测 `tools/call` 的响应就这样丢了一帧）。有 `id` 的请求读一行响应、通知（无 `id`）不读；整个
-    问答跑在工作线程里并 `join(timeout)`，超时即 kill + fail，绝不把 CI 挂死在 `readline` 上。
+    四个设计点都是实测逼出来的，别"简化"回去：
+
+    ① **逐帧一问一答**（不是"写完全部再 communicate"）：后者会让 stdin 的 EOF 追上仍在 to_thread 里跑的
+       慢调用（实测 `tools/call` 的响应就这样丢了一帧）。有 `id` 的请求读一行响应、通知（无 `id`）不读。
+    ② **`-u`**（子进程 stdout 无缓冲）：这是本 helper 能证明「pre-serving 窗口不吐字节」的**前提**。SDK v2
+       的 `stdio_server()` 在服务期把 fd 1 改指 stderr，于是一个不 flush 的 `print()` 会一直躺在 Python
+       缓冲里、等到 flush 时 fd 1 已被改指——泄漏落到 stderr、stdout 断言看不见（已实测：同一个泄漏带 `-u`
+       抓得到、不带 `-u` 抓不到）。`-u` 让 pre-run 写入立刻落到**真** stdout，覆盖才是确定的而非碰运气。
+    ③ **`encoding="utf-8"`**（不是裸 `text=True`）：SDK 无条件按 UTF-8 写 stdout（`mcp/server/stdio.py`
+       注明"the std handles' platform encodings are unreliable"）。裸 `text=True` 按平台 locale 解码：
+       非 UTF-8 locale 上首帧的中文 `instructions` 直接 UnicodeDecodeError（伪装成"服务端一帧没吐"），
+       Windows ANSI 代码页上则中文乱码但 `json.loads` 仍成功——洁净检查静默降级。
+    ④ **stderr 独立线程抽干**：SDK 的 `configure_logging` 会挂 `RichHandler(rich_tracebacks=True)`，一次
+       故障渲染出的 traceback 就可能超过约 64 KB 管道缓冲；不抽干则子进程卡在写 stderr 上、再不回应挂起的
+       请求，测试白等满 timeout 才以"服务端太慢"失败——指向的方向完全错。也因此收尾**不用**
+       `communicate()`（它会先 flush stdin，手工 close 过的 stdin 会 ValueError；实测踩过）。
     """
     import subprocess
     import sys
     import threading
 
     proc = subprocess.Popen(
-        [sys.executable, "-m", "guanlan.cli", "-C", str(kb), "mcp"],
+        [sys.executable, "-u", "-m", "guanlan.cli", "-C", str(kb), "mcp"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        encoding="utf-8",
         bufsize=1,
     )
     lines: list[str] = []
+    err_chunks: list[str] = []
+
+    def drain_stderr():
+        for chunk in proc.stderr:  # 读到 EOF，全程不让管道写满
+            err_chunks.append(chunk)
 
     def pump():
         for req in requests:
@@ -499,6 +537,8 @@ def _stdio_exchange(kb: Path, requests: list[dict], *, timeout=60) -> tuple[list
                 return
             lines.append(line)
 
+    err_thread = threading.Thread(target=drain_stderr, daemon=True)
+    err_thread.start()
     worker = threading.Thread(target=pump, daemon=True)
     worker.start()
     worker.join(timeout)
@@ -507,26 +547,42 @@ def _stdio_exchange(kb: Path, requests: list[dict], *, timeout=60) -> tuple[list
         proc.wait(timeout=15)
         pytest.fail(f"stdio server 未在 {timeout}s 内回完 {len(requests)} 个请求的响应")
 
-    # 由 communicate 关 stdin（它会先 flush；手工先 close 再 communicate 会 ValueError）→ EOF → server 收尾退出。
+    proc.stdin.close()  # EOF → server 收尾退出
+    tail: list[str] = []
+    tail_thread = threading.Thread(target=lambda: tail.extend(proc.stdout.read().splitlines()), daemon=True)
+    tail_thread.start()
+    tail_thread.join(15)
     try:
-        rest_out, stderr = proc.communicate(timeout=15)
+        proc.wait(timeout=15)
     except subprocess.TimeoutExpired:  # pragma: no cover - 收尾卡住同属环境异常
         proc.kill()
-        rest_out, stderr = proc.communicate()
-    lines.extend(rest_out.splitlines())  # 退出阶段若吐了字节，一并纳入洁净断言
-    return [ln for ln in lines if ln.strip()], stderr
+        proc.wait(timeout=15)
+    err_thread.join(5)
+    lines.extend(tail)  # 退出阶段若吐了字节，一并纳入洁净断言
+    # **不过滤空白行**：空行同样不是合法 JSON-RPC 帧（严格实现的客户端按协议错误处理），过滤掉会让
+    # "stdout 只承载合法帧"对纯空白污染恒为真——实测过：首帧前一个裸 `print()` 空行能让全套断言照过。
+    return lines, "".join(err_chunks)
 
 
 def test_stdio_subprocess_emits_only_jsonrpc_frames(kb_mcp):
     """**真 stdio 传输**上逐帧断言（决策P4.18-6）：stdout 只承载合法 JSON-RPC 帧、无任何杂散字节。
 
     此前只有 in-memory 的 `redirect_stdout` 断言——它抓的是我们核函数/降级文案的 print 泄漏（仍保留在
-    上一个用例），但**证明不了**传输启动阶段不污染 stdout；SDK v2 更默认发 OpenTelemetry span（只依赖
-    `opentelemetry-api`、无 exporter 故应为 no-op），必须在真传输上实证而非推断。
+    上一个用例），但那是在内存传输上推断真实 stdout 的行为。本例在真子进程上逐帧解析。
+
+    **覆盖边界说清楚**（已实测，别把它当成"服务期 stdout 全程受本用例保护"）：SDK v2 的 `stdio_server()`
+    在服务期把 **fd 1 改指 stderr**（`mcp/server/stdio.py`：\"While serving, fd 0 points at the null device
+    and fd 1 at stderr\"）。实测一个 tool handler 里的 `print()`、`sys.stdout.write()`、乃至 `os.write(1, …)`
+    全部落到 stderr，stdout 只剩干净的 JSON-RPC 帧。所以：
+    - **服务期**的 stdout 洁净是 SDK 的**结构性保证**（含 OTel——它默认只依赖 `opentelemetry-api`、无
+      exporter 故应为 no-op，即便某天真吐字节也进不了帧），不是本用例证出来的；
+    - 本用例真正守的是 SDK **接管 fd 1 之前**那段窗口——`require_kb_root` / P5.4 预热 / `build_mcp` /
+      argparse，即我们自己的代码最可能泄漏的地方。`-u` 是这段覆盖成立的前提（见 `_stdio_exchange` ②）。
 
     顺带覆盖决策P4.18-7（旧协议客户端不掉线）与决策P4.18-12（serverInfo 报 guanlan 自己的版本）。
     ⚠️ **一条连接只测一个 era**——客户端首帧决定本连接 era，先发现代信封再发旧 `initialize` 会得
-    `-32022`（那是正确行为，不是兼容性缺陷）。本例首帧即旧 `initialize`。
+    `-32022`（那是正确行为，不是兼容性缺陷）。本例首帧即旧 `initialize`；现代 era 的真帧覆盖在
+    `test_http_serves_modern_protocol_client`。
     """
     from guanlan import __version__
 
@@ -554,9 +610,11 @@ def test_stdio_subprocess_emits_only_jsonrpc_frames(kb_mcp):
         ],
     )
 
-    # ① stdout 每一行都必须是合法 JSON-RPC 帧（一个杂散 print / 一行日志即破帧）。
+    # ① stdout 每一行都必须是合法 JSON-RPC 帧（一个杂散 print / 一行日志 / **一个空行**即破帧）。
     frames = []
     for line in lines:
+        if not line.strip():  # pragma: no cover - 破帧即失败，不需要覆盖
+            pytest.fail("stdout 出现空行（同样不是合法 JSON-RPC 帧）")
         try:
             frame = json.loads(line)
         except json.JSONDecodeError:  # pragma: no cover - 破帧即失败，不需要覆盖
@@ -1027,6 +1085,141 @@ def test_http_serves_legacy_protocol_client(kb_mcp):
     result = frame["result"]
     assert result["protocolVersion"] == "2025-06-18"
     assert result["serverInfo"] == {"name": "guanlan", "version": __version__}
+
+
+def test_http_serves_modern_protocol_client(kb_mcp):
+    """**现代 era 的真帧覆盖**（决策P4.18-11）：首帧即 2026 per-request 信封、无 `initialize` 握手。
+
+    为什么必须走 http 手写帧：对 in-process server，`Client(mcp, mode=…)` 除 `"legacy"` 外**任何** mode
+    （含显式传 `mode="2026-07-28"`）都落到 `DirectDispatcher`——无流、无 JSON-RPC 帧。于是若只有内存用例，
+    SDK v2 两条 era 服务循环里「升级后的新客户端将走的那条」在真帧路径上一个断言都没有。本例补上：工具集、
+    `structuredContent` 信封、in-band 越界文案、http 的 ask 门控，在现代 era 上逐条与握手 era 同形。
+    """
+    import httpx2
+    from mcp.types import LATEST_PROTOCOL_VERSION, PROTOCOL_VERSION_META_KEY
+
+    mcp = build_mcp(kb_mcp, runner=_ok_runner, allow_ask=False)
+    app = mcp_server._build_http_app(mcp, host="127.0.0.1", allowed_hosts=None, token=None)
+    meta = {"_meta": {PROTOCOL_VERSION_META_KEY: LATEST_PROTOCOL_VERSION}}
+
+    def post(base, method, params):
+        resp = httpx2.post(
+            f"{base}/mcp",
+            headers={"content-type": "application/json", "accept": "application/json, text/event-stream"},
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": {**params, **meta}},
+        )
+        assert resp.status_code == 200
+        return next(
+            json.loads(ln[len("data:") :].strip())
+            for ln in resp.text.splitlines()
+            if ln.startswith("data:")
+        )
+
+    with _running_http(app) as base:
+        tools = post(base, "tools/list", {})["result"]
+        ok = post(base, "tools/call", {"name": "search", "arguments": {"query": "去中心化金融"}})["result"]
+        bad = post(base, "tools/call", {"name": "read_page", "arguments": {"path": "../bad.md"}})["result"]
+        gated = post(base, "tools/call", {"name": "ask", "arguments": {"question": "q"}})["result"]
+
+    # 现代 era 上工具集与门控同形（http 默认无 ask，决策P4.17-3）。
+    assert {t["name"] for t in tools["tools"]} == {
+        "search", "read_page", "list_pages", "graph", "health", "lint",
+    }
+    assert gated["isError"] is True and "ask" in gated["content"][0]["text"]
+    # wire 仍 camelCase；结构化信封与握手 era 一致。
+    assert ok["isError"] is False and ok["structuredContent"]["results"]
+    # in-band 越界仍是**我们的**受控中文文案（不是 SDK 接管，见 test_read_page_traversal_blocked）。
+    assert bad["isError"] is True and "路径越界（须在 wiki/ 内）" in bad["content"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("app_host", "app_allowed"),
+    [
+        ("127.0.0.1", None),  # 默认本机形态
+        ("192.168.1.5", ["kb.example.internal"]),  # 反向代理形态（决策P4.17-5 要求显式 --allowed-host）
+    ],
+)
+def test_http_rejects_forged_host_and_origin(kb_mcp, app_host, app_allowed):
+    """DNS-rebinding 防护在**真传输上**生效（决策P4.17-5/P4.18-4）：伪造 `Host` → 421、伪造 `Origin` → 403。
+
+    `test_http_security_derives_allowed_hosts` 只校验 `_http_security()` 这个纯函数的推导，证不了它抵达了
+    传输层。**非环回那档是变异检测的关键**：已实测，把 `_build_http_app` 里的 `transport_security=` kwarg
+    去掉后——
+    - 绑环回时 SDK 的自动兜底白名单（仅 127.0.0.1/localhost/::1）照样回 421，这档抓不到；
+    - 给非环回 `host` 时兜底不生效、**完全没有** Host/Origin 校验，伪造请求返回 200。
+    当时既有的全部 http 用例在该状态下依旧全绿，所以这一档必须在。
+    """
+    import httpx2
+
+    mcp = build_mcp(kb_mcp, runner=_ok_runner, allow_ask=False)
+    app = mcp_server._build_http_app(mcp, host=app_host, allowed_hosts=app_allowed, token=None)
+    hdr = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+    init = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "c", "version": "1"},
+        },
+    }
+
+    # 注：不论 app 的 `host` 参数是什么，uvicorn 都绑环回（测试不真占内网地址）；环回三件套恒在白名单里，
+    # 故这条"正常请求"在两档下都该放行。
+    with _running_http(app) as base:
+        ok = httpx2.post(f"{base}/mcp", headers=hdr, json=init)
+        forged_host = httpx2.post(f"{base}/mcp", headers={**hdr, "host": "evil.example.com"}, json=init)
+        forged_origin = httpx2.post(
+            f"{base}/mcp", headers={**hdr, "origin": "http://evil.example.com"}, json=init
+        )
+
+    assert ok.status_code == 200  # 环回 Host 正常放行
+    assert forged_host.status_code == 421
+    assert forged_origin.status_code == 403
+
+
+def test_http_is_stateless(kb_mcp):
+    """无状态姿态在**真传输上**生效（决策P4.17-7/P4.18-4）：响应不发 `Mcp-Session-Id`，后续 POST 也不需要。
+
+    已实测：`_build_http_app` 里少传 `stateless_http=True`，`initialize` 的响应立刻带上
+    `mcp-session-id: <hex>`（服务端会话状态），而 SDK 客户端往返用例照旧全绿——客户端会透明回传 session
+    id，手写帧用例又只发一次 POST，没人会发现。故把"没有 session"写成断言。
+    """
+    import httpx2
+
+    mcp = build_mcp(kb_mcp, runner=_ok_runner, allow_ask=False)
+    app = mcp_server._build_http_app(mcp, host="127.0.0.1", allowed_hosts=None, token=None)
+    hdr = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+
+    with _running_http(app) as base:
+        first = httpx2.post(
+            f"{base}/mcp",
+            headers=hdr,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "c", "version": "1"},
+                },
+            },
+        )
+        # 第二个 POST 是**另一条**连接，且不带任何 session 头——有状态服务端会在此拒绝。
+        second = httpx2.post(
+            f"{base}/mcp", headers=hdr, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+
+    assert first.status_code == 200 and "mcp-session-id" not in first.headers
+    assert second.status_code == 200 and "mcp-session-id" not in second.headers
+    frame = next(
+        json.loads(ln[len("data:") :].strip())
+        for ln in second.text.splitlines()
+        if ln.startswith("data:")
+    )
+    assert frame["result"]["tools"]  # 无 session 也照样服务
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")

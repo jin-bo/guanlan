@@ -25,8 +25,12 @@ TLS 外置。完整 OAuth / 多租户 source 级 scoping 显式推 E2（本文�
 - **stdio 通道洁净**（决策P4.10-13，最高优先不变量）：stdout 即 JSON-RPC 传输帧——server 路径
   **绝不向 stdout 写非协议字节**（一个杂散 print 即破帧）。故只调**核函数（返对象）**、绝不调
   `*_entrypoint`/`format_report` 等打印壳；SDK 日志默认走 stderr。P4.18 起在**真 stdio 子进程**上逐帧
-  实证（`tests/test_mcp.py::test_stdio_subprocess_emits_only_jsonrpc_frames`）——v2 默认发 OTel span，但
-  只依赖 `opentelemetry-api`（无 SDK/无 exporter）故为 no-op、不写任何流。
+  实证（`tests/test_mcp.py::test_stdio_subprocess_emits_only_jsonrpc_frames`）。
+  实证的**边界**（v2 实测，别当成"全程由我们的测试保护"）：v2 的 `stdio_server()` 在服务期把 **fd 1 改指
+  stderr**，故服务期任何 print / `os.write(1, …)`（含 OTel 若某天真吐字节——它默认只依赖
+  `opentelemetry-api`、无 SDK/无 exporter 故为 no-op）都进不了帧，这层是 SDK 的**结构性保证**；我们的
+  用例真正守的是 SDK 接管 fd 1 **之前**那段窗口（`require_kb_root` / P5.4 预热 / `build_mcp` / argparse），
+  也正是我们自己的代码可能泄漏的地方。两层叠起来才是完整的洁净保证。
 - **handler 异步姿态**（决策P4.10-15）：MCP 是异步 JSON-RPC、客户端可并发多 in-flight，故每个工具
   注册为 `async def`、阻塞核逻辑经 `anyio.to_thread.run_sync` 卸离事件循环（一次慢 `ask` 不饿死并发
   廉价 `search`）。并发 `search` 对共享 `CorpusCache` 的临界区靠 cache 自持锁兜底。

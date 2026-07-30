@@ -41,7 +41,10 @@
   只收安全修复的维护态**，且 v2 **删掉了整个 `mcp.server.fastmcp` 包（无 alias）**，故不做双大版本兼容层而是
   硬切（决策P4.18-2；前置依据：guanlan 的核心依赖 `agentao` 已自带探针式 1.x/2.x 兼容，Tool 注入反方向不受影响，
   决策P4.18-10）。**装了 `mcp` 1.x 的环境须一并升级**——`guanlan mcp` 会以 `EXIT_USAGE` 明示需要 `mcp>=2`
-  （决策P4.18-9）。
+  （决策P4.18-9）。**核心依赖 `agentao[cli]` 下限一并从 `>=0.4.13` 抬到 `>=0.4.17`**：agentao 的 1.x/2.x 探针兼容层
+  是 0.4.17 才有的，不抬下限就留下一个"依赖解析完全允许、但一定坏"的组合——已装 0.4.13–0.4.16 的用户装本 extra 时
+  pip 只把 `mcp` 抬到 2.x，于是 `guanlan mcp` 照常工作，而 ingest/query/Web 问答每次都死在 agentao 侧的 Tool schema
+  上，故障点看起来与真凶毫不相干（决策P4.18-10）。
   - **定性：等价迁移**（决策P4.18-1）——命令契约（`--transport`/`--host`/`--port`/`--auth-token-env`/
     `--allowed-host`/`--allow-ask` 与全部默认值）、七工具集与信封形状、`page`/`path` 口径、只读 + KB 零写契约、
     退出码**逐字保留**；已注册在 `~/.claude.json` / `mcp.json` 里的 stdio & http 条目**零改**——v2 仍服务握手
@@ -64,10 +67,26 @@
     `create_connected_server_and_client_session` 已删除，而 v2 默认 `mode="auto"` 走 `DirectDispatcher` 直调
     （**无流、无 JSON-RPC 帧、无握手**），无脑替换会静默丢掉全套用例的序列化覆盖（决策P4.18-11）；另加
     `test_in_memory_modern_mode_parity`（默认 mode 覆盖 2026 现代路径、与 legacy 结果一致）、
-    `test_stdio_subprocess_emits_only_jsonrpc_frames`（**真 stdio 子进程逐帧解析**，把决策P4.10-13 的 stdout
-    洁净红线从"in-memory 推断"升级为传输级实证——v2 默认发 OTel span，但只依赖 `opentelemetry-api`、无
-    exporter 故 no-op，决策P4.18-6）、`test_http_serves_legacy_protocol_client`（http 上钉 `2025-06-18` 的现役
-    客户端不掉线）。`tests/test_mcp.py` 59 例、全套 643 通过 / 3 skip。
+    `test_stdio_subprocess_emits_only_jsonrpc_frames`（**真 stdio 子进程逐帧解析**，决策P4.18-6）、
+    `test_http_serves_legacy_protocol_client`（http 上钉 `2025-06-18` 的现役客户端不掉线）。
+  - **回归网按 xhigh code-review 补齐**（这些位置此前"改对了但没上网"，变异实测能被静默丢掉）：
+    `test_http_rejects_forged_host_and_origin`（伪造 `Host` → 421 / `Origin` → 403，**含非环回 `host` 一档**
+    ——丢掉 `transport_security=` kwarg 时，绑环回仍被 SDK 兜底白名单救回 421、只有非环回档会漏成 200）、
+    `test_http_is_stateless`（响应头无 `Mcp-Session-Id`；丢掉 `stateless_http=True` 时 SDK 客户端往返用例照旧
+    全绿，因为它会透明回传 session id）、`test_http_serves_modern_protocol_client`（**现代 era 的真帧覆盖**：
+    对 in-process server，`Client` 除 `mode="legacy"` 外任何 mode 都走 `DirectDispatcher`、不产生帧，故手写
+    2026 per-request 信封直接 POST）、越界用例加断消息文案（证守卫仍在我们手里、未被 v2 的 `ResourceSecurity`
+    接管）、era 断言改按 SDK 的 `{MODERN,HANDSHAKE}_PROTOCOL_VERSIONS` 集合（不钉 `2026-` 日期前缀，避免上游
+    改版把未动的代码搞红）、`importorskip` 钉到 `mcp.server.mcpserver`（只探顶层 `mcp` 时 1.x 环境会 collection
+    ImportError **中断整场** pytest 而非整体 skip）、stdio helper 加 `-u` + `encoding="utf-8"` + stderr 独立抽干
+    并**不再过滤空白行**（三者分别修：不 flush 的泄漏被 fd-1 改指吞掉、非 UTF-8 locale 下伪装成"一帧没吐"、
+    stderr 写满约 64 KB 管道后卡满 timeout、空行污染恒真）、降级用例补"装着 1.x"与"内部 ImportError 不得被
+    冒充成缺 extra"两档。
+  - **stdout 洁净的机制说明校正**（实测）：v2 的 `stdio_server()` 在服务期把 **fd 1 改指 stderr**，故服务期的
+    `print`/`os.write(1,…)`（含 OTel 若真吐字节）都进不了帧——这层是 **SDK 的结构性保证**；子进程用例真正守的是
+    SDK 接管 fd 1 **之前**那段窗口（`require_kb_root`/P5.4 预热/`build_mcp`/argparse），也正是我们自己的代码
+    可能泄漏处。原先"在真传输上实证 OTel 不污染 stdout"的说法说过头了，已按实测改写（决策P4.18-6）。
+  - `tests/test_mcp.py` 63 例、全套 1141 通过 / 1 skip。
 
 ## [0.1.17] - 2026-07-01
 

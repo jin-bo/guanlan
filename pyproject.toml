@@ -27,9 +27,14 @@ classifiers = [
 dependencies = [
     # [cli] extra 带 rich/prompt-toolkit/readchar/pygments —— `agentao run` 控制台脚本预检需要，
     # wrapper 经子进程调它（见 guanlan/runtime.py），缺 extra 则 ingest/query 立即失败。
-    # >=0.4.13：P4.16 复用 agentao 已落地的 `/goal` 原语（cli.goal_state / cli.duration /
+    # >=0.4.13 起：P4.16 复用 agentao 已落地的 `/goal` 原语（cli.goal_state / cli.duration /
     # tools.goal，PR #109 起），见 docs/P4.16-Web目标续跑.md §1.3 复用矩阵。
-    "agentao[cli]>=0.4.13",
+    # >=0.4.17（P4.18 抬起，决策P4.18-10）：`[mcp]` extra 硬切 `mcp>=2` 后，这个下限必须一起抬——
+    # agentao 直到 0.4.17 才用 `agentao/mcp/_compat.py` 探针同时兼容 mcp 1.x/2.x（PR #148）。
+    # 若留在 0.4.13：已装 0.4.13–0.4.16 的用户装本 extra 时，pip 认为下限已满足、只把 mcp 抬到 2.x，
+    # 于是 guanlan mcp 照常工作，但 agentao 侧每次 ingest/query/Web 问答都死在 Tool schema 上
+    # （agentao CHANGELOG 0.4.17：「every MCP path failed」）——故障点看起来与真凶毫不相干。
+    "agentao[cli]>=0.4.17",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
 ]
 

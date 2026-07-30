@@ -176,8 +176,22 @@ def test_mcp_parser_rejects_unknown_transport():
         _parse(["-C", "/kb", "mcp", "--transport", "sse"])
 
 
+def _evict_mcp_modules(monkeypatch):
+    """清掉 guanlan.mcp* 与已缓存的 mcp.*：否则 `import mcp.server.mcpserver` 命中缓存的子模块、
+    不重经被打桩的父包 `mcp` → 降级路径不触发。monkeypatch 在 teardown 复原。"""
+    import sys
+
+    for name in list(sys.modules):
+        if (
+            name in ("guanlan.mcp", "mcp")
+            or name.startswith("guanlan.mcp.")
+            or name.startswith("mcp.")
+        ):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+
+
 def test_mcp_missing_extra_degrades(tmp_path, monkeypatch, capsys):
-    """缺 mcp extra（mcp SDK 导入失败）→ EXIT_USAGE 并引导 `pip install 'guanlan-wiki[mcp]'`。
+    """完全缺 mcp extra → EXIT_USAGE 并引导 `pip install 'guanlan-wiki[mcp]'`，且报明版本口径。
 
     在**装有** mcp 的 CI 也覆盖此路径：monkeypatch 令 `import mcp...` 抛 ImportError（决策P4.10-2/§7
     依赖门控；不能只靠『实际缺 SDK 的环境』，否则该环境整组 skip、降级路径永不被测）。
@@ -186,20 +200,56 @@ def test_mcp_missing_extra_degrades(tmp_path, monkeypatch, capsys):
 
     from guanlan.cli import main
 
-    # 同时清掉 guanlan.mcp* 与已缓存的 mcp.*：否则 `from mcp.server.mcpserver import MCPServer` 命中
-    # 缓存的子模块、不重经父包 `mcp`（被打桩为 None）→ 降级路径不触发。monkeypatch 在 teardown 复原。
-    for name in list(sys.modules):
-        if (
-            name in ("guanlan.mcp", "mcp")
-            or name.startswith("guanlan.mcp.")
-            or name.startswith("mcp.")
-        ):
-            monkeypatch.delitem(sys.modules, name, raising=False)
+    _evict_mcp_modules(monkeypatch)
     monkeypatch.setitem(sys.modules, "mcp", None)  # `import mcp` → ImportError
 
     rc = main(["-C", str(tmp_path), "mcp"])
     assert rc == 1
-    assert "guanlan-wiki[mcp]" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "guanlan-wiki[mcp]" in err
+    # 版本口径必须在文案里（决策P4.18-9）：只提 extra 名字不足以让装着 1.x 的人自救。
+    assert "mcp>=2" in err
+
+
+def test_mcp_v1_installed_degrades_with_version_hint(tmp_path, monkeypatch, capsys):
+    """**装着 mcp 1.x** → 同一条降级路径，且提示必须点明「升级到 mcp>=2」（决策P4.18-9）。
+
+    这是 P4.18 硬切引入的**新**失败模式，与「完全没装」不同：pip 认为 `[mcp]` extra 已满足，重装一遍
+    毫无效果。用一个只有顶层包、没有 `mcp.server.mcpserver` 的桩模拟 1.x 形状（v2 才有该模块）。
+    """
+    import sys
+    import types
+
+    from guanlan.cli import main
+
+    _evict_mcp_modules(monkeypatch)
+    monkeypatch.setitem(sys.modules, "mcp", types.ModuleType("mcp"))  # 有顶层包、无 v2 子模块
+
+    rc = main(["-C", str(tmp_path), "mcp"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "mcp>=2" in err and "v1.x 已不支持" in err
+
+
+def test_mcp_internal_import_error_is_not_masked(tmp_path, monkeypatch):
+    """guanlan 自己模块链上的 ImportError **不得**被冒充成「缺 extra」——须原样抛出（决策P4.18-9）。
+
+    守卫只探 SDK；把 `from .mcp import serve_mcp` 一起裹进 `except ImportError` 会让重构改名、半装的
+    间接依赖等真实 bug 显示成"请装 extra"，用户照做仍失败且看不到真因。
+    """
+    import sys
+
+    import pytest
+
+    from guanlan.cli import main
+
+    pytest.importorskip("mcp.server.mcpserver")  # 需真 SDK 在场，才能证「过了 SDK 探针之后」的行为
+    _evict_mcp_modules(monkeypatch)
+    # 让 guanlan.mcp 自身的导入炸掉（模拟改名/半装依赖），SDK 本身完好。
+    monkeypatch.setitem(sys.modules, "guanlan.mcp", None)
+
+    with pytest.raises(ImportError):
+        main(["-C", str(tmp_path), "mcp"])
 
 
 def test_p3_dispatch_end_to_end(tmp_path):

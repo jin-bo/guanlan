@@ -436,7 +436,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentao", extras = ["cli"], specifier = ">=0.4.13" },
+    { name = "agentao", extras = ["cli"], specifier = ">=0.4.17" },
     { name = "anyio", marker = "extra == 'mcp'", specifier = ">=4.1" },
     { name = "anyio", marker = "extra == 'web'", specifier = ">=4.1" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },
