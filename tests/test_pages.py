@@ -275,3 +275,55 @@ def test_order_findings_preserves_multiset():
     assert Counter(out) == Counter(inp)  # 多重集相等（Finding 是 frozen dataclass、可哈希）
     assert len(out) == len(inp)
 
+
+
+# ---------- HTML 注释剥离（各链接扫描器共用的口径） ----------
+
+
+def test_strip_html_comments_preserves_length_and_line_count():
+    """长度与行数**逐位守恒**——`reindex --prune` 按行号对齐原行与判定行，错位即错删。
+
+    裸 `\\r` 那条是踩过的坑：早期实现统一补 `\\n`，它会与前一个 `\\r` 合成一个 CRLF 边界，
+    行数凭空少一，`_prune_dangling` 的 strict zip 直接抛。
+    """
+    from guanlan.pages import strip_html_comments
+
+    for text in [
+        "a\n<!-- 注释 -->\nb\n",
+        "a\n<!-- 跨\n三\n行 -->\nb\n",
+        "a\r\n<!-- 跨\r\n行 -->\r\nb\r\n",
+        "a\r<!--x\r-->\rb",  # 老式裸 \r 断行
+        "<!-- 含\x0c罕见分隔符 -->\nb\n",
+        "a <!--x --> b",
+        "无注释\n",
+    ]:
+        out = strip_html_comments(text)
+        assert len(out) == len(text), text  # 逐字符一一对应
+        assert len(out.splitlines()) == len(text.splitlines()), text
+
+
+def test_strip_html_comments_does_not_glue_tokens():
+    """抹成等长空白而非删空：注释两侧不得被粘起来，凭空造出原文没有的链接。"""
+    from guanlan.pages import WIKILINK_RE, index_md_links, strip_html_comments
+
+    # `]` 与 `(` 被注释隔开 → 原文不是 markdown 链接，抹后也不该变成链接。
+    assert index_md_links(strip_html_comments("- [名]<!--注-->(entities/Missing.md)")) == set()
+    # `[[Mis<!--注-->sing]]` 不得粘成 `[[Missing]]`（那可能真解析到某页 → 幽灵边）。
+    assert WIKILINK_RE.findall(strip_html_comments("见 [[Mis<!--注-->sing]]")) != ["Missing"]
+
+
+def test_strip_html_comments_is_non_greedy():
+    """`<!--a--> 真内容 <!--b-->` 只吃两段注释；中间的真链接必须活下来。"""
+    from guanlan.pages import strip_html_comments
+
+    out = strip_html_comments("<!-- 甲 --> 见 [[真页]] <!-- 乙 -->")
+    assert "[[真页]]" in out
+    assert "甲" not in out and "乙" not in out
+
+
+def test_strip_html_comments_leaves_unterminated_open():
+    """未闭合 `<!--` 原样保留：吃到文末会把后文真链接静默吞掉，门禁宁多报不少报。"""
+    from guanlan.pages import strip_html_comments
+
+    text = "<!-- 忘了闭合\n后面还有 [[真页]]\n"
+    assert strip_html_comments(text) == text

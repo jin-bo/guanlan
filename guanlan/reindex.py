@@ -19,7 +19,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .errors import EXIT_OK, GuanlanError
-from .pages import index_md_links, index_sync_state, iter_pages, load_page, page_title
+from .pages import (
+    index_md_links,
+    index_sync_state,
+    iter_pages,
+    load_page,
+    page_title,
+    strip_html_comments,
+)
 from .paths import require_kb_root
 from .rawio import atomic_write_text  # 原子覆盖写 index.md（避免半写），与 raw/ 写共用骨架
 
@@ -152,12 +159,30 @@ def _apply_additions(lines: list[str], by_section: dict[str, list[str]]) -> list
     return lines
 
 
-def _prune_dangling(lines: list[str], dangling: set[str]) -> tuple[list[str], list[str]]:
-    """删除整行链接目标**全部** ∈ dangling 的行（单行单链接、精确匹配，不误删正常行）。"""
+def _scan_lines(text: str) -> list[str]:
+    """`_prune_dangling` 的判定行：抹掉闭合 HTML 注释后按同一口径切行，与原行**逐位等长**。
+
+    `strip_html_comments` 保行数，故可与 `_split_lines(text)[0]` 直接 zip。`remove` 也走这里
+    （跨模块复用同一归口，见本模块 §一期表面积）。
+    """
+    return _split_lines(strip_html_comments(text))[0]
+
+
+def _prune_dangling(
+    lines: list[str], scan_lines: list[str], dangling: set[str]
+) -> tuple[list[str], list[str]]:
+    """删除整行链接目标**全部** ∈ dangling 的行（单行单链接、精确匹配，不误删正常行）。
+
+    判定读 `scan_lines`（已抹 HTML 注释、与 `lines` **逐位等长**），删的是 `lines` 的原行。
+    两份分开是因为注释里的链接不算收录项：模板那四行 `<!-- ingest 自动追加：… -->` 一度被
+    整行剪掉——把"给 Agent 看的追加格式说明"当悬空项删了。单行注释在 `index_md_links` 内已
+    抹掉，多行注释只有在这里按全文对齐才认得出。
+    """
     kept: list[str] = []
     removed: list[str] = []
-    for ln in lines:
-        targets = index_md_links(ln)
+    # strict=True：两列表一旦不等长就抛，而不是被 zip 静默截短——截短意味着按错位的判定删行。
+    for ln, scan in zip(lines, scan_lines, strict=True):
+        targets = index_md_links(scan)
         if targets and targets <= dangling:
             removed.append(ln)
         else:
@@ -182,7 +207,7 @@ def run_reindex(wiki: Path, *, prune: bool = False) -> tuple[ReindexResult, str 
     # 1) 可选剪枝（先删悬空，再登记——登记行指向真实文件，不会被随后剪掉）。
     pruned: list[str] = []
     if prune and dangling:
-        lines, pruned = _prune_dangling(lines, set(dangling))
+        lines, pruned = _prune_dangling(lines, _scan_lines(text), set(dangling))
 
     # 2) 登记缺失页（按 _DIR_TO_SECTION 固定序聚合，分区内按 iter_pages 稳定序）。
     by_section: dict[str, list[str]] = {section: [] for section in _DIR_TO_SECTION.values()}

@@ -3,6 +3,34 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [未发布]
+
+### 修复
+
+- **HTML 注释里的链接不再被当成真链接（`check` / `lint` / `graph` / `health` / `reindex --prune` / `remove`）**
+  —— 各链接扫描器此前对 `<!-- … -->` 一视同仁，于是**注释里的示例链接**被当作生效引用。影响面比表象大，
+  按严重度排：① `reindex --prune` 把 init 模板 `index.md` 里那四行 `<!-- ingest 自动追加：-
+  [<名称>](entities/<Name>.md) — <一句话> -->` **整行删掉**——被删的正是告诉 Agent 追加格式的说明；
+  ② `check` 对注释掉的 `[[X]]` 报 `wikilink.broken`，**退出码 3**，即"随手注掉一段草稿"会让写门禁判库坏了；
+  ③ `graph` 造幽灵边/幽灵断链，`lint.broken_link` 与 `heal` 的 `missing_entity` 因派生自该图跟着误报；
+  ④ 全新 `guanlan init` 的库跑 `health` 立刻报 4 条 `index_dangling`（首次体检就是四条假告警）；
+  ⑤ `remove` 会连带删掉注释里提到该源的行。修法是 `pages.strip_html_comments` 一处归口，扫描前抹掉
+  **闭合**注释，四个扫描点（`check` 断链、`graph` 建边、`index_md_links`、`reindex._scan_lines`）共用。
+  两条刻意的设计：**保留行数**（注释替换为等量换行，按 `str.splitlines` 口径数行，`reindex --prune` 靠
+  原行与判定行逐位对齐来剪枝，行数一变就错删）；**未闭合的 `<!--` 原样保留、不吃到文末**（那会把后文
+  真断链静默吞掉，把漏报伪装成通过——门禁宁可多报不可少报）。回归网 14 例，其中 11 例对旧行为变异验证
+  为**失败**；另加一条 `test_freshly_initialized_kb_is_health_clean` 直接走 `run_init` 真模板体检——
+  这个 bug 一直没被测试看见，正是因为 `test_reindex` 的 index 夹具用的是**不带链接**的
+  `<!-- ingest 自动追加 -->`，与出厂模板漂移了。经 Codex 评审三项收敛：① 注释**抹成等长空白**
+  而非删空——删空会把两侧字符粘起来，凭空造出原文没有的链接（`[名]<!--注-->(entities/X.md)` 粘成
+  合法 markdown 链接、`[[Mis<!--注-->sing]]` 粘成可能真解析到某页的 `[[Missing]]`）；② 行分隔符
+  **逐字保留**而非统一补 `\n`（裸 `\r` 文本里补出的 `\n` 会与前一个 `\r` 合成一个 CRLF 边界、行数少一，
+  于是 `_prune_dangling` 的 strict zip 抛——这条是纵深防御，两条调用路径今天喂进来的文本已被
+  `read_text` 通用换行归一过）；③ **Web 渲染同步对齐**——`render.py` 此前仍会把注释里的 `[[X]]` 渲成
+  可点链接，与 check/graph 打架；改为落在注释区间内即拒绝成链。Web 与扫描器的失活方式**刻意不同**：
+  扫描器抹成空白，Web 保留注释原文按转义文本显示（决策P4-4 关了原始 HTML 透传），视图不该让页面上
+  凭空少一段字。
+
 ## [0.1.18] - 2026-07-30
 
 一次**底座迁移 + 反向评审补强**的发布：① **MCP 宿主迁到官方 SDK v2 / 协议 `2026-07-28`**（P4.18，

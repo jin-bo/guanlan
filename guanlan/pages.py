@@ -40,6 +40,8 @@ __all__ = [
     "Violation",
     "Finding",
     "WIKILINK_RE",
+    "strip_html_comments",
+    "html_comment_spans",
     "split_frontmatter",
     "parse_frontmatter",
     "load_page",
@@ -89,6 +91,56 @@ WIKILINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
 # 惰性嵌套量词的歧义/回溯，且畸形链接（未配对 `(` 后跟孤立 `)`）只会整体不匹配、不会截出错目标。
 # 注意：[[X]] 无 `](` 结构，天然不被误吃。
 _MD_LINK_RE = re.compile(r"\[[^\]\n]*\]\(((?:[^()\n]|\([^()\n]*\))*)\)")
+
+# HTML 注释：**闭合的** `<!-- … -->`（跨行，故 DOTALL）。非贪婪 → `<!--a--> x <!--b-->` 只吃两段注释、
+# 不把中间的 x 一并吞掉。未闭合的 `<!--` 刻意**不**匹配（见 strip_html_comments）。
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+# `str.splitlines` 认的**全部**行分隔符。抹注释时逐字保留它们（而不是统一补 `\n`），行边界才与原文
+# 一一对应——见 strip_html_comments 的「等长空白」一节。
+_LINEBREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _blank_comment(match: re.Match[str]) -> str:
+    """把一段注释抹成**等长空白**：行分隔符逐字留下，其余字符一律换成空格。"""
+    return "".join(c if c in _LINEBREAK_CHARS else " " for c in match.group(0))
+
+
+def strip_html_comments(text: str) -> str:
+    """把**闭合的** HTML 注释抹成等长空白，供各链接扫描器"只看真正生效的正文"。
+
+    注释里的 `[[…]]` / `[文字](路径)` 是**示例或被注释掉的内容**，不该产生断链违规、图谱边、
+    index 悬空判定。init 模板的 index.md 就带四行
+    `<!-- ingest 自动追加：- [<名称>](entities/<Name>.md) … -->` 提示——不抹注释时，全新库
+    `health` 立刻报 4 条 `index_dangling`，而 `reindex --prune` 会把这四行提示**直接删掉**。
+
+    **抹成等长空白、而不是删空**（两条都是踩过的坑）：
+
+    1. 删空会把注释两侧的字符**粘起来**，凭空造出原文没有的链接——`[名](<!--注-->entities/X.md)`
+       粘成合法 markdown 链接、`[[Mis<!--注-->sing]]` 粘成 `[[Missing]]`（后者可能真解析到某页，
+       于是幽灵边/幽灵收录项）。空格是天然的 token 边界，粘不起来。
+    2. 行分隔符**逐字保留**（不是统一补 `\\n`）：裸 `\\r` 断行的文本里，补出的 `\\n` 会与前一个
+       `\\r` 合成**一个** CRLF 边界，行数凭空少一。`reindex --prune`/`remove` 靠"抹注释后的第 i 行"
+       与"原文第 i 行"逐位对齐来剪枝，长度一旦不等，`_prune_dangling` 的 strict zip 就抛。
+       （那两条路径今天喂进来的文本已被 `Path.read_text` 的通用换行归一过、见不到裸 `\\r`，故这
+       一条是**纵深防御**：本函数不预设调用方替它归一，谁直接拿页面文本调都成立。）
+
+    于是本函数是**长度、行数、列偏移三保**的：输出与输入逐字符一一对应。
+
+    **未闭合的 `<!--` 原样保留、不吃到文末**：那样会把后文真实链接一并静默吞掉，把"漏报断链"
+    伪装成"通过"——门禁宁可多报也不能少报。代价是坏掉的注释里的链接仍参与扫描，可接受。
+    """
+    return _HTML_COMMENT_RE.sub(_blank_comment, text)
+
+
+def html_comment_spans(text: str) -> list[tuple[int, int]]:
+    """闭合 HTML 注释在 `text` 中的 `[起, 止)` 区间（与 `strip_html_comments` **同一口径**）。
+
+    供**要保留注释原文、只想让其中内容失活**的消费方。Web 渲染器就是这种：它得把注释按转义文本
+    原样显示出来（决策P4-4 关了原始 HTML 透传，注释因此以字面形式可见），不能像扫描器那样抹成
+    空白——否则页面上凭空少一段字。于是改判区间：落在区间内的 `[[…]]` 拒绝成链、留作字面文本。
+    """
+    return [m.span() for m in _HTML_COMMENT_RE.finditer(text)]
 
 
 @dataclass(frozen=True)
@@ -483,9 +535,11 @@ def index_md_links(text: str) -> set[str]:
     只取本地页面链接：剥 `#锚点`、`./` 前缀与首尾空白；跳过外链（`http(s)://`/`mailto:` 等）
     与纯锚点。返回去重的目标集合，供 health 的 index↔磁盘双向同步比对（§4.2）。
     解析的是 `[文字](路径)`，**不是** `[[wikilink]]`（index 用前者，见 conventions §index.md）。
+    **先抹闭合 HTML 注释**：模板的 `<!-- ingest 自动追加：- [<名称>](entities/<Name>.md) … -->`
+    是格式提示、不是收录项（见 `strip_html_comments`）。
     """
     targets: set[str] = set()
-    for raw in _MD_LINK_RE.findall(text):
+    for raw in _MD_LINK_RE.findall(strip_html_comments(text)):
         # 先归一反斜杠为 posix，再剥前缀——否则 `.\foo` 会漏掉 ./ 检测、错成 `/foo`。
         target = raw.split("#", 1)[0].strip().replace("\\", "/")
         if not target:

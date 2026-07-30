@@ -19,7 +19,14 @@ from collections import defaultdict
 from html.parser import HTMLParser as _HTMLParser
 from pathlib import Path
 
-from ..pages import WIKILINK_RE, link_resolution_index, link_stem, load_page, resolve_owner
+from ..pages import (
+    WIKILINK_RE,
+    html_comment_spans,
+    link_resolution_index,
+    link_stem,
+    load_page,
+    resolve_owner,
+)
 
 try:  # markdown 是 web extra 的一部分；缺失时回退 <pre> 源码视图（§6）。
     import markdown as _markdown
@@ -339,6 +346,17 @@ def _retag(el, tag: str, attrib: dict[str, str], text: str) -> None:
     el.text = text
 
 
+def _in_html_comment(text: str, pos: int) -> bool:
+    """`text[pos]` 是否落在某段闭合 HTML 注释内（区间口径见 `pages.html_comment_spans`）。
+
+    先做 `"<!--" in text` 的廉价短路：绝大多数页面根本没有注释，这样就不必对每个 `[[…]]`
+    重扫一遍所在块的文本。
+    """
+    if "<!--" not in text:
+        return False
+    return any(start <= pos < end for start, end in html_comment_spans(text))
+
+
 def _code_wikilink_raw(content: str) -> str | None:
     """行内 code 的整段内容恰好是 `[[...]]` 时返回内部 raw，否则 None。"""
     match = WIKILINK_RE.fullmatch(content.strip())
@@ -442,6 +460,12 @@ if _HAS_MARKDOWN:
             self._raw_index = raw_index
 
         def handleMatch(self, m, data):  # noqa: N802 (markdown API 命名)
+            if _in_html_comment(data, m.start(0)):
+                # 注释里的 `[[…]]` 不成链——与 check/graph/health 同口径（注释内容不是生效引用）。
+                # 三元 None 是 python-markdown 的"本次不匹配"约定：原文留作字面文本，故注释仍照常
+                # 显示（决策P4-4 关了原始 HTML 透传，注释本就以转义文本可见），只是里面的 `[[X]]`
+                # 不再是可点链接。**刻意不抹掉注释**：Web 是视图，不该让页面上凭空少一段字。
+                return None, None, None
             tag, attrib, display = _resolve_wikilink(
                 m.group(1), self._stem_to_path, self._raw_index
             )

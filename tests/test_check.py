@@ -208,3 +208,44 @@ def test_format_report_human_readable():
     text = format_report(result, json_output=False)
     assert "wikilink.broken" in text
     assert "wiki/concepts/Bar.md" in text
+
+
+def test_commented_out_wikilink_is_not_broken(tmp_path: Path):
+    """注释掉的 `[[…]]` 不进门禁：渲染后读者看不见，注掉一段草稿不该让 check 退 3。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(
+        wiki / "concepts" / "Bar.md",
+        body="正文没有链接。\n\n<!-- 草稿：以后写 [[还没建的页]]，另见 [[也没有]] -->",
+    )
+
+    result = run_check(wiki)
+    assert result.ok
+    assert result.violations == []
+
+
+def test_real_wikilink_outside_comment_still_broken(tmp_path: Path):
+    """同页混排：注释内的放行、注释外的照报——不是把整页豁免了。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(
+        wiki / "concepts" / "Bar.md",
+        body="<!-- 注掉的 [[被豁免]] -->\n\n正文真链到 [[确实没有]]。",
+    )
+
+    result = run_check(wiki)
+    details = [v.detail for v in result.violations if v.kind == "wikilink.broken"]
+    assert any("确实没有" in d for d in details)
+    assert not any("被豁免" in d for d in details)
+
+
+def test_unterminated_comment_does_not_swallow_later_links(tmp_path: Path):
+    """坏注释（`<!--` 无闭合）不得把后文真断链一并吞掉——漏报比误报危险。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki / "concepts" / "Bar.md", body="<!-- 忘了闭合\n\n后面真链到 [[确实没有]]。")
+
+    result = run_check(wiki)
+    assert any(
+        v.kind == "wikilink.broken" and "确实没有" in v.detail for v in result.violations
+    )
