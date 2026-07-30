@@ -34,6 +34,7 @@ from .pages import (
     report_json,
     resolve_owner,
     split_frontmatter,
+    strip_html_comments,
 )
 from .paths import require_kb_root
 
@@ -99,9 +100,12 @@ def _check_wikilinks(page: str, body: str, idx: dict[str, str]) -> list[Violatio
 
     `idx` = `link_resolution_index`（精确 stem/别名 ∪ 安全 fold variant → owner path）。**断链判据
     一律走 `resolve_owner`**，不再用 `link_stem(raw) in 键集`（会漏 fold 兜底命中，决策P3.8-3）。
+
+    **先抹闭合 HTML 注释**（与 graph 同口径）：注释里的 `[[…]]` 渲染后不可见，是示例或被注释掉的
+    内容，不该让门禁退出码变 3——写页面时顺手注掉一段草稿，不构成"库坏了"。
     """
     violations: list[Violation] = []
-    for raw in WIKILINK_RE.findall(body):
+    for raw in WIKILINK_RE.findall(strip_html_comments(body)):
         stem = link_stem(raw)
         if not stem:
             continue  # 空键（如 [[|别名]]/[[#锚]]）不校验，与历史行为一致。

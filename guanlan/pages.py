@@ -40,6 +40,7 @@ __all__ = [
     "Violation",
     "Finding",
     "WIKILINK_RE",
+    "strip_html_comments",
     "split_frontmatter",
     "parse_frontmatter",
     "load_page",
@@ -89,6 +90,31 @@ WIKILINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
 # 惰性嵌套量词的歧义/回溯，且畸形链接（未配对 `(` 后跟孤立 `)`）只会整体不匹配、不会截出错目标。
 # 注意：[[X]] 无 `](` 结构，天然不被误吃。
 _MD_LINK_RE = re.compile(r"\[[^\]\n]*\]\(((?:[^()\n]|\([^()\n]*\))*)\)")
+
+# HTML 注释：**闭合的** `<!-- … -->`（跨行，故 DOTALL）。非贪婪 → `<!--a--> x <!--b-->` 只吃两段注释、
+# 不把中间的 x 一并吞掉。未闭合的 `<!--` 刻意**不**匹配（见 strip_html_comments）。
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def strip_html_comments(text: str) -> str:
+    """抹掉**闭合的** HTML 注释，供各链接扫描器"只看真正生效的正文"。
+
+    注释里的 `[[…]]` / `[文字](路径)` 是**示例或被注释掉的内容**，渲染后读者看不见，因此不该
+    产生断链违规、图谱边、index 悬空判定。init 模板的 index.md 就带四行
+    `<!-- ingest 自动追加：- [<名称>](entities/<Name>.md) … -->` 提示——不抹注释时，全新库
+    `health` 立刻报 4 条 `index_dangling`，而 `reindex --prune` 会把这四行提示**直接删掉**。
+
+    **保留行数**：注释整体替换为**等量换行**，行号与行序不变——`reindex --prune` 靠"抹注释后的
+    第 i 行"与"原文第 i 行"逐位对齐来判定是否剪枝，行数一旦变化就会错删。行数按 `str.splitlines`
+    口径数（不是数 `\\n`），故 `\\r\\n` 与 `\\x0c`/`\\u2028` 等罕见分隔符也不会错位。列偏移不保留
+    （无消费方依赖列）。
+
+    **未闭合的 `<!--` 原样保留、不吃到文末**：那样会把后文真实链接一并静默吞掉，把"漏报断链"
+    伪装成"通过"——门禁宁可多报也不能少报。代价是坏掉的注释里的链接仍参与扫描，可接受。
+    """
+    return _HTML_COMMENT_RE.sub(
+        lambda m: "\n" * (len(m.group(0).splitlines()) - 1), text
+    )
 
 
 @dataclass(frozen=True)
@@ -483,9 +509,11 @@ def index_md_links(text: str) -> set[str]:
     只取本地页面链接：剥 `#锚点`、`./` 前缀与首尾空白；跳过外链（`http(s)://`/`mailto:` 等）
     与纯锚点。返回去重的目标集合，供 health 的 index↔磁盘双向同步比对（§4.2）。
     解析的是 `[文字](路径)`，**不是** `[[wikilink]]`（index 用前者，见 conventions §index.md）。
+    **先抹闭合 HTML 注释**：模板的 `<!-- ingest 自动追加：- [<名称>](entities/<Name>.md) … -->`
+    是格式提示、不是收录项（见 `strip_html_comments`）。
     """
     targets: set[str] = set()
-    for raw in _MD_LINK_RE.findall(text):
+    for raw in _MD_LINK_RE.findall(strip_html_comments(text)):
         # 先归一反斜杠为 posix，再剥前缀——否则 `.\foo` 会漏掉 ./ 检测、错成 `/foo`。
         target = raw.split("#", 1)[0].strip().replace("\\", "/")
         if not target:

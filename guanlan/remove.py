@@ -34,7 +34,12 @@ from .gate import _trusted_sources  # 读衍生页可信 sources 的单一归口
 from .pages import iter_pages, load_page, split_frontmatter
 from .paths import require_kb_root
 from .rawio import atomic_write_text, normalize_basename, raw_slug  # slug 归一 + 原子写（避免半写）同口径
-from .reindex import _join_lines, _prune_dangling, _split_lines  # index 行删除的单一归口
+from .reindex import (  # index 行删除的单一归口
+    _join_lines,
+    _prune_dangling,
+    _scan_lines,
+    _split_lines,
+)
 
 __all__ = [
     "DropSlug",
@@ -135,8 +140,9 @@ def _plan_index_lines(wiki: Path, slug: str) -> list[str]:
     index_path = wiki / "index.md"
     if not index_path.is_file():
         return []
-    lines, _eol, _trailing = _split_lines(index_path.read_text(encoding="utf-8"))
-    _kept, removed = _prune_dangling(lines, _index_target(slug))
+    text = index_path.read_text(encoding="utf-8")
+    lines, _eol, _trailing = _split_lines(text)
+    _kept, removed = _prune_dangling(lines, _scan_lines(text), _index_target(slug))
     return removed
 
 
@@ -189,8 +195,9 @@ def _prune_index_line(index_path: Path, slug: str) -> list[str]:
     """从当前 index.md 删摘要页登记行（幂等：行已删 → 不写）。返回被删行原文。"""
     if not index_path.is_file():
         return []
-    lines, eol, trailing = _split_lines(index_path.read_text(encoding="utf-8"))
-    kept, removed = _prune_dangling(lines, _index_target(slug))
+    text = index_path.read_text(encoding="utf-8")
+    lines, eol, trailing = _split_lines(text)
+    kept, removed = _prune_dangling(lines, _scan_lines(text), _index_target(slug))
     if removed:
         atomic_write_text(index_path, _join_lines(kept, eol, trailing))  # 自管 EOL、逐字原子写
     return removed

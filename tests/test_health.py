@@ -308,3 +308,47 @@ def test_health_ordering_deterministic_and_set_preserved(tmp_path: Path):
     }
     assert health_entrypoint(tmp_path, json_output=False, strict=False) == 0
     assert health_entrypoint(tmp_path, json_output=False, strict=True) == 6
+
+
+# ---------- index 链接与 HTML 注释 ----------
+
+
+def test_commented_index_link_is_not_dangling(tmp_path: Path):
+    """注释里的 index 链接不是收录项，不该报 index_dangling。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(
+        wiki,
+        index="# 索引\n\n<!-- ingest 自动追加：- [<名称>](entities/<Name>.md) — <一句话> -->\n",
+    )
+
+    report = run_health(wiki)
+    assert "health.index_dangling" not in _kinds(report)
+
+
+def test_real_index_link_outside_comment_still_dangling(tmp_path: Path):
+    """注释外的悬空链接照报——不是把整个 index.md 豁免了。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(
+        wiki,
+        index="# 索引\n\n<!-- 注掉 [x](entities/Hidden.md) -->\n- [死页](entities/Dead.md)\n",
+    )
+
+    report = run_health(wiki)
+    details = [f.detail for f in report.findings if f.kind == "health.index_dangling"]
+    assert any("entities/Dead.md" in d for d in details)
+    assert not any("entities/Hidden.md" in d for d in details)
+
+
+def test_freshly_initialized_kb_is_health_clean(tmp_path: Path):
+    """**用真模板**跑一遍：全新 `guanlan init` 的库体检必须一条建议都没有。
+
+    这条盯的是"夹具与出厂模板漂移"——本仓库的 index 夹具此前用的是不带链接的
+    `<!-- ingest 自动追加 -->`，而真模板带占位链接，于是四条 index_dangling 误报
+    一直没被任何测试看见。故此处刻意走 run_init 而非夹具。
+    """
+    from guanlan.init import run_init
+
+    run_init(tmp_path, today="2026-06-03")
+
+    report = run_health(tmp_path / "wiki")
+    assert report.findings == []

@@ -38,6 +38,7 @@ from .pages import (
     page_title,
     page_type,
     resolve_owner,
+    strip_html_comments,
 )
 from .paths import require_kb_root
 
@@ -134,7 +135,9 @@ def build_graph(wiki: Path) -> Graph:
     resolved_pairs: set[tuple[str, str]] = set()
     broken_pairs: set[tuple[str, str]] = set()
     for nid, body in bodies:
-        for raw in WIKILINK_RE.findall(body):
+        # 先抹闭合 HTML 注释（与 check 同口径）：注释里的 `[[…]]` 不该造出幽灵边/幽灵断链。
+        # lint.broken_link 与 heal 的 missing_entity 都源自本图，故一处修，三处同时不再误报。
+        for raw in WIKILINK_RE.findall(strip_html_comments(body)):
             target = link_stem(raw)
             if not target:
                 continue

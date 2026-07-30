@@ -275,3 +275,37 @@ def test_order_findings_preserves_multiset():
     assert Counter(out) == Counter(inp)  # 多重集相等（Finding 是 frozen dataclass、可哈希）
     assert len(out) == len(inp)
 
+
+
+# ---------- HTML 注释剥离（各链接扫描器共用的口径） ----------
+
+
+def test_strip_html_comments_preserves_line_count():
+    """行数必须逐位守恒——`reindex --prune` 按行号对齐原行与判定行，错位即错删。"""
+    from guanlan.pages import strip_html_comments
+
+    for text in [
+        "a\n<!-- 注释 -->\nb\n",
+        "a\n<!-- 跨\n三\n行 -->\nb\n",
+        "a\r\n<!-- 跨\r\n行 -->\r\nb\r\n",
+        "<!-- 含\x0c罕见分隔符 -->\nb\n",
+        "无注释\n",
+    ]:
+        assert len(strip_html_comments(text).splitlines()) == len(text.splitlines()), text
+
+
+def test_strip_html_comments_is_non_greedy():
+    """`<!--a--> 真内容 <!--b-->` 只吃两段注释；中间的真链接必须活下来。"""
+    from guanlan.pages import strip_html_comments
+
+    out = strip_html_comments("<!-- 甲 --> 见 [[真页]] <!-- 乙 -->")
+    assert "[[真页]]" in out
+    assert "甲" not in out and "乙" not in out
+
+
+def test_strip_html_comments_leaves_unterminated_open():
+    """未闭合 `<!--` 原样保留：吃到文末会把后文真链接静默吞掉，门禁宁多报不少报。"""
+    from guanlan.pages import strip_html_comments
+
+    text = "<!-- 忘了闭合\n后面还有 [[真页]]\n"
+    assert strip_html_comments(text) == text

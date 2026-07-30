@@ -373,3 +373,20 @@ def test_partial_interrupt_then_rerun_converges(tmp_path, monkeypatch):
     assert rc2 == EXIT_OK
     assert not (root / "wiki" / "sources" / "foo.md").exists()  # 摘要页终被移走
     assert _sources_of(multi) == ["bar"]  # 幂等：slug 摘除不重复/不回退
+
+
+def test_index_comment_mentioning_slug_is_not_pruned(tmp_path):
+    """撤回只删该源的**登记行**；注释里提到同一路径的行不动（注释不是收录项）。"""
+    root = _kb(tmp_path)
+    _raw(root, "foo")
+    _source_page(root, "foo")
+    comment = "<!-- 历史：[Foo](sources/foo.md) 曾收录于此 -->"
+    (root / "wiki" / "index.md").write_text(
+        f"# 索引\n\n## Sources\n\n- [Foo](sources/foo.md) — 摘要\n{comment}\n",
+        encoding="utf-8",
+    )
+
+    assert remove_entrypoint(root, src="foo", yes=True, json_output=False) == EXIT_OK
+    idx = (root / "wiki" / "index.md").read_text(encoding="utf-8")
+    assert "- [Foo](sources/foo.md) — 摘要" not in idx  # 真登记行删掉
+    assert comment in idx  # 注释行留住

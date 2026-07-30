@@ -339,3 +339,30 @@ def test_compute_backlinks_alias_link_counts_to_owner(tmp_path: Path):
     g = build_graph(wiki)
     bl = compute_backlinks(g)
     assert bl["wiki/entities/LLM.md"] == 1  # 别名链归到拥有页
+
+
+def test_commented_out_wikilink_makes_no_edge(tmp_path: Path):
+    """注释里的 `[[…]]` 不造边：既不做实边（幽灵关联），也不做 broken 边（幽灵断链）。
+
+    lint.broken_link 与 heal 的 missing_entity 都由本图派生，故此处一断，三处同时不误报。
+    """
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/A.md", body="<!-- 注掉：[[B]]、[[没有这一页]] -->\n\n正文无链接。")
+    _page(wiki, "concepts/B.md", body="正文")
+
+    g = build_graph(wiki)
+    assert g.edges == []
+    assert g.broken == []
+
+
+def test_wikilink_outside_comment_still_makes_edge(tmp_path: Path):
+    """同页混排：注释外的链接照常成边（不是把整页跳过了）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/A.md", body="<!-- 注掉 [[B]] -->\n\n正文链到 [[C]]。")
+    _page(wiki, "concepts/B.md", body="正文")
+    _page(wiki, "concepts/C.md", body="正文")
+
+    g = build_graph(wiki)
+    assert [(e.source, e.target) for e in g.edges] == [("a", "c")]

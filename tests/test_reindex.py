@@ -209,3 +209,37 @@ def test_json_contract(tmp_path: Path, capsys):
         "section": "Entities",
         "line": "- [DeFi](entities/DeFi.md) — （别名：defi）",
     }
+
+
+# ---------- prune 与 HTML 注释 ----------
+
+
+def test_prune_keeps_template_hint_comments(tmp_path: Path):
+    """`--prune` 不得删掉模板里带占位链接的提示注释——那是给 Agent 看的追加格式说明。
+
+    init 模板的四行提示形如 `<!-- ingest 自动追加：- [<名称>](entities/<Name>.md) — … -->`。
+    这些占位路径当然"没有对应文件"，一度被整行当悬空剪掉。
+    """
+    hint = "<!-- ingest 自动追加：- [<名称>](entities/<Name>.md) — <一句话> -->"
+    index = INDEX_TEMPLATE.replace(
+        "## Entities\n\n<!-- ingest 自动追加 -->",
+        f"## Entities\n\n{hint}\n- [死页](entities/Dead.md) — 悬空",
+    )
+    root = _kb(tmp_path, index=index)
+
+    reindex_entrypoint(root, prune=True, dry_run=False, json_output=False)
+    idx = _index(tmp_path)
+    assert hint in idx  # 注释行留住
+    assert "entities/Dead.md" not in idx  # 真悬空行照删
+
+
+def test_prune_keeps_multiline_commented_block(tmp_path: Path):
+    """跨行注释里的登记行同样不删——单行注释在 index_md_links 里就抹了，跨行只有按全文对齐才认得出。"""
+    block = "<!--\n- [注掉的页](entities/Commented.md) — 暂时收起\n-->"
+    index = INDEX_TEMPLATE.replace(
+        "## Entities\n\n<!-- ingest 自动追加 -->", f"## Entities\n\n{block}"
+    )
+    root = _kb(tmp_path, index=index)
+
+    reindex_entrypoint(root, prune=True, dry_run=False, json_output=False)
+    assert "- [注掉的页](entities/Commented.md) — 暂时收起" in _index(tmp_path)
