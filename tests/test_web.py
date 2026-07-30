@@ -7,6 +7,7 @@
 import asyncio
 import base64
 import json
+import os
 import re
 import socket
 import sys
@@ -2212,6 +2213,36 @@ def _chat_with(client, message, attachments):
                 elif event == "error":
                     error = data
     return tokens, done, error
+
+
+def test_chat_scrubs_poisoned_api_key_before_build(kb, monkeypatch) -> None:
+    """进程内嵌入路径：`build_from_environment` 被调用时，毒空 `*_API_KEY` **已从 os.environ 摘除**
+    （gbrain v0.42.58 反向评审 §2）。
+
+    Claude Code 给子进程注入 `ANTHROPIC_API_KEY=''`，而 agentao 的 `safe_load_dotenv` 用 `setdefault`
+    ——空串不摘掉，`.env` 里的真 key 就永远 setdefault 不进来，Web 问答报「无 key」。断言时机而非仅结果：
+    摘除必须**早于** `build_from_environment`（它在调用期才 load dotenv）。
+    """
+    import guanlan.web.chat as chat_mod
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-real")
+    monkeypatch.setattr(chat_mod, "ensure_skill_available", lambda _kb: None)
+    seen: dict = {}
+
+    def fake_bfe(**kwargs):
+        seen["anthropic"] = os.environ.get("ANTHROPIC_API_KEY", "<已摘除>")
+        seen["deepseek"] = os.environ.get("DEEPSEEK_API_KEY")
+        return _FakeAgent(kwargs)
+
+    monkeypatch.setattr(chat_mod, "build_from_environment", fake_bfe)
+
+    with TestClient(create_app(kb)) as c:
+        _tokens, done, error = _chat(c, "问题")
+
+    assert error is None and done is not None
+    assert seen["anthropic"] == "<已摘除>"  # 毒值在建 agent 之前就没了
+    assert seen["deepseek"] == "sk-real"  # 真值不受影响
 
 
 def test_chat_emits_heartbeat_during_silence(kb, monkeypatch) -> None:

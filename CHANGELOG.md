@@ -90,6 +90,25 @@
 
 ### 修复
 
+- **在 Claude Code 会话里跑 `guanlan` 时「`.env` 有真 key 却报无 key」（源自 gbrain v0.42.58 反向评审 §2，
+  探针 gbrain #1249，见 [`docs/backlog/notes/gbrain-v0.42.58-反向评审.md`](docs/backlog/notes/gbrain-v0.42.58-反向评审.md)）**
+  —— Claude Code 会给子进程注入 `ANTHROPIC_API_KEY=''` 以掐断子进程的 LLM 调用；而 agentao 的
+  `safe_load_dotenv` 用 `os.environ.setdefault`（no-override），**空串也算「已设置」**，于是 `.env` 里的真 key
+  永远 setdefault 不进来，`os.getenv` 恒返空串。触发面：**provider = Anthropic 且从 Claude Code 会话里跑
+  `guanlan ingest/query/web`**（OpenAI provider 不受影响——Claude Code 不注入 `OPENAI_API_KEY=''`）。
+  现在两条 LLM 路径在交给 agentao **之前**都剔除毒空值：CLI 子进程路径 `runtime._subprocess_runner` 显式传
+  `env=scrubbed_environ()`（不再裸继承父环境）；Web 进程内嵌入路径在 `chat.build_from_environment` 前调
+  `drop_poisoned_api_keys()` 就地摘除（**时机关键**——`build_from_environment` 在调用期才 `safe_load_dotenv`）。
+  **只删空/纯空白的 `*_API_KEY`，绝不注入或读取任何真 key**——守「脚本零 LLM、wrapper 不持 API key」不变量，
+  与本接缝已有的 `stdin=DEVNULL` 同类（喂给子进程前的环境清洗）。**已实测**：摘掉毒值后 agentao 自己的
+  dotenv 加载即恢复正常（`safe_load_dotenv` → 真 key，`discover_llm_kwargs` → 真 key）。测试见
+  `tests/test_runtime.py`（只删空值不删真值 / 子进程 env 实际内容 / 就地摘除幂等 / API 只回变量名不泄值）与
+  `tests/test_web.py`（断言摘除**早于** `build_from_environment`）。
+  > 注：根因在 agentao，已另提 [agentao#157](https://github.com/jin-bo/agentao/pull/157) 修 `safe_load_dotenv`；
+  > 但观澜这层清洗**不依赖那个修复**——它对任何 agentao 版本都生效，故不锁 agentao 下限。
+  > 另更正 backlog note §2 的处方：只改 agentao `discover_llm_kwargs` 跳过空值**不足以**修复（那只是把
+  > `api_key=''` 变成缺省，真 key 仍因掩蔽而永不加载），必须在加载器或调用方摘掉毒值。
+
 - **`wiki/` 与 `.trash/` 的确定性写全部走原子覆盖，消除半写坏页（源自 OpenKB 反向评审 §2，见
   [`docs/backlog/notes/openkb-2026-07-反向评审.md`](docs/backlog/notes/openkb-2026-07-反向评审.md)）** ——
   此前 `wiki/` 的零 LLM 写用裸 `Path.write_text`/`write_bytes`：进程中断 / 磁盘满卡在写一半，会把
