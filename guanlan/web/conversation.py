@@ -25,6 +25,7 @@ from agentao.permissions import PermissionMode
 from agentao.tools.goal import UpdateGoalTool
 
 from ..gate import REPAIR_PROMPT, _render_violations
+from ..runtime import drop_poisoned_api_keys
 from ..search import CorpusCache
 from ..skill import SKILL_NAME
 from .chat_support import (
@@ -241,6 +242,10 @@ class Conversation:
                 make_guanlan_search_tool(search_cache, wiki=kb / "wiki")
             ]
 
+        # 进程内嵌入路径没有子进程边界可换 env，故就地摘掉毒空 `*_API_KEY`（gbrain 反向评审 §2）：
+        # `build_from_environment` 在**调用期**才 `safe_load_dotenv()`，先摘空串，`.env` 里的真 key
+        # 才 setdefault 得进来。只删空值、绝不读写真 key（守「wrapper 不持 API key」）。
+        drop_poisoned_api_keys()
         self.agent = chat.build_from_environment(**opts)
         # 姿态两点同步置位（缺第二步 = 没真正切换，照搬 cli/run.py）：开局用构造姿态。
         self._apply_mode(mode)

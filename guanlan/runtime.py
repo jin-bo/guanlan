@@ -16,6 +16,7 @@ stdout 是 `RunResult` JSON 信封；字段名是 `error.type`（非 `error.kind
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -118,6 +119,55 @@ def _progress_heartbeat(working_directory: Path):
             print(file=sys.stderr, flush=True)
 
 
+# ───────── 空 API key 撞空清洗（源自 gbrain v0.42.58 反向评审 §2，探针 gbrain #1249）─────────
+
+_POISON_SUFFIX = "_API_KEY"
+
+
+def _is_poisoned_key(name: str, value: str) -> bool:
+    """`*_API_KEY` 且值为空 / 纯空白 → 毒值。空 key 永不承载语义，留着只会盖住真值。"""
+    return name.endswith(_POISON_SUFFIX) and not value.strip()
+
+
+def poisoned_api_key_names(env: dict[str, str] | None = None) -> list[str]:
+    """列出环境里的毒空 `*_API_KEY` 变量名（不返回任何值——守「wrapper 不持 API key」）。"""
+    items = os.environ if env is None else env
+    return sorted(k for k, v in items.items() if _is_poisoned_key(k, v))
+
+
+def scrubbed_environ() -> dict[str, str]:
+    """`os.environ` 的副本，剔除毒空 `*_API_KEY`——喂给 `agentao run` 子进程用。
+
+    **为什么需要**：Claude Code 会给子进程注入 `ANTHROPIC_API_KEY=''` 以掐断子进程的 LLM 调用。
+    agentao 侧两处叠加把这个空串变成硬失败：① `embedding/factory.py` 收 key 只判 `is not None`
+    （空串照收进 `api_key`，与它自己 docstring 声称的「空/纯空白视作未设」相矛盾）；②
+    `_env.py:safe_load_dotenv` 用 `os.environ.setdefault`（no-override），故 `.env` 里的**真** key
+    盖不进已被注入空串的变量。于是「provider=Anthropic + 从 Claude Code 会话里跑 guanlan」时，
+    `.env` 明明有真 key 却报无 key/空 key（gbrain #1249 同款，本仓 issue 面已实测成立）。
+
+    剔掉毒空值后，agentao 自己的 `safe_load_dotenv` 就能把 `.env` 里的真 key 正常 `setdefault` 进去
+    ——**修复靠的是让 agentao 恢复正常发现，不是我们去读 key**。
+
+    **硬约束**：只删空串、**绝不注入或读取任何真 key**（守「脚本零 LLM、wrapper 不持 API key」不变量
+    ——删一个毒空值 ≠ 持钥）。与本接缝已有的 `stdin=DEVNULL` 同类：都是「喂给子进程前的环境清洗」。
+    """
+    return {k: v for k, v in os.environ.items() if not _is_poisoned_key(k, v)}
+
+
+def drop_poisoned_api_keys() -> list[str]:
+    """就地从 `os.environ` 摘掉毒空 `*_API_KEY`，返回被摘的变量名（供日志/测试）。
+
+    进程内嵌入路径（Web 聊天的 `chat.build_from_environment`）用这支：它直接吃我们自己的
+    `os.environ`，没有子进程边界可以换 env。**摘除时机必须早于** `build_from_environment`
+    ——后者在**调用期**才 `safe_load_dotenv()`，故先摘掉空串，真 key 才 setdefault 得进来。
+    幂等；只删空值故无需恢复（毒值本身无意义）。理由与边界见 `scrubbed_environ`。
+    """
+    dropped = poisoned_api_key_names()
+    for name in dropped:
+        os.environ.pop(name, None)
+    return dropped
+
+
 def _subprocess_runner(
     prompt: str,
     *,
@@ -165,6 +215,8 @@ def _subprocess_runner(
                 # 我们总是显式传 --prompt；切断继承的 stdin，否则父进程被管道/重定向喂 stdin 时，
                 # agentao 会把管道 stdin 当成 run spec，与 --prompt 冲突而拒绝执行（破坏自动化场景）。
                 stdin=subprocess.DEVNULL,
+                # 显式传 env（不再裸继承）：只为剔除毒空 `*_API_KEY`，其余逐项照传（见 scrubbed_environ）。
+                env=scrubbed_environ(),
             )
     except OSError as exc:
         # agentao 不在 PATH（或无法启动子进程）：归一为运行时错误，遵守退出码契约，
