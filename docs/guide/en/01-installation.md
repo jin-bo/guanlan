@@ -40,7 +40,9 @@ Pulls in `fastapi` / `uvicorn` / `markdown` / `python-multipart` / `anyio`. Enab
 pip install 'guanlan-wiki[mcp]'
 ```
 
-Pulls in the official `mcp` SDK (`mcp>=1.27,<2`) and `anyio`. Enables `guanlan mcp` — see [MCP host](06-mcp-host.md).
+Pulls in the official `mcp` SDK (`mcp>=2,<3`) and `anyio`. Enables `guanlan mcp` — see [MCP host](06-mcp-host.md).
+
+> SDK **1.x is no longer supported** (P4.18 cut over to v2 / protocol `2026-07-28`). If your environment still pins 1.x, `guanlan mcp` says so explicitly. MCP clients pinned to older revisions are unaffected — a v2 server still serves the handshake-era revisions.
 
 > Both extras **degrade gracefully**: without the dependency, `guanlan web` / `guanlan mcp` print a clear `pip install 'guanlan-wiki[...]'` hint instead of crashing.
 

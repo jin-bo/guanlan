@@ -162,14 +162,22 @@ def _cmd_web(args: argparse.Namespace) -> int:
 def _cmd_mcp(args: argparse.Namespace) -> int:
     # mcp 是可选叠加层：缺 `guanlan-wiki[mcp]`（mcp SDK 导入失败）时优雅降级、引导安装，
     # 不让 CLI 抛 traceback（决策P4.10-2，镜像 web）。导入收在函数内，核心命令不背 import 成本。
+    # 守卫只探 **SDK 本身**（`mcp.server.mcpserver` 是 v2 才有的模块：缺 mcp → ImportError，装了 1.x →
+    # ModuleNotFoundError，两种都是「装错依赖」）。刻意不把 `from .mcp import serve_mcp` 一起裹进来：
+    # 那样 guanlan 自己模块链上的任何 ImportError（重构改名、半装的间接依赖）都会被冒充成「缺 extra」，
+    # 用户重装 + 升级 mcp 后仍失败、且真正的 ImportError 从头到尾不露面（决策P4.18-9 要的是诚实诊断）。
     try:
-        from .mcp import serve_mcp
+        import mcp.server.mcpserver  # noqa: F401
     except ImportError:
+        # 版本口径必须明示（决策P4.18-9）：只说"请装 extra"会让装着 1.x 的人重装一遍仍失败、无从自救
+        # ——pip 认为 extra 已满足。
         print(
-            "`guanlan mcp` 需要可选依赖：请先 `pip install 'guanlan-wiki[mcp]'`。",
+            "`guanlan mcp` 需要可选依赖：请先 `pip install 'guanlan-wiki[mcp]'`"
+            "（需要官方 SDK `mcp>=2`；v1.x 已不支持，装了旧版请一并升级：`pip install -U 'mcp>=2,<3'`）。",
             file=sys.stderr,
         )
         return EXIT_USAGE
+    from .mcp import serve_mcp
     # 注：本命令把 guanlan 作 MCP **服务端**（把 wiki 只读暴露给外部 Agent），
     # 与「Agentao 作 MCP 客户端的 Tool 注入」方向相反（决策P4.10-6）。
     try:

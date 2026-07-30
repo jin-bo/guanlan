@@ -1,6 +1,11 @@
 """`serve_mcp(...)`：起只读 MCP 服务（P4.10 stdio + P4.17 Streamable HTTP，见 docs/P4.10-MCP宿主.md
 §1/§2、docs/P4.17-MCP远程传输.md）。
 
+**底座**：官方 `mcp` SDK **v2**（`MCPServer`，P4.18 从 v1 的 `FastMCP` 迁来，见 docs/P4.18-MCP2.0迁移.md）
+——命令契约/工具集/只读契约/退出码全部逐字保留（决策P4.18-1），改的只是 import、`serverInfo.version`
+（决策P4.18-12）与 http 姿态的传参位置（决策P4.18-4）。SDK v2 同时服务协议 `2026-07-28` 与握手时代旧
+修订（客户端首帧决定本连接 era），故已注册的 stdio/http 客户端零改（决策P4.18-7）。
+
 P4「可选宿主层」的**第二种传输**（stdio ⇄ Web 的 HTTP+SSE）：把同一套只读核心暴露给任意 MCP
 客户端（Claude Code / Codex / Cursor）。**方向澄清（决策P4.10-6）**：guanlan 在此作 MCP **服务端**，
 把 wiki 只读暴露给外部 Agent；与 DESIGN §1.22「Tool 注入」（Agentao 作 MCP **客户端**消费外部工具）
@@ -19,7 +24,13 @@ TLS 外置。完整 OAuth / 多租户 source 级 scoping 显式推 E2（本文�
   **不注册任何写工具**。`ask` 走 CLI query 只读子进程路径（与 `guanlan query` 字节同源）。
 - **stdio 通道洁净**（决策P4.10-13，最高优先不变量）：stdout 即 JSON-RPC 传输帧——server 路径
   **绝不向 stdout 写非协议字节**（一个杂散 print 即破帧）。故只调**核函数（返对象）**、绝不调
-  `*_entrypoint`/`format_report` 等打印壳；FastMCP 日志默认走 stderr。
+  `*_entrypoint`/`format_report` 等打印壳；SDK 日志默认走 stderr。P4.18 起在**真 stdio 子进程**上逐帧
+  实证（`tests/test_mcp.py::test_stdio_subprocess_emits_only_jsonrpc_frames`）。
+  实证的**边界**（v2 实测，别当成"全程由我们的测试保护"）：v2 的 `stdio_server()` 在服务期把 **fd 1 改指
+  stderr**，故服务期任何 print / `os.write(1, …)`（含 OTel 若某天真吐字节——它默认只依赖
+  `opentelemetry-api`、无 SDK/无 exporter 故为 no-op）都进不了帧，这层是 SDK 的**结构性保证**；我们的
+  用例真正守的是 SDK 接管 fd 1 **之前**那段窗口（`require_kb_root` / P5.4 预热 / `build_mcp` / argparse），
+  也正是我们自己的代码可能泄漏的地方。两层叠起来才是完整的洁净保证。
 - **handler 异步姿态**（决策P4.10-15）：MCP 是异步 JSON-RPC、客户端可并发多 in-flight，故每个工具
   注册为 `async def`、阻塞核逻辑经 `anyio.to_thread.run_sync` 卸离事件循环（一次慢 `ask` 不饿死并发
   廉价 `search`）。并发 `search` 对共享 `CorpusCache` 的临界区靠 cache 自持锁兜底。
@@ -35,9 +46,10 @@ import os
 from pathlib import Path
 
 import anyio
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
+from .. import __version__
 from ..errors import EXIT_OK, GuanlanError
 from ..paths import require_kb_root
 from ..runtime import AgentRunner
@@ -100,8 +112,8 @@ def build_mcp(
     runner: AgentRunner | None = None,
     search_cache: CorpusCache | None = None,
     allow_ask: bool = True,
-) -> FastMCP:
-    """构造注册了只读工具的 FastMCP server（不跑事件循环，供测试直接 `call_tool`）。
+) -> MCPServer:
+    """构造注册了只读工具的 MCPServer（不跑事件循环，供测试直接 `call_tool`）。
 
     `search_cache` 缺省新建一个长驻 `CorpusCache`（决策P4.10-11）——`search` 工具的多次调用复用它、
     只重建变更页。`model` 仅 `ask` 用（覆盖其 Agentao 模型）；`runner` 注入点供测试打桩、不打真实 LLM。
@@ -118,12 +130,19 @@ def build_mcp(
     cache = search_cache if search_cache is not None else CorpusCache()
     wiki = root / "wiki"
     startup_model = model  # 闭包捕获启动 --model：ask 工具的 `model` 入参会同名遮蔽，须先存别名。
-    # log_level=WARNING：压掉 FastMCP 每请求一行的 INFO（"Processing request…"）。这些走 **stderr**
+    # log_level=WARNING：压掉 MCPServer 每请求一行的 INFO（"Processing request…"）。这些走 **stderr**
     # （非协议通道，不破 stdio 帧），但对直接拉起本 server 的客户端是噪声；降到 WARNING 更像个好公民。
-    mcp = FastMCP("guanlan", instructions=_INSTRUCTIONS, log_level="WARNING")
+    # 注：这是 **Python logging 级别**，不是协议 `logging` 能力（后者被 SEP-2577 废弃、我们本就没用）。
+    # version=__version__（决策P4.18-12）：SDK v1 在 `initialize.serverInfo.version` 回的是**所装 mcp SDK
+    # 的版本**（实测 1.29 回 '1.29.0'）、v2 默认回空串——两者都不是 guanlan 的版本，故显式传自己的，
+    # 单一来源 `guanlan/__init__.py`。这是本半阶段唯一主动引入的 wire 变化。
+    mcp = MCPServer(
+        "guanlan", version=__version__, instructions=_INSTRUCTIONS, log_level="WARNING"
+    )
 
-    # 七个工具一律 async：阻塞核逻辑卸 to_thread（决策P4.10-15）；返回类型注解（TypedDict）驱动
-    # FastMCP 自动生成 output schema → structuredContent + JSON 文本块兜底（决策P4.10-10）。
+    # 七个工具一律 async：阻塞核逻辑卸 to_thread（决策P4.10-15/决策P4.18-5——v2 会把同步 handler 自动卸
+    # worker thread，但我们保留显式卸载：零行为风险，且 ask 的慢子进程仍须自己控）；返回类型注解
+    # （TypedDict）驱动 SDK 自动生成 output schema → structuredContent + JSON 文本块兜底（决策P4.10-10）。
 
     @mcp.tool(name="search", description=_SEARCH_DESC)
     async def search(query: str, limit: int = 10) -> SearchEnvelope:
@@ -289,7 +308,7 @@ class _BearerTokenMiddleware:
 
 
 def _build_http_app(
-    mcp: FastMCP,
+    mcp: MCPServer,
     *,
     host: str,
     allowed_hosts: list[str] | None,
@@ -297,20 +316,29 @@ def _build_http_app(
 ):
     """配置 http 姿态（无状态 + DNS-rebinding 白名单）并返回（按需裹 token 闸的）ASGI app。
 
-    `streamable_http_app()` 在**首次调用时**读 `settings.stateless_http`/`transport_security` 建 session
-    manager，故这些必须先赋值。注：它**不读** `settings.host`/`settings.port`（那些由 `_serve_http` 直接
-    传给 uvicorn），故此处不设，免留无效旋钮误导。token 非空则外裹一层 `_BearerTokenMiddleware`（决策P4.17-2）。
+    姿态经 `streamable_http_app()` 的 **kwargs** 传入（决策P4.18-4）：SDK v2 把传输参数从构造期/`settings`
+    移到了 app 工厂与 `run()`——`stateless_http`/`transport_security`/`host` 已**不在** `Settings` 里
+    （v1 那条"后置赋值 `mcp.settings.*`"的路子在 v2 上直接 `ValueError: "Settings" object has no field`）。
+    `host=` 只影响 SDK 的"环回且未给 transport_security 时自动补默认白名单"兜底分支；我们**总是**显式传
+    `transport_security`，故该兜底不生效，传它只为不与 SDK 语义打架。端口不在此处——由 `_serve_http`
+    直接给 uvicorn。token 非空则外裹一层 `_BearerTokenMiddleware`（决策P4.17-2）。
+
+    返回的 Starlette app **自带** `lifespan=session_manager.run()`（v2 与 v1 同）——故 `_serve_http` 直接
+    `uvicorn.run(app)` 即可；迁移指南里"宿主须自己进 `session_manager.run()`"只针对把它 mount 进别的
+    ASGI 宿主，我们不 mount。
     """
-    mcp.settings.stateless_http = True  # 决策P4.17-7：无 Mcp-Session-Id、无事件重放
-    mcp.settings.transport_security = _http_security(host, allowed_hosts)
-    app = mcp.streamable_http_app()
+    app = mcp.streamable_http_app(
+        stateless_http=True,  # 决策P4.17-7：无 Mcp-Session-Id、无事件重放
+        transport_security=_http_security(host, allowed_hosts),  # 决策P4.17-5
+        host=host,
+    )
     if token is not None:
         app = _BearerTokenMiddleware(app, token)
     return app
 
 
 def _serve_http(
-    mcp: FastMCP,
+    mcp: MCPServer,
     *,
     host: str,
     port: int,
@@ -320,7 +348,7 @@ def _serve_http(
     import uvicorn
 
     app = _build_http_app(mcp, host=host, allowed_hosts=allowed_hosts, token=token)
-    # log_level=warning：与 stdio 分支 build_mcp 的 FastMCP log_level 同调，压掉 uvicorn 每请求 INFO。
+    # log_level=warning：与 stdio 分支 build_mcp 的 MCPServer log_level 同调，压掉 uvicorn 每请求 INFO。
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 

@@ -7,8 +7,9 @@ P4「可选宿主层」的第二种传输：把只读核心搬进任意 MCP 客�
 > extra 时 `from guanlan.mcp import serve_mcp` 抛 `ImportError`，由 `guanlan/cli.py` 捕获并优雅引导安装
 > （镜像 web 决策P4-2 / 决策P4.10-2）。
 
-注：本子包名 `guanlan.mcp` 与官方 SDK 顶层包 `mcp` 不冲突——子模块里的 `from mcp.server.fastmcp ...`
-是**绝对导入**，命中顶层 SDK；内部互引用一律相对导入（`.tools` / `..errors`）。
+注：本子包名 `guanlan.mcp` 与官方 SDK 顶层包 `mcp` 不冲突——子模块里的 `from mcp.server.mcpserver ...`
+是**绝对导入**，命中顶层 SDK；内部互引用一律相对导入（`.tools` / `..errors`）。底座为 SDK **v2**
+（`mcp>=2,<3`；P4.18 从 v1 `mcp.server.fastmcp` 迁来，见 docs/P4.18-MCP2.0迁移.md）。
 """
 
 from __future__ import annotations
