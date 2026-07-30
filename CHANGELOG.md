@@ -3,7 +3,13 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
-## [未发布]
+## [0.1.18] - 2026-07-30
+
+一次**底座迁移 + 反向评审补强**的发布：① **MCP 宿主迁到官方 SDK v2 / 协议 `2026-07-28`**（P4.18，
+等价迁移——命令契约与工具集逐字保留，代价是 `[mcp]` extra 的安装面破坏性变更）；② 三条源自兄弟项目
+反向评审的确定性补强/修复——ingest 撞名守卫（llm_wiki）、`wiki/`·`.trash/` 写走原子覆盖（OpenKB）、
+交给 agentao 前剔除毒空 `*_API_KEY`（gbrain）；③ 检索收敛提示与一批文档校正。不新增退出码、不动门禁、
+`raw/` 只读不破。
 
 ### 新增
 
@@ -87,6 +93,13 @@
     SDK 接管 fd 1 **之前**那段窗口（`require_kb_root`/P5.4 预热/`build_mcp`/argparse），也正是我们自己的代码
     可能泄漏处。原先"在真传输上实证 OTel 不污染 stdout"的说法说过头了，已按实测改写（决策P4.18-6）。
   - `tests/test_mcp.py` 63 例、全套 1141 通过 / 1 skip。
+
+### 文档
+
+- `CLAUDE.md` 优化：status 段瘦身、过时事实校正、命令清单补全。
+- 发版前收口：`docs/发布到-PyPI.md` 改按「版本单一源在 `guanlan/__init__.py`」重写实操步骤（并补两-PR
+  仪式、CHANGELOG 段头格式、tag 落点、发布后验证的缓存坑）；归档 gbrain / llm_wiki / swarmvault 三份
+  反向评审笔记；校正 `README.en.md` 与 `DESIGN.md` §7 中与 P4.18 不一致的口径。
 
 ### 修复
 

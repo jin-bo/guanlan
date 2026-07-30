@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 观澜 (GuānLán) is an implementation of the [Karpathy LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): an Agent incrementally builds and maintains a structured, cross-linked markdown knowledge wiki instead of doing fresh RAG retrieval on every query. The full design (in Chinese) is the authoritative spec — read [`docs/DESIGN.md`](docs/DESIGN.md) before any non-trivial change.
 
-**Current status:** released through v0.1.17; the roadmap is fully implemented — P2 minimal closed loop, P3 health/graph family, P4 optional host layer (Web + MCP, through P4.17's Streamable HTTP transport and P4.18's move to MCP SDK v2 / protocol `2026-07-28`), P5 retrieval + multi-format ingest, and every half-phase P2.1–P5.4. No roadmap spec remains unimplemented; per-phase flags, behavior, and red lines live in the `docs/P*.md` file for that phase, not here.
+**Current status:** released through v0.1.18; the roadmap is fully implemented — P2 minimal closed loop, P3 health/graph family, P4 optional host layer (Web + MCP, through P4.17's Streamable HTTP transport and P4.18's move to MCP SDK v2 / protocol `2026-07-28`), P5 retrieval + multi-format ingest, and every half-phase P2.1–P5.4. No roadmap spec remains unimplemented; per-phase flags, behavior, and red lines live in the `docs/P*.md` file for that phase, not here.
 
 CLAUDE.md does **not** restate phase history or per-decision detail — authoritative sources:
 - Per-version change detail → [`CHANGELOG.md`](CHANGELOG.md)
