@@ -243,3 +243,23 @@ def test_prune_keeps_multiline_commented_block(tmp_path: Path):
 
     reindex_entrypoint(root, prune=True, dry_run=False, json_output=False)
     assert "- [注掉的页](entities/Commented.md) — 暂时收起" in _index(tmp_path)
+
+
+def test_prune_on_cr_index_normalized_by_universal_newlines(tmp_path: Path):
+    """老式裸 `\\r` 断行的 index：照常剪枝、不抛。
+
+    顺带钉住**边界的实际位置**：`Path.read_text` 的通用换行在读入时就把裸 `\\r` 归一成 `\\n`，
+    故 `_prune_dangling` 这条路径根本见不到 `\\r`。`strip_html_comments` 自身对裸 `\\r` 也保行数
+    （见 `tests/test_pages.py`），但那是纵深防御，不是这条路径的最后防线——别把两者混为一谈。
+    """
+    index = (
+        "# 索引\r\r## Entities\r\r"
+        "<!--\r- [注掉的页](entities/Commented.md)\r-->\r"
+        "- [死页](entities/Dead.md) — 悬空\r"
+    )
+    root = _kb(tmp_path, index=index)
+
+    reindex_entrypoint(root, prune=True, dry_run=False, json_output=False)  # 不得抛
+    idx = _index(tmp_path)
+    assert "entities/Commented.md" in idx  # 注释块留住
+    assert "entities/Dead.md" not in idx  # 真悬空行照删

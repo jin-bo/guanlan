@@ -328,6 +328,22 @@ def test_render_markdown_wikilink_resolves(client, kb) -> None:
     assert "wikilink broken" in html  # 不存在 → 标灰
 
 
+def test_render_markdown_wikilink_in_comment_is_not_linkified(client, kb) -> None:
+    """注释里的 `[[…]]` 不成链——与 check/graph/health 同口径（Codex 评审 #1：Web 曾与它们打架）。
+
+    注意 Web 端与扫描器的**失活方式不同**：扫描器把注释抹成空白，Web 保留注释原文按转义文本
+    显示（决策P4-4 关了原始 HTML 透传），只是拒绝这次匹配。视图不该让页面上凭空少一段字。
+    """
+    from guanlan.web.render import render_markdown
+
+    write_page(kb, "wiki/entities/Foo.md", type="entity", body="正文足够长的内容。")
+    html = render_markdown("真正文见 [[Foo]]。\n\n<!-- 草稿：以后写 [[Foo]] -->", kb / "wiki")
+
+    assert html.count('data-page="wiki/entities/Foo.md"') == 1  # 只有注释外那一处成链
+    assert "[[Foo]]" in html  # 注释内留作字面文本
+    assert "草稿：以后写" in html  # 注释原文没被吞掉
+
+
 def test_render_markdown_code_path_linkifies_source_citation(client, kb) -> None:
     """兜底：源出处被写成【路径+反引号】的行内 code，若精确解析到现有页 → 转 wikilink。"""
     from guanlan.web.render import render_markdown
