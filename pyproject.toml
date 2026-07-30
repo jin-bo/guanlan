@@ -99,3 +99,13 @@ packages = ["guanlan"]
 # 辅助 skill pdf-to-markdown（P4.6）：供可写会话 Agent 把上传的 PDF/DOCX/… 解析成 Markdown
 # 暂存物（再经人审晋级为 raw/ 源）。同样随包携带、由 skill.py 幂等装入全局供 Agent 发现。
 "skills/pdf-to-markdown" = "guanlan/_skill/pdf-to-markdown"
+
+# lint 规则集显式钉住，不随 ruff 版本浮动。
+# 背景：CI 用 `uvx ruff check`（不进 lock、每次取最新），本仓库此前一直吃 ruff 的**默认**规则集。
+# ruff 0.16.0 把默认 select 从 `E4/E7/E9/F` 扩到含 I/S/SIM/RUF/UP/PL/FURB… 的大集合，于是同一份
+# 未改动的代码在 CI 上突然报 170 处——main 也一样红，与任何具体 PR 无关。这里把仓库历史上一直在
+# 用的那套显式写下来：本地 `uvx ruff check` 与 CI 的结果不再随 ruff 升级漂移（与 ci.yml 把
+# actionlint 钉到镜像 digest 是同一取向）。
+# 是否采纳扩容后的规则集是另一个决定（170 处需逐条甄别，多为 RUF100/I001/RUF059），不在此顺带。
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
