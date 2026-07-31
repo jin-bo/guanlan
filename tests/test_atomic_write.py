@@ -9,8 +9,16 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
-from guanlan.rawio import atomic_write_bytes, atomic_write_text
+from guanlan.rawio import (
+    atomic_write_bytes,
+    atomic_write_text,
+    detect_eol,
+    dump_frontmatter,
+    read_text_verbatim,
+    split_eol_lines,
+)
 
 
 def _boom(*_args, **_kwargs):
@@ -151,8 +159,6 @@ def test_bytes_replace_failure_leaves_old_and_no_tmp(tmp_path: Path, monkeypatch
 def test_fmrepair_atomic_and_crlf_verbatim(tmp_path: Path, monkeypatch) -> None:
     """集成证明：`fmrepair.repair_page_frontmatter` 经 `atomic_write_bytes`——修好仍 CRLF 逐字，
     且 `os.replace` 崩则坏页保持原字节（不留半写）。"""
-    import yaml
-
     from guanlan.fmrepair import repair_page_frontmatter
     from guanlan.pages import split_frontmatter
 
@@ -192,3 +198,78 @@ def test_provenance_stamp_is_atomic(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("guanlan.rawio.os.replace", _boom)
     assert stamp_raw_digest(page, "sha256:deadbeef") is False  # 写崩被吞 → False
     assert page.read_text(encoding="utf-8") == original  # 页未被半写
+
+
+# ---------- 读侧对偶：read_text_verbatim / detect_eol / split_eol_lines / dump_frontmatter ----------
+
+
+def test_read_text_verbatim_does_not_translate_newlines(tmp_path: Path) -> None:
+    """逐字读：CRLF / 裸 CR 原样进内存。对照 `Path.read_text`——它把三种行尾一律抹成 `\\n`，
+    与逐字写一凑就是「CRLF 静默转 LF」的根因。"""
+    target = tmp_path / "mixed.md"
+    target.write_bytes(b"a\r\nb\rc\n")
+    assert read_text_verbatim(target) == "a\r\nb\rc\n"
+    assert target.read_text(encoding="utf-8") == "a\nb\nc\n"  # 对照：标准读归一
+
+
+def test_read_verbatim_write_roundtrip_is_byte_identical(tmp_path: Path) -> None:
+    """读→原样写回 = 逐字节不变：`reindex`/`remove`/`provenance`「只改该改的行」的地基。"""
+    target = tmp_path / "p.md"
+    original = "---\r\ntitle: x\r\n---\r\n\r\n正文\r\n"
+    target.write_bytes(original.encode("utf-8"))
+    atomic_write_text(target, read_text_verbatim(target))
+    assert target.read_bytes() == original.encode("utf-8")
+
+
+def test_read_text_verbatim_error_shape_matches_strict_read_text(tmp_path: Path) -> None:
+    """异常形状与 `read_text(encoding='utf-8')` 严格档一致（非 UTF-8 → UnicodeDecodeError、
+    文件不存在 → OSError），故调用方原有的 except 分支无需跟着改。"""
+    bad = tmp_path / "bad.md"
+    bad.write_bytes(b"\xff\xfe not utf-8")
+    with pytest.raises(UnicodeDecodeError):
+        read_text_verbatim(bad)
+    with pytest.raises(OSError):
+        read_text_verbatim(tmp_path / "缺.md")
+
+
+def test_detect_eol_takes_first_occurrence(tmp_path: Path) -> None:
+    """取**首个**行尾，而不是「含 CRLF 即判 CRLF」：否则 LF 文件里混进一个 CRLF，
+    整份会被重写成 CRLF——修 CRLF 丢失反而制造 LF 丢失。"""
+    assert detect_eol("a\r\nb\r\n") == "\r\n"
+    assert detect_eol("a\nb\n") == "\n"
+    assert detect_eol("a\rb\r") == "\r"
+    assert detect_eol("没有换行") == "\n"
+    assert detect_eol("a\nb\r\nc\n") == "\n"  # LF 为主、混进一个 CRLF → 仍判 LF
+
+
+def test_split_eol_lines_only_splits_real_terminators() -> None:
+    """只按 CRLF/CR/LF 切。`str.splitlines` 还会切 `\\v`/`\\f`/`\\x1c`/`\\u2028` 等——那些在
+    markdown 里是行内字符，切开再按统一 EOL 拼回去等于把它们静默换成换行。"""
+    assert split_eol_lines("a\r\nb\rc\nd") == ["a", "b", "c", "d"]
+    assert split_eol_lines("") == []
+    assert split_eol_lines("a\n") == ["a"]  # 末尾换行不产出幽灵空行
+    assert split_eol_lines("a\n\n") == ["a", ""]
+    for exotic in "\v\f\x1c\x1d\x1e\x85\u2028\u2029":
+        assert split_eol_lines(f"a{exotic}b") == [f"a{exotic}b"]
+        assert "\n".join(split_eol_lines(f"a{exotic}b")) == f"a{exotic}b"  # 拼回不变形
+
+
+def test_dump_frontmatter_default_matches_legacy_literal() -> None:
+    """默认 `eol='\\n'` 与被它替换掉的 `f\"---\\n{dumped}---\\n{body}\"` 逐字相同（零行为变更）。"""
+    meta = {"title": "含: 冒号", "sources": ["a", "b"]}
+    body = "\n正文一\n正文二\n"
+    dumped = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False)
+    assert dump_frontmatter(meta, body) == f"---\n{dumped}---\n{body}"
+
+
+def test_dump_frontmatter_crlf_translates_block_only() -> None:
+    """`eol='\\r\\n'`：块与两条 `---` 出 CRLF，`body` **逐字不动**（body 自带原行尾）。
+    重解析后值往返一致——YAML 把 `\\r\\n` 视作合法换行。"""
+    meta = {"title": "x", "sources": ["a"]}
+    body = "\r\n正文\r\n"
+    out = dump_frontmatter(meta, body, eol="\r\n")
+    assert out.startswith("---\r\n") and "---\r\n\r\n正文\r\n" in out
+    assert "\n" not in out.replace("\r\n", "")  # 全文无落单 LF
+    assert out.endswith(body)
+    block = out.split("---\r\n", 1)[1].rsplit("---\r\n", 1)[0]
+    assert yaml.safe_load(block) == meta  # CRLF 块仍可解析、值不变

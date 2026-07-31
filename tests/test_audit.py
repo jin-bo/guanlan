@@ -643,3 +643,22 @@ def test_audit_result_dict_fields(kb: Path):
     r = d["receipts"][0]
     assert set(r) == {"slug", "status", "members", "reviewed", "reason"}
     assert r["status"] == "refreshed"
+
+
+def test_stamp_keeps_crlf_source_page(kb: Path):
+    """**行尾保真**：CRLF 摘要页被 stamp 后仍是 CRLF（正文逐字不动、值仍可解析）。
+
+    `ingest`/`audit` 每次打指纹都会重写这一页；旧实现归一读 + 逐字写，等于顺手把整页改成 LF。
+    """
+    sp = kb / "wiki" / "sources" / "crlf.md"
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_bytes("---\ntitle: 源\ntype: source\n---\n\n正文一\n正文二\n".replace("\n", "\r\n").encode())
+    value = format_digest_value("raw/crlf.md", "e" * 64)
+
+    assert stamp_raw_digest(sp, value) is True
+
+    raw = sp.read_bytes()
+    assert raw.count(b"\n") == raw.count(b"\r\n")  # 无落单 LF
+    assert "\r\n正文一\r\n正文二\r\n".encode("utf-8") in raw  # 正文逐字未动
+    meta, _ = load_page(sp)
+    assert meta[RAW_DIGEST_KEY] == value  # CRLF 块仍可解析、值往返一致

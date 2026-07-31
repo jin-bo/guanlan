@@ -363,3 +363,65 @@ def test_strip_html_comments_leaves_unterminated_open():
 
     text = "<!-- 忘了闭合\n后面还有 [[真页]]\n"
     assert strip_html_comments(text) == text
+
+
+def test_strip_html_comments_recognizes_whole_line_comment_under_crlf_and_cr():
+    """CRLF / 裸 CR 文本里的整行注释同样要被认出来。
+
+    行锚定若用 `^`/`$`+MULTILINE（只认 `\\n`），CRLF 文本里 `-->` 与 `\\n` 之间隔着 `\\r`、`$`
+    匹配不上，整行注释**当场失效**——`reindex --prune` 会把 CRLF 库的模板提示行当悬空项删掉。
+    自 `read_text_verbatim` 上线后这些行尾会**真的**喂进本函数，不再有 `Path.read_text` 替它归一。
+    """
+    from guanlan.pages import strip_html_comments
+
+    for eol in ("\r\n", "\r", "\n"):
+        text = f"# 标题{eol}<!-- ingest 自动追加：- [<名称>](entities/<Name>.md) -->{eol}正文{eol}"
+        out = strip_html_comments(text)
+        assert "entities" not in out  # 注释被抹
+        assert len(out) == len(text)  # 等长
+        assert out.count(eol) == text.count(eol)  # 行分隔符逐字保留
+        assert out.startswith(f"# 标题{eol}") and out.endswith(f"正文{eol}")
+        # 跨行注释块同样识别
+        block = f"# 标题{eol}<!--{eol}- [藏页](entities/Hidden.md){eol}-->{eol}尾{eol}"
+        assert "entities" not in strip_html_comments(block)
+
+
+def test_strip_html_comments_never_swallows_real_links_under_crlf():
+    """**反向**（漏报守卫）：换成 CRLF 后，收窄规则不得反过来失效。
+
+    正例（"注释被忽略了"）测不出漏报——漏报是沉默的。故这里摆真实的断链引用与真实的登记行，
+    周围放会触发过滤的字面标记，断言它们**仍被扫到**。
+    """
+    from guanlan.pages import WIKILINK_RE, index_md_links, strip_html_comments
+
+    for eol in ("\r\n", "\r"):
+        # (a) 行内 code 里的字面标记跨段配对，不得吞掉中间的真引用
+        body = eol.join(["注释以 `<!--` 开头。", "", "本页引用了 [[压根不存在的页]]。", "", "以 `-->` 结尾。"])
+        assert WIKILINK_RE.findall(strip_html_comments(body)) == ["压根不存在的页"]
+        # (b) 未闭合 `<!--` 不与后一段真注释的 `-->` 配对，中间的真登记行仍算收录项
+        idx = eol.join([
+            "## Entities", "", "<!-- TODO 稍后整理", "- [Foo](entities/Foo.md) — 一句话", "",
+            "<!-- ingest 自动追加：- [<名称>](entities/<Name>.md) -->", "",
+        ])
+        assert "entities/Foo.md" in index_md_links(idx)
+        # (c) 行内注释仍不算注释（CRLF 下也别把行尾备注当整行注释）
+        inline = f"- [Bar](entities/Bar.md) <!-- 备注 -->{eol}"
+        assert "entities/Bar.md" in index_md_links(inline)
+
+
+def test_link_regexes_do_not_span_a_line_break():
+    """`[[…]]` 与 `[文字](路径)` 都不得跨行粘连——`\\n` 与 `\\r` 都要排除。
+
+    只排 `\\n` 的话，CRLF / 裸 CR 文本里 `\\r` 会被当普通字符，`[名](路径\\r更多)` 能匹配出一个
+    含 `\\r` 的假目标，index↔磁盘同步据此判定就会错。
+    """
+    from guanlan.pages import WIKILINK_RE, index_md_links
+
+    for eol in ("\r\n", "\r", "\n"):
+        assert WIKILINK_RE.findall(f"[[前{eol}后]]") == []
+        assert index_md_links(f"[文字](entities/A.md{eol}entities/B.md)") == set()
+        # 正常同行链接照常识别（别把守卫写成"什么都不认"）
+        assert index_md_links(f"- [A](entities/A.md){eol}- [B](entities/B.md)") == {
+            "entities/A.md",
+            "entities/B.md",
+        }
