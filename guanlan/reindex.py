@@ -28,7 +28,12 @@ from .pages import (
     strip_html_comments,
 )
 from .paths import require_kb_root
-from .rawio import atomic_write_text  # 原子覆盖写 index.md（避免半写），与 raw/ 写共用骨架
+from .rawio import (  # 读写成对逐字节：避免半写，且不静默改行尾
+    atomic_write_text,
+    detect_eol,
+    read_text_verbatim,
+    split_eol_lines,
+)
 
 __all__ = [
     "ReindexEntry",
@@ -109,10 +114,14 @@ def _section_for(path: Path, wiki: Path) -> str | None:
 
 
 def _split_lines(text: str) -> tuple[list[str], str, bool]:
-    """拆 index.md 为 (无换行行列表, 检测到的 EOL, 是否以换行结尾)，供最小扰动重组。"""
-    eol = "\r\n" if "\r\n" in text else "\n"
-    trailing = text.endswith(("\n", "\r"))
-    return text.splitlines(), eol, trailing
+    """拆 index.md 为 (无换行行列表, 检测到的 EOL, 是否以换行结尾)，供最小扰动重组。
+
+    切行与探 EOL 都走 `rawio` 归口：只认 CRLF/CR/LF 三种真行终止符（不像 `str.splitlines` 连
+    `\\v`/`\\f`/`\\u2028` 也切），EOL 取首个出现者。配合 `read_text_verbatim` 读盘，CRLF 的 index.md
+    过一遍 `reindex`/`remove` 后**仍是 CRLF**——旧实现读侧被 `Path.read_text` 归一，这里探到的永远是
+    `\\n`，等于每次重写都把整份文件的行尾静默改掉。
+    """
+    return split_eol_lines(text), detect_eol(text), text.endswith(("\n", "\r"))
 
 
 def _join_lines(lines: list[str], eol: str, trailing: bool) -> str:
@@ -229,7 +238,8 @@ def run_reindex(wiki: Path, *, prune: bool = False) -> tuple[ReindexResult, str 
     missing, dangling = index_sync_state(wiki, pages)
 
     index_path = wiki / "index.md"
-    text = index_path.read_text(encoding="utf-8") if index_path.is_file() else ""
+    # 逐字读（不做换行归一）：与 `atomic_write_text` 的逐字写成对，CRLF 库重写后行尾不变。
+    text = read_text_verbatim(index_path) if index_path.is_file() else ""
     lines, eol, trailing = _split_lines(text)
 
     # 1) 可选剪枝（先删悬空，再登记——登记行指向真实文件，不会被随后剪掉）。

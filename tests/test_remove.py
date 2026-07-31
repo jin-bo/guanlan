@@ -390,3 +390,29 @@ def test_index_comment_mentioning_slug_is_not_pruned(tmp_path):
     idx = (root / "wiki" / "index.md").read_text(encoding="utf-8")
     assert "- [Foo](sources/foo.md) — 摘要" not in idx  # 真登记行删掉
     assert comment in idx  # 注释行留住
+
+
+def test_crlf_index_and_page_keep_crlf_through_remove(tmp_path):
+    """**行尾保真**：CRLF 的 index.md 与 CRLF 的多源衍生页，撤回后仍是 CRLF。
+
+    `remove` 会重写两类文件——index.md（删登记行）与多源页（摘 `sources` 里的 slug）。旧实现两处
+    都是「`Path.read_text` 归一读 + `atomic_write_text` 逐字写」，净效果是每撤回一个源就把这两类
+    文件整份的行尾静默改掉。
+    """
+    root = _kb(tmp_path)
+    _raw(root, "foo")
+    _source_page(root, "foo")
+    page = _page(root, "wiki/concepts/多源.md", sources="[foo, bar]")
+    page.write_bytes(page.read_bytes().replace(b"\n", b"\r\n"))
+    index = "# 索引\n\n## Sources\n\n- [Foo](sources/foo.md) — 摘要\n- [别的](sources/bar.md) — 摘要\n"
+    (root / "wiki" / "index.md").write_bytes(index.replace("\n", "\r\n").encode("utf-8"))
+
+    assert remove_entrypoint(root, src="foo", yes=True, json_output=False) == EXIT_OK
+
+    idx = (root / "wiki" / "index.md").read_bytes()
+    assert idx.count(b"\n") == idx.count(b"\r\n")  # 无落单 LF
+    assert b"sources/foo.md" not in idx and b"sources/bar.md" in idx  # 该删的删了、别的没动
+    body = page.read_bytes()
+    assert body.count(b"\n") == body.count(b"\r\n")  # 衍生页整份仍 CRLF（含重出的 frontmatter 块）
+    assert _sources_of(page) == ["bar"]  # slug 已摘掉，值仍可解析
+    assert "正文内容。\r\n".encode("utf-8") in body  # 正文逐字未动

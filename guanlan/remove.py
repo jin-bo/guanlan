@@ -33,7 +33,14 @@ from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .gate import _trusted_sources  # 读衍生页可信 sources 的单一归口（坏/缺 → None）
 from .pages import iter_pages, load_page, split_frontmatter
 from .paths import require_kb_root
-from .rawio import atomic_write_text, normalize_basename, raw_slug  # slug 归一 + 原子写（避免半写）同口径
+from .rawio import (  # slug 归一 + 逐字读写（避免半写、不静默改行尾）同口径
+    atomic_write_text,
+    detect_eol,
+    dump_frontmatter,
+    normalize_basename,
+    raw_slug,
+    read_text_verbatim,
+)
 from .reindex import (  # index 行删除的单一归口
     _join_lines,
     _prune_dangling,
@@ -139,9 +146,7 @@ def _plan_index_lines(wiki: Path, slug: str) -> list[str]:
     index_path = wiki / "index.md"
     if not index_path.is_file():
         return []
-    _kept, removed = _prune_dangling(
-        index_path.read_text(encoding="utf-8"), _index_target(slug)
-    )
+    _kept, removed = _prune_dangling(read_text_verbatim(index_path), _index_target(slug))
     return removed
 
 
@@ -161,15 +166,18 @@ def run_remove_result(root: Path, slug: str) -> RemovePlan:
 def _drop_slug_from_page(path: Path, slug: str) -> bool:
     """从一页 frontmatter 的 `sources` 摘掉 slug、重写回盘。返回是否改动（幂等：已无 → False）。
 
-    复用 `split_frontmatter` + `yaml.safe_dump`（同 `rawio.apply_origin`，**绝不裸拼**）；**body 逐字
+    复用 `split_frontmatter` + `rawio.dump_frontmatter`（同 `apply_origin`，**绝不裸拼**）；**body 逐字
     保留**（`split_frontmatter` 返回原文 body），只重序列化 frontmatter 块。坏/无块/非映射 → 不动。
 
     非 UTF-8 页（`load_page` 在 plan 期用 `errors='replace'` 容错读、仍可能进 drop 清单）这里**跳过**
     （strict 读会抛 `UnicodeDecodeError`——是 `ValueError` 子类、不被 `run_remove` 的 `except OSError`
     接住）：用 replace 解码后回写会损坏原字节，故不安全重写、留人工，**绝不崩在执行中途**。
+
+    读走 `read_text_verbatim`、块按原 EOL 重出（`dump_frontmatter`）：CRLF 页只改 `sources` 那几行，
+    不会被顺手整份改成 LF（旧实现读侧归一 + 写侧逐字，等于每次摘源都重写全文行尾）。
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        text = read_text_verbatim(path)
     except UnicodeDecodeError:
         return False
     block, body = split_frontmatter(text)
@@ -185,8 +193,8 @@ def _drop_slug_from_page(path: Path, slug: str) -> bool:
     if not isinstance(sources, list) or slug not in sources:
         return False  # 幂等：重跑时 slug 已不在 → no-op
     meta["sources"] = [s for s in sources if s != slug]
-    dumped = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False)
-    atomic_write_text(path, f"---\n{dumped}---\n{body}")  # 原子覆盖：崩溃不把内容页写成半截
+    # 原子覆盖：崩溃不把内容页写成半截；块按原 EOL 出、body 逐字不动。
+    atomic_write_text(path, dump_frontmatter(meta, body, eol=detect_eol(text)))
     return True
 
 
@@ -194,7 +202,7 @@ def _prune_index_line(index_path: Path, slug: str) -> list[str]:
     """从当前 index.md 删摘要页登记行（幂等：行已删 → 不写）。返回被删行原文。"""
     if not index_path.is_file():
         return []
-    text = index_path.read_text(encoding="utf-8")
+    text = read_text_verbatim(index_path)  # 逐字读：与逐字写成对，CRLF 不被静默改成 LF
     _lines, eol, trailing = _split_lines(text)  # 只为拿 EOL/尾换行，重组时按原样保真
     kept, removed = _prune_dangling(text, _index_target(slug))
     if removed:

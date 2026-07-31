@@ -22,6 +22,11 @@
 `wiki/` + `.trash/` 的确定性写复用——`remove`/`reindex`/`provenance` 走文本壳，`fmrepair`（CRLF 保真）
 与 `gate` 回滚（原字节）走字节底座——单一实现，杜绝多处落盘规则漂移。
 
+写是逐字节的，读也必须逐字节，否则"读→改→写"会静默改用户行尾。故本模块另备读侧与重组原语：
+**`read_text_verbatim`**（`atomic_write_text` 的对偶，不做换行归一）、**`detect_eol` / `split_eol_lines`**
+（拆行改行再拼回时保原 EOL）、**`dump_frontmatter`**（重序列化 frontmatter 的单一归口，块按原 EOL 出、
+body 逐字不动）。三支合起来保证 CRLF 页过一遍 `reindex`/`remove`/`audit` 后仍是 CRLF。
+
 本模块不含任何路由 / 可变状态，故可独立单测、与 web 解耦；`web/rawfeed.py` 保留薄壳
 re-export 旧名（`_raw_slug` / `_normalize_basename` / …）并把校验 `ValueError` 包成
 `HTTPException(400)`，字节行为不变。
@@ -173,8 +178,7 @@ def apply_origin(text: str, origin: str) -> str:
     block, body = split_frontmatter(text)
     bad_block = ValueError("parsed frontmatter 损坏或非键值映射，请在可写会话修正后再晋级。")
     if block is None:  # ① 无块（含未闭合）→ 新建块、原文作 body
-        dumped = yaml.safe_dump({"origin": origin}, allow_unicode=True, sort_keys=False)
-        return f"---\n{dumped}---\n{text}"
+        return dump_frontmatter({"origin": origin}, text)
     try:
         meta = yaml.safe_load(block)
     except yaml.YAMLError:
@@ -186,8 +190,7 @@ def apply_origin(text: str, origin: str) -> str:
     if "origin" in meta:  # ③ 已有 origin → 永久保留、忽略传入值
         return text
     meta["origin"] = origin  # ② 缺 origin → 插入键、重序列化（body 逐字保留）
-    dumped = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False)
-    return f"---\n{dumped}---\n{body}"
+    return dump_frontmatter(meta, body)
 
 
 def _preserve_metadata(tmp: str, target: Path) -> None:
@@ -256,8 +259,70 @@ def atomic_write_text(target: Path, content: str) -> None:
     `reindex._join_lines` 按探测 EOL 重组）原样保真，硬编码 `\\n` 的调用方在 POSIX 上字节等同。覆盖保留
     原权限位、写失败旧文件不动、不 fsync/锁/journal——细节见 `atomic_write_bytes`。供 `wiki/` + `.trash/`
     的确定性写（`remove` / `reindex` / `provenance`）替代裸 `Path.write_text`。
+
+    **读回来要改再写回去的调用方必须配 `read_text_verbatim`**，别用 `Path.read_text`——后者做通用换行
+    归一，与本函数的逐字写盘不对称，一读一写就把 CRLF 静默抹成 LF（详见 `read_text_verbatim`）。
     """
     atomic_write_bytes(target, content.encode("utf-8"))
+
+
+def read_text_verbatim(path: Path) -> str:
+    """UTF-8 读文本、**不做换行翻译**——`atomic_write_text` 的读侧对偶。
+
+    `Path.read_text` 走通用换行（universal newlines）：`\\r\\n` / 裸 `\\r` 一律归一成 `\\n` 进内存。它自己
+    读写成对时无害（`Path.write_text` 又按平台翻译回去），但本模块的写是**逐字节**的——于是
+    「`read_text` 读 → 改几行 → `atomic_write_text` 写」这条链净效果是**把整份文件的 CRLF 静默改成 LF**：
+    用户在 Windows 上跑一次 `reindex` / `remove` / `audit`，index.md 与内容页会整份改行尾，git 里炸出
+    一屏无关 diff。`fmrepair` 早就为此走 `read_bytes` + `atomic_write_bytes`（见其文档 §逐字节 I/O），
+    本函数把同一条纪律给到文本层调用方。
+
+    等价于 `path.read_bytes().decode("utf-8")`（`Path.read_text(newline="")` 要 3.13+，本项目 3.10+ 不可用）：
+    IO 失败抛 `OSError`、非 UTF-8 抛 `UnicodeDecodeError`，与 `read_text(encoding="utf-8")` 的严格档一致，
+    故调用方原有的异常处理无需改动。
+    """
+    return path.read_bytes().decode("utf-8")
+
+
+# 真正的行终止符：CRLF / 裸 CR / LF。**刻意不含** `str.splitlines` 额外认的 `\v \f \x1c \x1d \x1e
+# \x85 \u2028 \u2029`——那几个在 markdown 里是行内字符，用 `splitlines` 切开再按统一 EOL 拼回去
+# 等于把它们静默换成换行（同属"重写时悄悄改用户字节"的一类）。
+_EOL_RE = re.compile(r"\r\n|\r|\n")
+
+
+def detect_eol(text: str) -> str:
+    """探测文本行尾，供"拆行→改几行→拼回"的调用方原样重组。无换行 → `"\\n"`。
+
+    取**首个**出现的行尾，而不是"含 `\\r\\n` 即判 CRLF"：后者会让一份 LF 文件里混进的**一个**
+    CRLF 把整份文件重写成 CRLF——修 CRLF 丢失反而制造 LF 丢失。首个出现＝"这份文件本来是什么"，
+    混合行尾的文件按首行归一（无损保全每行原样需要逐行留 EOL，不在本原语的职责内）。
+    """
+    match = _EOL_RE.search(text)
+    return match.group(0) if match else "\n"
+
+
+def split_eol_lines(text: str) -> list[str]:
+    """按**真实行终止符**切行（不含行尾），空文本 → `[]`。见 `_EOL_RE` 为何不用 `str.splitlines`。"""
+    if not text:
+        return []
+    lines = _EOL_RE.split(text)
+    if text.endswith(("\n", "\r")):
+        lines.pop()  # 末尾换行切出的那个空串不是一行
+    return lines
+
+
+def dump_frontmatter(meta: dict, body: str, *, eol: str = "\n") -> str:
+    """把 `meta` 重序列化为 frontmatter 块 + **逐字原样**的 `body`，块与分隔行按 `eol` 出行尾。
+
+    「绝不裸拼 `key: 值`」的单一归口（决策P4.6-10）：`apply_origin` / `remove._drop_slug_from_page` /
+    `provenance.stamp_raw_digest` 三处重写 frontmatter 都过这里，杜绝 YAML 转义规则三处漂移。
+
+    `eol` 只作用于**本函数生成的部分**（两条 `---` 与 `yaml.safe_dump` 的输出，后者恒出 `\\n`）；`body`
+    自带原行尾、逐字返回不翻译。CRLF 页因此整份保真——否则重写 frontmatter 会把页面切成"块 LF + 正文
+    CRLF"的混合体。YAML 把 `\\r\\n` 视作合法换行，值往返不变。
+    """
+    dumped = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False)
+    head = f"---\n{dumped}---\n"
+    return (head.replace("\n", eol) if eol != "\n" else head) + body
 
 
 def atomic_write_raw(target: Path, content: str, overwrite: bool) -> int:

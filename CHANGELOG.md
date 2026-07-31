@@ -7,6 +7,34 @@
 
 ### 修复
 
+- **CRLF 行尾不再被静默改成 LF（`reindex` / `remove` / `ingest`+`audit` 的指纹 stamp）**
+  —— 四个确定性写点都是「`Path.read_text` 读 → 改几行 → `rawio.atomic_write_text` 写」。读侧走通用
+  换行（`\r\n`、裸 `\r` 一律归一成 `\n`），写侧却是**逐字节**的，一读一写净效果就是把**整份文件**的
+  行尾改掉：Windows 用户跑一次 `guanlan reindex`，index.md 27 行 CRLF 全变 LF，git 里炸出一屏与本次
+  操作无关的 diff；`remove` 摘一个 slug、`audit` 打一次指纹，同样把整张内容页/摘要页重写一遍。
+  `reindex._split_lines` 里那句探测 CRLF 的代码因此**从来没生效过**（读侧早已归一，探到的永远是 `\n`），
+  而 `atomic_write_text` 的文档还在承诺「自管 EOL 的调用方原样保真」——三处说法互相矛盾。修法是给
+  逐字节的写补上逐字节的读：`rawio` 新增 `read_text_verbatim`（`atomic_write_text` 的读侧对偶）、
+  `detect_eol` / `split_eol_lines`（拆行改行再拼回时保原 EOL）、`dump_frontmatter`（重序列化
+  frontmatter 的单一归口，块按原 EOL 出、body 逐字不动），四个写点全部改用。`fmrepair` 早就为同一个
+  理由走 `read_bytes` + `atomic_write_bytes`，这次是把那条纪律推广到文本层。三处顺带收敛：
+  ① `detect_eol` 取**首个**出现的行尾而非「含 CRLF 即判 CRLF」——后者会让 LF 文件里混进的一个 CRLF
+  把整份重写成 CRLF，修 CRLF 丢失反而制造 LF 丢失；② `split_eol_lines` 只认 CRLF/CR/LF，不像
+  `str.splitlines` 连 `\v`/`\f`/`\x1c`/`\u2028` 也切（切开再按统一 EOL 拼回去 = 把行内字符静默换成
+  换行，同属"重写时悄悄改用户字节"）；③ `apply_origin` 改走 `dump_frontmatter`，与另两处 frontmatter
+  重写共用「绝不裸拼」的同一实现（零行为变更，有用例逐字比对旧字面量）。
+- **注释与链接正则改为行尾中立**：上一条让原始 `\r` **第一次真的**流进 `strip_html_comments`，而它的
+  行锚定用的是 `^`/`$`+MULTILINE——只认 `\n`，CRLF 文本里 `-->` 与 `\n` 之间隔着 `\r`、`$` 匹配不上，
+  整行注释当场不再被识别（前一条 CHANGELOG 里「这条是纵深防御、调用路径喂进来的文本已被 `read_text`
+  归一过」的前提，至此失效）。改用「前后不是非换行符」的环视 `(?<![^\r\n])…(?![^\r\n])`，对 LF /
+  CRLF / 裸 CR 一视同仁（LF 下与旧式逐字等价）；`WIKILINK_RE` / `_MD_LINK_RE` 一并把 `\r` 与 `\n` 同等
+  排除，杜绝引用跨行粘连。**边界说清、不夸大**：`reindex --prune` 今天并不会因此删掉 CRLF 库的注释行
+  ——那层由 `_comment_touched_lines` 的宽松口径兜着（实测：把正则退回只认 `\n`，端到端用例仍绿）。
+  这里修的是**严格口径自己**不能因行尾失灵——`strip_html_comments` 是 `check`/`graph`/`index_md_links`/
+  Web 渲染共用的公共原语，让它对 CRLF 静默换一套含义，是给下一个消费方埋雷。回归网 16 例，逐条对旧
+  实现变异验证：读侧、frontmatter 重出、注释正则、链接正则各自的用例都能在退回旧写法时**失败**；其中
+  两条是**反方向守卫**——CRLF 下真断链仍被扫出、真悬空行仍被剪掉，免得「兼容行尾」写成「CRLF 库一律
+  不报不剪」。
 - **注释剥离收窄为「只认独占整行的注释」，堵掉它自己引入的门禁漏报（xhigh 评审 8 条）**
   —— 上一条的实现用裸 `<!--.*?-->` 匹配，非贪婪只保证止于**第一个** `-->`、不保证那个 `-->` 属于
   同一段注释。后果比原 bug 更重：① 正文或行内 code 里的字面 `<!--`（讲注释写法时很常见）会与后文

@@ -245,12 +245,12 @@ def test_prune_keeps_multiline_commented_block(tmp_path: Path):
     assert "- [注掉的页](entities/Commented.md) — 暂时收起" in _index(tmp_path)
 
 
-def test_prune_on_cr_index_normalized_by_universal_newlines(tmp_path: Path):
-    """老式裸 `\\r` 断行的 index：照常剪枝、不抛。
+def test_prune_on_bare_cr_index(tmp_path: Path):
+    """老式裸 `\\r` 断行的 index：照常剪枝、不抛，且行尾**仍是裸 `\\r`**。
 
-    顺带钉住**边界的实际位置**：`Path.read_text` 的通用换行在读入时就把裸 `\\r` 归一成 `\\n`，
-    故 `_prune_dangling` 这条路径根本见不到 `\\r`。`strip_html_comments` 自身对裸 `\\r` 也保行数
-    （见 `tests/test_pages.py`），但那是纵深防御，不是这条路径的最后防线——别把两者混为一谈。
+    自 `read_text_verbatim` 上线，`_prune_dangling` 见到的就是原始 `\\r`（旧实现被
+    `Path.read_text` 的通用换行提前归一成 `\\n`，这条路径根本见不到 `\\r`）。于是
+    `strip_html_comments` 对裸 `\\r` 的处理**从纵深防御变成这条路径的实际口径**。
     """
     index = (
         "# 索引\r\r## Entities\r\r"
@@ -263,6 +263,8 @@ def test_prune_on_cr_index_normalized_by_universal_newlines(tmp_path: Path):
     idx = _index(tmp_path)
     assert "entities/Commented.md" in idx  # 注释块留住
     assert "entities/Dead.md" not in idx  # 真悬空行照删
+    raw = (tmp_path / "wiki" / "index.md").read_bytes()
+    assert b"\n" not in raw and raw.count(b"\r") >= 5  # 裸 CR 未被改写成 LF
 
 
 def test_prune_does_not_break_open_a_multiline_comment_block(tmp_path: Path):
@@ -300,3 +302,91 @@ def test_prune_keeps_whole_line_comment_block_verbatim(tmp_path: Path):
     idx = _index(tmp_path)
     assert block in idx
     assert "- [死页](entities/Dead.md) — 悬空" not in idx
+
+
+# ---------- 行尾保真（CRLF 不被静默改成 LF）----------
+
+
+def _to_crlf(text: str) -> bytes:
+    return text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
+
+
+def _write_crlf_index(root: Path, index: str) -> None:
+    (root / "wiki" / "index.md").write_bytes(_to_crlf(index))
+
+
+def test_crlf_index_stays_crlf_through_reindex(tmp_path: Path):
+    """CRLF 的 index.md 跑完 `reindex`（登记 + 剪枝）后**仍是 CRLF**，且新登记行也用 CRLF。
+
+    旧实现读侧 `Path.read_text` 归一、写侧 `atomic_write_text` 逐字，净效果是每次 reindex 都把整份
+    index 的行尾静默改掉——Windows 用户跑一次就在 git 里炸出一屏无关 diff。
+    """
+    index = INDEX_TEMPLATE + "\n- [不存在](entities/Ghost.md)\n"
+    root = _kb(tmp_path, index=index)
+    _write_crlf_index(root, index)
+    _page(root / "wiki", "entities/Alpha.md", title="Alpha")
+
+    reindex_entrypoint(root, prune=True, dry_run=False, json_output=False)
+
+    raw = (root / "wiki" / "index.md").read_bytes()
+    assert raw.count(b"\n") == raw.count(b"\r\n")  # 无落单 LF：整份仍是 CRLF
+    assert "- [Alpha](entities/Alpha.md)\r\n".encode("utf-8") in raw  # 新行也随大流
+    assert b"entities/Ghost.md" not in raw  # 真悬空照删
+
+
+def test_prune_keeps_template_hint_comments_under_crlf(tmp_path: Path):
+    """**过删守卫**：CRLF 库里的模板提示注释不得被 `--prune` 删掉。
+
+    读侧改逐字后，注释规则第一次真的要面对 `\\r`。实测两张网都在：`strip_html_comments` 的严格
+    口径（行锚定改用环视，见 `pages._HTML_COMMENT_RE`）与 `_comment_touched_lines` 的宽松口径
+    （凡沾注释标记的行一律不删）。**本例钉的是结果，不是哪张网**——把注释规则退回只认 `\\n` 的
+    写法，本例仍绿，因为第二张网接住了；证明第一张网的用例在 `tests/test_pages.py`（原语层）。
+    """
+    root = _kb(tmp_path)
+    _write_crlf_index(root, INDEX_TEMPLATE)
+
+    for _ in range(2):  # 跑两轮：第二轮不得把上一轮的残留当悬空
+        reindex_entrypoint(root, prune=True, dry_run=False, json_output=False)
+
+    raw = (root / "wiki" / "index.md").read_bytes()
+    assert raw.count(b"<!-- ingest \xe8\x87\xaa\xe5\x8a\xa8\xe8\xbf\xbd\xe5\x8a\xa0 -->") == 3
+    assert b"<!-- query --backfill " in raw
+    assert raw.count(b"\n") == raw.count(b"\r\n")
+
+
+def test_prune_still_removes_real_dangling_under_crlf(tmp_path: Path):
+    """**漏删守卫**（反方向）：别把行尾兼容写成"CRLF 库一律不剪"。
+
+    只测"注释被留住"是测不出漏删的——真悬空行若也一并留住，index 会永远对不上磁盘而无人发觉。
+    故摆一条真悬空行，周围放会触发注释规则的字面标记，断言它**仍被剪掉**。
+    """
+    index = INDEX_TEMPLATE.replace(
+        "## Entities\n\n<!-- ingest 自动追加 -->",
+        "## Entities\n\n<!-- 上面是提示 -->\n- [死页](entities/Dead.md) — 悬空\n"
+        "- [活页](entities/Alive.md) — 在册\n",
+    )
+    root = _kb(tmp_path, index=index)
+    _write_crlf_index(root, index)
+    _page(root / "wiki", "entities/Alive.md", title="活页")
+
+    reindex_entrypoint(root, prune=True, dry_run=False, json_output=False)
+
+    raw = (root / "wiki" / "index.md").read_bytes()
+    assert b"entities/Dead.md" not in raw  # 真悬空照删
+    assert b"entities/Alive.md" in raw  # 有盘上文件的行不动
+    assert "<!-- 上面是提示 -->".encode("utf-8") in raw
+
+
+def test_split_lines_does_not_split_on_inline_control_chars(tmp_path: Path):
+    """`_split_lines` 只按 CRLF/CR/LF 切行。
+
+    `str.splitlines` 还会切 `\\v`/`\\f`/`\\x1c`/`\\u2028`——按它切开再按统一 EOL 拼回去，等于把
+    页面里的这些行内字符静默换成换行（同属"重写时悄悄改用户字节"）。
+    """
+    from guanlan.reindex import _join_lines, _split_lines
+
+    text = "# 标题\n- [A](entities/A.md) 备注\x0b续行\n"
+    lines, eol, trailing = _split_lines(text)
+    assert lines == ["# 标题", "- [A](entities/A.md) 备注\x0b续行"]
+    assert (eol, trailing) == ("\n", True)
+    assert _join_lines(lines, eol, trailing) == text  # 往返逐字不变

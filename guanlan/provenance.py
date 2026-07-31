@@ -11,7 +11,7 @@ P3.7-3a Option A）共用的**无状态原语**，杜绝两处漂移：
 - `compute_raw_digest` / `format_digest_value` / `parse_digest_value`：算/拼/解 digest 标量；
 - `admit_raw_path`：raw 路径**严格准入**（相对 + `raw/` 前缀 + realpath 不越界，决策P3.7-12）——
   `check` 不校验 `raw_digest`，手写/损坏字段可能含越界路径，比 hash / 喂 Agent 前必须自挡穿越；
-- `stamp_raw_digest`：**YAML-safe** 写入（`split_frontmatter` → 设键 → `yaml.safe_dump`，**绝不
+- `stamp_raw_digest`：**YAML-safe** 写入（`split_frontmatter` → 设键 → `dump_frontmatter`，**绝不
   裸拼**，复用 `rawio.apply_origin` 同款做法，决策P3.7-9）+ **写后 check**（重解析确认 frontmatter
   仍合法、值往返一致）+ 失败**回滚**到写前字节——「宁可不 stamp 也绝不留坏页」。
 """
@@ -25,7 +25,12 @@ from pathlib import Path
 import yaml
 
 from .pages import split_frontmatter
-from .rawio import atomic_write_text  # 原子覆盖写 source 页 frontmatter：stamp / 回滚均不留半写
+from .rawio import (  # 原子覆盖写 source 页 frontmatter：stamp / 回滚均不留半写、不改行尾
+    atomic_write_text,
+    detect_eol,
+    dump_frontmatter,
+    read_text_verbatim,
+)
 
 __all__ = [
     "RAW_DIGEST_KEY",
@@ -100,18 +105,22 @@ def admit_raw_path(kb: Path, raw_rel: str) -> Path | None:
 def stamp_raw_digest(source_page: Path, digest_value: str) -> bool:
     """把 `raw_digest` 写进 source 页 frontmatter（YAML-safe + 写后 check + 回滚）。返回是否成功落值。
 
-    决策P3.7-9：**绝不裸拼**——`split_frontmatter` → 设 `raw_digest` 键 → `yaml.safe_dump`
+    决策P3.7-9：**绝不裸拼**——`split_frontmatter` → 设 `raw_digest` 键 → `rawio.dump_frontmatter`
     （`allow_unicode=True, sort_keys=False`，复用 `rawio.apply_origin` 同款做法）；写后重解析确认
     frontmatter 仍是合法映射、`raw_digest` 值往返一致，不过则回滚到写前字节、返回 False。
 
     跳过（返回 False、不写盘）：页不存在 / 是符号链接 / 无 frontmatter 块 / 块本就不可解析或非映射
     —— 「定位不到 / 该页 frontmatter 本就不可解析 → 跳过」（决策P3.7-9，调用方据此记降级、不阻断）。
     已是现值 → 幂等返回 True、不写盘。
+
+    读走 `read_text_verbatim`、块按原 EOL 重出：CRLF 摘要页被 stamp 后仍是 CRLF（旧实现读侧
+    `Path.read_text` 归一 + 写侧逐字，等于每次 `ingest`/`audit` 打指纹都顺手把该页整份改成 LF）。
+    回滚写的 `original` 同样是原始字节的解码结果，故回滚是**真回滚**、不留行尾差。
     """
     if source_page.is_symlink() or not source_page.is_file():
         return False
     try:
-        original = source_page.read_text(encoding="utf-8")
+        original = read_text_verbatim(source_page)
     except OSError:
         return False
     block, body = split_frontmatter(original)
@@ -126,8 +135,7 @@ def stamp_raw_digest(source_page: Path, digest_value: str) -> bool:
     if meta.get(RAW_DIGEST_KEY) == digest_value:
         return True  # 幂等：已是现值，零写盘
     meta[RAW_DIGEST_KEY] = digest_value
-    dumped = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False)
-    new_text = f"---\n{dumped}---\n{body}"
+    new_text = dump_frontmatter(meta, body, eol=detect_eol(original))
     try:
         atomic_write_text(source_page, new_text)  # 原子覆盖：崩在写一半不留坏页
     except OSError:
