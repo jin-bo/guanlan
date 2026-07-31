@@ -263,3 +263,40 @@ def test_prune_on_cr_index_normalized_by_universal_newlines(tmp_path: Path):
     idx = _index(tmp_path)
     assert "entities/Commented.md" in idx  # 注释块留住
     assert "entities/Dead.md" not in idx  # 真悬空行照删
+
+
+def test_prune_does_not_break_open_a_multiline_comment_block(tmp_path: Path):
+    """`--prune` 不得删掉**带注释标记**的行——删了会把注释块拆开、块内内容「转正」。
+
+    评审实测的两步静默丢失（用行尾开块的写法，该写法不被"独占整行"规则识别）：第一轮删掉带
+    `<!--` 的首行 → 块内 `- [藏页](…)` 变成生效登记行；第二轮它已是真悬空，被一并删除。
+    """
+    index = INDEX_TEMPLATE.replace(
+        "## Entities\n\n<!-- ingest 自动追加 -->",
+        "## Entities\n\n- [死页](entities/Dead.md) — 悬空 <!--\n"
+        "- [藏页](entities/Hidden.md) — 暂时收起\n-->",
+    )
+    root = _kb(tmp_path, index=index)
+
+    for _ in range(2):  # 跑两轮：第二轮不得把上一轮的残留当悬空
+        reindex_entrypoint(root, prune=True, dry_run=False, json_output=False)
+    idx = _index(tmp_path)
+    assert "- [死页](entities/Dead.md) — 悬空 <!--" in idx  # 带标记的行不删（保守闸）
+    assert "-->" in idx
+    assert "- [藏页](entities/Hidden.md) — 暂时收起" in idx  # 块内内容没被「转正」后删掉
+
+
+def test_prune_keeps_whole_line_comment_block_verbatim(tmp_path: Path):
+    """独占整行的注释块：整块逐字留住，真悬空行照删。"""
+    block = "<!--\n- [藏页](entities/Hidden.md) — 暂时收起\n-->"
+    index = INDEX_TEMPLATE.replace(
+        "## Entities\n\n<!-- ingest 自动追加 -->",
+        f"## Entities\n\n- [死页](entities/Dead.md) — 悬空\n{block}",
+    )
+    root = _kb(tmp_path, index=index)
+
+    for _ in range(2):
+        reindex_entrypoint(root, prune=True, dry_run=False, json_output=False)
+    idx = _index(tmp_path)
+    assert block in idx
+    assert "- [死页](entities/Dead.md) — 悬空" not in idx

@@ -159,31 +159,59 @@ def _apply_additions(lines: list[str], by_section: dict[str, list[str]]) -> list
     return lines
 
 
-def _scan_lines(text: str) -> list[str]:
-    """`_prune_dangling` 的判定行：抹掉闭合 HTML 注释后按同一口径切行，与原行**逐位等长**。
+def _comment_touched_lines(lines: list[str]) -> set[int]:
+    """**可能**属于某段 HTML 注释的行号（宽松口径，只用来决定"不删"）。
 
-    `strip_html_comments` 保行数，故可与 `_split_lines(text)[0]` 直接 zip。`remove` 也走这里
-    （跨模块复用同一归口，见本模块 §一期表面积）。
+    与 `pages.strip_html_comments` 的严格口径**分工相反、各自保守**：
+    - 严格口径（只认独占整行的注释）决定**忽略什么**——放宽会让门禁漏报真断链；
+    - 本函数这份宽松口径决定**保护什么不被删**——收紧会让 `--prune` 铰碎用户注释掉的内容。
+
+    两者都朝"少犯致命错"的方向偏，且互不继承对方的失效模式：本函数过度匹配的后果只是少删几行。
+
+    按行扫（不按字符偏移）以避开行分隔符口径差异。未闭合的 `<!--` 之后的行全部视为受保护——
+    `--prune` 少删永远比删错强。
     """
-    return _split_lines(strip_html_comments(text))[0]
+    touched: set[int] = set()
+    in_comment = False
+    for i, line in enumerate(lines):
+        if in_comment:
+            touched.add(i)
+            if "-->" in line:
+                in_comment = False
+            continue
+        if "<!--" in line:
+            touched.add(i)
+            if "-->" not in line.rsplit("<!--", 1)[1]:  # 本行最后一个 <!-- 之后没有闭合
+                in_comment = True
+    return touched
 
 
-def _prune_dangling(
-    lines: list[str], scan_lines: list[str], dangling: set[str]
-) -> tuple[list[str], list[str]]:
+def _prune_dangling(text: str, dangling: set[str]) -> tuple[list[str], list[str]]:
     """删除整行链接目标**全部** ∈ dangling 的行（单行单链接、精确匹配，不误删正常行）。
 
-    判定读 `scan_lines`（已抹 HTML 注释、与 `lines` **逐位等长**），删的是 `lines` 的原行。
-    两份分开是因为注释里的链接不算收录项：模板那四行 `<!-- ingest 自动追加：… -->` 一度被
-    整行剪掉——把"给 Agent 看的追加格式说明"当悬空项删了。单行注释在 `index_md_links` 内已
-    抹掉，多行注释只有在这里按全文对齐才认得出。
+    收整份 `text` 而非两列表：函数**自己**切出「原行」与「判定行」，"两列逐位等长"于是成为
+    本函数的内部不变式，而不是外包给调用方的口头约定——三个调用点（reindex 一处、remove 两处）
+    谁少传一份或传错一份，都会让"模板提示行被整行剪掉"那个 bug 静默复发，而 `strict=True`
+    挡不住它（两列等长，只是判定错）。
+
+    判定读**抹掉整行注释后**的行、删的是**原行**：注释里的链接不算收录项，模板那四行
+    `<!-- ingest 自动追加：… -->` 一度被当悬空项整行剪掉。独占整行的注释（含跨行块的每一行）
+    抹后无链接，`targets` 为空即不删。
+
+    **凡沾注释的行一律不删**（`_comment_touched_lines` 的宽松口径）：`strip_html_comments` 只认
+    独占整行的注释，行尾开块的写法（`- [死页](…) — 悬空 <!--` + 若干行 + `-->`）不被它识别，其内容
+    会按普通登记行参与判定。若照删，注释块会被**拆开**——块内被注掉的行就此「转正」，下一轮
+    `--prune` 再把它当真悬空删掉，用户「暂时收起、勿删」的内容两步内静默蒸发。宁可少删几行。
     """
+    lines = _split_lines(text)[0]
+    # strict=True：抹注释保行数（见 strip_html_comments），此处兜住"万一不保"——宁可抛也不错删。
+    scan_lines = _split_lines(strip_html_comments(text))[0]
+    protected = _comment_touched_lines(lines)
     kept: list[str] = []
     removed: list[str] = []
-    # strict=True：两列表一旦不等长就抛，而不是被 zip 静默截短——截短意味着按错位的判定删行。
-    for ln, scan in zip(lines, scan_lines, strict=True):
+    for i, (ln, scan) in enumerate(zip(lines, scan_lines, strict=True)):
         targets = index_md_links(scan)
-        if targets and targets <= dangling:
+        if targets and targets <= dangling and i not in protected:
             removed.append(ln)
         else:
             kept.append(ln)
@@ -207,7 +235,7 @@ def run_reindex(wiki: Path, *, prune: bool = False) -> tuple[ReindexResult, str 
     # 1) 可选剪枝（先删悬空，再登记——登记行指向真实文件，不会被随后剪掉）。
     pruned: list[str] = []
     if prune and dangling:
-        lines, pruned = _prune_dangling(lines, _scan_lines(text), set(dangling))
+        lines, pruned = _prune_dangling(text, set(dangling))
 
     # 2) 登记缺失页（按 _DIR_TO_SECTION 固定序聚合，分区内按 iter_pages 稳定序）。
     by_section: dict[str, list[str]] = {section: [] for section in _DIR_TO_SECTION.values()}

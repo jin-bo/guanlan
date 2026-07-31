@@ -37,7 +37,6 @@ from .rawio import atomic_write_text, normalize_basename, raw_slug  # slug 归�
 from .reindex import (  # index 行删除的单一归口
     _join_lines,
     _prune_dangling,
-    _scan_lines,
     _split_lines,
 )
 
@@ -140,9 +139,9 @@ def _plan_index_lines(wiki: Path, slug: str) -> list[str]:
     index_path = wiki / "index.md"
     if not index_path.is_file():
         return []
-    text = index_path.read_text(encoding="utf-8")
-    lines, _eol, _trailing = _split_lines(text)
-    _kept, removed = _prune_dangling(lines, _scan_lines(text), _index_target(slug))
+    _kept, removed = _prune_dangling(
+        index_path.read_text(encoding="utf-8"), _index_target(slug)
+    )
     return removed
 
 
@@ -196,8 +195,8 @@ def _prune_index_line(index_path: Path, slug: str) -> list[str]:
     if not index_path.is_file():
         return []
     text = index_path.read_text(encoding="utf-8")
-    lines, eol, trailing = _split_lines(text)
-    kept, removed = _prune_dangling(lines, _scan_lines(text), _index_target(slug))
+    _lines, eol, trailing = _split_lines(text)  # 只为拿 EOL/尾换行，重组时按原样保真
+    kept, removed = _prune_dangling(text, _index_target(slug))
     if removed:
         atomic_write_text(index_path, _join_lines(kept, eol, trailing))  # 自管 EOL、逐字原子写
     return removed
