@@ -328,20 +328,56 @@ def test_render_markdown_wikilink_resolves(client, kb) -> None:
     assert "wikilink broken" in html  # 不存在 → 标灰
 
 
-def test_render_markdown_wikilink_in_comment_is_not_linkified(client, kb) -> None:
-    """注释里的 `[[…]]` 不成链——与 check/graph/health 同口径（Codex 评审 #1：Web 曾与它们打架）。
+def test_render_markdown_strips_whole_line_comments(client, kb) -> None:
+    """整行注释在解析前抹掉——Web 与 check/graph/health **同一口径**，且覆盖所有成链路径。
 
-    注意 Web 端与扫描器的**失活方式不同**：扫描器把注释抹成空白，Web 保留注释原文按转义文本
-    显示（决策P4-4 关了原始 HTML 透传），只是拒绝这次匹配。视图不该让页面上凭空少一段字。
+    评审推翻了前一版「保留注释原文、只在 inline 处理器拒绝匹配」的做法：那样既漏
+    （两个 treeprocessor 拿不到原文偏移、照样成链）又散（含空行的注释被切成普通段落后，
+    inline 处理器看到的块里根本没有 `<!--`）。
     """
     from guanlan.web.render import render_markdown
 
     write_page(kb, "wiki/entities/Foo.md", type="entity", body="正文足够长的内容。")
-    html = render_markdown("真正文见 [[Foo]]。\n\n<!-- 草稿：以后写 [[Foo]] -->", kb / "wiki")
+    (kb / "raw" / "案例.md").write_text("素材", encoding="utf-8")
+    wiki = kb / "wiki"
 
-    assert html.count('data-page="wiki/entities/Foo.md"') == 1  # 只有注释外那一处成链
-    assert "[[Foo]]" in html  # 注释内留作字面文本
-    assert "草稿：以后写" in html  # 注释原文没被吞掉
+    # 注释外照常成链
+    assert 'data-page="wiki/entities/Foo.md"' in render_markdown("真正文见 [[Foo]]。", wiki)
+
+    # 三条成链路径都不得在注释里生效：[[…]]、反引号页面引用、裸 raw/ 路径
+    html = render_markdown(
+        "<!-- 旧写法：`wiki/entities/Foo.md`，素材见 raw/案例.md，也可写 [[Foo]] -->", wiki
+    )
+    assert "wikilink" not in html and "rawlink" not in html
+    assert "旧写法" not in html  # 注释整体不显示（同 Obsidian/GitHub）
+
+    # 含空行的多段注释（前一版在此漏得最狠）
+    html = render_markdown(
+        "正文。\n\n<!--\n草稿段一\n\n以后写 [[Foo]]，另见 [[根本没有这页]]\n-->\n", wiki
+    )
+    assert "wikilink" not in html
+    assert html == "<p>正文。</p>"
+
+
+def test_render_markdown_comment_blanking_makes_no_empty_code_block(client, kb) -> None:
+    """被抹的行置**空串**而非等长空格：4 个以上前导空格在 markdown 里是缩进代码块。"""
+    from guanlan.web.render import render_markdown
+
+    wiki = kb / "wiki"
+    assert render_markdown("<!-- 一段够长的整行注释，抹成等长空格就会变缩进代码块 -->", wiki) == ""
+    # 段落边界不因注释行消失而合并
+    assert render_markdown("段一。\n\n<!-- 注 -->\n\n段二。", wiki) == "<p>段一。</p>\n<p>段二。</p>"
+    # 围栏代码块内部原本就有的缩进空行不受影响
+    assert "    return 1" in render_markdown("```\ndef f():\n    pass\n\n    return 1\n```", wiki)
+
+
+def test_render_markdown_inline_comment_is_not_treated_as_comment(client, kb) -> None:
+    """行内注释不被识别（与扫描器同口径）：其中的 `[[…]]` 照常成链，不静默消失。"""
+    from guanlan.web.render import render_markdown
+
+    write_page(kb, "wiki/entities/Foo.md", type="entity", body="正文足够长的内容。")
+    html = render_markdown("正文 <!-- 备注 [[Foo]] --> 收尾", kb / "wiki")
+    assert 'data-page="wiki/entities/Foo.md"' in html
 
 
 def test_render_markdown_code_path_linkifies_source_citation(client, kb) -> None:

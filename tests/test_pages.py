@@ -312,13 +312,49 @@ def test_strip_html_comments_does_not_glue_tokens():
     assert WIKILINK_RE.findall(strip_html_comments("见 [[Mis<!--注-->sing]]")) != ["Missing"]
 
 
-def test_strip_html_comments_is_non_greedy():
-    """`<!--a--> 真内容 <!--b-->` 只吃两段注释；中间的真链接必须活下来。"""
+def test_strip_html_comments_only_matches_whole_line_comments():
+    """只认**独占整行**的注释：行中间的 `<!--` 永远不构成注释开头。
+
+    这条收窄是评审逼出来的——行内标记一旦被当注释开头，正文/行内 code 里的字面 `<!--`
+    就能与后文任意一个 `-->` 配对，把中间的真链接整段抹掉（`check` 于是对真断链退 0）。
+    """
     from guanlan.pages import strip_html_comments
 
-    out = strip_html_comments("<!-- 甲 --> 见 [[真页]] <!-- 乙 -->")
-    assert "[[真页]]" in out
-    assert "甲" not in out and "乙" not in out
+    # 整行注释 → 抹掉
+    assert "隐藏" not in strip_html_comments("<!-- 隐藏 -->")
+    assert "隐藏" not in strip_html_comments("   <!-- 隐藏 -->   ")
+    assert "隐藏" not in strip_html_comments("<!--\n隐藏\n-->")
+    # 行内注释 → 原样保留（其中的链接照常参与扫描：宁可多报，不可少报）
+    for text in ["正文 <!-- 备注 --> 更多", "<!-- 甲 --> 见 [[真页]] <!-- 乙 -->"]:
+        assert strip_html_comments(text) == text
+
+
+def test_strip_html_comments_never_swallows_real_links():
+    """**核心不变量**：任何写法都不得让真实链接凭空消失——漏报比误报危险得多。"""
+    from guanlan.pages import WIKILINK_RE, index_md_links, strip_html_comments
+
+    # (a) 行内 code 里的字面标记跨段配对（写文档讲注释写法时的常见形状）
+    body = "注释以 `<!--` 开头。\n\n本页引用了 [[压根不存在的页]]。\n\n以 `-->` 结尾。"
+    assert WIKILINK_RE.findall(strip_html_comments(body)) == ["压根不存在的页"]
+
+    # (b) 未闭合的 `<!--` 与**后一段真注释**的 `-->` 配对（init 模板自带四段注释，触发面极大）
+    idx = (
+        "## Entities\n\n<!-- TODO 稍后整理\n- [Foo](entities/Foo.md) — 一句话\n\n"
+        "<!-- ingest 自动追加：- [<名称>](entities/<Name>.md) -->\n"
+    )
+    assert "entities/Foo.md" in index_md_links(idx)
+
+
+def test_strip_html_comments_does_not_reglue_via_downstream_strip():
+    """紧贴 `[[…]]` / `(…)` 内缘的注释不得被识别——否则下游 `.strip()` 会把它重新粘成有效引用。"""
+    from guanlan.pages import index_md_links, link_stem, strip_html_comments
+
+    # `[[Foo<!--旧名-->]]` 一旦抹成 `[[Foo    ]]`，link_stem 的 strip 会得到 `foo` → 断链伪装成通过
+    assert link_stem(strip_html_comments("[[Foo<!--旧名-->]]")[2:-2]) != "foo"
+    # 同理链接目标内缘
+    assert index_md_links(strip_html_comments("- [名](entities/Bar.md<!--备注-->)")) != {
+        "entities/Bar.md"
+    }
 
 
 def test_strip_html_comments_leaves_unterminated_open():

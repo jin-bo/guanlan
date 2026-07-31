@@ -352,3 +352,18 @@ def test_freshly_initialized_kb_is_health_clean(tmp_path: Path):
 
     report = run_health(tmp_path / "wiki")
     assert report.findings == []
+
+
+def test_commented_out_registration_counts_as_unregistered(tmp_path: Path):
+    """注掉的登记行**不算**已收录——index↔磁盘同步的另一个方向，与 dangling 方向同一口径。
+
+    后果是有意的：该页会被报 `index_missing_page`、并被 `reindex` 重新登记。注释不是内容，
+    guanlan 没有「已收录但暂时下架」这个状态；想不收录就把页面挪出 `wiki/`。
+    """
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki, index="# 索引\n\n<!-- 暂时下架：- [Foo](entities/Foo.md) — 摘要 -->\n")
+    _page(wiki, "entities/Foo.md", title="Foo", type="entity")
+
+    report = run_health(wiki)
+    assert "health.index_missing_page" in _kinds(report)
+    assert "health.index_dangling" not in _kinds(report)  # 注释行不产生悬空误报

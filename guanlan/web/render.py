@@ -21,11 +21,11 @@ from pathlib import Path
 
 from ..pages import (
     WIKILINK_RE,
-    html_comment_spans,
     link_resolution_index,
     link_stem,
     load_page,
     resolve_owner,
+    strip_html_comments,
 )
 
 try:  # markdown 是 web extra 的一部分；缺失时回退 <pre> 源码视图（§6）。
@@ -346,17 +346,6 @@ def _retag(el, tag: str, attrib: dict[str, str], text: str) -> None:
     el.text = text
 
 
-def _in_html_comment(text: str, pos: int) -> bool:
-    """`text[pos]` 是否落在某段闭合 HTML 注释内（区间口径见 `pages.html_comment_spans`）。
-
-    先做 `"<!--" in text` 的廉价短路：绝大多数页面根本没有注释，这样就不必对每个 `[[…]]`
-    重扫一遍所在块的文本。
-    """
-    if "<!--" not in text:
-        return False
-    return any(start <= pos < end for start, end in html_comment_spans(text))
-
-
 def _code_wikilink_raw(content: str) -> str | None:
     """行内 code 的整段内容恰好是 `[[...]]` 时返回内部 raw，否则 None。"""
     match = WIKILINK_RE.fullmatch(content.strip())
@@ -364,6 +353,44 @@ def _code_wikilink_raw(content: str) -> str | None:
 
 
 if _HAS_MARKDOWN:
+
+    class _StripCommentsPreprocessor(_Preprocessor):
+        """整行 HTML 注释在**解析前**抹成空白行，与扫描器共用 `pages.strip_html_comments`。
+
+        为什么放在 preprocessor 而不是各处理器里逐个设防（这是评审推翻的前一版做法）：注释里的
+        引用不止 `[[…]]` 一种，`_CodePathLinkTreeprocessor`（反引号页面引用）与
+        `_RawPathTreeprocessor`（裸 `raw/<slug>.md`）跑在**元素树**上、拿不到原文偏移，各设一道
+        守卫既漏且散；而 inline 处理器只看得到**当前块**的文本，含空行的注释会被切成普通段落、
+        第二块里根本没有 `<!--`，守卫直接失效。preprocessor 拿到的是整篇的行列表，一处抹掉、
+        全部下游自然干净——check/graph/health 与 Web 从此**同一口径**，不必逐处理器同步。
+
+        代价是注释文本不再显示在 Web 页面上。这与 Obsidian/GitHub 等任何 markdown 渲染器一致
+        （注释本就是隐藏内容）；此前之所以能看见，只是决策P4-4 关掉原始 HTML 透传后注释被转义成
+        了字面文本的**副产物**，不是有意的特性。
+
+        **被抹的行置空串、而不是留一串空格**：`strip_html_comments` 为了给 `reindex --prune` 保住
+        列偏移会抹成**等长**空白，而一行 4 个以上空格在 markdown 里是**缩进代码块**——直接把整行
+        注释渲染成了一个空的 `<pre><code>`。这里按"与原行不同即置空"改写，只动被注释影响的行，
+        原本就是空白的行（如围栏代码块内部的缩进空行）原样保留。
+
+        已知边界：围栏代码块内**独占整行**的 `<!-- … -->` 也会被抹掉、在页面上不显示。不为此再写
+        一套围栏跟踪——python-markdown 自己已有一份，本项目不重复造第二个事实源；且链接语义上并
+        无分歧（围栏内本就不成链，扫描器也不该把代码示例算作引用）。
+        """
+
+        def run(self, lines: list[str]) -> list[str]:  # noqa: N802 (markdown API 命名)
+            stripped = strip_html_comments("\n".join(lines)).split("\n")
+            return [
+                "" if new != old else old
+                for old, new in zip(lines, stripped, strict=True)
+            ]
+
+    class _StripCommentsExtension(_Extension):
+        def extendMarkdown(self, md) -> None:  # noqa: N802 (markdown API 命名)
+            # 优先级 32 > 内置 normalize_whitespace(30)：在任何块级切分前抹掉，跨空行注释才不被切散。
+            md.preprocessors.register(
+                _StripCommentsPreprocessor(md), "guanlan_strip_comments", 32
+            )
 
     class _EscapeHtmlExtension(_Extension):
         """禁用原始 HTML 透传——把页面里的 `<…>` 转义为文本，杜绝 XSS（决策P4-4 纵深防御）。
@@ -460,12 +487,7 @@ if _HAS_MARKDOWN:
             self._raw_index = raw_index
 
         def handleMatch(self, m, data):  # noqa: N802 (markdown API 命名)
-            if _in_html_comment(data, m.start(0)):
-                # 注释里的 `[[…]]` 不成链——与 check/graph/health 同口径（注释内容不是生效引用）。
-                # 三元 None 是 python-markdown 的"本次不匹配"约定：原文留作字面文本，故注释仍照常
-                # 显示（决策P4-4 关了原始 HTML 透传，注释本就以转义文本可见），只是里面的 `[[X]]`
-                # 不再是可点链接。**刻意不抹掉注释**：Web 是视图，不该让页面上凭空少一段字。
-                return None, None, None
+            # 注释里的 `[[…]]` 已由 `_StripCommentsPreprocessor` 在解析前抹掉，这里无需再设防。
             tag, attrib, display = _resolve_wikilink(
                 m.group(1), self._stem_to_path, self._raw_index
             )
@@ -706,6 +728,7 @@ def render_markdown(
     extensions = [
         "fenced_code",
         "tables",
+        _StripCommentsExtension(),  # 整行 HTML 注释解析前抹掉，与扫描器同口径。
         _EscapeHtmlExtension(),  # 安全：关原始 HTML 透传。
         _SafeLinkExtension(),  # 安全：中和 javascript:/data: 链接。
     ]
