@@ -52,11 +52,29 @@ GitHub Release**（notes 从 CHANGELOG 对应版本段抽，已存在则跳过�
 验证：
 
 ```bash
-# 刚发完立刻装可能拿到**上一版**（pip 缓存旧 wheel + PyPI /simple 索引比 JSON API 慢半拍），
-# 故用 --no-cache-dir 且钉死版本号强取，并在隔离 venv 里做（别污染开发树）。
-uv venv /tmp/verify-0.1.18 && /tmp/verify-0.1.18/bin/pip install --no-cache-dir 'guanlan-wiki==0.1.18'
+# 刚发完立刻装可能拿到**上一版**（缓存旧 wheel + PyPI /simple 索引比 JSON API 慢半拍），
+# 故禁缓存且钉死版本号强取，并在隔离 venv 里做（别污染开发树）。
+uv venv /tmp/verify-0.1.18
+uv pip install --python /tmp/verify-0.1.18/bin/python --no-cache 'guanlan-wiki==0.1.18'
 /tmp/verify-0.1.18/bin/guanlan --version
 ```
+
+**`uv venv` 建出来的环境里没有 `pip`**（不像 `python -m venv`），所以 `<venv>/bin/pip install …`
+会直接 `No module named pip` / `no such file`——本文此前正是这么写的，v0.1.20 发版时撞上。两条出路：
+
+- **用 uv 装**（上面那条，推荐）：`uv pip install --python <venv>/bin/python …`。**旗标名也不同**：
+  uv 是 `--no-cache`，pip 才是 `--no-cache-dir`；照抄 pip 的写法 uv 会报未知参数。
+- **想让 pip 口径原样可用**：建环境时加 `--seed`（`uv venv --seed /tmp/verify-0.1.18`），它会把
+  `pip` 装进去，之后 `<venv>/bin/pip install --no-cache-dir …` 就照常可用。
+
+另两点（都在 v0.1.20 实操中撞过）：
+
+- **`--python` 必须显式给**。uv 会自动发现并选用当前项目的 `.venv`——不指名道姓就可能装进开发树，
+  验证变成"验了个寂寞"外加污染环境（跑本地可编辑安装的 `agentao` 时尤其要命）。若本机把
+  `UV_NO_SYNC=1` 之类的环境变量设成了常驻，别用 `UV_NO_SYNC= `（空串）去临时取消它：uv 要求
+  boolish 值，空串直接报错退出，正确写法是 `UV_NO_SYNC=0` 或 `env -u UV_NO_SYNC`。
+- **验证要装 extra**：`guanlan-wiki==X.Y.Z` 只装核心，`guanlan/web/` 与 `guanlan/mcp/` 的随包内容
+  不会被导入验证覆盖。想确认可选层也随包发出去了，装 `'guanlan-wiki[web,mcp]==X.Y.Z'`。
 
 ## 可选：先发 TestPyPI 演练
 
