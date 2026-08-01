@@ -3,7 +3,12 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
-## [未发布]
+## [0.1.20] - 2026-08-01
+
+单一主题：**把一件早就在发生、却没人看得见的事显示出来**——外部 MCP server 早已被 agentao 默认注入
+观澜的每一次 ingest / query / heal / audit / Web 问答，而观澜里此前没有任何痕迹。P4.19 只补这份可见性，
+**不改变**注入行为：零 LLM、零策略、零管理、不写 KB、不执行任何外部工具。无接口破坏、无新退出码、
+无新依赖（连接检查复用既有的可选 extra `guanlan-wiki[mcp]`）。全量 1215 passed / 1 skipped。
 
 ### 新增
 
