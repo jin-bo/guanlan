@@ -3,6 +3,47 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [未发布]
+
+### 新增
+
+- **Web 里看得见本库的外部 MCP 配置，并能显式做一次连接检查（P4.19，见
+  [`docs/P4.19-Web-MCP诊断.md`](docs/P4.19-Web-MCP诊断.md)）** —— 顶栏新增「MCP」按钮，浮层里列出这个知识库
+  实际会被注入的外部 MCP server（名称 / 来源 / 传输 / 端点 / 是否 trust），可点一次「检查连接」看每个 server
+  连不连得上、报了哪些工具。**本相位补的是可见性，不改变任何注入行为**：agentao 的 `build_from_environment`
+  在调用方不传 `mcp_registry=` 时**默认注入** `FileBackedMCPRegistry`，读 `<kb>/.agentao/mcp.json` +
+  `~/.agentao/mcp.json`，而观澜的 CLI 子进程与 Web 嵌入**都吃这个默认**——也就是说外部 MCP 工具早已在注入
+  ingest/query/heal/audit/Web 问答，此前用户在观澜里看不到任何痕迹。零 LLM、零策略、零管理、不写 KB、
+  **不执行任何外部工具**（只 `initialize` + `tools/list`）。
+  - **时点语义钉死措辞**（决策P4.19-8）：面板显示的是「当前磁盘配置的解析结果；新建 Web 会话或下一次 CLI
+    作业将使用这些配置。**已有会话需新建后生效**」——MCP 是会话**构造期**一次性加载的，含糊成"当前生效"
+    会让用户以为改完 `mcp.json` 就对手上这个会话生效，事实相反。
+  - **两条轨**：生效集合取上游 `load_mcp_config` 的归一结果（就是 agent 实际会连的那一份，不另立口径）；
+    诊断另读两份文件的**原文**——上游 `_load_json_file` 对坏 JSON **静默返回 `{}`**，只信它就只会显示
+    "没有配置"而不是"配置写坏了"。静态检查只两项：`json_unparsable` / `transport_unresolvable`。
+  - **脱敏覆盖到错误文本与日志**（决策P4.19-5/14/15）：URL 只留 `scheme://host[:port]/path`（去 userinfo 与
+    整个 query 串，**并遮掉路径里 ≥16 字符的段**——托管 MCP 把 key 放路径里是标准形态，只去 query 会让活
+    密钥原样打在面板上）、stdio 只回 `command` 的 basename（不回 `args`）、绝不回 `headers`/`env`/token；
+    **连接错误串走同一道脱敏**——agentao 的 `NonMcpEndpointError` 会把完整 URL 写进消息，只脱敏端点而放过
+    `error` 等于没脱敏；**上游那条 `logger.error` 也过一道**——响应体擦干净而跑 `guanlan web` 的终端里留着
+    `?token=`，不叫"不出进程"。做法是已知敏感值定向擦除（能保住可诊断性就保：`command` 只去目录留命令名）
+    + URL 正则兜底，且**每个过滤分支各配一条可被变异测试杀的用例**（端到端只覆盖上游今天恰好会拼进错误串
+    的形态，headers/env 分支曾被整段删掉而全套用例仍绿）。
+  - **配置坏掉不再静默**：坏 JSON、`mcpServers` 写成数组、条目不是对象、`env` 值不是字符串、`command` 拼错
+    ——上游对这些一律**静默丢弃**（甚至一条坏条目让整份配置消失），此前面板把它们统统渲染成「未配置任何
+    外部 MCP server」，与真空配置一字不差。现在各自报 `json_unparsable` / `config_shape_invalid`（点名到条目）
+    / `transport_unresolvable`；同一份坏配置在检查端回 **422 + 可执行原因**而不是 500。
+  - **姿态**：检查端点**不接受**前端传入的 server 定义 / URL / header（否则面板就成了任意 MCP 客户端）；
+    不在启动或页面加载时自动探测（连接会真起 stdio 子进程 / 发网络请求，必须是用户点的）；同一进程内
+    **单飞**、并发请求返回 **409 不排队**；不设端点级墙钟，沿用上游 per-server startup timeout；reader
+    只读部署下两个端点**不注册**（理由不是"写 KB"，而是**有外部副作用**）；检查端点**请求体必填**
+    （最简 `{}`，与 ingest/heal 同姿态）——无体 / `text/plain` 的浏览器**简单请求**不触发 CORS 预检，
+    放行无体等于让任意网页驱使本机观澜连一遍全部配置的 MCP server（响应读不到，副作用照发）。
+  - **依赖**：连接检查需要 `guanlan-wiki[mcp]` 带的 MCP 客户端栈，缺时回 **501 + 安装指引**（不是 500）；
+    配置展示纯读盘、零 SDK 依赖，照常可用。
+  - 与 `guanlan mcp`（P4.10/P4.17/P4.18，观澜作 MCP **服务端**）**方向相反**：这里诊断的是观澜作为
+    MCP **客户端**被注入的外部 server。真 stdio 端到端测试正是拿 `guanlan mcp` 当被测上游（零新依赖）。
+
 ## [0.1.19] - 2026-07-30
 
 一次**三层递进**的修复，同一条因果链：起点是「HTML 注释里的链接被当成真链接」；修它引入的过滤

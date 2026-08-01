@@ -441,6 +441,18 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .raw-filter { display: flex; justify-content: flex-end; padding: .2rem .4rem .4rem; }
 .raw-badge { flex: 0 0 auto; margin: 0 .5rem; padding: .05rem .4rem; border-radius: 4px; background: var(--lan-mist); color: var(--lan-ink-soft); font-size: .72rem; white-space: nowrap; }
 
+/* 外部 MCP 配置诊断浮层（P4.19）：配置表 + 「检查连接」+ 就地渲染的结果。 */
+.mcp-row { display: grid; grid-template-columns: 1fr .6fr .6fr 1.6fr .8fr; gap: .5rem;
+  padding: .35rem .4rem; border-bottom: 1px solid var(--lan-mist); font-size: .85rem; align-items: baseline; }
+.mcp-row.mcp-head { color: var(--lan-ink-soft); font-size: .75rem; text-transform: uppercase; letter-spacing: .3px; }
+.mcp-row .mcp-endpoint { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .78rem; }
+.mcp-actions { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: .7rem 0 .2rem; }
+.mcp-result-head { margin: .9rem 0 .3rem; color: var(--lan-deep); font-size: .95rem; }
+.mcp-result { margin: .4rem 0 .7rem; padding-left: .5rem; border-left: 3px solid var(--lan-mist); }
+.mcp-tool { margin: .3rem 0; font-size: .82rem; }
+.mcp-tool code { font-size: .8rem; color: var(--lan-deep); margin-right: .35rem; }
+.mcp-disclaimer { margin-top: 1rem; border-top: 1px solid var(--lan-mist); padding-top: .5rem; }
+
 /* 投喂浮层（P4.1）：文件名输入 + 正文 textarea + 存盘 + 状态行（成功/409/失败）。 */
 .feed-name { width: 100%; box-sizing: border-box; padding: .4rem .55rem; margin-bottom: .5rem;
   border: 1px solid var(--lan-mist); border-radius: 5px; font-size: .9rem; }

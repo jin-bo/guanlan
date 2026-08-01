@@ -75,6 +75,10 @@ from .helpers import (
     _workspace_image_src,
 )
 from .jobs import JobQueue, WriteGate
+
+# 整模块导入（不 from-import 具体函数）：端点内经 `mcpdiag.<fn>` 取属性，测试可 monkeypatch
+# 单飞/慢检查而不必真起上游进程。模块本身零 mcp SDK 依赖（只导 agentao.mcp.config）。
+from . import mcpdiag
 from .parsefeed import (
     _BACKENDS,
     image_lint,
@@ -360,6 +364,21 @@ class AuditBody(BaseModel):
     model: str | None = None
 
 
+class McpCheckBody(BaseModel):
+    """`POST /api/mcp/check` 请求体（P4.19）。`name` 可省（省略=查全部），给了则必须是当前配置里
+    已存在的 server 名（否则 404）。
+
+    刻意**只收一个名字**（决策P4.19-3）：端点不接受前端传入的 server 定义 / URL / header——否则这个
+    只读诊断面板就成了一个任意 MCP 客户端（SSRF）。
+
+    **请求体本身必填**（最简 `{}`，决策P4.19-13）：与 ingest/heal 等既有写端点同姿态。不是形式主义
+    ——无体 POST 与 `text/plain` 体都是浏览器的**简单请求**（不触发 CORS 预检），若允许无体，任意网页
+    就能驱使本机观澜去连一遍配置里的全部 MCP server（起 stdio 子进程 + 对外发请求），响应虽读不到、
+    副作用照发。必填体把这条路堵在 422：`application/json` 会触发预检并被同源策略拦下。"""
+
+    name: str | None = None
+
+
 # 随包前端静态资源目录（guanlan/web/static/，随 packages 自动入 wheel，见 pyproject）。
 # 仍留在 app.py（与下方静态挂载强绑定、且被 tests/test_web.py 直接 import）。
 STATIC_DIR = Path(__file__).parent / "static"
@@ -482,6 +501,8 @@ def create_app(
     )
     app.state.conversations = conversations
     app.state.reader = reader
+    # P4.19 外部 MCP 连接检查的单飞闸（决策P4.19-10）：进程内同时只跑一次，后来者 409、不排队。
+    app.state.mcp_check_busy = False
 
     # reader 路由裁剪（决策P4.9-2/3/17）：写路由 + GET /graph 重建 + GET /api/conversations 枚举 +
     # POST .../undo 包进此装饰器——reader 下**不注册**（命中即 404、物理写不了 KB / 枚举不了他人会话），
@@ -904,6 +925,48 @@ def create_app(
         if not path.is_file():
             raise HTTPException(status_code=404, detail=f"{filename} 尚未生成，请先 GET /graph")
         return FileResponse(path, media_type=media_type)
+
+    # ── 外部 MCP 配置诊断（P4.19，见 docs/P4.19-Web-MCP诊断.md）───────────────────
+    # 展示配置 + 用户显式点一次连接检查，两件事。零 LLM、零策略、零管理、不写 KB、不执行外部工具。
+    # 背景：agentao 默认注入 FileBackedMCPRegistry（读 <kb>/.agentao/mcp.json + ~/.agentao/mcp.json），
+    # 观澜的 CLI 子进程与 Web 嵌入都吃这个默认——外部工具早已在注入，本组端点只是补上可见性。
+    #
+    # 两个端点都包 `_writer_only`（决策P4.19-6）：**此处理由不是「写 KB」，而是「有外部副作用」**
+    # ——连接检查会发网络请求、会拉起本机配置好的 stdio 子进程，匿名只读部署下不该给。复用既有裁剪
+    # 装饰器（命中即 404、路由根本不存在），不为一个端点新造第二套裁剪机制。
+    @_writer_only(app.get("/api/mcp"))
+    async def mcp_config() -> dict:
+        # 纯读盘、零网络：读两份 mcp.json 的原文（定 scope + 报解析失败）+ 上游归一结果（定生效集合）。
+        return await anyio.to_thread.run_sync(mcpdiag.read_config, root)
+
+    @_writer_only(app.post("/api/mcp/check"))
+    async def mcp_check(body: McpCheckBody) -> dict:
+        # 单飞 + 409（决策P4.19-10）：已有检查在跑时后续请求**直接拒**、不排队——排队只会让用户连点
+        # 变成 N 次真实连接（每次都拉子进程/发请求）。置位与检查之间无 await，单事件循环下即原子
+        # （与决策P4-2 的 workers=1 单进程假设一致）。
+        if app.state.mcp_check_busy:
+            raise HTTPException(status_code=409, detail="已有一次 MCP 连接检查在进行中，请稍后重试。")
+        app.state.mcp_check_busy = True
+        try:
+            # to_thread 卸离事件循环：manager 内部是 loop.run_until_complete，在运行中的循环里直接调会崩。
+            # 不设端点级总墙钟（决策P4.19-10）：to_thread 的线程不可取消，墙钟要么形同虚设、要么把线程
+            # 与它拉起的 stdio 子进程留在后台跑。上界由上游 per-server startup timeout（默认 60s，
+            # 对含 stdio 的所有传输生效）给出。
+            results = await anyio.to_thread.run_sync(
+                functools.partial(mcpdiag.check_servers, root, name=body.name)
+            )
+        except mcpdiag.UnknownServer as exc:
+            raise HTTPException(status_code=404, detail=f"未配置的 MCP server：{exc}") from exc
+        except mcpdiag.McpConfigUnreadable as exc:
+            # 配置坏到上游归一不了：这不是服务器故障（500 会让前端只显示「HTTP 500」、
+            # 一个字不提配置文件），而是"输入不可用"——把可执行的原因回给用户。
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except mcpdiag.McpSdkUnavailable as exc:
+            # 缺 `[mcp]` extra：给可执行的安装指引，而不是一个 500。GET /api/mcp 不受影响。
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        finally:
+            app.state.mcp_check_busy = False
+        return {"results": results}
 
     # 作业心跳回调工厂（A+ 心跳，决策：瞬时进度行）：长跑的 agent 作业（ingest/heal/backfill/audit）
     # 全程靠 agentao 子进程（capture_output）静默、worker 又 redirect stderr 到 buf，tty 心跳够不到

@@ -49,6 +49,7 @@ function applyReaderMode() {
     "feed-btn", "ingest-btn", "heal-btn", "backfill-btn", "audit-btn", "staging-btn", // 写端点（reader 下 404）
     "attach-btn",                                           // 上传是写（404）
     "graph-btn",                                            // 重建是写者（404）；不给死链（决策P4.9-11）
+    "mcp-btn",                                              // MCP 诊断：连接检查有外部副作用（404，决策P4.19-6）
     "mode-badge",                                           // 姿态恒只读、/mode 已禁可写 → 冻结隐藏（决策P4.9-4）
   ];
   for (const id of hideIds) {
