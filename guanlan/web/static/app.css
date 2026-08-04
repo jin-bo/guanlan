@@ -231,6 +231,16 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .mermaid-error { margin: .45rem 0 0; font-size: .82rem; color: var(--lan-ink-soft);
   border-left: 3px solid var(--lan-ripple); padding-left: .5rem; }
 
+/* flint 数据图表（P4.20）：```flint 块经 enhanceFlint 编译渲染后换成的 <figure>。
+   注意 ECharts 把 <svg> 以 position:absolute 放进固定尺寸容器，`max-width` 咬不住它——**真正让图落进
+   栏里的是渲染前按栏宽重编译**（决策P4.20-19），这里的 max-width/overflow-x 只是事后缩窗口时的兜底
+   （与 .mermaid-rendered 同姿态）。渲染失败/超限/被截断时 .flint-error 徽标贴在保留的 <pre> 源码上方，
+   三种文案由 i18n 区分。 */
+.flint-rendered { margin: .55rem 0; overflow-x: auto; text-align: center; }
+.flint-rendered svg { max-width: 100%; height: auto; }
+.flint-error { margin: .45rem 0 0; font-size: .82rem; color: var(--lan-ink-soft);
+  border-left: 3px solid var(--lan-ripple); padding-left: .5rem; }
+
 /* 代码语法高亮（P4.14，决策P4.14-6）：highlight.js 产物 <span class="hljs-*">。不 vendored 第三方主题 CSS，
    就地写一档**昼澜 token 主题**——代码块底是深澜（pre{background:#0d2b33}），故 token 取**深底可读**的澜调
    亮色（青/海沫绿 + 一抹暖砂作数字对比），与界面同水墨澜色调。wiki 单页 / 对话气泡 / 暂存区预览共用。 */

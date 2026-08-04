@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 观澜 (GuānLán) is an implementation of the [Karpathy LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): an Agent incrementally builds and maintains a structured, cross-linked markdown knowledge wiki instead of doing fresh RAG retrieval on every query. The full design (in Chinese) is the authoritative spec — read [`docs/DESIGN.md`](docs/DESIGN.md) before any non-trivial change.
 
-**Current status:** released through v0.1.20; the roadmap is fully implemented — P2 minimal closed loop, P3 health/graph family, P4 optional host layer (Web + MCP, through P4.17's Streamable HTTP transport, P4.18's move to MCP SDK v2 / protocol `2026-07-28`, and P4.19's read-only Web panel for the *opposite* direction — the external MCP servers agentao already injects into this KB), P5 retrieval + multi-format ingest, and every half-phase P2.1–P5.4. No roadmap spec remains unimplemented; per-phase flags, behavior, and red lines live in the `docs/P*.md` file for that phase, not here.
+**Current status:** released through v0.1.20, plus unreleased P4.20 on `main`; the roadmap is fully implemented — P2 minimal closed loop, P3 health/graph family, P4 optional host layer (Web + MCP, through P4.17's Streamable HTTP transport, P4.18's move to MCP SDK v2 / protocol `2026-07-28`, P4.19's read-only Web panel for the *opposite* direction — the external MCP servers agentao already injects into this KB — and P4.20's in-browser rendering of ` ```flint ` chart-spec blocks into data charts), P5 retrieval + multi-format ingest, and every half-phase P2.1–P5.4. No roadmap spec remains unimplemented; per-phase flags, behavior, and red lines live in the `docs/P*.md` file for that phase, not here.
 
 CLAUDE.md does **not** restate phase history or per-decision detail — authoritative sources:
 - Per-version change detail → [`CHANGELOG.md`](CHANGELOG.md)
@@ -31,11 +31,12 @@ uv run guanlan -C /tmp/demo audit --dry-run  # P3.7: semantic audit of drifted s
 uv run guanlan -C /tmp/demo convert 报告.pdf  # P5.2: multi-format → raw/<slug>.md via pdf-to-markdown skill (zero-LLM host write; --dry-run / --overwrite / --ingest / --backend)
 uv run guanlan -C /tmp/demo web --no-browser   # P4: optional local Web host (needs guanlan-wiki[web]; 127.0.0.1 only)
 uv run guanlan -C /tmp/demo mcp          # P4.10/P4.17: optional read-only MCP server (stdio; --transport http for Streamable HTTP) (needs guanlan-wiki[mcp])
-uv run guanlan install-skill             # copy the bundled guanlan-wiki skill into ~/.agentao/skills/ (external-base mode)
+uv run guanlan install-skill             # copy the bundled skills (guanlan-wiki + the pdf-to-markdown / flint-chart-author aux pair) into ~/.agentao/skills/ (external-base mode)
 uv run pytest                            # run all tests
 uv run pytest tests/test_web.py          # P4 Web host tests (skipped if guanlan-wiki[web] absent)
 uv run pytest tests/test_mcp.py          # P4.10 MCP host tests (skipped if guanlan-wiki[mcp] absent)
 uv run pytest tests/test_web_mcpdiag.py  # P4.19 Web MCP diagnostics (the reverse direction: external servers injected *into* this KB)
+uv run --extra web python scripts/smoke_p420.py  # P4.20 flint chart rendering — real-browser smoke (Playwright; not in pytest)
 uv run pytest tests/test_convert.py      # P5.2 convert tests (mock skill backend; zero-LLM)
 uv run pytest tests/test_init.py::test_init_is_idempotent_and_non_destructive  # single test
 ```
@@ -50,7 +51,7 @@ The project deliberately separates three concerns. Internalize this split before
 
 1. **`guanlan/` — the thin CLI wrapper (this package).** It carries *no wiki-maintenance intelligence* — judgment about content lives in the skill and runs under Agentao. The wrapper owns exactly three kinds of code: deterministic zero-LLM operations (`init`/`check`/`health`/`lint`/`graph`/`reindex`/`search`/`remove`/`convert` — roughly one module per subcommand), orchestration of Agentao + the skill for the LLM operations (`ingest`/`query`/`heal`/`audit`) with the deterministic write gate (`gate.py`) wrapped around every write run, and the optional hosts (`web/`, `mcp/`). `cli.py` is argparse-only.
 
-2. **`skills/guanlan-wiki/` — the maintenance engine.** This is where the actual wiki-maintenance workflows live (`SKILL.md` = workflows, `references/conventions.md` = default page/frontmatter/naming conventions — the deterministic checks live in the `guanlan/` package, not in skill scripts). The engine is shipped/installed *once* and is **not** copied into each knowledge base. It is intended to run under Agentao's skill discovery.
+2. **`skills/guanlan-wiki/` — the maintenance engine.** This is where the actual wiki-maintenance workflows live (`SKILL.md` = workflows, `references/conventions.md` = default page/frontmatter/naming conventions — the deterministic checks live in the `guanlan/` package, not in skill scripts). The engine is shipped/installed *once* and is **not** copied into each knowledge base. It is intended to run under Agentao's skill discovery. Alongside it `skills/` also carries two **auxiliary** skills that are deliberately *not* part of the maintenance engine, because their subject matter is orthogonal to wiki conventions: `pdf-to-markdown` (P4.6, parse uploads into `workspace/parsed/`) and `flint-chart-author` (P4.20, turn structured data into a renderable ` ```flint ` chart-spec block). All three are enumerated in `guanlan/skill.py`'s `BUNDLED_SKILL_NAMES`; adding one costs a `force-include` line plus a tuple entry, and `tests/test_skill.py` covers it automatically.
 
 3. **User knowledge base (generated by `guanlan init`).** Holds only data + per-base config: `AGENTAO.md` (Agent behavior hard-constraints + pointers), `SCHEMA.md` (this base's domain/page-types/custom rules), `raw/` (read-only sources), `wiki/` (Agent-owned generated layer: `index.md`, `log.md`, `overview.md`, plus `sources/ entities/ concepts/ syntheses/`).
 

@@ -18,7 +18,13 @@ const KATEX_OPTS = { // 硬编码、无放宽旋钮（决策P4.14-4）
     { left: "\\(", right: "\\)", display: false },
   ],
   ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code", "option"], // 代码块内 $ 不排版、保字面
-  ignoredClasses: ["page-meta"], // 跳过 chrome：wiki.js paintPage 把 .page-meta（页路径/更新时间）与正文同放
+  // 跳过 chrome：wiki.js paintPage 把 .page-meta（页路径/更新时间）与正文同放。
+  // 另跳两类**渲染产物**（P4.20 评审补）：mermaid / flint 会把原本躺在 `pre>code` 里、受上面
+  // ignoredTags 无条件保护的文本**搬进 `<svg><text>`**——那一刻保护就没了，而 auto-render 不跳 svg。
+  // 于是一个形如 `$5–$20` 的价格分桶类别名会被 KaTeX 当公式，就地塞进 HTML 命名空间的 <span>；
+  // 浏览器不渲染 SVG 子树里的 HTML 元素，那条坐标轴/图例标签**直接从图上消失**（图还在、没有徽标）。
+  // 三个增强器并发跑、谁先落地不定，所以这不是靠顺序能规避的，须在此显式排除渲染产物。
+  ignoredClasses: ["page-meta", "flint-rendered", "mermaid-rendered"],
                                   // view 内（wiki.js），auto-render 扫文本节点会连 chrome 一起扫——令其跳过（P2 修）
   trust: false,        // 安全铰链（KaTeX 默认即此，显式写明）：禁 \href/\url/\includegraphics/\html*（§4）
   strict: "ignore",    // 仅静默告警，非安全项

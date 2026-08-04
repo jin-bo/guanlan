@@ -144,12 +144,13 @@
      中间六个文件只是关注点分组、彼此无载入期依赖（函数声明全局提升、共享 let 仅在运行期互访）。 -->
 <script src="/static/core.js"></script>
 <script src="/static/i18n_apply.js"></script>
-<!-- 内容富渲染增强（P4.13 mermaid + P4.14 数学/化学/代码）：mermaid/math/code 三脚本各定义一个全局
-     （enhanceMermaid/typesetMath/highlightCode），content_enhance.js 把三者编排为 enhanceContent；四者须在
-     其调用者 wiki/jobs/staging/chat **之前**载入，content_enhance.js 又须在三增强**之后**（它引用三全局）。 -->
+<!-- 内容富渲染增强（P4.13 mermaid + P4.14 数学/化学/代码 + P4.20 flint 图表）：四脚本各定义一个全局
+     （enhanceMermaid/typesetMath/highlightCode/enhanceFlint），content_enhance.js 把四者编排为 enhanceContent；
+     五者须在其调用者 wiki/jobs/staging/chat **之前**载入，content_enhance.js 又须在四增强**之后**（它引用四全局）。 -->
 <script src="/static/mermaid_enhance.js"></script>
 <script src="/static/math_enhance.js"></script>
 <script src="/static/code_enhance.js"></script>
+<script src="/static/flint_enhance.js"></script>
 <script src="/static/content_enhance.js"></script>
 <script src="/static/wiki.js"></script>
 <script src="/static/reports.js"></script>
