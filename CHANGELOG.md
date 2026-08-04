@@ -3,7 +3,12 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
-## [未发布]
+## [0.1.21] - 2026-08-04
+
+单一主题：**让写进 wiki 的数字自己说话**——观澜经 MCP 接入结构化数据库后，Agent 取到的结果行
+此前只能以表格或裸 JSON 落盘。P4.20 把最后一公里补上：` ```flint ` 规格块在浏览器内编译成图表，
+而**同一段 markdown 在 CLI / 纯文本回退里仍是 honest 的规格源码**（规格与数据都在块里，零信息损失）。
+服务端零改、无接口破坏、无新退出码、无新依赖。全量 1231 passed / 1 skipped。
 
 ### 新增
 
@@ -54,6 +59,14 @@
   - 无接口破坏、无新退出码、无新依赖（两枚资产随既有 `web` extra 的静态资源打包）。
     16 条服务端契约用例（`tests/test_web.py`）+ 真浏览器冒烟 18/18（`scripts/smoke_p420.py`，
     新增的三条都做过**反向对照**：摘掉对应修复后用例确实变红）。
+
+### 修复
+
+- **`docs/发布到-PyPI.md` 的「验证」段改为 uv 口径**——原来那条命令**跑不通**：`uv venv` 不带 pip
+  （除非 `--seed`），故 `<venv>/bin/pip install …` 必然 `no such file`；且 uv 用 `--no-cache`
+  而 pip 用 `--no-cache-dir`、`--python` 不显式给会装进开发树的 `.venv`。v0.1.20 发版实操中撞上，
+  已按实际可跑的口径改写，并补上「装 `[web,mcp]` extra 才覆盖到 `guanlan/web/`、`guanlan/mcp/`
+  随包内容」这一条。
 
 ## [0.1.20] - 2026-08-01
 

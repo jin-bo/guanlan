@@ -106,4 +106,8 @@ It is the recall front-end for `query`/skill, and is reused by the Web `/api/sea
 - **Maintenance** `health` / `lint` / `graph` / `reindex` / `heal` → [Maintenance](04-maintenance.md)
 - **Multi-format** `convert` → [Convert](07-convert.md)
 - **Hosts** `web` / `mcp` → [Web host](05-web-host.md) / [MCP host](06-mcp-host.md)
-- **`install-skill`**: install the bundled `guanlan-wiki` skill into `~/.agentao/skills/` (for external real bases; not needed in dev mode, see [Installation](01-installation.md#develop-from-source)). `--force` reinstalls over an existing copy.
+- **`install-skill`**: install the three bundled skills into `~/.agentao/skills/` (for external real bases; not needed in dev mode, see [Installation](01-installation.md#develop-from-source)). `--force` reinstalls over an existing copy.
+  - `guanlan-wiki` — the maintenance engine (`ingest` / `query` / Web chat all activate it).
+  - `pdf-to-markdown` — parses uploaded PDF/DOCX/… into staged markdown (used by `convert` and Web uploads).
+  - `flint-chart-author` — turns structured data into ` ```flint ` chart blocks the Web host can render (see [Web host · Rich rendering](05-web-host.md)).
+  The latter two are activated by the Agent **on demand**; they are orthogonal to wiki conventions.
