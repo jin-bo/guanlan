@@ -7219,3 +7219,227 @@ def test_continuation_prompt_has_convergence_rule():
     from guanlan.web.conversation import _continuation_prompt
 
     assert "不要重复等价检索" in _continuation_prompt("某目标")
+
+
+# ──────────────────────── P4.20 Web flint 数据图表渲染 ────────────────────────
+# 测试分工同 P4.13/P4.14：flint 与 ECharts 自身的渲染质量是 upstream 的事、DOM 交互需真浏览器
+# （走 scripts/smoke_p420.py）；Python 层只锁**服务端不变量**（规格保真到达 + 转义姿态零回归 +
+# 双运行时随包 + 安全/资源闸硬编码 + 编排器接线 + 钉版 SHA256）。安全闸的 grep 断言是**必要非充分**
+# （证「闸子在代码里」，真生效与否走冒烟脚本 3/5/6/7）。见 docs/P4.20-Web-flint图表渲染.md §7。
+
+FLINT_BLOCK = (
+    '```flint\n'
+    '{"data":{"values":[{"模型":"model-a","评测得分":72.4},{"模型":"model-b","评测得分":81.9}]},\n'
+    ' "chart_spec":{"chartType":"Bar Chart",\n'
+    '               "encodings":{"x":{"field":"模型"},"y":{"field":"评测得分"}}}}\n'
+    '```\n'
+)
+
+
+def test_api_page_preserves_flint_source(client, kb) -> None:
+    """```flint 围栏块经 fenced_code 落成 code.language-flint、规格 JSON 转义保真——供前端拾取（服务端零改）。"""
+    write_page(kb, "wiki/concepts/Chart.md", type="concept", body="图表：\n\n" + FLINT_BLOCK)
+    resp = client.get("/api/page", params={"path": "wiki/concepts/Chart.md"})
+    assert resp.status_code == 200
+    html = resp.json()["html"]
+    assert 'class="language-flint"' in html  # 前端按此 class 拾取
+    # 规格保真：JSON 的引号被 markdown 转义成 &quot;，前端读 textContent 时浏览器反转义回真 JSON 喂 JSON.parse。
+    assert "&quot;chartType&quot;:&quot;Bar Chart&quot;" in html  # 引号转义、前端读 textContent 时反转义回真 JSON
+    assert "model-a" in html and "72.4" in html  # 数据整体内联到达（决策P4.20-12：图 100% 可从 markdown 重建）
+
+
+def test_api_page_flint_escapes_payload_in_data(client, kb) -> None:
+    """flint 块里的数据值夹带原始 HTML 仍被转义——规格走的是与 mermaid 同一条 fenced_code 通道。"""
+    write_page(kb, "wiki/concepts/ChartXss.md", type="concept",
+               body='```flint\n{"data":{"values":[{"a":"<img src=x onerror=alert(1)>"}]}}\n```\n')
+    html = client.get("/api/page", params={"path": "wiki/concepts/ChartXss.md"}).json()["html"]
+    assert 'class="language-flint"' in html
+    assert "<img" not in html and "&lt;img" in html  # 载荷在块内也全转义、无活元素
+
+
+def test_api_page_flint_does_not_break_escape_posture(client, kb) -> None:
+    """含 ```flint 的页里夹带原始 <script> 仍被转义——P4.20 未碰 _EscapeHtmlExtension（决策P4.20-8）。"""
+    write_page(kb, "wiki/concepts/ChartMixed.md", type="concept",
+               body=FLINT_BLOCK + "\n正文夹带 <script>alert(1)</script>。")
+    html = client.get("/api/page", params={"path": "wiki/concepts/ChartMixed.md"}).json()["html"]
+    assert 'class="language-flint"' in html  # 图块仍在
+    assert "<script" not in html and "&lt;script&gt;" in html  # 原始 HTML 仍全转义、姿态不变
+
+
+def test_vendor_flint_runtimes_and_enhance_served(client) -> None:
+    """vendored 双运行时 + 增强脚本随包可取（packages=["guanlan"] 自动携带包内静态资源，非 force-include）。"""
+    flint = client.get("/static/vendor/flint/echarts.js")
+    assert flint.status_code == 200
+    assert "assembleECharts" in flint.text  # 自包含单文件 ESM：具名导出（不挂 window）
+    echarts = client.get("/static/vendor/echarts.min.js")
+    assert echarts.status_code == 200
+    assert 'version="6.1.0"' in echarts.text  # 自包含 UMD 尾部（钉版可见）
+    enhance = client.get("/static/flint_enhance.js")
+    assert enhance.status_code == 200
+    assert "window.enhanceFlint" in enhance.text
+
+
+def test_vendor_flint_runtime_is_self_contained_esm() -> None:
+    """flint dist 仍是**自包含单文件 ESM**——决策P4.20-3 的「无 npm、无构建」底线机械守门。"""
+    src = (STATIC_DIR / "vendor" / "flint" / "echarts.js").read_text(encoding="utf-8")
+    # 关键字与引号之间**允许空白**：flint 的 dist 是**不压缩**的 ESM，真出现外部依赖时写的是
+    # `from "echarts";`（有空格）。要求引号紧贴 `from` 的正则恒不触发——守门会静默地证明不了它要证的事。
+    assert not re.search(r'(?:\bfrom|\brequire\s*\()\s*["\'][a-zA-Z@]', src), \
+        "flint dist 出现 bare import/require（不再自包含）"
+    assert "import(" not in src, "flint dist 出现运行时动态 import（不再离线自洽）"
+    assert re.search(r"export ?\{[^}]*assembleECharts", src), "assembleECharts 不再是具名导出"
+
+
+def test_vendored_flint_assets_match_pinned_digests() -> None:
+    """两枚 vendored 资产的 SHA256 == vendor/README.md 记录值——钉版的机械守门（决策P4.20-1/-4）。"""
+    import hashlib
+
+    readme = (STATIC_DIR / "vendor" / "README.md").read_text(encoding="utf-8")
+    for rel, size in (("vendor/flint/echarts.js", 531443), ("vendor/echarts.min.js", 1121883)):
+        blob = (STATIC_DIR / rel).read_bytes()
+        digest = hashlib.sha256(blob).hexdigest()
+        assert len(blob) == size, f"{rel} 字节数与 README 记录不符"
+        assert f"`{digest}`" in readme, f"{rel} 的 SHA256 {digest} 未记入 vendor/README.md"
+
+
+def test_flint_enhance_security_and_resource_gates() -> None:
+    """安全闸 + 资源闸硬编码、无放宽旋钮（决策P4.20-4/-5/-6）：必要非充分（真生效走冒烟 3/5/6/7）。"""
+    src = (STATIC_DIR / "flint_enhance.js").read_text(encoding="utf-8")
+    # 渲染姿态两条铰链：SVG 产物 + tooltip 不走 HTML 通道。
+    assert 'renderer: "svg"' in src
+    assert 'renderMode: "richText"' in src
+    # 入口白名单：只五个顶层键；拒 data.url（只认内联 values）。
+    assert 'FLINT_TOP_KEYS = ["data", "semantic_types", "chart_spec", "field_display_names", "options"]' in src
+    assert 'inp.data = { values }' in src and "no-inline-values" in src
+    # 三条资源闸（**字符数**非字节 / 1000 行 / 画布尺寸有限且不过大）。
+    assert "FLINT_MAX_CHARS = 64 * 1024" in src and "MAX_BYTES" not in src
+    assert "FLINT_MAX_ROWS = 1000" in src
+    assert "Number.isFinite(w)" in src and "FLINT_SIZE = { maxW: 1600, maxH: 1200 }" in src
+    # **故意没有下界**（决策P4.20-20）：小画布不消耗资源。曾经的 minW/minH 把按语义定尺寸的合法小图
+    # （实测两周的 Calendar Heatmap 只有 114px）判成「数据过大」，还叫作者删数据——那只会让画布更小。
+    gate_code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("//"))
+    assert "minW" not in gate_code and "minH" not in gate_code
+    # 出口断言按**键域**：不扫值域（否则含 URL 数据的正常图会被整张否掉，决策P4.20-4）。
+    assert "assertSafeOption" in src and "empty-series" in src
+    # 注：本文件里若干「某标识符**不该出现**」的断言都先剥掉 `//` 注释行——注释里往往正写着
+    # 「为什么不这么做」，直接 grep 全文会被自己的解释噎住（本相位已踩过三次）。
+    code_only = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("//"))
+    assert "https?:" not in code_only, "出口断言不得扫值域（合法数据里就有 URL 串，扫值域会把正常图整张否掉）"
+    # 实例生命周期（决策P4.20-7）：ECharts 是前端第一个有状态渲染器。
+    assert "sweepFlintCharts" in src and ".dispose()" in src
+    assert "/static/vendor/flint/echarts.js" in src and "/static/vendor/echarts.min.js" in src  # 懒加载 vendored
+
+
+def test_flint_exit_assertion_does_not_ban_legit_keys() -> None:
+    """出口断言**不许乱拒**（决策P4.20-16）：`target` 不在黑名单、`renderItem` 只拒非函数。
+
+    实测教训——`target` 一刀切会禁掉 `Sankey Diagram`/`Network Graph`（其 `links[].target` 是
+    **节点名**），`renderItem` 一刀切会禁掉 `Waterfall Chart`（flint 自己造的函数）。
+    这条是「闸子只证明了能拒、没证明不乱拒」的反向守门（对应冒烟 5b/8c）。
+    """
+    src = (STATIC_DIR / "flint_enhance.js").read_text(encoding="utf-8")
+    assert 'FLINT_BAD_KEYS = new Set(["link", "toolbox", "dataView"])' in src
+    assert '"target"' not in src.split("FLINT_BAD_KEYS")[1].split("\n")[0]
+    assert 'k === "renderItem" && typeof v !== "function"' in src  # 只拒字符串形态（版本漂移/注入）
+    assert "not-echarts-option" in src  # 非 ECharts 产物落到诚实的 renderFail、而非误报「数据过大」
+
+
+def test_flint_fits_column_by_recompiling_not_by_resizing() -> None:
+    """自适应宽靠**把尺寸交还给 flint 重编译**，既不靠 CSS 缩放、也不靠事后改画布（决策P4.20-19）。
+
+    两条实测教训叠在一起：①ECharts 浏览器端 SVG 不写 viewBox，且它把 <svg> 以 position:absolute
+    放进固定尺寸容器，`max-width:100%` 咬不住；②但**事后改 init 尺寸也不行**——flint 把
+    `legend.left`/`graphic.left`/`grid` 按它自己算出的 `_width` 烤成绝对像素（实测 _width=562 时
+    legend.left=464），画布缩到 377 就把整个图例画到视口外，图还在、没有徽标、读者却分不清线。
+    故唯一正解是拿 `chart_spec.canvasSize` **重编译**，让 flint 自己重算这些绝对像素。
+    """
+    src = (STATIC_DIR / "flint_enhance.js").read_text(encoding="utf-8")
+    body = src[src.index("async function enhanceFlint"):]
+    assert "assembleFitted(" in body and body.index("assembleFitted(") < body.index("echarts.init(")
+    assert "canvasSize" in src, "按栏宽收窄须经 chart_spec.canvasSize 重编译，而非事后改 init 尺寸"
+    assert "fitToColumn" not in src, "不得再有『编译完再改画布尺寸』的做法（会把 flint 烤死的图例挤出视口）"
+    assert "pre.getBoundingClientRect().width" in src  # 不用父容器 clientWidth（含 padding、收窄不够）
+    assert 'setAttribute("viewBox"' in src  # 浏览器端不自带，手动补一行兜底
+    code_only = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("//"))
+    assert "ResizeObserver" not in code_only  # 仍不引（沿决策P4.20-2：少一个状态源）
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    assert ".flint-rendered { margin: .55rem 0; overflow-x: auto;" in css  # 事后缩窗口的兜底
+
+
+def test_flint_post_edits_of_compiled_option_are_bounded() -> None:
+    """对 flint 产物的**事后改写**只有三类，且每类都有它不许越过的边界（决策P4.20-19 及其邻居）。"""
+    src = (STATIC_DIR / "flint_enhance.js").read_text(encoding="utf-8")
+    # ① 逐槽换色：映射表从 opt.color **自身**造（cat10/cat20/变体全覆盖、不随上游漂移），
+    #    且语义色图型整张跳过（Waterfall 的涨绿/跌红不许被换成澜青/海沫绿）。
+    assert "FLINT_SEMANTIC_COLOR_CHARTS" in src and '"Waterfall Chart"' in src
+    assert "Array.isArray(opt.color)" in src, "色板映射须由产物自身的 color 数组现造"
+    assert "FLINT_DEFAULT_PALETTE" not in src, "不得再硬编码 flint 的色板常量（只列 10 档会漏 cat20）"
+    assert src.count('"#') >= 20  # 昼澜色板补齐到 20 档，够 cat20 用
+    # ② tooltip：flint 的 formatter 是**函数**且返回 HTML 串，而 richText 不解析 HTML。
+    assert "plainTextFormatters" in src and "htmlToPlainText" in src
+    assert 'renderMode: "richText"' in src  # 安全铰链不撤，改的是喂给它的东西
+    # ③ flint 自己的截断不许静默：读完 _warnings 再剥 `_` 私有键。
+    assert "assertNoSilentTruncation" in src and '"overflow"' in src
+    body = src[src.index("async function enhanceFlint"):]
+    assert body.index("assertNoSilentTruncation(") < body.index('k.startsWith("_")')
+
+
+def test_flint_dynamic_import_can_actually_retry() -> None:
+    """动态 import 失败后必须能**真的**重取（决策P4.20-26）。
+
+    只把 promise 置空不够：按 HTML module map 语义，失败的 import() 会把该 URL 的失败结果留在
+    文档存活期内，重发同一 URL 立刻再 reject、根本不回服务端。注入 <script> 的那三个渲染器没这
+    问题（每次新造标签），故这条是 flint 独有的义务。
+    """
+    src = (STATIC_DIR / "flint_enhance.js").read_text(encoding="utf-8")
+    assert "_flintImportAttempt" in src
+    assert "retry=" in src, "重试须换 URL（query 即可），否则命中 module map 的失败缓存"
+
+
+def test_katex_skips_chart_render_products() -> None:
+    """KaTeX 须跳过 mermaid/flint 的渲染产物（P4.20 评审补）。
+
+    两个渲染器都把原本躺在 `pre>code` 里、受 ignoredTags 无条件保护的文本**搬进 <svg><text>**——
+    那一刻保护就没了，而 auto-render 不跳 svg。于是一个形如 `$5–$20` 的价格分桶类别名会被当公式，
+    就地塞进 HTML 命名空间的 <span>，浏览器不渲染 SVG 子树里的 HTML 元素 → 那条标签直接从图上消失。
+    三个增强器并发跑、谁先落地不定，靠顺序规避不了。
+    """
+    src = (STATIC_DIR / "math_enhance.js").read_text(encoding="utf-8")
+    opts = src[src.index("ignoredClasses"):src.index("ignoredClasses") + 200]
+    assert '"flint-rendered"' in opts and '"mermaid-rendered"' in opts
+
+
+def test_flint_replace_happens_after_render() -> None:
+    """`replaceWith` 必须在 `setOption` **之后**（决策P4.20-15）——反过来做会静默空白，review 最易放过。"""
+    src = (STATIC_DIR / "flint_enhance.js").read_text(encoding="utf-8")
+    body = src[src.index("async function enhanceFlint"):]
+    assert body.index("setOption(") < body.index("replaceWith("), "replaceWith 早于 setOption：失败时会留空 figure"
+    assert "chart.dispose();" in body  # 渲染期抛错 → 临时实例当场释放、源码原样留树
+
+
+def test_flint_enhance_wired_in_orchestrator_and_load_order() -> None:
+    """编排器加第四类增强、code_enhance 跳 flint、index.html 载入顺序（决策P4.20-8，七个注入点零改动）。"""
+    co = (STATIC_DIR / "content_enhance.js").read_text(encoding="utf-8")
+    assert "enhanceFlint(container)" in co[co.index("function enhanceContent"):]
+    ce = (STATIC_DIR / "code_enhance.js").read_text(encoding="utf-8")
+    assert "language-flint" in ce  # 与 language-mermaid 并列跳过（显式化「谁负责这个块」）
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert index.index('/static/flint_enhance.js"') < index.index('/static/content_enhance.js"')
+    assert index.index('/static/content_enhance.js"') < index.index('/static/wiki.js"')
+
+
+def test_flint_i18n_three_distinguishable_keys() -> None:
+    """三条文案分开（决策P4.20-6/-10/-18）：「画不出来」「太大所以没画」「被 flint 丢了数据所以没画」
+    的修法完全不同，合并任意两条都会把作者引向错路。"""
+    i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
+    for key in ('"flint.renderFail"', '"flint.tooLarge"', '"flint.truncated"'):
+        assert i18n.count(key) == 2, f"{key} 须 zh/en 各一条"
+    assert "flint.loading" not in i18n  # 无加载占位（沿 P4.13 收窄）
+
+
+def test_render_py_untouched_by_flint_phase() -> None:
+    """render.py 字节稳定的机械保证：服务端零改、未引入任何图表渲染依赖（决策P4.20-8）。"""
+    src = (STATIC_DIR.parent / "render.py").read_text(encoding="utf-8")
+    low = src.lower()
+    for forbidden in ("flint", "echarts", "vega", "chart"):
+        assert forbidden not in low, f"render.py 不应引入 {forbidden}（决策P4.20-8：渲染只在前端）"

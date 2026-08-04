@@ -104,6 +104,9 @@ packages = ["guanlan"]
 # 辅助 skill pdf-to-markdown（P4.6）：供可写会话 Agent 把上传的 PDF/DOCX/… 解析成 Markdown
 # 暂存物（再经人审晋级为 raw/ 源）。同样随包携带、由 skill.py 幂等装入全局供 Agent 发现。
 "skills/pdf-to-markdown" = "guanlan/_skill/pdf-to-markdown"
+# 辅助 skill flint-chart-author（P4.20）：供 Agent 把结构化数据/查询结果写成合法的 ```flint 图表规格块
+# （由 Web 宿主前端编译渲染成图）。与 wiki 维护约定正交，故独立于 guanlan-wiki（决策P4.20-11）。
+"skills/flint-chart-author" = "guanlan/_skill/flint-chart-author"
 
 # lint 规则集显式钉住，不随 ruff 版本浮动。
 # 背景：CI 用 `uvx ruff check`（不进 lock、每次取最新），本仓库此前一直吃 ruff 的**默认**规则集。

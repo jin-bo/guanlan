@@ -12,11 +12,15 @@ Agentao 的 skill 发现路径（见 `agentao/skills/manager.py`）：
 **幂等拷贝到全局 (1)**（与 Agentao 自带 skill 的 bootstrap 行为一致），并提供
 `guanlan install-skill` 做显式安装/重装。
 
-随包携带两个 skill：
+随包携带三个 skill：
 - `guanlan-wiki` —— 维护引擎（**决定可发现性门禁**：`ingest`/`query`/Web 问答都激活它）。
 - `pdf-to-markdown` —— 辅助 skill（P4.6）：可写会话里 Agent 把上传的 PDF/DOCX/… 解析成
-  `workspace/parsed/` 暂存物（再经人审晋级为 `raw/` 源）。它由 Agent **按需自行激活**
-  （非构造期强激活），故只需保证「可发现」即可。
+  `workspace/parsed/` 暂存物（再经人审晋级为 `raw/` 源）。
+- `flint-chart-author` —— 辅助 skill（P4.20）：把结构化数据/查询结果写成合法的 ```flint 图表规格块，
+  由 Web 宿主前端编译渲染成图（`web/static/flint_enhance.js`）。与 wiki 维护约定正交，故不并进
+  维护引擎（决策P4.20-11）。
+
+两个辅助 skill 都由 Agent **按需自行激活**（非构造期强激活），故只需保证「可发现」即可。
 """
 
 from __future__ import annotations
@@ -28,8 +32,8 @@ from agentao.paths import user_root
 
 # 维护引擎：可发现性门禁与构造期强激活都以它为准（见 web/chat.py、runtime.py）。
 SKILL_NAME = "guanlan-wiki"
-# 辅助 skill：随包发布、保证可发现，由 Agent 按需激活（P4.6 多格式解析）。
-AUX_SKILL_NAMES: tuple[str, ...] = ("pdf-to-markdown",)
+# 辅助 skill：随包发布、保证可发现，由 Agent 按需激活（P4.6 多格式解析 / P4.20 图表规格作者）。
+AUX_SKILL_NAMES: tuple[str, ...] = ("pdf-to-markdown", "flint-chart-author")
 # 全部随包 skill：install-skill / ensure 一并铺到全局。
 BUNDLED_SKILL_NAMES: tuple[str, ...] = (SKILL_NAME, *AUX_SKILL_NAMES)
 

@@ -27,8 +27,14 @@ function loadHljs() {
 // 幂等可重入：已高亮块带 .hljs、重复调跳过（highlight.js v11 重复高亮会告警「unescaped HTML」）。
 async function highlightCode(container) {
   if (!container) return;
+  // 跳 mermaid / flint（各归其增强器）/ 已高亮。flint 那条是**显式化**：hljs 本就没有 `flint` 语言、
+  // 走到下面 getLanguage 守门也是纯文本，行为等价；显式跳过让「谁负责这个块」在代码里一眼可见
+  // （决策P4.20-8），且省一次遍历。
   const blocks = [...container.querySelectorAll('pre > code[class*="language-"]')].filter(
-    (c) => !c.classList.contains("language-mermaid") && !c.classList.contains("hljs") // 跳 mermaid / 已高亮
+    (c) =>
+      !c.classList.contains("language-mermaid") &&
+      !c.classList.contains("language-flint") &&
+      !c.classList.contains("hljs")
   );
   if (!blocks.length) return; // 早退：无可高亮块零加载（懒，决策P4.14-1）
   let hljs;
