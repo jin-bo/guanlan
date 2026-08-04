@@ -52,6 +52,12 @@
 - [P4.12-Web语义审计](P4.12-Web语义审计.md) —— Web 端 `audit` 写作业(预览漂移源组 → 复核 → 结构化回执)
 - [P4.13-Web-mermaid渲染](P4.13-Web-mermaid渲染.md) —— Web 端 ```mermaid``` 围栏块浏览器内渲染成图(vendored UMD + strict 安全闸 + 优雅降级)
 - [P4.14-Web数学化学代码渲染](P4.14-Web数学化学代码渲染.md) —— Web 端数学/化学(KaTeX+mhchem) + 代码高亮(highlight.js)渲染(vendored + trust:false 默认安全闸 + 失败保留源码)
+- [P4.15-Web工具确认](P4.15-Web工具确认.md) —— 可写会话里的 ASK 工具改为浏览器内人确认 + `ask_user` 人在环(超时/断线一律默认拒绝)
+- [P4.16-Web目标续跑](P4.16-Web目标续跑.md) —— `/goal` 长任务目标与自动续跑(宿主拥有的外层循环 + 时间/轮数预算 + 收尾轮)
+- [P4.17-MCP远程传输](P4.17-MCP远程传输.md) —— `guanlan mcp --transport http`:官方 Streamable HTTP(localhost-first + bearer token 闸)
+- [P4.18-MCP2.0迁移](P4.18-MCP2.0迁移.md) —— 底座迁到官方 SDK v2 / 协议 `2026-07-28`(等价迁移,旧客户端不掉线)
+- [P4.19-Web-MCP诊断](P4.19-Web-MCP诊断.md) —— **反方向**:观澜作 MCP 客户端时被注入的外部 server 一览 + 显式连接检查(只读叠加层)
+- [P4.20-Web-flint图表渲染](P4.20-Web-flint图表渲染.md) —— Web 端 ```flint``` 规格块浏览器内编译成数据图表(vendored ESM + 入口白名单/键域出口断言 + 三档失败文案)
 
 ### P5 —— 语料规模化(多格式 + 检索)
 
