@@ -39,3 +39,11 @@ agentao.log.*
 /AGENTAO.readonly.md
 /AGENTAO.full.md
 /SCHEMA.md
+
+# .env —— 凭据文件，**任何一层目录都不许进仓库**（不锚定根：开发时的样例库也可能各带一份）。
+# agentao 的 `safe_load_dotenv` 从 cwd 逐级上溯找它，模型 API key 一直走这条路；P4.21 起
+# 飞书的 GUANLAN_IM_FEISHU_APP_ID/_APP_SECRET 也认它，故这条忽略从"卫生习惯"变成了**必需**。
+# `.env.example`（若将来有）是不含真值的模板，显式放行。
+.env
+.env.*
+!.env.example

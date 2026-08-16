@@ -252,6 +252,110 @@ def test_mcp_internal_import_error_is_not_masked(tmp_path, monkeypatch):
         main(["-C", str(tmp_path), "mcp"])
 
 
+# ───────────── 宿主默认值：常量是唯一来源，cli 不许抄一份 ─────────────
+
+# (常量所在模块, 常量名, 该子命令的最小 argv, argparse dest, 测试用的探针值)
+_HOST_DEFAULTS = [
+    ("guanlan.web.defaults", "DEFAULT_PORT", ["web"], "port", 9911),
+    ("guanlan.web.defaults", "DEFAULT_MAX_CONVERSATIONS", ["web"], "max_conversations", 77),
+    ("guanlan.web.defaults", "DEFAULT_CONFIRM_TIMEOUT", ["web"], "confirm_timeout", 4321.0),
+    # 探针值**不能与既有文案撞车**：拿 "workspace-write" / "auto" 当探针的话，它们本就出现在
+    # 邻近 help 里，那条 help 断言会永远绿（假绿）。下面的 `not in baseline_help` 守着这一点。
+    # argparse 不校验 default 是否属于 choices，故探针可以是个不存在的取值。
+    ("guanlan.web.defaults", "DEFAULT_MODE", ["web"], "mode", "zz-mode-probe"),
+    ("guanlan.web.defaults", "DEFAULT_CONFIRM", ["web"], "confirm", "zz-confirm-probe"),
+    ("guanlan.im.defaults", "DEFAULT_MAX_CONVERSATIONS", ["im", "--platform", "weixin", "--allow-all-users"], "max_conversations", 77),
+    ("guanlan.im.defaults", "DEFAULT_IDLE_TTL", ["im", "--platform", "weixin", "--allow-all-users"], "idle_ttl", 4321.0),
+    ("guanlan.im.defaults", "DEFAULT_MCP_REQUEST_TIMEOUT", ["im", "--platform", "weixin", "--allow-all-users"], "mcp_request_timeout", 4321.0),
+    ("guanlan.im.defaults", "DEFAULT_IDENTIFY_SECONDS", ["im-identify", "--platform", "weixin"], "seconds", 4321.0),
+]
+
+
+def _rendered(value):
+    """help 文案里该值的渲染形态（float 用 `:g`，与 cli 的 f-string 一致）。"""
+    return f"{value:g}" if isinstance(value, float) else str(value)
+
+
+def _squash(text: str) -> str:
+    """去掉全部空白再比对。
+
+    argparse 的 `textwrap` 会**在连字符处断行**（`break_on_hyphens`），中文 help 里列宽又窄，
+    于是 `zz-confirm-probe` 会被劈成 `zz-confirm-` + 换行 + `probe`——直接 `in` 判断会假红。
+    """
+    return "".join(text.split())
+
+
+@pytest.mark.parametrize(
+    ("module_name", "const", "argv", "dest", "probe"),
+    _HOST_DEFAULTS,
+    ids=[f"{m.split('.')[1]}:{c}" for m, c, *_ in _HOST_DEFAULTS],
+)
+def test_host_cli_default_follows_the_constant(module_name, const, argv, dest, probe, monkeypatch, capsys):
+    """把常量改掉，CLI 的默认值与 help 文案**必须跟着动**。
+
+    这是本组唯一有意义的断言形式。只断言"默认值等于常量"是测不出东西的——两边各写一份
+    `100` 时它照样绿。而 IM / Web 此前正是各写一份（连 help 里的中文「默认 100」是第三份），
+    于是常量沦为装饰：调 `DEFAULT_IDLE_TTL` 对 CLI 用户毫无效果，docstring 和 `--help`
+    从此说假话，**没有任何测试会红**。改一处即处处生效，才是常量存在的全部意义。
+
+    顺带守住另一件事：这几个默认值必须能从**零依赖叶子模块**读到。若哪天有人把它们挪回
+    `im/server.py` / `web/server.py`，本测试会因导入 agentao / fastapi 而变慢甚至在缺
+    `[web]` extra 的环境里直接崩——那正是当初分出 `defaults.py` 的原因。
+    """
+    import importlib
+
+    module = importlib.import_module(module_name)
+    baseline = build_parser().parse_args(argv)
+    assert getattr(baseline, dest) == getattr(module, const)
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([*argv[:1], "--help"])
+    baseline_help = capsys.readouterr().out
+    # 探针若本就出现在文案里（如拿 "auto" 当探针），下面那条 help 断言会**永远绿**。
+    assert _rendered(probe) not in _squash(baseline_help), "探针值与既有文案撞车，这条用例会假绿"
+
+    monkeypatch.setattr(module, const, probe)
+    assert getattr(build_parser().parse_args(argv), dest) == probe, "cli 抄了一份字面量"
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([*argv[:1], "--help"])
+    assert _rendered(probe) in _squash(capsys.readouterr().out), "help 文案没跟着常量走（第三份拷贝）"
+
+
+def test_web_mode_choices_come_from_the_constant(monkeypatch):
+    """`--mode` / `--confirm` 的**合法取值**同样取自常量，不在 cli 里再列一遍。
+
+    两头各列一份的后果不是抽象的：cli 收下一个运行期不认的值，用户会拿到一个
+    422 / ValueError 而不是「invalid choice」——错在哪一层都看不出来。
+    """
+    from guanlan.web import defaults
+
+    monkeypatch.setattr(defaults, "WEB_MODES", ("read-only", "workspace-write", "demo-mode"))
+    assert build_parser().parse_args(["web", "--mode", "demo-mode"]).mode == "demo-mode"
+    monkeypatch.setattr(defaults, "CONFIRM_MODES", ("ask", "auto", "demo-confirm"))
+    assert build_parser().parse_args(["web", "--confirm", "demo-confirm"]).confirm == "demo-confirm"
+
+
+def test_web_defaults_module_is_a_dependency_free_leaf():
+    """`web/defaults.py` 必须能在**没装 `[web]` extra** 的环境里导入。
+
+    它是 `guanlan web --help` 的前提：`_cmd_web` 那套「缺 extra 就优雅引导安装」的降级，
+    发生在**解析之后**——parser 建不起来的话，用户看到的是 traceback，不是那句安装提示。
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys;"
+        "sys.modules['fastapi'] = None; sys.modules['uvicorn'] = None;"
+        "import guanlan.web.defaults as d;"
+        "from guanlan.cli import build_parser;"
+        "assert build_parser().parse_args(['web']).port == d.DEFAULT_PORT;"
+        "assert 'fastapi' not in [m for m in sys.modules if sys.modules[m] is not None]"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_p3_dispatch_end_to_end(tmp_path):
     """三命令经 main 真正分发到各 entrypoint：在 init 出的库上各自退 0。"""
     from guanlan.cli import main

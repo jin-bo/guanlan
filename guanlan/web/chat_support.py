@@ -19,10 +19,19 @@ from agentao.tools.base import Tool
 
 from ..check import Violation
 from ..search import CorpusCache, search_result_dict
+from .defaults import DEFAULT_MAX_CONVERSATIONS, WEB_MODES
+
+# `mcp_registry=` 的"未给"哨兵（P4.21 §14，决策P4.21-60）：`None` 是**有意义的取值**——
+# `build_from_environment` 只在 `mcp_registry`/`mcp_manager` 都不在 overrides 里时才自装
+# `FileBackedMCPRegistry`，故显式 `None` 恰是"关掉 MCP 文件发现"的文档化写法。于是"没传"必须
+# 另有表示，否则 Conversation/Store 无法区分二者。放在本模块（两会话类都已在**顶部**引它、无环）。
+_UNSET: object = object()
 
 # Web 双姿态（决策P4.5-1）：仅对齐 agentao 枚举的 read-only / workspace-write 两值。
 # full-access（绕全部 preset 规则）/ plan（内部态）永不在 Web 出现 → set_mode 抛 ValueError → 端点 422。
-_WEB_MODES = ("read-only", "workspace-write")
+# 值归零依赖的 `defaults.py`——cli 的 `--mode choices` 取的是同一份，否则「命令行收下了、
+# 运行期再 422」这种两头不一致只能靠人肉对齐。
+_WEB_MODES = WEB_MODES
 
 # 嵌入会话共享的 logger（坑③：注入它 = 我们自管日志栈）。默认由 configure_agent_log 给它挂
 # 一个落 <wd>/agentao.log 的 file handler；不挂时无 handler、不写文件（如测试 / --no-agent-log）。
@@ -38,7 +47,9 @@ _agent_log_paths: set[str] = set()
 # 内存会话数硬上限**默认值**：超出拒新建（决策P4-8：v1 不上 LRU，仅一个保守上界给内存设界）。
 # P4.9 起改为 `ConversationStore(max_conversations=…)` 形参可配（决策P4.9-18），多用户部署可调高；
 # 本常量仅作默认，仍被 `create_app`/`serve`/CLI 一路透传（直读它的旧点已归口 self._max_conversations）。
-MAX_CONVERSATIONS = 100
+# 值归 `defaults.py`；本名仍是**测试猴补的接缝**（`monkeypatch.setattr(chat, "MAX_CONVERSATIONS", n)`，
+# `_cap()` call-time 读它），故必须保持为本模块的可重绑名字，不能改写成直读 defaults。
+MAX_CONVERSATIONS = DEFAULT_MAX_CONVERSATIONS
 
 # 内存会话 idle 回收 TTL（秒，决策P4.9-6）：久无活动（> 此值）且无在飞 turn 的会话在「新建/恢复」
 # 锁内惰性淘汰，缓解多并发用户顶满 max_conversations。时间源 time.monotonic（免墙钟跳变）、可注入

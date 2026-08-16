@@ -20,6 +20,7 @@ from ..paths import require_kb_root
 from ..runtime import AgentRunner
 from .app import create_app
 from .chat import MAX_CONVERSATIONS, configure_agent_log, disable_agent_log
+from .defaults import DEFAULT_CONFIRM, DEFAULT_CONFIRM_TIMEOUT, DEFAULT_MODE, DEFAULT_PORT
 
 HOST = "127.0.0.1"  # 红线：绝不 0.0.0.0（决策P4-4，写端口严禁暴露网络）。
 
@@ -69,17 +70,17 @@ def _open_browser_when_ready(host: str, port: int, *, timeout: float = 10.0) -> 
 def serve(
     root: str | Path,
     *,
-    port: int = 8765,
+    port: int = DEFAULT_PORT,
     open_browser: bool = True,
     model: str | None = None,
     runner: AgentRunner | None = None,
     agent_log: bool | None = None,
     session_persist: bool = True,
-    mode: str = "read-only",
+    mode: str = DEFAULT_MODE,
     reader: bool = False,
     max_conversations: int = MAX_CONVERSATIONS,
-    confirm: str = "ask",
-    confirm_timeout: float = 120.0,
+    confirm: str = DEFAULT_CONFIRM,
+    confirm_timeout: float = DEFAULT_CONFIRM_TIMEOUT,
     goal_enabled: bool = True,
 ) -> int:
     """起本地 Web 宿主，长驻直到 Ctrl-C；正常停服返回 `EXIT_OK`。

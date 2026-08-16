@@ -65,6 +65,26 @@ mcp = [
     # server.py 直接 import anyio（to_thread 卸 ask 子进程/读盘），显式声明而非靠 mcp 传递。
     "anyio>=4.1",
 ]
+# IM 宿主（P4.21，可选叠加层，见 docs/P4.21-IM宿主.md 决策P4.21-27）：**按平台分**，
+# 不给一个大 `[im]` 拖来两家 SDK——装了 `[im-weixin]` 的人不该为 lark-oapi 付代价。
+# 选 httpx 而非 aiohttp：观澜生态无 aiohttp，且 httpx 无 aiohttp 那个 ClientTimeout
+# 上下文管理器坑。
+im-weixin = [
+    "httpx>=0.27",
+    "anyio>=4.1",  # 核心 to_thread 卸线程（§4.3 通则），显式声明而非靠传递
+    # `qrcode` 原定为"可选增强，缺则打印原始值，故不进 extra"——**推翻**：退回打印的那个 URL
+    # 就是登录凭据本身，用户要用它只能贴进第三方生成器（把登录链接交给外人）或想办法挪到手机上。
+    # 这不是"稍差一点的等价路径"，是**把安全成本转嫁给用户**。纯 Python、非 Windows 无运行时
+    # 依赖，代价小到不值得让扫码登录默认不可用。
+    "qrcode>=7.4",
+]
+# 1.6.8 = WS 客户端 `extra_ua_tags` 参数的首个版本（§8.1，决策P4.21-29）：**低于此版本
+# 收不到群 @ 事件**（服务端只推 P2P），而旧 SDK 连这个参数都不接受 → TypeError。
+im-feishu = [
+    "lark-oapi>=1.6.8",
+    "anyio>=4.1",
+]
+im = ["guanlan-wiki[im-weixin]", "guanlan-wiki[im-feishu]"]
 
 [project.urls]
 Homepage = "https://github.com/jin-bo/guanlan"
