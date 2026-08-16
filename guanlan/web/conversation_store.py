@@ -19,8 +19,9 @@ from pathlib import Path
 from agentao.embedding import delete_session, list_sessions
 
 from ..search import CorpusCache
+from .defaults import DEFAULT_CONFIRM_TIMEOUT
 from ..skill import SKILL_NAME
-from .chat_support import IDLE_TTL_SECONDS, _is_canonical_uuid
+from .chat_support import _UNSET, IDLE_TTL_SECONDS, _is_canonical_uuid
 from .goal_io import clear_goal_sidecar, goal_sidecar_path, read_goal
 from .jobs import WriteGate
 
@@ -45,10 +46,15 @@ class ConversationStore:
         idle_ttl: float | None = IDLE_TTL_SECONDS,
         search_cache: CorpusCache | None = None,
         confirm_mode: str = "ask",
-        confirm_timeout: float = 120.0,
+        confirm_timeout: float = DEFAULT_CONFIRM_TIMEOUT,
         clock: Callable[[], float] = time.monotonic,
+        mcp_registry: object = _UNSET,
     ) -> None:
         self._kb = kb
+        # P4.21（决策P4.21-60）：透传每个会话的**可选** MCP registry。默认哨兵 = 不传给
+        # `Conversation`，Web/reader 两路行为与今天逐字节相同；IM 宿主传 BoundedTimeoutRegistry
+        # （给每个 server 落有限 `timeout.request`）或 `None`（`--no-mcp`，关掉文件发现）。
+        self._mcp_registry = mcp_registry
         self._default_model = default_model
         self._persist = persist
         # P5.1：共享的检索 CorpusCache（create_app 注入这一个）；透传到每个会话，由 Conversation
@@ -137,6 +143,7 @@ class ConversationStore:
                     confirm_mode=self._confirm_mode,
                     confirm_timeout=self._confirm_timeout,
                     clock=self._clock,
+                    mcp_registry=self._mcp_registry,  # P4.21：哨兵即"不传"，Web 零影响
                 )
                 self._convs[cid] = conv
                 return conv
@@ -318,6 +325,7 @@ class ConversationStore:
                     confirm_mode=self._confirm_mode,
                     confirm_timeout=self._confirm_timeout,
                     clock=self._clock,
+                    mcp_registry=self._mcp_registry,  # P4.21：新建/恢复两路零漂移
                 )
                 conv.agent.messages = messages  # 镜像 agentao cli/commands/sessions.py 的 resume
                 # 只认构造已激活的 SKILL_NAME，**不**回放盘上任意 active_skills（扩大姿态，决策P4.2-4/6）

@@ -15,6 +15,7 @@
 5. [Web 宿主](zh/05-web-宿主.md) — `guanlan web`（含 `--reader`）
 6. [MCP 宿主](zh/06-mcp-宿主.md) — `guanlan mcp`
 7. [多格式转换](zh/07-多格式转换.md) — `guanlan convert`
+8. [IM 宿主（微信 / 飞书）](zh/08-im-宿主.md) — `guanlan im` / `im-login` / `im-identify`
 
 ## English
 
@@ -25,3 +26,4 @@
 5. [Web host](en/05-web-host.md) — `guanlan web` (incl. `--reader`)
 6. [MCP host](en/06-mcp-host.md) — `guanlan mcp`
 7. [Convert](en/07-convert.md) — `guanlan convert`
+8. [IM host (WeChat / Feishu)](en/08-im-host.md) — `guanlan im` / `im-login` / `im-identify`

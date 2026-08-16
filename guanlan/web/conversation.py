@@ -19,6 +19,8 @@ from pathlib import Path
 
 import anyio
 from agentao.cancellation import AgentCancelledError, CancellationToken
+
+from .defaults import CONFIRM_MODES, DEFAULT_CONFIRM_TIMEOUT
 from agentao.cli.goal_state import GoalState, GoalStatus, budget_summary
 from agentao.embedding.compat import build_compat_transport
 from agentao.permissions import PermissionMode
@@ -29,6 +31,7 @@ from ..runtime import drop_poisoned_api_keys
 from ..search import CorpusCache
 from ..skill import SKILL_NAME
 from .chat_support import (
+    _UNSET,
     Emit,
     _blocked_in_mode,
     _context_stats,
@@ -139,11 +142,17 @@ class Conversation:
         write_gate: WriteGate | None = None,
         search_cache: CorpusCache | None = None,
         confirm_mode: str = "ask",
-        confirm_timeout: float = 120.0,
+        confirm_timeout: float = DEFAULT_CONFIRM_TIMEOUT,
         clock: Callable[[], float] = time.monotonic,
+        mcp_registry: object = _UNSET,
     ) -> None:
         self.id = cid
         self._kb = kb
+        # P4.21（决策P4.21-60）：外部 MCP registry 的**可选**透传口。默认哨兵 `_UNSET` = 不进
+        # `opts`，`build_from_environment` 照旧自己装 `FileBackedMCPRegistry`（Web/reader 两路
+        # 与今天逐字节相同）。IM 宿主显式传一个给每个 server 落有限 `timeout.request` 的包装
+        # （§4.7），或传 `None` 彻底关掉文件发现——**`None` 是有意义的取值**，故不能拿它当"未给"。
+        self._mcp_registry = mcp_registry
         self._search_cache = search_cache  # P5.1：共享的 CorpusCache（None=不注册召回工具，纯读测试）
         # idle 回收用时间戳（决策P4.9-6）：time.monotonic（免墙钟跳变）、可注入（测试决定性）。
         # 每轮起跑 / 控制操作刷新（见 begin_turn / request_stop）；store 在「新建/恢复」锁内据
@@ -231,6 +240,11 @@ class Conversation:
             # --model 仅在给定时入 overrides：显式 model=None 会盖掉 .env 发现的模型、
             # 触发 agent.py 的 "model required" ValueError（默认不带 --model 的常路就崩）。
             opts["model"] = model
+        if self._mcp_registry is not _UNSET:
+            # 仅在**显式给出**时入 opts（含显式 `None`）：`build_from_environment` 只在
+            # `mcp_registry`/`mcp_manager` 都不在 overrides 里时才自装 FileBacked 发现，
+            # 故 `None` 恰是"关掉文件发现"的文档化写法（`embedding/factory.py`）。
+            opts["mcp_registry"] = self._mcp_registry
 
         # P5.1（§3.1/§5）：构造期注入 `guanlan_search` 召回工具——与 transport/filesystem 同在构造期
         # 一处装齐、无「构造后再补挂」时序窗口（决策P5.1-6）。**每会话新建一个实例**（工厂闭包捕获
@@ -450,7 +464,7 @@ class Conversation:
         与气泡②（`/confirm {allow_session}`=放行当前+翻 auto）不同：本方法无 interaction_id、
         不 put 任何 pending 的 True；当前若正有 pending 仍悬着，须另点允许/拒绝/②才落定。
         """
-        if mode not in ("ask", "auto"):
+        if mode not in CONFIRM_MODES:
             raise ValueError(f"未知 confirm_mode：{mode}")
         with self._pending_lock:
             self._confirm_mode = mode

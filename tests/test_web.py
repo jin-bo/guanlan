@@ -2901,6 +2901,18 @@ def test_web_missing_extra_degrades(kb, monkeypatch, capsys) -> None:
     for name in list(sys.modules):
         if name.startswith("guanlan.web"):
             monkeypatch.delitem(sys.modules, name, raising=False)
+    # ★ 父包属性也要一并还原（P4.21 §3.0 惰性化的连带）：`guanlan/web/__init__.py` 改成
+    # PEP 562 惰性取 `serve` 之后，**缺 fastapi 时 `import guanlan.web` 本身是成功的**
+    # （ImportError 推迟到取 `serve` 那一刻）。导入成功 ⇒ 导入机制会把 `guanlan.web` 这个
+    # **父包属性**重新绑到本次新建的模块对象上，而 `monkeypatch.delitem` 只还原
+    # `sys.modules` 条目——两者就此指向**两个不同的模块对象**。
+    # 后果很隐蔽：`monkeypatch.setattr("guanlan.web.serve", …)` 走 `getattr(guanlan, "web")`
+    # 打在新对象上，而 `from .web import serve` 走 `sys.modules` 拿到旧对象的**真** `serve`
+    # ——于是那条用例会真的把 uvicorn 起起来、整场 pytest 挂死。
+    # 记一次同值 setattr 即可：teardown 时 monkeypatch 会把旧模块对象放回父包属性。
+    import guanlan
+
+    monkeypatch.setattr(guanlan, "web", guanlan.web, raising=False)
     monkeypatch.setitem(sys.modules, "fastapi", None)  # `import fastapi` → ImportError
 
     rc = main(["-C", str(kb), "web", "--no-browser"])

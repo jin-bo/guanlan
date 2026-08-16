@@ -59,6 +59,7 @@ from ..runtime import HEARTBEAT_INTERVAL_S, AgentRunner
 from ..search import CorpusCache, search_result_dict, tokenize
 from .chat import IDLE_TTL_SECONDS, MAX_CONVERSATIONS, ConversationStore
 from .conversation import GoalActiveError
+from .defaults import CONFIRM_MODES, DEFAULT_CONFIRM_TIMEOUT
 from .helpers import (
     _audit_preview,
     _heal_preview,
@@ -328,7 +329,7 @@ class ConfirmModeBody(BaseModel):
     @field_validator("confirm_mode")
     @classmethod
     def _mode_known(cls, v: str) -> str:
-        if v not in ("ask", "auto"):
+        if v not in CONFIRM_MODES:
             raise ValueError(f"未知 confirm_mode：{v}（须 ∈ ask/auto）。")
         return v
 
@@ -408,7 +409,7 @@ def create_app(
     reader: bool = False,
     max_conversations: int | None = None,
     confirm: str = "ask",
-    confirm_timeout: float = 120.0,
+    confirm_timeout: float = DEFAULT_CONFIRM_TIMEOUT,
     goal_enabled: bool = True,
 ) -> FastAPI:
     """构造绑定到知识库 `root` 的 FastAPI app。

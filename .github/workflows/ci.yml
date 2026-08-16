@@ -41,11 +41,14 @@ jobs:
 
       # --extra web 装上 fastapi/uvicorn/markdown，--extra mcp 装上 mcp SDK，否则 test_web.py /
       # test_aliases.py / test_mcp.py 会被 importorskip 跳过；dev 组（pytest）uv sync 默认带上。
+      # --extra im-weixin / im-feishu（P4.21 决策P4.21-45，**不可省**）：不装的话
+      # tests/test_im_feishu.py 里那条**真 SDK 签名探针**永远 skip，于是「lark-oapi 缺
+      # extra_ua_tags 就收不到群 @ 事件」这条最关键的回归**永远不跑**——而它正是这组测试存在的理由。
       - name: 装依赖
-        run: uv sync --extra web --extra mcp --python ${{ matrix.python-version }}
+        run: uv sync --extra web --extra mcp --extra im-weixin --extra im-feishu --python ${{ matrix.python-version }}
 
       - name: 跑测试
-        run: uv run --extra web --extra mcp --python ${{ matrix.python-version }} pytest -q
+        run: uv run --extra web --extra mcp --extra im-weixin --extra im-feishu --python ${{ matrix.python-version }} pytest -q
 
   # 改 workflow 时校验：YAML 语法 / action input / ${{ }} 表达式，并对 run: 里的内联 shell 跑 shellcheck
   # （release.yml 那段抽 CHANGELOG 的 awk/bash 由此受检）。单跑一次、不进 Python 矩阵。

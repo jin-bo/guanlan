@@ -15,7 +15,7 @@ from .audit import audit_entrypoint
 from .check import check_entrypoint
 from .convert import _BACKENDS as _CONVERT_BACKENDS
 from .convert import convert_entrypoint
-from .errors import EXIT_USAGE, GuanlanError
+from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .graph import graph_entrypoint
 from .heal import DEFAULT_LIMIT, heal_entrypoint, positive_int
 from .health import health_entrypoint
@@ -194,6 +194,62 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
+
+
+def _cmd_im(args: argparse.Namespace) -> int:
+    # im 是可选叠加层（决策P4.21-27，镜像 web/mcp）：**探针只探该平台的 SDK**——装了
+    # `[im-weixin]` 的人不该因为没装 lark-oapi 就跑不了微信。故这里不做统一探针，
+    # 由 `adapters/__init__.py` 的工厂在建**那一个**适配器时按需探测并优雅引导。
+    from .im import serve_im
+
+    try:
+        return serve_im(
+            args.dir,
+            platform=args.platform,
+            allow_user=args.allow_user,
+            allow_user_env=args.allow_user_env,
+            allow_chat=args.allow_chat,
+            allow_all_users=args.allow_all_users,
+            web_base_url=args.web_base_url,
+            model=args.model,
+            max_conversations=args.max_conversations,
+            idle_ttl=args.idle_ttl,
+            mcp_request_timeout=args.mcp_request_timeout,
+            no_mcp=args.no_mcp,
+        )
+    except GuanlanError as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
+
+
+def _cmd_im_login(args: argparse.Namespace) -> int:
+    from .im import run_login
+
+    try:
+        return run_login(platform=args.platform)
+    except GuanlanError as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
+    except KeyboardInterrupt:  # 见 `_cmd_im_identify` 的说明：Ctrl-C 是**文档化的正常出口**
+        print("\n已取消登录。", file=sys.stderr)
+        return EXIT_USAGE
+
+
+def _cmd_im_identify(args: argparse.Namespace) -> int:
+    from .im import run_identify
+
+    try:
+        return run_identify(platform=args.platform, seconds=args.seconds)
+    except GuanlanError as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
+    except KeyboardInterrupt:
+        # 这两个命令**没有**装 `serve_im` 那套信号处理器（它把首个 SIGINT 变成优雅停机事件），
+        # 故 Ctrl-C 会一路冒到顶层。而 im-identify 自己打的提示里就写着「Ctrl-C 提前结束」——
+        # 一条**文档化的正常出口**不该以一屏 traceback 收场。`run_*` 的 `finally` 已经关掉适配器、
+        # 释放了凭据锁，这里只补最后一行人话。
+        print("\n已结束收集。", file=sys.stderr)
+        return EXIT_OK
 
 
 def _cmd_install_skill(args: argparse.Namespace) -> int:
@@ -404,12 +460,30 @@ def _add_convert_parser(sub, dir_parent) -> None:
 
 
 def _add_web_parser(sub, dir_parent) -> None:
+    # 默认值与合法取值一律取 `guanlan/web/defaults.py`（零依赖叶子，**不会**拉起 fastapi——
+    # 缺 `[web]` extra 时 `guanlan web --help` 仍须可用）。同 heal/audit 的既有惯例：
+    # `default=` 与 help 文案共用一个常量，文案便不可能与实际默认漂开。
+    from .web.defaults import (
+        CONFIRM_MODES,
+        DEFAULT_CONFIRM,
+        DEFAULT_CONFIRM_TIMEOUT,
+        DEFAULT_MAX_CONVERSATIONS,
+        DEFAULT_MODE,
+        DEFAULT_PORT,
+        WEB_MODES,
+    )
+
     p = sub.add_parser(
         "web",
         parents=[dir_parent],
         help="起本地 Web 宿主（可选叠加层，需 `pip install 'guanlan-wiki[web]'`）",
     )
-    p.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765，仅 127.0.0.1）")
+    p.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"监听端口（默认 {DEFAULT_PORT}，仅 127.0.0.1）",
+    )
     p.add_argument("--no-browser", action="store_true", help="起服后不自动打开浏览器")
     p.add_argument("--model", default=None, help="覆盖 Agentao 模型（透传写作业与会话）")
     p.add_argument(
@@ -430,8 +504,8 @@ def _add_web_parser(sub, dir_parent) -> None:
     p.add_argument(
         "--max-conversations",
         type=int,
-        default=100,
-        help="内存会话硬上限（默认 100；须 ≥ 1，多用户部署可调高，P4.9-18）",
+        default=DEFAULT_MAX_CONVERSATIONS,
+        help=f"内存会话硬上限（默认 {DEFAULT_MAX_CONVERSATIONS}；须 ≥ 1，多用户部署可调高，P4.9-18）",
     )
     p.add_argument(
         "--no-session-persist",
@@ -440,23 +514,24 @@ def _add_web_parser(sub, dir_parent) -> None:
     )
     p.add_argument(
         "--mode",
-        choices=["read-only", "workspace-write"],
-        default="read-only",
-        help="新会话开局姿态（默认 read-only；workspace-write 起即可让 Agent 写 wiki/workspace，浏览器内可 /mode 切换）",
+        choices=WEB_MODES,
+        default=DEFAULT_MODE,
+        help=f"新会话开局姿态（默认 {DEFAULT_MODE}；workspace-write 起即可让 Agent 写 wiki/workspace，浏览器内可 /mode 切换）",
     )
     p.add_argument(
         "--confirm",
-        choices=["ask", "auto"],
-        default="ask",
-        help="workspace-write 下 ASK 决策（带操作符 shell / 需确认工具）的处置（P4.15，默认 ask）："
+        choices=CONFIRM_MODES,
+        default=DEFAULT_CONFIRM,
+        help=f"workspace-write 下 ASK 决策（带操作符 shell / 需确认工具）的处置（P4.15，默认 {DEFAULT_CONFIRM}）："
         "ask=经浏览器弹给人确认（允许/本会话起自动放行/拒绝）；auto=沿用 P4.5 静默放行逃生舱。"
         "会话内可点气泡②或经 UI 翻 auto↔ask",
     )
     p.add_argument(
         "--confirm-timeout",
         type=float,
-        default=120.0,
-        help="confirm/ask 等待用户应答的超时秒数（P4.15，默认 120）；无人应答即默认拒绝，兜「人走开 → 写锁永占」",
+        default=DEFAULT_CONFIRM_TIMEOUT,
+        help=f"confirm/ask 等待用户应答的超时秒数（P4.15，默认 {DEFAULT_CONFIRM_TIMEOUT:g}）；"
+        "无人应答即默认拒绝，兜「人走开 → 写锁永占」",
     )
     p.add_argument(
         "--goal",
@@ -511,6 +586,138 @@ def _add_mcp_parser(sub, dir_parent) -> None:
     p.set_defaults(func=_cmd_mcp)
 
 
+def _im_platforms() -> tuple[str, ...]:
+    """`--platform` 的合法取值**从注册表读**，不在 cli 里再抄一份（决策P4.21-3 的同一条判据）。
+
+    抄一份的代价不是抽象的：`tests/test_im.py::test_core_has_no_platform_branch` 只扫
+    `guanlan/im/*.py`，**扫不到 cli.py**——于是"新增平台 = 注册一行、核心零改"这条对外承诺
+    （CLAUDE.md 也这么写）会在这里悄悄失效：注册了却仍被 argparse 挡在门外，且没有任何测试报警。
+    `adapters/__init__.py` 本身零第三方依赖（平台 SDK 都在工厂里按需 import），故这次导入
+    对 `guanlan check` 之类的核心命令不构成成本。
+    """
+    from .im.adapters import ADAPTERS
+
+    return tuple(sorted(ADAPTERS))
+
+
+def _im_login_platforms() -> tuple[str, ...]:
+    """同上，取自 `LOGIN_FLOWS`——`run_login` 已经查这张表，解析期不该再写死一份。"""
+    from .im.adapters import LOGIN_FLOWS
+
+    return tuple(sorted(LOGIN_FLOWS))
+
+
+def _add_im_parser(sub, dir_parent) -> None:
+    # 同 `_add_web_parser`：默认值取零依赖叶子 `guanlan/im/defaults.py`，**不碰** `im.server`
+    # （它拉 agentao + anyio，实测模块数 177 → 242，核心命令没理由为 IM 付这笔钱）。
+    from .im.defaults import (
+        DEFAULT_IDLE_TTL,
+        DEFAULT_MAX_CONVERSATIONS,
+        DEFAULT_MCP_REQUEST_TIMEOUT,
+    )
+
+    p = sub.add_parser(
+        "im",
+        parents=[dir_parent],
+        help="起 IM 宿主（个人微信 / 飞书；只读、无监听端口，见 docs/P4.21-IM宿主.md）",
+    )
+    # --platform 必填、无默认（决策P4.21-5）：两家能力差别大到没有合理默认值。
+    p.add_argument("--platform", required=True, choices=_im_platforms(), help="IM 平台")
+    p.add_argument(
+        "--allow-user",
+        action="append",
+        default=None,
+        metavar="ID",
+        help="放行的用户 ID（可重复）。ID 从 `guanlan im-identify` 拿",
+    )
+    p.add_argument(
+        "--allow-user-env",
+        default=None,
+        metavar="VAR",
+        help="从环境变量 VAR 读用户白名单（逗号分隔）；改完仍需重启，不做热重载",
+    )
+    p.add_argument(
+        "--allow-chat",
+        action="append",
+        default=None,
+        metavar="ID",
+        help="放行的群 ID（可重复）。群聊放行 = 群 AND 人 AND @我（决策P4.21-33）",
+    )
+    p.add_argument(
+        "--allow-all-users",
+        action="store_true",
+        help="不逐个列人（**只**旁路用户名单，**永不**旁路群名单，决策P4.21-39）；启动会大声告警",
+    )
+    p.add_argument(
+        "--web-base-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "Web **站点入口**，附在截断告示里。**不会**把 [[wikilink]] 转成链接"
+            "——Web 宿主没有按页面名开页的路由，拼出来的都是死链（决策P4.21-76）"
+        ),
+    )
+    p.add_argument("--model", default=None, help="覆盖 Agentao 模型")
+    p.add_argument(
+        "--max-conversations",
+        type=int,
+        default=DEFAULT_MAX_CONVERSATIONS,
+        help=f"内存会话硬上限（默认 {DEFAULT_MAX_CONVERSATIONS}）",
+    )
+    p.add_argument(
+        "--idle-ttl",
+        type=float,
+        default=DEFAULT_IDLE_TTL,
+        help=f"会话闲置多久算过期（秒，默认 {DEFAULT_IDLE_TTL:g}）",
+    )
+    p.add_argument(
+        "--mcp-request-timeout",
+        type=float,
+        default=DEFAULT_MCP_REQUEST_TIMEOUT,
+        help=(
+            f"外部 MCP 工具**等一次 tools/call 回话**的秒数上界（默认 "
+            f"{DEFAULT_MCP_REQUEST_TIMEOUT:g}，须为有限正数）。"
+            "它是宿主级天花板：盘上配了更长的显式值也会被收紧到它。"
+            "**它不是一次工具执行、也不是一次完整请求的总上界**（§4.7）"
+        ),
+    )
+    p.add_argument(
+        "--no-mcp", action="store_true", help="彻底不加载外部 MCP server（连文件发现都关掉）"
+    )
+    p.set_defaults(func=_cmd_im)
+
+
+def _add_im_login_parser(sub, dir_parent) -> None:
+    # im-login / im-identify 与知识库无关，故**不继承 dir_parent**（沿 install-skill 先例）。
+    p = sub.add_parser("im-login", help="微信扫码登录，凭据落 ~/.guanlan/im/weixin/")
+    # `--platform feishu` 在**解析期**即拒（决策P4.21-42）：不进运行期、不碰凭据锁。
+    # 合法值取自 `LOGIN_FLOWS`（同 `_im_login_platforms` 的理由）。
+    p.add_argument(
+        "--platform",
+        required=True,
+        choices=_im_login_platforms(),
+        help="仅需要扫码登录的平台（飞书凭据走 GUANLAN_IM_FEISHU_APP_ID/_APP_SECRET，无需登录）",
+    )
+    p.set_defaults(func=_cmd_im_login)
+
+
+def _add_im_identify_parser(sub, dir_parent) -> None:
+    from .im.defaults import DEFAULT_IDENTIFY_SECONDS
+
+    p = sub.add_parser(
+        "im-identify",
+        help="限时收集入站 ID 并打到终端（零 LLM、**绝不回复**、不读知识库）",
+    )
+    p.add_argument("--platform", required=True, choices=_im_platforms(), help="IM 平台")
+    p.add_argument(
+        "--seconds",
+        type=float,
+        default=DEFAULT_IDENTIFY_SECONDS,
+        help=f"收集窗口秒数（默认 {DEFAULT_IDENTIFY_SECONDS:g}，到点自动退出）",
+    )
+    p.set_defaults(func=_cmd_im_identify)
+
+
 def _add_install_skill_parser(sub, dir_parent) -> None:
     # install-skill 不接受 -C/--dir（装到 ~/.agentao/skills/，与知识库根无关），故不继承 dir_parent。
     p = sub.add_parser(
@@ -539,6 +746,9 @@ _SUBCOMMAND_BUILDERS = (
     _add_convert_parser,
     _add_web_parser,
     _add_mcp_parser,
+    _add_im_parser,
+    _add_im_login_parser,
+    _add_im_identify_parser,
     _add_install_skill_parser,
 )
 
