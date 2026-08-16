@@ -27,6 +27,7 @@ import pytest
 
 from guanlan.errors import EXIT_USAGE, GuanlanError
 from guanlan.im import server as im_server
+from guanlan.im.adapters import feishu as fs
 from guanlan.im.adapters.feishu import (
     CAPS,
     ENV_APP_ID,
@@ -158,9 +159,13 @@ class _FakeWSClient:
         }
         self.started = threading.Event()
         self.stopped = threading.Event()
+        # 真 SDK 在 `_connect()` 成功后把 socket 存进 `_conn`，断开时置回 None——首连看门狗
+        # 就是读它当"连上了"的正面证据，故假件必须照着模型，否则整组用例都在测一个不存在的形状。
+        self._conn = None
         _FakeWSClient.instances.append(self)
 
     def start(self) -> None:  # 阻塞（真 SDK 亦然），故宿主放 daemon 线程里跑
+        self._conn = object()
         self.started.set()
         self.stopped.wait(timeout=10)
 
@@ -349,6 +354,172 @@ def test_sdk_probe_runs_before_any_network_call(fake_lark, tmp_path, monkeypatch
 
     asyncio.run(scenario())
     assert not calls, "SDK 版本探针之前就发了网络请求，真正的错因会被凭据类报错盖住"
+
+
+# ───────────────────────── 首连看门狗（§8.1，决策P4.21-57 的够不到的那一半）─────────
+
+
+def _ws_variant(behavior: str, *, has_conn: bool = True) -> type:
+    """造一个可编排首连行为的假 WS **类**。
+
+    `_FakeWSClient` 模拟的是"连上了"这一条正路；看门狗要守的全是**歪路**，故另起一套。
+
+    必须返回**类**而不是可调用实例：`_require_channel_tag` 探的是 `ws_client_cls.__init__`
+    的签名，实例的 `__init__` 是工厂自己的形参，会被那条探针当成旧版 SDK 一律拒掉。
+    """
+
+    class _WS:
+        instances: list = []
+
+        # 形参逐一具名，理由同 `_FakeWSClient.__init__`（`inspect.signature` 要看得见它）。
+        def __init__(
+            self, *, app_id, app_secret, domain, event_handler, extra_ua_tags=None
+        ) -> None:
+            if has_conn:
+                self._conn = None
+            self.stopped = threading.Event()
+            _WS.instances.append(self)
+
+        def start(self) -> None:
+            if behavior == "reconnecting":
+                # SDK 首连失败即走这条：钩子响一声，然后进 120 秒一轮的**无限**重连，
+                # `start()` 永不返回——`_WS_DEAD` 哨兵因此永远投不出去。
+                self.on_reconnecting()
+                self.stopped.wait(timeout=10)
+            elif behavior == "recovered":
+                self.on_reconnecting()  # 首连失败……
+                if has_conn:
+                    self._conn = object()  # ……但这一次重试立刻成功了
+                self.on_reconnected()
+                self.stopped.wait(timeout=10)
+            elif behavior == "thread-dies":
+                raise RuntimeError("连不上，线程直接退")
+            else:  # "hangs"：既不连上也不报错（DNS 黑洞 / 握手挂死）
+                self.stopped.wait(timeout=10)
+
+        def stop(self) -> None:
+            self.stopped.set()
+
+    return _WS
+
+
+@pytest.fixture
+def fast_watchdog(monkeypatch):
+    """把看门狗窗口缩短，使超时分支在测试里是**毫秒**级而不是 30 秒。"""
+    monkeypatch.setattr(fs, "WS_FIRST_CONNECT_TIMEOUT", 0.3)
+    monkeypatch.setattr(fs, "_WS_POLL_INTERVAL", 0.01)
+
+
+def _install_ws(fake_lark, monkeypatch, ws_cls: type) -> type:
+    monkeypatch.setattr(fake_lark, "ws", types.SimpleNamespace(Client=ws_cls))
+    return ws_cls
+
+
+def test_first_connect_failure_refuses_to_start(fake_lark, tmp_path, monkeypatch, fast_watchdog):
+    """首连失败 → **拒启**，不许以「假装启动成功」的姿态继续。
+
+    这是 `_WS_DEAD` 哨兵**够不到**的一种活死人：SDK 把 `_connect()` 的异常吞进 `_reconnect()`，
+    而首连成功前 `_reconnect_count == -1` ⇒ `while True` 每 120 秒重试、永不放弃 ⇒ 那个 daemon
+    线程永远不返回 ⇒ `_ws_runner` 末尾的哨兵永远投不出去。表现是「启动成功、日志安静、
+    一条消息都收不到」。真机上的 `SSL: CERTIFICATE_VERIFY_FAILED` 走的正是这条。
+    """
+    _install_ws(fake_lark, monkeypatch, _ws_variant("reconnecting"))
+
+    async def scenario():
+        with pytest.raises(GuanlanError) as exc:
+            await started_adapter(tmp_path)
+        assert exc.value.exit_code == EXIT_USAGE
+        assert "重连" in str(exc.value)
+
+    asyncio.run(scenario())
+
+
+def test_first_connect_that_never_lands_refuses_at_deadline(
+    fake_lark, tmp_path, monkeypatch, fast_watchdog
+):
+    """**既不连上也不报错**（DNS 黑洞 / 握手挂死）同样拒启——沉默不算通过。
+
+    与上一条的区别：这里连 `on_reconnecting` 都不会响，唯一能用的证据是"到点了 `_conn` 还是
+    `None`"。少了这条判据，最安静的那种故障恰好能溜过看门狗。
+    """
+    _install_ws(fake_lark, monkeypatch, _ws_variant("hangs"))
+
+    async def scenario():
+        with pytest.raises(GuanlanError) as exc:
+            await started_adapter(tmp_path)
+        assert exc.value.exit_code == EXIT_USAGE
+        assert "没有连上" in str(exc.value)
+
+    asyncio.run(scenario())
+
+
+def test_ws_thread_dying_before_connect_refuses_to_start(
+    fake_lark, tmp_path, monkeypatch, fast_watchdog
+):
+    """线程在连上之前就带着异常退出 → 立刻拒启，不等满窗口。"""
+    _install_ws(fake_lark, monkeypatch, _ws_variant("thread-dies"))
+
+    async def scenario():
+        with pytest.raises(GuanlanError) as exc:
+            await started_adapter(tmp_path)
+        assert exc.value.exit_code == EXIT_USAGE
+        assert "退出" in str(exc.value)
+
+    asyncio.run(scenario())
+
+
+def test_immediate_recovery_is_not_treated_as_failure(
+    fake_lark, tmp_path, monkeypatch, fast_watchdog
+):
+    """**反向用例**：首连失败但当场重连成功 → 必须放行。
+
+    判据是「失败了**且没恢复**」，不是「失败过」。写成后者的话，一次抖动就让宿主起不来，
+    而它明明已经连上了——看门狗的误杀比它要防的病还常见。
+    """
+    _install_ws(fake_lark, monkeypatch, _ws_variant("recovered"))
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_unobservable_sdk_degrades_to_a_warning_not_a_refusal(
+    fake_lark, tmp_path, monkeypatch, fast_watchdog, caplog
+):
+    """SDK 换了形状、`_conn` 不复存在 → **告警放行**，绝不拒启。
+
+    观测不到 ≠ 坏了。这里若一律拒启，一次 SDK 升级就能让所有人起不了服——**看门狗自己
+    成了故障源**。留一条 WARNING：日后真出「机器人不理我」时，它是唯一能说明"当时看门狗
+    是瞎的"的证据。真 SDK 的形状另有探针用例守着，那条变红比运行期悄悄降级早得多。
+    """
+    _install_ws(fake_lark, monkeypatch, _ws_variant("hangs", has_conn=False))
+
+    async def scenario():
+        with caplog.at_level("WARNING", logger="guanlan.im"):
+            ad = await started_adapter(tmp_path)
+        await ad.close()
+
+    asyncio.run(scenario())
+    assert any("未生效" in r.getMessage() for r in caplog.records), "降级时没留下任何痕迹"
+
+
+def test_ws_client_exposes_the_watchdog_hooks():
+    """**真 SDK 探针**（同 `extra_ua_tags` 那条的分层）：看门狗依赖的三个形状还在吗。
+
+    三者任一变了，看门狗都会**静默降级**成"看不见"——而它的全部价值就在于不让人静默。
+    故宁可在这里红，也不要在某天线上变成"机器人不理我，日志一片安静"。
+    """
+    lark = pytest.importorskip("lark_oapi", reason="未装 [im-feishu] extra")
+
+    client = lark.ws.Client(app_id="probe", app_secret="probe")
+    assert hasattr(client, "_conn"), "SDK 不再暴露 `_conn`：看门狗失去唯一的成功证据"
+    # 首连成功之前 `_reconnect_count` 是 -1 ＝ `while True` 无限重连——**这正是本看门狗
+    # 存在的原因**。哪天上游改成有限次，`start()` 会自己抛出、`_WS_DEAD` 就够得着了。
+    assert client._reconnect_count < 0, "上游已改成有限次重连，看门狗的前提变了，请复核"
+    source = inspect.getsource(type(client)._reconnect)
+    assert "self.on_reconnecting()" in source, "SDK 不再调用 `on_reconnecting` 钩子"
 
 
 def test_domain_env_selects_lark(fake_lark, tmp_path, monkeypatch):
