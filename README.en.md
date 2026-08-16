@@ -6,7 +6,7 @@
 
 [中文](https://github.com/jin-bo/guanlan/blob/main/README.md) | **English**
 
-[![PyPI](https://img.shields.io/pypi/v/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![Python](https://img.shields.io/pypi/pyversions/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/jin-bo/guanlan/blob/main/LICENSE) ![Status](https://img.shields.io/badge/status-CLI%20loop%20%2B%20Web%2FMCP%20hosts-brightgreen)
+[![PyPI](https://img.shields.io/pypi/v/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![Python](https://img.shields.io/pypi/pyversions/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/jin-bo/guanlan/blob/main/LICENSE) ![Status](https://img.shields.io/badge/status-CLI%20loop%20%2B%20Web%2FMCP%2FIM%20hosts-brightgreen)
 
 > "There is an art to observing water — one must observe its ripples." (*Mencius*) — discerning patterns and trends in an ocean of information.
 
@@ -33,6 +33,7 @@ This is an implementation of the [Karpathy LLM Wiki pattern](https://gist.github
 | `guanlan graph` | Build an interactive `[[wikilink]]` knowledge graph | no |
 | `guanlan web` | Browse, ask, and maintain in a browser (optional add-on) | partly |
 | `guanlan mcp` | Expose the wiki read-only to MCP clients (optional add-on) | partly |
+| `guanlan im` | Ask the wiki from a WeChat / Feishu chat window (optional add-on, read-only) | partly |
 
 > There are also `reindex` (index backfill), `heal` (missing-entity materialization), `audit` (semantic audit: re-review drifted sources whose `raw/` changed but the wiki wasn't re-synthesized), `remove` (source retraction: move a mis-ingested/retracted source into `.trash/`), `convert` (PDF/DOCX/… → markdown), etc. Per-command detail is in the **[User Guide](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)**.
 
@@ -49,9 +50,13 @@ pip install guanlan-wiki
 Optional hosts (add-on layers, install on demand):
 
 ```bash
-pip install 'guanlan-wiki[web]'    # browser host: guanlan web
-pip install 'guanlan-wiki[mcp]'    # read-only MCP server: guanlan mcp (needs the official SDK mcp>=2)
+pip install 'guanlan-wiki[web]'         # browser host: guanlan web
+pip install 'guanlan-wiki[mcp]'         # read-only MCP server: guanlan mcp (needs the official SDK mcp>=2)
+pip install 'guanlan-wiki[im-weixin]'   # IM host: guanlan im --platform weixin
+pip install 'guanlan-wiki[im-feishu]'   # IM host: guanlan im --platform feishu
 ```
+
+> The two IM extras are **split per platform** rather than one big `[im]` that drags in both SDKs (write `[im]` if you do want both).
 
 ## Quickstart
 
@@ -79,6 +84,17 @@ guanlan -C my-wiki web       # local Web host, 127.0.0.1 only, opens a browser b
 
 In the browser: browse the wiki and follow `[[wikilink]]` navigation, run check·health·lint reports, view the graph, trigger ingest and other write jobs from `raw/` (incl. heal, audit drift-review, backfill), and chat read-only with the agent. **Single-user, local only — never expose the port to a network.**
 
+Use it from WeChat / Feishu (optional):
+
+```bash
+pip install 'guanlan-wiki[im-feishu]'
+guanlan im-identify --platform feishu          # first, collect the full IDs you want to authorize
+guanlan -C my-wiki im --platform feishu \
+    --allow-user ou_xxxxxxxx                   # deny by default; an empty whitelist refuses to start
+```
+
+The IM host is **read-only** and listens on no port. But **a process with no listening port can still push your entire knowledge base into a 200-person group chat** — so authorization is an explicit whitelist, and a group message passes only when group **AND** user **AND** @-mention all hold.
+
 For a full walkthrough see the **[User Guide → Quickstart](https://github.com/jin-bo/guanlan/blob/main/docs/guide/en/02-quickstart.md)**.
 
 ## Generated layout
@@ -98,7 +114,7 @@ my-wiki/
 
 ## Documentation
 
-- 📖 **[User Guide `docs/guide/`](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)** — installation, quickstart, every command, Web/MCP hosts (bilingual)
+- 📖 **[User Guide `docs/guide/`](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)** — installation, quickstart, every command, Web/MCP/IM hosts (bilingual)
 - 🏗️ [Design doc `docs/DESIGN.md`](https://github.com/jin-bo/guanlan/blob/main/docs/DESIGN.md) — full design (developer-facing, authoritative spec; in Chinese)
 - 📋 [CHANGELOG.md](https://github.com/jin-bo/guanlan/blob/main/CHANGELOG.md) — versions and milestone progress
 

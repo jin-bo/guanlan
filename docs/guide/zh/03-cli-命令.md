@@ -105,7 +105,7 @@ guanlan -C my-wiki search "关键词" --json
 
 - **维护类** `health` / `lint` / `graph` / `reindex` / `heal` → [维护:体检与图谱](04-维护-体检-图谱.md)
 - **多格式** `convert` → [多格式转换](07-多格式转换.md)
-- **宿主** `web` / `mcp` → [Web 宿主](05-web-宿主.md) / [MCP 宿主](06-mcp-宿主.md)
+- **宿主** `web` / `mcp` / `im`(连带 `im-login` / `im-identify`) → [Web 宿主](05-web-宿主.md) / [MCP 宿主](06-mcp-宿主.md) / [IM 宿主](08-im-宿主.md)
 - **`install-skill`**:把随包的三个 skill 装入 `~/.agentao/skills/`(外部真实库用;开发期免装,见 [安装](01-安装.md#从源码开发安装))。`--force` 覆盖重装。
   - `guanlan-wiki` —— 维护引擎(`ingest`/`query`/Web 问答都激活它)。
   - `pdf-to-markdown` —— 把上传的 PDF/DOCX/… 解析成 markdown 暂存物(`convert` 与 Web 上传走它)。

@@ -105,7 +105,7 @@ It is the recall front-end for `query`/skill, and is reused by the Web `/api/sea
 
 - **Maintenance** `health` / `lint` / `graph` / `reindex` / `heal` → [Maintenance](04-maintenance.md)
 - **Multi-format** `convert` → [Convert](07-convert.md)
-- **Hosts** `web` / `mcp` → [Web host](05-web-host.md) / [MCP host](06-mcp-host.md)
+- **Hosts** `web` / `mcp` / `im` (plus `im-login` / `im-identify`) → [Web host](05-web-host.md) / [MCP host](06-mcp-host.md) / [IM host](08-im-host.md)
 - **`install-skill`**: install the three bundled skills into `~/.agentao/skills/` (for external real bases; not needed in dev mode, see [Installation](01-installation.md#develop-from-source)). `--force` reinstalls over an existing copy.
   - `guanlan-wiki` — the maintenance engine (`ingest` / `query` / Web chat all activate it).
   - `pdf-to-markdown` — parses uploaded PDF/DOCX/… into staged markdown (used by `convert` and Web uploads).

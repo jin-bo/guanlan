@@ -2052,3 +2052,96 @@ def test_ready_dataclass_is_frozen():
     r = Ready("k", "c", "t", None, "t")
     with pytest.raises(Exception):
         r.text = "x"  # type: ignore[misc]
+
+
+# ───────────────────────── 启动横幅（决策P4.21-80）─────────────────────────
+
+
+def _serve_to_completion(kb, adapter, **kw):
+    """跑一次 `serve_im`，入站流立刻正常结束 → `_run` 走完停机序列返回。"""
+    adapter.queue.put_nowait(_STOP)
+    kw.setdefault("allow_user", ["u1"])
+    return im_server.serve_im(
+        kb, platform="fake", adapter=adapter, no_mcp=True, store=FakeStore(), **kw
+    )
+
+
+def test_startup_banner_goes_to_stdout_after_connecting(kb_im, capsys):
+    """**连上之后打一条人话**（决策P4.21-80）。
+
+    在此之前 `guanlan im` 起服后终端**一个字都没有**——「连上了在等消息」与「卡在某处」
+    长得一模一样。横幅走 **stdout** 而非 `_logger.info`：宿主不配置 logging，INFO 没有任何
+    handler 接（`logging.lastResort` 只兜 WARNING+），用一条默认看不见的通道发它等于没写。
+    """
+    _serve_to_completion(kb_im, FakeAdapter())
+    out = capsys.readouterr().out
+    assert "[guanlan im] 已连上 fake" in out
+    assert str(kb_im) in out and "只读" in out  # 答"连的是哪个库"
+    assert "用户 1 人" in out  # 答"名单加载上了吗"
+    assert "Ctrl-C" in out  # 答"怎么停"
+
+
+def test_startup_banner_is_silent_when_the_connection_fails(kb_im, capsys):
+    """**反向守卫：连不上就不许说「已连上」。**
+
+    横幅必须打在 `adapter.start()` **成功之后**。抢在前面打，等于把 §15.6 首连看门狗刚拆掉的
+    那个假象原样装回去——终端上写着「已连上」、实际一条消息也收不到，比没有横幅更坏。
+    """
+    adapter = FakeAdapter()
+    adapter.start_error = RuntimeError("连不上")
+    assert _serve_to_completion(kb_im, adapter) == EXIT_AGENT_ERROR
+    assert "已连上" not in capsys.readouterr().out
+
+
+def test_startup_banner_never_prints_whitelisted_ids(kb_im, capsys):
+    """**只打数量、绝不打 ID**（§9.1 脱敏在这里适用）。
+
+    `im-identify` 是唯一的例外——把完整 ID 打到终端是它**唯一**的用途，且它限时、绝不回复。
+    而 `guanlan im` 是长驻宿主，stdout 常被重定向进日志文件 / journal / 运维面板，受众远不止
+    敲命令的那个人。数量已足够回答横幅要回答的问题。
+    """
+    probe = "zz-user-id-probe"
+    _serve_to_completion(kb_im, FakeAdapter(), allow_user=[probe])
+    out = capsys.readouterr().out
+    assert probe not in out, "横幅把白名单 ID 打出去了"
+    assert "用户 1 人" in out, "连数量都没打，横幅答不了「名单加载上了吗」"
+
+
+def test_banner_wording_covers_every_whitelist_shape():
+    """横幅文案的三种形态——**措辞说反了比没有更危险**（同 `--allow-all-users` 告警那条教训）。
+
+    `--allow-all-users` **不给** `--allow-chat` 时的真实含义是「任何能私聊到它的人都可读整库」，
+    横幅必须原样说出来；给了 `--allow-chat` 则不能再这么说（受众被群边界收住了）。
+    """
+    fmt = im_server._format_banner
+    kb = Path("/kb")
+
+    all_no_chat = fmt(
+        platform="feishu",
+        kb=kb,
+        policy=AccessPolicy(frozenset(), frozenset(), allow_all=True),
+        mcp_on=False,
+        mcp_timeout=120.0,
+    )
+    assert "全员可问（任何能私聊到它的人）" in all_no_chat
+    assert "--no-mcp" in all_no_chat
+
+    all_with_chat = fmt(
+        platform="feishu",
+        kb=kb,
+        policy=AccessPolicy(frozenset(), frozenset({"c1", "c2"}), allow_all=True),
+        mcp_on=True,
+        mcp_timeout=120.0,
+    )
+    assert "全员可问" in all_with_chat and "任何能私聊到它的人" not in all_with_chat
+    assert "群 2 个" in all_with_chat
+
+    named = fmt(
+        platform="weixin",
+        kb=kb,
+        policy=AccessPolicy(frozenset({"a", "b"}), frozenset(), allow_all=False),
+        mcp_on=True,
+        mcp_timeout=60.0,
+    )
+    assert "用户 2 人" in named and "全员" not in named
+    assert "60s" in named, "MCP 上界写死成了默认值，改 --mcp-request-timeout 它就开始说假话"

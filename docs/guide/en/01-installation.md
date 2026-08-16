@@ -24,7 +24,7 @@ guanlan --help
 
 ## Optional hosts (add-on layers, install on demand)
 
-The core is the CLI; the Web and MCP hosts are **optional add-on layers** — all CLI commands work without them.
+The core is the CLI; the Web, MCP and IM hosts are all **optional add-on layers** — every CLI command works without them.
 
 ### Web host
 
@@ -44,7 +44,19 @@ Pulls in the official `mcp` SDK (`mcp>=2,<3`) and `anyio`. Enables `guanlan mcp`
 
 > SDK **1.x is no longer supported** (P4.18 cut over to v2 / protocol `2026-07-28`). If your environment still pins 1.x, `guanlan mcp` says so explicitly. MCP clients pinned to older revisions are unaffected — a v2 server still serves the handshake-era revisions.
 
-> Both extras **degrade gracefully**: without the dependency, `guanlan web` / `guanlan mcp` print a clear `pip install 'guanlan-wiki[...]'` hint instead of crashing.
+### IM host
+
+```bash
+pip install 'guanlan-wiki[im-weixin]'   # personal WeChat
+pip install 'guanlan-wiki[im-feishu]'   # Feishu / Lark
+pip install 'guanlan-wiki[im]'          # both
+```
+
+**Splitting this into two extras is deliberate**: someone who only uses WeChat should not have `lark-oapi` dragged in. The WeChat side pulls in `httpx` and `qrcode` (it draws the login QR code in your terminal); the Feishu side pulls in `lark-oapi>=1.6.8`. Enables `guanlan im` / `im-login` / `im-identify` — see [IM host](08-im-host.md).
+
+> The Feishu floor of `1.6.8` is pinned hard: it is the first version whose long-connection client accepts `extra_ua_tags`, and **without that tag the server never pushes group @-mention events**. On an older version the adapter refuses to start and tells you to upgrade — better than connecting and silently receiving no group messages.
+
+> Every extra **degrades gracefully**: without the dependency, `guanlan web` / `guanlan mcp` / `guanlan im` print a clear `pip install 'guanlan-wiki[...]'` hint instead of crashing. The IM probe checks **only the platform you asked for** — having `[im-weixin]` but not `lark-oapi` never blocks the WeChat route.
 
 ## Develop from source
 
