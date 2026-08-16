@@ -9,7 +9,8 @@ wrapper 以工作目录 = 知识库根调用：
                 --interaction-policy reject \
                 [--model M] [--max-iterations N]
 
-stdout 是 `RunResult` JSON 信封；字段名是 `error.type`（非 `error.kind`）。
+stdout 是 `RunResult` JSON 信封；字段名是 `error.type`（非 `error.kind`）。信封的编码是
+**协议的一部分、固定 UTF-8**，父子两端都显式钉死、不随 locale 变（issue #50，见 `envelope_child_env`）。
 `runner` 可注入以便测试——fake runner 模拟"写 wiki + 返回摘要"，不起子进程、不打真实 LLM。
 """
 
@@ -154,6 +155,54 @@ def scrubbed_environ() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not _is_poisoned_key(k, v)}
 
 
+# ───────── 信封编码契约（issue #50：Windows GBK locale 下解码 agentao 输出失败）─────────
+
+ENVELOPE_ENCODING = "utf-8"
+# 管道解码用**非严格**档，理由见 `envelope_child_env` 末段——这不是「怕出错就 replace」的懒惰档，
+# 是 Windows 上唯一可控的档：strict 的 UnicodeDecodeError 死在 subprocess 自己的 reader 线程里。
+ENVELOPE_ERRORS = "replace"
+
+
+def envelope_child_env() -> dict[str, str]:
+    """喂给 `agentao run` 的环境：`scrubbed_environ()` 之上再**显式钉死子进程 std 流编码为 UTF-8**。
+
+    **为什么需要**（issue #50）：`--format json` 的 stdout 信封是**机器协议**，两端必须约定同一个
+    编码；此前两端都没约定，各自跟 locale 走，于是只在「父子 locale 恰好一致」时侥幸成立：
+
+    | 环境 | 子端（agentao）实际编码 | 父端（`text=True`）解码 | 结果 |
+    |---|---|---|---|
+    | Windows + CP936 | **UTF-8**（agentao `_ensure_utf8()` 只在 win32 强制） | GBK（locale） | ❌ 失配 |
+    | POSIX + UTF-8 locale | UTF-8 | UTF-8 | ✅ CI 只覆盖这一格 |
+    | POSIX + `LANG=zh_CN.GBK` | GBK（locale） | GBK（locale） | ✅ matched-locale 侥幸 |
+
+    失配那格有**两种**表现，崩溃反而是少数派：中文信封的 UTF-8 字节按 GBK 解，约 1/3 撞上非法序列
+    （报告里那条 `UnicodeDecodeError`），另约 2/3 **静默解成乱码且 `json.loads` 照样成功**——
+    JSON 骨架全是 ASCII、撑得住，死的只有中文正文。于是 `query` 会以退出码 0 交付一段乱码答案。
+
+    **为什么必须两端一起钉**：只钉父端 `encoding="utf-8"` 会修好 Windows 那格、却打断 POSIX
+    matched-locale 那格（子端仍按 GBK 发、父端强解 UTF-8 → 乱码）。这个坑 `convert.py` 已经踩过
+    一次并回退，见 docs/backlog/notes/gbrain-v0.42.53-反向审计-guanlan缺陷.md §1.③/§2.4b：
+    「须两端协同」。本接缝比 convert 那条好办——对端是 agentao 而非裸 `print` 的 skill 脚本，
+    一个环境变量就钉得住。
+
+    **为什么是 `PYTHONIOENCODING` 而不是 `PYTHONUTF8=1`**：后者连 fsencoding（argv/文件名口径）
+    一起改，会波及 agentao 对磁盘上非 UTF-8 文件名的读写，血溅面远大于这条协议缝；
+    `PYTHONIOENCODING` 只动 std 流，正是要的粒度。用户手工设的 `PYTHONIOENCODING=cp936` 会被
+    **覆盖**（非 setdefault）：这条缝是机器协议、不是给人看的控制台，编码不可协商。
+    （agentao 侧 `_ensure_utf8()` 用的正是 `setdefault`，故显式传入与它不冲突、且在 POSIX 上补上了
+    它主动跳过的那一半。）
+
+    **为什么父端还要 `errors="replace"`**：钉死两端后管道里本该只有合法 UTF-8，`replace` 兜的是
+    第三方混入的杂散字节（子进程链上的原生崩溃信息等）。**strict 在 Windows 上不可救**——
+    `capture_output` 在 Windows 走 `_readerthread`，解码异常死在 subprocess 内部线程里，父进程
+    `try/except` 够不着，只会再次拿到 `proc.stdout is None`（issue #50 报告的 traceback 即此形态）。
+    所以「保持 strict、捕获 `UnicodeDecodeError`」这条路在 Windows 上根本走不通。
+    """
+    env = scrubbed_environ()
+    env["PYTHONIOENCODING"] = ENVELOPE_ENCODING
+    return env
+
+
 def drop_poisoned_api_keys() -> list[str]:
     """就地从 `os.environ` 摘掉毒空 `*_API_KEY`，返回被摘的变量名（供日志/测试）。
 
@@ -212,11 +261,17 @@ def _subprocess_runner(
                 cwd=str(working_directory),
                 capture_output=True,
                 text=True,
+                # 信封是机器协议：**不跟 locale 走**，父端解码与子端 std 流（下面 env 里的
+                # PYTHONIOENCODING）一起钉死 UTF-8；errors 非严格档在 Windows 上是硬需求。
+                # 完整理由（含只钉一端为何会回归 POSIX matched-locale）见 `envelope_child_env`。
+                encoding=ENVELOPE_ENCODING,
+                errors=ENVELOPE_ERRORS,
                 # 我们总是显式传 --prompt；切断继承的 stdin，否则父进程被管道/重定向喂 stdin 时，
                 # agentao 会把管道 stdin 当成 run spec，与 --prompt 冲突而拒绝执行（破坏自动化场景）。
                 stdin=subprocess.DEVNULL,
-                # 显式传 env（不再裸继承）：只为剔除毒空 `*_API_KEY`，其余逐项照传（见 scrubbed_environ）。
-                env=scrubbed_environ(),
+                # 显式传 env（不再裸继承）：剔除毒空 `*_API_KEY`（见 scrubbed_environ）+ 钉死子端
+                # std 流编码（见 envelope_child_env），其余逐项照传。
+                env=envelope_child_env(),
             )
     except OSError as exc:
         # agentao 不在 PATH（或无法启动子进程）：归一为运行时错误，遵守退出码契约，
@@ -230,12 +285,28 @@ def _subprocess_runner(
     return _parse_envelope(proc.returncode, proc.stdout, proc.stderr)
 
 
-def _parse_envelope(returncode: int, stdout: str, stderr: str) -> AgentRunResult:
-    """把子进程结果归一为 AgentRunResult。stdout 解析失败 → runtime_error（不可信任为成功）。"""
+def _parse_envelope(
+    returncode: int, stdout: str | None, stderr: str | None
+) -> AgentRunResult:
+    """把子进程结果归一为 AgentRunResult。stdout 解析失败 → runtime_error（不可信任为成功）。
+
+    **`str | None` 不是防御性洁癖**：`capture_output` 在 Windows 用 reader 线程收管道，线程里
+    抛异常（如解码失败）会让 `proc.stdout` 变成 `None`，`json.loads(None)` 再抛一个 `TypeError`
+    把真正的原因盖掉——issue #50 报的就是这条二次异常。此处**只是错误呈现层的兜底**，真修在
+    `envelope_child_env` 的两端编码契约；留着它是因为「读不到 stdout」不止编码一种成因。
+    """
+    stdout_missing = stdout is None  # reader 线程猝死的独有形态，值得单独给一句人话诊断
+    stdout = stdout or ""
+    stderr = stderr or ""
     try:
         data = json.loads(stdout)
-    except (json.JSONDecodeError, ValueError):
-        detail = stderr.strip() or stdout.strip() or "无法解析 agentao run 输出"
+    except (json.JSONDecodeError, ValueError, TypeError):  # TypeError 双保险（上面已归一非 None）
+        fallback = (
+            "未能读到 agentao run 的 stdout（子进程输出流读取失败）"
+            if stdout_missing
+            else "无法解析 agentao run 输出"
+        )
+        detail = stderr.strip() or stdout.strip() or fallback
         return AgentRunResult(False, detail, error_type="runtime_error", raw=None)
     if not isinstance(data, dict):
         return AgentRunResult(False, stdout.strip(), error_type="runtime_error", raw=None)
