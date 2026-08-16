@@ -54,6 +54,7 @@ from ..errors import EXIT_OK, GuanlanError
 from ..paths import require_kb_root
 from ..runtime import AgentRunner
 from ..search import CorpusCache
+from .defaults import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_TRANSPORT
 from .tools import (
     AskEnvelope,
     GraphEnvelope,
@@ -355,9 +356,9 @@ def _serve_http(
 def serve_mcp(
     root: str | Path,
     *,
-    transport: str = "stdio",
-    host: str = "127.0.0.1",
-    port: int = 8766,
+    transport: str = DEFAULT_TRANSPORT,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
     auth_token_env: str | None = None,
     allowed_host: list[str] | None = None,
     allow_ask: bool = False,

@@ -66,6 +66,11 @@ CAPS = AdapterCaps(
 # 「一条 WS 长连已经死了」的哨兵（见 `_ws_runner`）。放队列里传，使 `inbound()` 能把它变成异常。
 _WS_DEAD = object()
 
+# 首连看门狗的等待上界（秒）。正常情形下「端点发现 POST + WS 握手」两秒内就完成，故这个窗口
+# 只在**出事时**才走满。取值要能容下慢网络的一次握手，又远小于 SDK 那个 120 秒的重连间隔。
+WS_FIRST_CONNECT_TIMEOUT = 30.0
+_WS_POLL_INTERVAL = 0.1
+
 
 def build_markdown_post_rows(text: str) -> list[list[dict]]:
     """按**围栏块**切行（§8.4 的唯一真实逻辑）。
@@ -202,6 +207,9 @@ class FeishuAdapter:
         self._queue: asyncio.Queue[object] = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._closing = False  # `close()` 已开始 → WS 线程结束属正常，别再报"连接已断"
+        # 首连看门狗的两个跨线程标志（SDK 的钩子在 WS 线程里被调），见 `_await_first_connection`。
+        self._ws_reconnecting = threading.Event()  # SDK 已进入重连 ⇒ 首连**失败了**
+        self._ws_reconnected = threading.Event()  # 重连成功（首连成功不走这个钩子）
 
     # ── 凭据 ────────────────────────────────────────────────────────────────
     def _load_credentials(self) -> None:
@@ -258,11 +266,79 @@ class FeishuAdapter:
             # 不传这个 tag，飞书服务端**不会**经 WebSocket 推送群 @ 事件（只推 P2P 单聊）。
             extra_ua_tags=["channel"],
         )
+        # 首连看门狗的两个钩子：SDK 的 `_reconnect()` 会 `self.on_reconnecting()` / 成功后
+        # `self.on_reconnected()`，两者都包在 try/except 里。**类上并没有定义它们**——这是
+        # SDK 留给使用方的鸭子类型扩展点（不赋值就 AttributeError、被它自己吞掉）。
+        self._ws_reconnecting.clear()
+        self._ws_reconnected.clear()
+        self._ws.on_reconnecting = self._ws_reconnecting.set
+        self._ws.on_reconnected = self._ws_reconnected.set
         # SDK 的 `start()` 是**阻塞**的（内部自建事件循环），故放进 daemon 线程。
         self._ws_thread = threading.Thread(
             target=self._ws_runner, name="guanlan-im-feishu-ws", daemon=True
         )
         self._ws_thread.start()
+        await self._await_first_connection()
+
+    async def _await_first_connection(self) -> None:
+        """**首连看门狗**：起服时必须拿到「长连真的建起来了」的证据，否则拒启。
+
+        没有它，一次失败的首连会变成**决策P4.21-57 明写要杜绝的活死人**，而且是 `_WS_DEAD`
+        哨兵**够不到**的那一种：SDK 的 `start()` 把 `_connect()` 的异常吞进 `_reconnect()`，
+        而首连成功之前 `_reconnect_count` 还是默认的 `-1` ⇒ 走 `while True` 分支、每
+        `_reconnect_interval`（实测默认 **120 秒**）重试一次、**永不放弃**。于是那个 daemon
+        线程永远不返回，`_ws_runner` 末尾那句 `_WS_DEAD` 永远投不出去——宿主一路"启动成功"，
+        日志安静，消息一条收不到。真机上撞见的 `SSL: CERTIFICATE_VERIFY_FAILED` 正是这条路径。
+
+        判据是**非对称**的，这一点是有意的：
+
+        - **有失败的正面证据** → 拒启。`on_reconnecting` 已触发（＝首连失败、已进无限重连），
+          或线程已死，或 `_conn` 到点仍是 `None`。
+        - **有成功的正面证据** → 放行。`_conn` 非空，或 `on_reconnected` 触发。
+        - **两种证据都取不到**（SDK 换了形状、`_conn` 这个私有属性不复存在）→ **放行并告警**，
+          绝不拒启。观测不到不等于坏了；这里误判一次就是让所有升级 SDK 的人起不了服。
+          真 SDK 的形状另有一条探针用例守着（`test_ws_client_exposes_the_watchdog_hooks`），
+          它变红比运行期悄悄降级成"看不见"要早得多。
+
+        首连失败**不等它重试**：重试间隔 120 秒，任何合理的启动窗口都接不住第二次尝试。与其
+        让用户对着两分钟的静默发呆，不如立刻报错——重跑一次的成本远低于误判"已经在跑了"。
+        """
+        deadline = asyncio.get_running_loop().time() + WS_FIRST_CONNECT_TIMEOUT
+        observable = hasattr(self._ws, "_conn")  # 取不到就只能靠钩子，见上文第三条
+        while True:
+            if self._ws_reconnected.is_set() or getattr(self._ws, "_conn", None) is not None:
+                return
+            if self._ws_reconnecting.is_set():
+                raise GuanlanError(
+                    "飞书 WS 首次连接失败，SDK 已进入无限重连（每 120 秒一次），"
+                    "宿主此刻收不到任何消息，故拒绝以「假装启动成功」的姿态继续。"
+                    "常见原因：网络不通、app_id/app_secret 不对、或本机 TLS 根证书库为空"
+                    "（macOS 官方版 Python 需跑一次 `Install Certificates.command`）。"
+                    "上面几行 `[Lark] ... connect failed` 的日志里有服务端原话。",
+                    exit_code=EXIT_USAGE,
+                )
+            thread = self._ws_thread
+            if thread is not None and not thread.is_alive():
+                raise GuanlanError(
+                    "飞书 WS 长连线程在建立连接前就退出了——上面的 ERROR 日志里有原因。",
+                    exit_code=EXIT_USAGE,
+                )
+            if asyncio.get_running_loop().time() >= deadline:
+                if not observable:
+                    # 观测不到 ⇒ 不拒启，但要留下痕迹：日后真出「机器人不理我」时，这行是
+                    # 唯一能说明"看门狗当时是瞎的"的证据。
+                    _logger.warning(
+                        "无法确认飞书 WS 是否连上（SDK 未暴露 `_conn`，版本可能已变）："
+                        "首连看门狗本次**未生效**，若收不到消息请检查网络与凭据。"
+                    )
+                    return
+                raise GuanlanError(
+                    f"飞书 WS 在 {WS_FIRST_CONNECT_TIMEOUT:g} 秒内没有连上，"
+                    "宿主此刻收不到任何消息，故拒绝以「假装启动成功」的姿态继续。"
+                    "请检查网络连通性与 app_id/app_secret。",
+                    exit_code=EXIT_USAGE,
+                )
+            await asyncio.sleep(_WS_POLL_INTERVAL)
 
     def _ws_runner(self) -> None:
         """在 daemon 线程里跑 SDK 的阻塞 `start()`，**并把它的死亡报回事件循环**。

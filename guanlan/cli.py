@@ -544,6 +544,13 @@ def _add_web_parser(sub, dir_parent) -> None:
 
 
 def _add_mcp_parser(sub, dir_parent) -> None:
+    # 同 web/im：默认值取零依赖叶子 `guanlan/mcp/defaults.py`（`guanlan/mcp/__init__.py` 已惰性化，
+    # 故这行**不会**拉起官方 mcp SDK——缺 `[mcp]` extra 时 `guanlan mcp --help` 仍须可用）。
+    from .mcp.defaults import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_TRANSPORT, TRANSPORTS
+    # web 的端口也从常量取：help 里「与 web 8765 错开」若抄成字面量，就是 8765 的第四份拷贝，
+    # 改 web 的默认端口它会立刻开始说假话。
+    from .web.defaults import DEFAULT_PORT as WEB_DEFAULT_PORT
+
     p = sub.add_parser(
         "mcp",
         parents=[dir_parent],
@@ -555,16 +562,22 @@ def _add_mcp_parser(sub, dir_parent) -> None:
     # ── P4.17 Streamable HTTP 传输（默认 stdio，向后兼容硬约束，决策P4.17-1）──
     p.add_argument(
         "--transport",
-        choices=("stdio", "http"),
-        default="stdio",
-        help="传输：stdio（默认，与既有行为字节等价）或 http（Streamable HTTP，默认绑 127.0.0.1:8766）",
+        choices=TRANSPORTS,
+        default=DEFAULT_TRANSPORT,
+        help=f"传输：{DEFAULT_TRANSPORT}（默认，与既有行为字节等价）或 http"
+        f"（Streamable HTTP，默认绑 {DEFAULT_HOST}:{DEFAULT_PORT}）",
     )
     p.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="http 绑定地址（默认 127.0.0.1；非环回须配 --auth-token-env，决策P4.17-2）",
+        default=DEFAULT_HOST,
+        help=f"http 绑定地址（默认 {DEFAULT_HOST}；非环回须配 --auth-token-env，决策P4.17-2）",
     )
-    p.add_argument("--port", type=int, default=8766, help="http 监听端口（默认 8766，与 web 8765 错开）")
+    p.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"http 监听端口（默认 {DEFAULT_PORT}，与 web {WEB_DEFAULT_PORT} 错开）",
+    )
     p.add_argument(
         "--auth-token-env",
         default=None,

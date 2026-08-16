@@ -245,8 +245,13 @@ def test_mcp_internal_import_error_is_not_masked(tmp_path, monkeypatch):
 
     pytest.importorskip("mcp.server.mcpserver")  # 需真 SDK 在场，才能证「过了 SDK 探针之后」的行为
     _evict_mcp_modules(monkeypatch)
-    # 让 guanlan.mcp 自身的导入炸掉（模拟改名/半装依赖），SDK 本身完好。
-    monkeypatch.setitem(sys.modules, "guanlan.mcp", None)
+    # 让 guanlan 自己的模块链炸掉（模拟改名/半装依赖），SDK 本身完好。
+    # **打在 `guanlan.mcp.server` 而不是包根 `guanlan.mcp` 上**：包根现在是 PEP 562 惰性壳，
+    # 建 parser 时要从 `guanlan.mcp.defaults` 读默认值——把包根打死会让 ImportError 在
+    # **解析期**就抛出，这条用例照样绿，却再也证明不了「`_cmd_mcp` 没把它冒充成缺 extra」
+    # （日后真有人把 `from .mcp import serve_mcp` 裹进 except，这里也不会红）。打在子模块上
+    # 既保住原意，也更贴近真实故障形态：重构改名坏的是某个子模块，不是整个包。
+    monkeypatch.setitem(sys.modules, "guanlan.mcp.server", None)
 
     with pytest.raises(ImportError):
         main(["-C", str(tmp_path), "mcp"])
@@ -268,6 +273,9 @@ _HOST_DEFAULTS = [
     ("guanlan.im.defaults", "DEFAULT_IDLE_TTL", ["im", "--platform", "weixin", "--allow-all-users"], "idle_ttl", 4321.0),
     ("guanlan.im.defaults", "DEFAULT_MCP_REQUEST_TIMEOUT", ["im", "--platform", "weixin", "--allow-all-users"], "mcp_request_timeout", 4321.0),
     ("guanlan.im.defaults", "DEFAULT_IDENTIFY_SECONDS", ["im-identify", "--platform", "weixin"], "seconds", 4321.0),
+    ("guanlan.mcp.defaults", "DEFAULT_TRANSPORT", ["mcp"], "transport", "zz-transport-probe"),
+    ("guanlan.mcp.defaults", "DEFAULT_HOST", ["mcp"], "host", "10.1.2.3"),
+    ("guanlan.mcp.defaults", "DEFAULT_PORT", ["mcp"], "port", 9911),
 ]
 
 
@@ -333,6 +341,57 @@ def test_web_mode_choices_come_from_the_constant(monkeypatch):
     assert build_parser().parse_args(["web", "--mode", "demo-mode"]).mode == "demo-mode"
     monkeypatch.setattr(defaults, "CONFIRM_MODES", ("ask", "auto", "demo-confirm"))
     assert build_parser().parse_args(["web", "--confirm", "demo-confirm"]).confirm == "demo-confirm"
+
+
+def test_mcp_transport_choices_come_from_the_constant(monkeypatch):
+    """`--transport` 的合法取值同样取自 `TRANSPORTS`，不在 cli 里再列一遍。
+
+    上面那条参数化用例只探**默认值**——而 argparse 根本不校验 default 是否属于 choices，
+    所以把 `choices=TRANSPORTS` 抄回 `("stdio", "http")` 时它照样绿。少了本条，choices
+    那份拷贝就是无人看守的。
+    """
+    from guanlan.mcp import defaults as mcp_defaults
+
+    monkeypatch.setattr(mcp_defaults, "TRANSPORTS", ("stdio", "http", "demo-transport"))
+    args = build_parser().parse_args(["mcp", "--transport", "demo-transport"])
+    assert args.transport == "demo-transport"
+
+
+def test_mcp_port_help_quotes_the_web_constant(monkeypatch, capsys):
+    """`--port` 的 help 里那句「与 web 8765 错开」也得取 web 的常量，不能抄第四份。
+
+    抄了的话，改 web 默认端口时这句话立刻开始说假话，而它恰恰是**解释这个默认值为什么是
+    8766** 的唯一去处。
+    """
+    from guanlan.web import defaults as web_defaults
+
+    monkeypatch.setattr(web_defaults, "DEFAULT_PORT", 9123)
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["mcp", "--help"])
+    assert "9123" in _squash(capsys.readouterr().out)
+
+
+def test_mcp_defaults_module_is_a_dependency_free_leaf():
+    """`guanlan mcp --help` 在**没装 `[mcp]` extra** 时必须仍然可用。
+
+    包根 `guanlan/mcp/__init__.py` 为此改成了 PEP 562 惰性壳。若哪天有人把 `serve_mcp`
+    的导入挪回模块顶层，建 parser 就会连带拉起官方 SDK，用户看到的是 traceback，
+    而不是 `_cmd_mcp` 那句「请先 pip install 'guanlan-wiki[mcp]'」。
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys;"
+        "sys.modules['mcp'] = None;"  # `import mcp...` → ImportError
+        "import guanlan.mcp.defaults as d;"
+        "from guanlan.cli import build_parser;"
+        "a = build_parser().parse_args(['mcp']);"
+        "assert (a.transport, a.host, a.port) == (d.DEFAULT_TRANSPORT, d.DEFAULT_HOST, d.DEFAULT_PORT);"
+        "assert 'guanlan.mcp.server' not in sys.modules"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_web_defaults_module_is_a_dependency_free_leaf():
