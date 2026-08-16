@@ -6,7 +6,7 @@
 
 **中文** | [English](https://github.com/jin-bo/guanlan/blob/main/README.en.md)
 
-[![PyPI](https://img.shields.io/pypi/v/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![Python](https://img.shields.io/pypi/pyversions/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/jin-bo/guanlan/blob/main/LICENSE) ![Status](https://img.shields.io/badge/状态-CLI%20闭环%20%2B%20Web%2FMCP%20宿主可用-brightgreen)
+[![PyPI](https://img.shields.io/pypi/v/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![Python](https://img.shields.io/pypi/pyversions/guanlan-wiki)](https://pypi.org/project/guanlan-wiki/) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/jin-bo/guanlan/blob/main/LICENSE) ![Status](https://img.shields.io/badge/状态-CLI%20闭环%20%2B%20Web%2FMCP%2FIM%20宿主可用-brightgreen)
 
 > 《孟子·尽心上》"观水有术,必观其澜"——在信息的汪洋中洞察脉络与趋势。
 
@@ -33,6 +33,7 @@
 | `guanlan graph` | 生成可交互的 `[[wikilink]]` 知识图谱 | 否 |
 | `guanlan web` | 在浏览器里浏览、问答、维护(可选叠加层) | 部分 |
 | `guanlan mcp` | 把 wiki 只读暴露给 MCP 客户端(可选叠加层) | 部分 |
+| `guanlan im` | 在微信 / 飞书的聊天窗口里问知识库(可选叠加层,只读) | 部分 |
 
 > 还有 `reindex`(索引回填)、`heal`(缺失实体物化)、`audit`(语义审计:复核 `raw/` 已变但 wiki 未重综合的漂移源)、`remove`(源撤回:把误摄/已撤稿源移入 `.trash/`)、`convert`(PDF/DOCX/… 转 markdown)等。逐命令细节见 **[用户指南](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)**。
 
@@ -49,9 +50,13 @@ pip install guanlan-wiki
 可选宿主(叠加层,按需装):
 
 ```bash
-pip install 'guanlan-wiki[web]'    # 浏览器宿主 guanlan web
-pip install 'guanlan-wiki[mcp]'    # 只读 MCP 服务端 guanlan mcp（需官方 SDK mcp>=2）
+pip install 'guanlan-wiki[web]'         # 浏览器宿主 guanlan web
+pip install 'guanlan-wiki[mcp]'         # 只读 MCP 服务端 guanlan mcp（需官方 SDK mcp>=2）
+pip install 'guanlan-wiki[im-weixin]'   # IM 宿主 guanlan im --platform weixin
+pip install 'guanlan-wiki[im-feishu]'   # IM 宿主 guanlan im --platform feishu
 ```
+
+> IM 的两个 extra **按平台分**,不给一个大 `[im]` 把两家 SDK 都拖来(要两个都装写 `[im]`)。
 
 ## 快速开始
 
@@ -79,6 +84,17 @@ guanlan -C my-wiki web       # 起本地 Web 宿主,仅监听 127.0.0.1,默认�
 
 浏览器里可:浏览 wiki 并跟随 `[[wikilink]]` 导航、跑 check·health·lint 看报告、看 graph、从 `raw/` 触发 ingest 等写作业(含 heal 补全、audit 漂移复核、backfill 回填)、与 agent 只读多轮对话。**仅供本机单用户——绝不要把端口暴露到网络。**
 
+在微信 / 飞书里用(可选):
+
+```bash
+pip install 'guanlan-wiki[im-feishu]'
+guanlan im-identify --platform feishu          # 先拿到要授权的人的完整 ID
+guanlan -C my-wiki im --platform feishu \
+    --allow-user ou_xxxxxxxx                   # 白名单默认 deny,空白名单拒启
+```
+
+IM 宿主**只读**、不监听任何端口。但**一个零监听端口的进程照样能把整库答案送进一个 200 人的群**——所以授权是显式白名单,群聊放行是「群 **AND** 人 **AND** @我」三者同时成立。
+
 完整上手见 **[用户指南 → 快速上手](https://github.com/jin-bo/guanlan/blob/main/docs/guide/zh/02-快速上手.md)**。
 
 ## 生成结构
@@ -98,7 +114,7 @@ my-wiki/
 
 ## 文档
 
-- 📖 **[用户指南 `docs/guide/`](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)** —— 安装、上手、各命令、Web/MCP 宿主(中英双语)
+- 📖 **[用户指南 `docs/guide/`](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)** —— 安装、上手、各命令、Web/MCP/IM 宿主(中英双语)
 - 🏗️ [设计文档 `docs/DESIGN.md`](https://github.com/jin-bo/guanlan/blob/main/docs/DESIGN.md) —— 完整设计(面向开发,权威规格)
 - 📋 [CHANGELOG.md](https://github.com/jin-bo/guanlan/blob/main/CHANGELOG.md) —— 版本与里程碑进展
 

@@ -181,6 +181,25 @@ For a group message, `im-identify` prints both the user ID and the chat ID:
 
 ---
 
+## What a successful start looks like
+
+Both routes are the same: once connected, the terminal prints a banner and then waits. **No banner means it
+did not connect** — see [Troubleshooting](#troubleshooting).
+
+```
+[guanlan im] 已连上 feishu，等待消息中（Ctrl-C 停服）
+  知识库  /Users/me/my-wiki（只读）
+  白名单  用户 3 人 · 群 1 个
+  外部 MCP 已启用（单次请求上限 120s）
+```
+
+The whitelist line is there so you can check **that your configuration actually loaded** — especially when
+the list comes from an environment variable via `--allow-user-env`: a wrong count means the variable was not
+read. It prints **counts only, never IDs**: the host is a long-running process whose output is often
+redirected into a log file, and IDs do not belong there. Use `guanlan im-identify` to see full IDs.
+
+---
+
 ## Who may ask: the authorization truth table
 
 | Scenario | Passes when |

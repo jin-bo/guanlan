@@ -318,8 +318,42 @@ async def _shutdown(
     return failed
 
 
+def _format_banner(
+    *, platform: str, kb: Path, policy: AccessPolicy, mcp_on: bool, mcp_timeout: float
+) -> str:
+    """启动横幅文案（决策P4.21-80）。纯函数，故可直接单测。
+
+    **只打数量、绝不打 ID**——§9.1 的日志脱敏在这里**适用**。`im-identify` 是唯一的例外
+    （把完整 ID 打到终端是它**唯一**的用途，且它限时、绝不回复），而 `guanlan im` 是长驻宿主，
+    stdout 常被重定向进日志文件 / systemd journal / 运维面板，受众远不止敲命令的那个人。
+    数量已经足够回答横幅要回答的那个问题：**「我配的名单加载上了吗」**。
+    """
+    if policy.allow_all:
+        who = "全员可问" + ("" if policy.allow_chats else "（任何能私聊到它的人）")
+    else:
+        who = f"用户 {len(policy.allow_users)} 人"
+    if policy.allow_chats:
+        who += f" · 群 {len(policy.allow_chats)} 个"
+    mcp = (
+        f"外部 MCP 已启用（单次请求上限 {mcp_timeout:g}s）" if mcp_on else "外部 MCP 已关闭（--no-mcp）"
+    )
+    return "\n".join(
+        (
+            f"[guanlan im] 已连上 {platform}，等待消息中（Ctrl-C 停服）",
+            f"  知识库  {kb}（只读）",
+            f"  白名单  {who}",
+            f"  {mcp}",
+        )
+    )
+
+
 async def _run(
-    adapter: IMAdapter, intake: Intake, delivery: Delivery, *, warn_interval: float
+    adapter: IMAdapter,
+    intake: Intake,
+    delivery: Delivery,
+    *,
+    warn_interval: float,
+    banner: str | None = None,
 ) -> int:
     stop_event = asyncio.Event()
     handle = _install_signal_handlers(
@@ -344,6 +378,18 @@ async def _run(
             with contextlib.suppress(Exception):
                 await adapter.close()  # start() 可能已建了一半连接
             return EXIT_AGENT_ERROR
+        if banner:
+            # ★ **打在 `start()` 成功之后**（决策P4.21-80）：连接建立之前打「已连上」就是撒谎，
+            # 而「进程起来了、连接没建起来」恰恰是 §15.6 首连看门狗刚消灭的那种活死人——
+            # 横幅若抢在前面打，等于把看门狗刚拆掉的假象又装了回去。`im-identify` 的那句提示
+            # 同样在 `start()` 之后打（同一条判据）。
+            #
+            # **走 stdout 而不是 `_logger.info`**：宿主不配置 logging，INFO 级没有任何 handler
+            # 接（`logging.lastResort` 只兜 WARNING+），横幅的**全部用途**就是让操作者看见——
+            # 用一条默认看不见的通道发它等于没写。stdout 在 IM 宿主上也没有协议占用
+            # （那是 `guanlan mcp --transport stdio` 的约束，与这里无关）。
+            with contextlib.suppress(Exception):  # 诊断辅助绝不能自己成为故障源
+                print(banner, flush=True)
         recv = asyncio.create_task(_receive_loop(adapter, intake))
         stop = asyncio.create_task(stop_event.wait())
         code = EXIT_OK
@@ -457,7 +503,16 @@ def serve_im(
         registry.set_busy(delivery.busy)  # 在飞守卫接线（§4.5），避免构造期循环依赖
         intake = Intake(ad.caps, policy, clock=clock)
         intake.set_sink(delivery.submit)  # task 的创建权归 Delivery（决策P4.21-52）
-        return asyncio.run(_run(ad, intake, delivery, warn_interval=warn_interval))
+        banner = _format_banner(
+            platform=platform,
+            kb=kb,
+            policy=policy,
+            mcp_on=mcp_reg is not None,
+            mcp_timeout=timeout,
+        )
+        return asyncio.run(
+            _run(ad, intake, delivery, warn_interval=warn_interval, banner=banner)
+        )
     finally:
         lock.release()  # 与 start() 失败路径共用同一套兜底（§4.1）
 
