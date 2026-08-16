@@ -90,6 +90,32 @@
 
 ### 修复
 
+- **Windows 中文 locale（CP936）下解不动 agentao 的 JSON 信封**（issue #50，与本次 IM 主题无关的
+  独立修复）——`agentao run --format json` 的 stdout 此前**两端都没约定编码、各自跟 locale 走**，
+  只在「父子 locale 恰好一致」时侥幸成立。Windows 上 agentao 自己强制 UTF-8 输出、观澜却按 CP936
+  解码，于是失配。现在**两端一起钉死 UTF-8**：父端 `encoding="utf-8"`，子端经 `PYTHONIOENCODING`
+  （不是 `PYTHONUTF8`——后者连 fsencoding 一起改，血溅面远大于这条协议缝）。
+  - **崩溃只是少数派**：报告里那条 `UnicodeDecodeError` 约占三分之一，另外约三分之二是**中文信封
+    被静默解成乱码、`json.loads` 照样成功**——JSON 骨架全是 ASCII、撑得住，死的只有中文正文。
+    也就是说 `query` 会以**退出码 0 交付一段乱码答案**，而这一半从来不会被谁注意到。
+  - **只钉一端会换个 locale 继续错**：单钉父端修好 Windows、却打断 POSIX 的 matched-locale
+    （`LANG=zh_CN.GBK` 下子端仍按 GBK 发）。`convert.py` 已经踩过这个坑并回退过一次
+    （backlog §1.③/§2.4b：「须两端协同」），这次不重蹈。**`convert.py` 本次不动**——那条缝的对端
+    是裸 `print` 的 skill 脚本，与本接缝不同构。
+  - **`errors="replace"` 不是懒惰档、是 Windows 上唯一可控的档**：`capture_output` 在 Windows 走
+    reader 线程，strict 解码抛的异常**死在 subprocess 内部线程里**，父进程 `try/except` 根本够不着
+    ——「保持 strict、捕获 `UnicodeDecodeError`」这条路走不通，只会再次拿到 `proc.stdout is None`。
+  - 连带把 `_parse_envelope` 的 `stdout`/`stderr` 归一为 `str | None`：读不到 stdout 时给一句人话
+    诊断，而不是 `json.loads(None)` 抛个 `TypeError` 把真因盖掉。**这只是错误呈现层的兜底**，
+    真修是上面的编码契约——留着它是因为「读不到 stdout」不止编码一种成因。
+  - 顺带说明这条缝的影响面：它是**所有** LLM 命令的唯一入口（`ingest`/`query`/`heal`/`audit`、
+    Web 作业、MCP 的 `query` 工具）。且异常路径会**绕过写门禁**——`run_agent_task` 抛异常时
+    `enforce_write_result` 根本不执行，那次运行的 `raw/` 只读快照比对一条都没跑。
+  - 回归测试三层：契约测试（父端 `encoding`/`errors` + 子端 `PYTHONIOENCODING` 成对断言，
+    跨平台常绿）、`_parse_envelope(None, None)` 单测、以及一条**真管道**用例——在
+    `LC_ALL=C` + `-X utf8=0` 的真子解释器里跑（父端 locale 编码 = ASCII，与 Windows CP936 同构），
+    PATH 上摆一个只吐 UTF-8 字节的假 agentao。进程内 monkeypatch 造不出这个缺陷（locale 解码档在
+    解释器启动时就定了），故必须真起进程；造不出非 UTF-8 父端的环境**诚实跳过**、不静默空跑。
 - **`guanlan im-login --platform weixin` 拿不到二维码**——真机首跑即挂，服务端回
   `{"err_msg":"missing bot_type","ret":1}`。三处修正（详见 `docs/P4.21-IM宿主.md` §7.6 实测表）：
   - `bot_type` 是 **query 参数**、不是请求体字段（放 body 里服务端读不到，照样报 missing），

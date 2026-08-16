@@ -1,13 +1,19 @@
 """P2 runtime 测试：RunResult 信封解析 + agentao 不在 PATH 的兜底 + 空 API key 撞空清洗
-（不打真实 LLM）。"""
++ 信封编码契约（issue #50）（不打真实 LLM）。"""
 
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
+import guanlan
 from guanlan.runtime import (
     _parse_envelope,
     drop_poisoned_api_keys,
+    envelope_child_env,
     poisoned_api_key_names,
     run_agent_task,
     scrubbed_environ,
@@ -55,6 +61,22 @@ def test_status_ok_but_llm_api_error_is_failure():
     assert not r.ok
     assert r.error_type == "runtime_error"
     assert "LLM API error" in r.final_text
+
+
+def test_parse_envelope_none_stdout_is_runtime_error():
+    """Windows GBK：reader 线程解码猝死 → `proc.stdout is None` → 必须归一为 runtime_error，
+    而不是 `json.loads(None)` 的裸 TypeError 把真因盖掉（issue #50）。"""
+    r = _parse_envelope(0, None, None)
+    assert not r.ok and r.error_type == "runtime_error"
+    assert "stdout" in r.final_text  # 有可读诊断，不是空串
+    assert r.raw is None
+
+
+def test_parse_envelope_none_stdout_keeps_stderr_diagnostic():
+    """stdout 读失败但 stderr 有料时，优先展示 stderr——原始编码错误才不被兜底文案顶掉。"""
+    r = _parse_envelope(1, None, "UnicodeDecodeError: 'gbk' codec can't decode byte 0x8a")
+    assert not r.ok and r.error_type == "runtime_error"
+    assert "0x8a" in r.final_text
 
 
 def test_missing_agentao_executable_is_runtime_error(tmp_path: Path, monkeypatch):
@@ -134,3 +156,111 @@ def test_poisoned_names_never_expose_values(monkeypatch):
 
     assert "sk-must-not-leak" not in str(poisoned_api_key_names())
     assert "sk-must-not-leak" not in str(drop_poisoned_api_keys())
+
+
+# ───────── 信封编码契约（issue #50：Windows GBK locale 下解码 agentao 输出失败）─────────
+
+
+def test_subprocess_runner_pins_utf8_on_both_ends(tmp_path: Path, monkeypatch):
+    """信封是机器协议：父端解码与子端 std 流**同时**钉 UTF-8，两者缺一不可。
+
+    只钉父端会修好 Windows、却打断 POSIX matched-locale（`LANG=zh_CN.GBK` 下子端仍按 GBK 发）；
+    只钉子端则 POSIX 修好、Windows 父端仍按 CP936 解。故这条断言必须成对。
+    """
+    monkeypatch.delenv("PYTHONUTF8", raising=False)
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, '{"status":"ok","final_text":"答案"}', "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    r = run_agent_task("q", working_directory=tmp_path, skills=())
+
+    assert r.ok
+    assert captured["encoding"] == "utf-8"  # 父端：不跟 locale 走
+    assert captured["env"]["PYTHONIOENCODING"] == "utf-8"  # 子端：同上
+    # strict 在 Windows 上不可救——异常死在 subprocess 自己的 reader 线程里，父进程 catch 不到，
+    # 只会再次拿到 stdout=None。故 errors 必须是非严格档。
+    assert captured["errors"] == "replace"
+    # 只钉 std 流：PYTHONUTF8 连 fsencoding（argv/文件名口径）一起改，血溅面过大，刻意不设。
+    assert "PYTHONUTF8" not in captured["env"]
+
+
+def test_envelope_child_env_overrides_user_ioencoding(monkeypatch):
+    """用户手设的 `PYTHONIOENCODING=cp936` 会被**覆盖**（非 setdefault）：这条缝是机器协议、
+    不是给人看的控制台，编码不可协商。同时毒空 key 清洗照旧生效（两条清洗叠加、互不吃掉）。"""
+    monkeypatch.setenv("PYTHONIOENCODING", "cp936")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-real")
+
+    env = envelope_child_env()
+    assert env["PYTHONIOENCODING"] == "utf-8"
+    assert "ANTHROPIC_API_KEY" not in env
+    assert env["DEEPSEEK_API_KEY"] == "sk-real"
+    assert os.environ["PYTHONIOENCODING"] == "cp936"  # 只换给子进程的副本，不动自己的环境
+
+
+# 在**非 UTF-8 父端 locale**下真起子进程跑一遍 `run_agent_task` 的驱动脚本。
+# 自身 stdout 在该 locale 下就是 ASCII，故结果用默认 `ensure_ascii=True` 转义回传。
+_NON_UTF8_DRIVER = r"""
+import json, locale, os, sys
+from pathlib import Path
+
+sys.path.insert(0, os.environ["GUANLAN_SRC"])
+from guanlan.runtime import run_agent_task
+
+r = run_agent_task("q", working_directory=Path(os.environ["GUANLAN_WD"]), skills=())
+sys.stdout.write(json.dumps({
+    "locale_encoding": locale.getpreferredencoding(False),
+    "ok": r.ok,
+    "final_text": r.final_text,
+}))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only：假 agentao 靠 shebang 可执行")
+def test_envelope_round_trips_under_non_utf8_parent_locale(tmp_path: Path):
+    """**真管道**回归：父端 locale 非 UTF-8 时，中文信封仍逐字往返（issue #50 的可复现形态）。
+
+    进程内 monkeypatch 造不出这个缺陷——locale 解码档在解释器启动时就定了（同理见 backlog
+    §1.③）。故此处真起一个 `LC_ALL=C` + `-X utf8=0` 的解释器（父端 locale 编码 = ASCII，
+    与 Windows CP936 同构：**父端 locale 解不动子端发来的 UTF-8**），PATH 上摆一个只吐 UTF-8
+    字节的假 agentao。修复前：`text=True` 按 ASCII 解 → `UnicodeDecodeError` 冒出 `subprocess.run`
+    （POSIX 形态）→ 驱动非零退出；修复后：父端钉 UTF-8 → 中文原样回来。
+    """
+    expected = "已摄入《测试文档》，新建 3 页。"
+    payload = json.dumps({"status": "ok", "final_text": expected}, ensure_ascii=False)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "agentao"
+    # 假 agentao 走 `stdout.buffer` 直发 UTF-8 字节——正是 agentao 真身在钉死编码后的行为，
+    # 且脚本源码全 ASCII，不把测试自身的写盘编码也搅进来。
+    fake.write_text(
+        f"#!{sys.executable}\nimport sys\nsys.stdout.buffer.write({payload.encode()!r})\n",
+        encoding="ascii",
+    )
+    fake.chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["LC_ALL"] = env["LANG"] = "C"
+    env["PYTHONCOERCECLOCALE"] = "0"  # 挡掉 PEP 538 把 C locale 强升成 C.UTF-8
+    env.pop("PYTHONUTF8", None)  # PEP 540 UTF-8 模式会让整个用例退化成空跑
+    env.pop("PYTHONIOENCODING", None)
+    env["GUANLAN_SRC"] = str(Path(guanlan.__file__).resolve().parent.parent)
+    env["GUANLAN_WD"] = str(tmp_path)
+
+    proc = subprocess.run(
+        [sys.executable, "-X", "utf8=0", "-c", _NON_UTF8_DRIVER],
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert proc.returncode == 0, f"驱动异常退出：\n{proc.stderr}"
+    got = json.loads(proc.stdout)
+    if "utf" in got["locale_encoding"].lower():  # 造不出非 UTF-8 父端 → 诚实跳过，不静默空跑
+        pytest.skip(f"本环境的父端 locale 仍是 {got['locale_encoding']}，无法复现该缺陷")
+    assert got["ok"]
+    assert got["final_text"] == expected
