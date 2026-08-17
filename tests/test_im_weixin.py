@@ -537,7 +537,7 @@ def test_identify_prints_full_id_and_never_replies(state, capsys, monkeypatch):
     rec = Recorder()
     rec.queue(EP_GETUPDATES, {"ret": 0, "msgs": [frame()], "get_updates_buf": "c1"})
 
-    def fake_factory(_state, *, group_wanted=False):
+    def fake_factory(_state, *, group_wanted=False, actions_wanted=True):
         return make_adapter(state, rec)
 
     monkeypatch.setitem(

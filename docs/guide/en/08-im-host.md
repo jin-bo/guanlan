@@ -136,12 +136,21 @@ enterprises — skip what you can).
 > reception into finer permissions such as DM vs. group @; `im:message` is the parent that covers them) —
 > **trust the console's prompt**.
 
-**③ Events and callbacks**
+**③ Events and callbacks ← two separate settings here; do not configure only one**
 
-1. Choose **long connection (WebSocket)** as the delivery mode; do **not** configure a webhook URL.
-   (GuānLán only implements WS mode: a webhook needs a publicly reachable inbound endpoint, which
-   contradicts the "no listening port" red line.)
+1. **Event subscription**: choose **long connection (WebSocket)** as the delivery mode; do **not** configure
+   a webhook URL. (GuānLán only implements WS mode: a webhook needs a publicly reachable inbound endpoint,
+   which contradicts the "no listening port" red line.)
 2. Subscribe to exactly one event: **`im.message.receive_v1`** (receive message).
+3. **Callbacks** (a separate block on the same page, **a different setting from "event subscription"**):
+   choose **long connection** there as well, and add the **`card.action.trigger`** callback (card
+   interaction).
+
+> **Missing step 3 fails silently**: the bot still answers, the "pages cited by this answer" card is still
+> delivered — **the buttons simply do nothing, and not a single line appears in the log**. This is the second
+> most common "looks configured but nothing happens" on Feishu. GuānLán logs one INFO line the first time it
+> sends a card to remind you to check this. If you do not want clickable citations, skipping it harms nothing
+> else.
 
 **④ Publish and wait for approval ← the biggest trap**
 
@@ -248,16 +257,43 @@ variable — but **a restart is still required** (there is no allowlist hot-relo
 
 ## Using it inside IM
 
-Three slash commands, **all zero-LLM: no conversation is created, no tokens are spent**:
+Four slash commands, **all zero-LLM: no conversation is created, no tokens are spent**:
 
 | Command | Effect |
 |---|---|
 | `/search <keywords>` | Retrieval; returns titles + snippets + page paths in milliseconds |
+| `/page <page name>` | Open one page by name (the name is whatever sits inside `[[ ]]` in an answer) |
 | `/new` | Clear the current conversation context and start over |
 | `/help` | Usage |
 
 Anything without a slash is **LLM Q&A** (multi-turn, remembers the context). **In a group you must @ the
 bot**; `@bot /search entity-a` is recognized too.
+
+**`/page` accepts three spellings**: the page name itself, any **alias** declared in its frontmatter, and
+**equivalent variants** such as `_` vs `-`, full-width vs half-width, and case (`/page multi_head_attention`
+opens `multi-head-attention.md`) — it uses the very same resolution table as `check` and `graph`. A typo does
+not leave you empty-handed either: it degrades into a top-3 retrieval and offers candidates.
+
+> **`/page` can open any page under `wiki/`**, including the three config pages `index` / `log` / `overview`.
+> It follows the `[[link]]` convention, and under that convention those three are perfectly **legal link
+> targets** (`/search` does not return them because corpus recall is a different question). `log` in
+> particular is the agent's operation log — which sources were ingested, and when. Weigh your whitelist
+> against that fact before opening the bot to a group; the command itself is not the gate.
+
+**Clickable citations (Feishu)**: when an answer mentions `[[some page]]` and that page really exists, the bot
+**appends a card** turning those citations into buttons; clicking one is exactly like sending `/page some page`
+yourself. **A page opened via `/page` gets its own card too** (titled "pages cited by this page"), so you can
+keep hopping through the wiki one page at a time. A few boundaries worth knowing:
+
+- **Feishu only.** Personal WeChat has a plain-text outbound surface only; `[[citations]]` stay verbatim in the
+  answer and typing `/page` works just as well.
+- The card carries **page names only, never a content excerpt** — everyone in the group can see it, so it
+  carries no content.
+- **Buttons can only open pages; they never trigger a write** (ingest / heal / audit are all excluded).
+- A card in a group is **shared**: every click still goes through the whitelist, and an unauthorized person who
+  clicks sees only a neutral "received" toast and gets no page.
+- Cards can be **forwarded**, but clicking a forwarded card does **nothing** — the bot only honors sessions it
+  has actually answered a question in.
 
 **Answer shape**:
 
