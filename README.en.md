@@ -95,6 +95,8 @@ guanlan -C my-wiki im --platform feishu \
 
 The IM host is **read-only** and listens on no port. But **a process with no listening port can still push your entire knowledge base into a 200-person group chat** — so authorization is an explicit whitelist, and a group message passes only when group **AND** user **AND** @-mention all hold.
 
+The `[[citations]]` in an answer are not dead text: on any platform you can send `/page entity-a` to pull that page up (zero-LLM, milliseconds); on Feishu the bot also appends a card turning those citations into **buttons**, and tapping one is exactly like sending that command yourself. Buttons **can only open pages — they never trigger a write**.
+
 For a full walkthrough see the **[User Guide → Quickstart](https://github.com/jin-bo/guanlan/blob/main/docs/guide/en/02-quickstart.md)**.
 
 ## Generated layout
