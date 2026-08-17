@@ -12,13 +12,17 @@ from pathlib import Path
 from ...errors import EXIT_USAGE, GuanlanError
 from ..contract import IMAdapter
 
-# `group_wanted` = "这次部署要不要收群消息"，由核心从白名单推出后传进来。它是**平台无关的
-# 部署意图**，不是平台分支——决策P4.21-3 守住的是「核心不写 `if platform ==`」，不是
-# 「适配器不许收参数」。飞书用它决定 bot 身份探测失败是否致命（§8.2），微信直接忽略。
+# `group_wanted` = "这次部署要不要收群消息"，`actions_wanted` = "这次部署要不要可点面"，
+# 二者都由核心从**部署意图**推出后传进来。它们是**平台无关的**，不是平台分支——决策P4.21-3
+# 守住的是「核心不写 `if platform ==`」，不是「适配器不许收参数」。飞书用前者决定 bot 身份探测
+# 失败是否致命（§8.2）、用后者决定要不要注册卡片回调（`im-identify` 传 False，因为那个模式的
+# 安全性整个建立在「绝不回复任何消息」上，而卡片回调是要同步回一个 toast 的）；微信两者都忽略。
 AdapterFactory = Callable[..., IMAdapter]
 
 
-def _weixin(state: Path, *, group_wanted: bool = False) -> IMAdapter:
+def _weixin(
+    state: Path, *, group_wanted: bool = False, actions_wanted: bool = True
+) -> IMAdapter:
     try:
         import httpx  # noqa: F401
     except ImportError:
@@ -29,10 +33,13 @@ def _weixin(state: Path, *, group_wanted: bool = False) -> IMAdapter:
         ) from None
     from .weixin import WeixinAdapter
 
-    return WeixinAdapter(state)  # iLink 通常不投递群事件，`group_wanted` 无意义
+    # iLink 通常不投递群事件、也没有任何可点面，故两个部署意图对它都无意义。
+    return WeixinAdapter(state)
 
 
-def _feishu(state: Path, *, group_wanted: bool = False) -> IMAdapter:
+def _feishu(
+    state: Path, *, group_wanted: bool = False, actions_wanted: bool = True
+) -> IMAdapter:
     try:
         import lark_oapi  # noqa: F401
     except ImportError:
@@ -43,7 +50,7 @@ def _feishu(state: Path, *, group_wanted: bool = False) -> IMAdapter:
         ) from None
     from .feishu import FeishuAdapter
 
-    return FeishuAdapter(state, group_wanted=group_wanted)
+    return FeishuAdapter(state, group_wanted=group_wanted, actions_wanted=actions_wanted)
 
 
 async def _weixin_login(state: Path) -> int:

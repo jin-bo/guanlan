@@ -14,6 +14,7 @@ import logging
 import subprocess
 import sys
 import tokenize
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,17 +22,31 @@ from agentao.cancellation import AgentCancelledError
 
 from guanlan.errors import EXIT_AGENT_ERROR, EXIT_OK, EXIT_USAGE, GuanlanError
 from guanlan.im import server as im_server
-from guanlan.im.contract import CHAT_DM, CHAT_GROUP, KIND_OTHER, KIND_TEXT, AdapterCaps, InboundMessage, OutboundRef
+from guanlan.im.contract import (
+    CHAT_DM,
+    CHAT_GROUP,
+    KIND_OTHER,
+    KIND_TEXT,
+    ORIGIN_ACTION,
+    ORIGIN_USER,
+    AdapterCaps,
+    InboundMessage,
+    OutboundRef,
+)
 from guanlan.im.delivery import (
+    ACTIONS_TITLE,
     ATTACHMENT_HINT,
     BUSY_HINT,
     EDIT_INTERVAL_S,
     EDIT_MIN_CHARS,
     ERROR_HINT,
+    PAGE_USAGE,
     Delivery,
     _EditState,
 )
 from guanlan.im.intake import (
+    ACTION_COMMANDS,
+    COMMANDS,
     DEDUP_KEEP_ENTRIES,
     DEDUP_MAX_ENTRIES,
     AccessPolicy,
@@ -40,7 +55,15 @@ from guanlan.im.intake import (
     session_key_of,
 )
 from guanlan.im.mcp_bound import BoundedTimeoutRegistry, bounded_request_timeout
-from guanlan.im.reply import _split_paragraph, split_for, to_im_markdown, truncation_notice
+from guanlan.im.pageview import MAX_PAGE_ARG, validate_page_arg
+from guanlan.im.reply import (
+    _split_paragraph,
+    extract_wikilinks,
+    page_truncation_notice,
+    split_for,
+    to_im_markdown,
+    truncation_notice,
+)
 from guanlan.im.session import AcquireStatus, SessionRegistry
 from guanlan.search import CorpusCache
 
@@ -68,6 +91,9 @@ CAPS_EDIT = AdapterCaps(
     batch_delay_s=0.01,
     batch_split_delay_s=0.02,
 )
+# P4.22：可点引用只由能力位分派，故两档各配一份"开了动作面"的能力位即可覆盖两条投递档。
+CAPS_ACTIONS = replace(CAPS_TYPING, supports_actions=True, max_actions=8)
+CAPS_EDIT_ACTIONS = replace(CAPS_EDIT, supports_actions=True, max_actions=8)
 
 _STOP = object()  # FakeAdapter.inbound 的"正常结束"哨兵
 
@@ -88,11 +114,20 @@ class FakeAdapter:
         self.inbound_error: BaseException | None = None
         self.taken_not_delivered = 0
         self._seq = 0
+        # P4.22：可点引用。`send_error` 让用例决定**哪些**正文片发不出去
+        # （返回 None = 照常发；返回异常 = 这一片挂掉），用来测决策P4.22-20。
+        self.actions: list[tuple[str, str, list]] = []
+        self.send_error = None
+        # 真适配器**会在 `start()` 里就地降级**能力位（飞书探不到卡片注册面即如此）。
+        # 设上这个字段就照着模型：装配期一套 caps、`start()` 之后另一套（决策P4.22-27）。
+        self.caps_after_start: AdapterCaps | None = None
 
     async def start(self) -> None:
         self.calls.append(("start",))
         if self.start_error is not None:
             raise self.start_error
+        if self.caps_after_start is not None:
+            self.caps = self.caps_after_start
         self.started = True
 
     async def close(self) -> None:
@@ -115,13 +150,25 @@ class FakeAdapter:
     async def send(self, chat_id: str, text: str) -> OutboundRef:
         self._seq += 1
         self.calls.append(("send", chat_id, text))
+        if self.send_error is not None:
+            err = self.send_error(text)
+            if err is not None:
+                raise err
         return OutboundRef(chat_id=chat_id, message_id=f"m{self._seq}")
 
     async def edit(self, ref: OutboundRef, text: str, *, finalize: bool = False) -> None:
         self.calls.append(("edit", ref.message_id, text, finalize))
+        if self.send_error is not None:
+            err = self.send_error(text)
+            if err is not None:
+                raise err
 
     async def typing(self, chat_id: str, on: bool) -> None:
         self.calls.append(("typing", chat_id, on))
+
+    async def send_actions(self, chat_id: str, text: str, actions: list) -> None:
+        self.calls.append(("send_actions", chat_id, text))
+        self.actions.append((chat_id, text, list(actions)))
 
     # —— 断言辅助 ——
     def sent(self) -> list[str]:
@@ -283,6 +330,7 @@ def msg(
     mentioned: bool = False,
     kind: str = KIND_TEXT,
     attachments: bool = False,
+    origin: str = ORIGIN_USER,
 ) -> InboundMessage:
     global _MID
     _MID += 1
@@ -296,6 +344,7 @@ def msg(
         mentioned_me=mentioned,
         msg_kind=kind,
         has_attachments=attachments,
+        origin=origin,
     )
 
 
@@ -1233,6 +1282,28 @@ async def run_host(adapter, intake, delivery, *, warn_interval: float = 30.0) ->
     return await im_server._run(adapter, intake, delivery, warn_interval=warn_interval)
 
 
+def test_intake_rereads_caps_after_start(kb_im):
+    """★★★ 决策P4.22-27：适配器在 `start()` 里降级的能力位，`Intake` 必须跟得上。
+
+    `Intake` 在**装配期**构造（`serve_im`），而 `start()` 晚得多——飞书探不到卡片回调注册面时
+    就在那里就地关掉 `supports_actions`。`Delivery` 每次派发现读 `adapter.caps`、天然跟得上；
+    `Intake` 拿的是快照。今天恰好无害（降级只动按钮位，`Intake` 只读长度与节流阈值），故
+    **没有任何功能用例会红**——这正是要专门有一条的理由。
+    """
+
+    async def scenario():
+        adapter, intake, delivery, *_ = make_stack(kb_im)
+        degraded = replace(adapter.caps, max_message_length=17)
+        adapter.caps_after_start = degraded
+        host = asyncio.create_task(run_host(adapter, intake, delivery))
+        await wait_until(lambda: adapter.started, what="适配器起来")
+        assert intake._caps is degraded, "Intake 还攥着装配期那份陈旧 caps"
+        adapter.queue.put_nowait(_STOP)
+        await host
+
+    asyncio.run(scenario())
+
+
 def test_shutdown_requests_stop_and_closes_after_turns(kb_im):
     """**shutdown 真停**（决策P4.21-41/48）：`request_stop()` 被调用；`close()` 在所有 turn **之后**。"""
 
@@ -2145,3 +2216,519 @@ def test_banner_wording_covers_every_whitelist_shape():
     )
     assert "用户 2 人" in named and "全员" not in named
     assert "60s" in named, "MCP 上界写死成了默认值，改 --mcp-request-timeout 它就开始说假话"
+
+
+# ───────────────────── P4.22 可点引用（`/page` + 动作出口 + origin 闸）─────────
+
+
+@pytest.fixture
+def kb_pages(kb_im: Path) -> Path:
+    """在最小库上补几张页面，覆盖三条解析语义：精确 stem / 别名（P3.1）/ fold variant（P3.8）。"""
+    wiki = kb_im / "wiki"
+    (wiki / "entities" / "甲实体.md").write_text(
+        "---\ntitle: 甲实体\ntype: entity\naliases:\n  - 甲方\n---\n\n甲实体讲的是示例主题与流程编排。\n",
+        encoding="utf-8",
+    )
+    (wiki / "concepts").mkdir(exist_ok=True)
+    (wiki / "concepts" / "乙概念.md").write_text(
+        "---\ntitle: 乙概念\ntype: concept\n---\n\n乙概念是一种示例方法。\n", encoding="utf-8"
+    )
+    (wiki / "entities" / "multi-head-attention.md").write_text(
+        "---\ntitle: Multi-Head Attention\ntype: entity\n---\n\n示例页面。\n", encoding="utf-8"
+    )
+    return kb_im
+
+
+async def _run_text(intake: Intake, delivery: Delivery, text: str, **kw) -> None:
+    await intake.offer(msg(text, **kw))
+    await asyncio.sleep(0.05)
+    await drain_tasks(delivery)
+
+
+def test_page_opens_by_stem_alias_and_fold_variant(kb_pages):
+    """`/page` 复用 P3.8 的**单一 owner 归口**——三条解析语义各一例。
+
+    IM 侧另写一套按名查找就是给这个系统开第五个口径，而 P3.8 的整个动机正是消灭这种漂移。
+    """
+
+    async def scenario():
+        for name, expect in (
+            ("甲实体", "wiki/entities/甲实体.md"),  # 精确 stem
+            ("甲方", "wiki/entities/甲实体.md"),  # 别名（P3.1）
+            ("multi_head_attention", "wiki/entities/multi-head-attention.md"),  # fold（P3.8）
+        ):
+            adapter, intake, delivery, *_ = make_stack(kb_pages)
+            await _run_text(intake, delivery, f"/page {name}")
+            body = "\n".join(adapter.sent())
+            assert expect in body, f"{name} 没解析到 {expect}"
+
+    asyncio.run(scenario())
+
+
+def test_page_output_has_head_and_no_frontmatter(kb_pages):
+    """输出契约（§4.2）：首行标题 + 页型 + **相对**路径；YAML 头**不出现**（反向断言）。"""
+
+    async def scenario():
+        adapter, intake, delivery, *_ = make_stack(kb_pages)
+        await _run_text(intake, delivery, "/page 甲实体")
+        body = "\n".join(adapter.sent())
+        assert body.startswith("甲实体　（entity）\nwiki/entities/甲实体.md")
+        assert "title:" not in body and "aliases:" not in body, "frontmatter 漏进了 IM 输出"
+        assert "甲实体讲的是示例主题与流程编排。" in body
+        assert str(kb_pages) not in body, "绝对路径不该经平台服务端往返"
+
+    asyncio.run(scenario())
+
+
+def test_page_truncation_notice_never_carries_a_url(kb_pages):
+    """长页截断 → 末片是**本页**告示，且**即便配了 `--web-base-url` 也不附入口**（决策P4.22-12）。
+
+    Web 宿主没有按名开页的路由，给出去仍是死链——"一个 404 比一段可读的引用更误导"。
+    """
+
+    async def scenario():
+        (kb_pages / "wiki" / "entities" / "甲实体.md").write_text(
+            "---\ntitle: 甲实体\ntype: entity\n---\n\n" + "长\n" * 5000, encoding="utf-8"
+        )
+        adapter, intake, delivery, *_ = make_stack(
+            kb_pages, caps=CAPS_TYPING, web_base_url="https://example.invalid"
+        )
+        await _run_text(intake, delivery, "/page 甲实体")
+        sent = adapter.sent()
+        assert sent[-1].startswith("⚠️ 本页还有约")
+        assert "https://" not in sent[-1] and "Web" not in sent[-1]
+
+    asyncio.run(scenario())
+
+
+def test_page_miss_degrades_to_search(kb_pages):
+    """未命中 → 降级为一次 top-3 检索（决策P4.22-11）：手打错别字才是未命中的现实来源。"""
+
+    async def scenario():
+        adapter, intake, delivery, *_ = make_stack(kb_pages)
+        await _run_text(intake, delivery, "/page 甲实休")
+        body = "\n".join(adapter.sent())
+        assert body.startswith("没有找到名为「甲实休」的页面。")
+        assert "你也许想找" in body and "wiki/entities/甲实体.md" in body
+        assert body.count("wiki/") <= 3, "降级提示不该喧宾夺主（上限 top-3）"
+
+    asyncio.run(scenario())
+
+
+def test_page_without_argument_shows_usage(kb_pages):
+    async def scenario():
+        adapter, intake, delivery, *_ = make_stack(kb_pages)
+        await _run_text(intake, delivery, "/page   ")
+        assert adapter.sent() == [PAGE_USAGE]
+
+    asyncio.run(scenario())
+
+
+def test_page_traversal_attempt_is_structurally_unreachable(kb_pages):
+    """`/page ../../etc/passwd`：不命中、不读盘、不抛异常。
+
+    路径穿越在这个设计里不是"挡住了"，而是**结构上不可达**（`resolve_owner` 只返回索引表里的
+    值）。这条用例守的是"日后有人图省事改成 `wiki / name` 拼路径"。
+    """
+
+    async def scenario():
+        adapter, intake, delivery, *_ = make_stack(kb_pages)
+        await _run_text(intake, delivery, "/page ../../etc/passwd")
+        body = "\n".join(adapter.sent())
+        assert "没有找到" in body  # 名字被原样回显（那是用户自己在自己会话里打的）
+        assert "root:x:" not in body, "居然把盘上的文件读出来了"
+
+    asyncio.run(scenario())
+
+
+def test_validate_page_arg_is_the_single_length_gate():
+    """★ 决策P4.22-18：参数长度**只有一个口径**（≤200），且控制字符一律拒。
+
+    边界值**成对**断言：v2 稿在适配器侧另量了一次"≤200"、量的却是整条命令串，于是页面名落在
+    194–200 字符时「手打能开、点按钮被丢」——**只测一侧永远看不出这种不一致**。
+    """
+    assert validate_page_arg("  甲实体 ") == "甲实体"
+    assert validate_page_arg("") is None and validate_page_arg("   ") is None
+    assert validate_page_arg("x" * MAX_PAGE_ARG) == "x" * MAX_PAGE_ARG
+    assert validate_page_arg("x" * (MAX_PAGE_ARG + 1)) is None
+    assert validate_page_arg("甲\n实体") is None
+    assert validate_page_arg("甲\x00实体") is None
+
+
+def test_extract_wikilinks_dedupes_and_keeps_order():
+    """抽取口径与 `check`/`graph` 同一条正则；按首次出现保序去重，`|别名` / `#锚点` 剥掉。"""
+    text = "见 [[乙概念]] 与 [[甲实体]]，又见 [[甲实体#某节]] 和 [[甲实体|甲方]]。"
+    assert extract_wikilinks(text) == ["乙概念", "甲实体"]
+    # 注释口径**原样继承** `strip_html_comments`（只认独占整行的注释），不在 IM 侧另立一套。
+    assert extract_wikilinks("<!-- [[注释里的]] -->\n正文") == []
+
+
+def test_actions_are_never_offered_when_capability_is_off(kb_pages, monkeypatch):
+    """**反向用例**：`supports_actions=False`（个人微信）→ `send_actions` 一次都不被调。
+
+    守的是"微信侧一个字不变"：能力位为 False 的平台完全走现状，与 `typing()` 的处置对称。
+    """
+
+    async def scenario():
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_pages, caps=CAPS_TYPING)
+        store.on_create = lambda c: setattr(c, "answer", "答案里有 [[甲实体]] 和 [[乙概念]]。")
+        await _run_text(intake, delivery, "问题")
+        assert adapter.actions == []
+        assert "send_actions" not in adapter.kinds()
+
+    asyncio.run(scenario())
+
+
+def test_actions_offered_for_resolvable_links_only(kb_pages):
+    """动作出口：去重、保序、**断链的不出现**（决策P4.22-3：不承诺一个不存在的东西）。"""
+
+    async def scenario():
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_pages, caps=CAPS_ACTIONS)
+        store.on_create = lambda c: setattr(
+            c, "answer", "见 [[乙概念]]、[[甲实体]]、[[丙实体]] 与 [[甲实体#节]]。"
+        )
+        await _run_text(intake, delivery, "问题")
+        assert len(adapter.actions) == 1
+        chat_id, text, actions = adapter.actions[0]
+        assert chat_id == "u1" and text == ACTIONS_TITLE
+        assert [a.label for a in actions] == ["乙概念", "甲实体"]  # 保序 + 去重 + 丢断链
+        assert [a.command for a in actions] == ["/page 乙概念", "/page 甲实体"]
+
+    asyncio.run(scenario())
+
+
+def test_actions_overflow_is_announced_not_silent(kb_pages):
+    """超限**不静默**（继承决策P4.21-31）：卡片上要明说"另有 N 个"，且指回可用的手打出路。"""
+
+    async def scenario():
+        caps = replace(CAPS_ACTIONS, max_actions=1)
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_pages, caps=caps)
+        store.on_create = lambda c: setattr(c, "answer", "见 [[甲实体]] 与 [[乙概念]]。")
+        await _run_text(intake, delivery, "问题")
+        _chat, text, actions = adapter.actions[0]
+        assert len(actions) == 1
+        assert "另有 1 个" in text and "/page" in text
+
+    asyncio.run(scenario())
+
+
+def test_actions_never_expose_names_from_the_truncated_tail(kb_pages):
+    """★★ 决策P4.22-13 的**反向用例**：只出现在被丢弃后缀里的页面名，绝不上卡片。
+
+    `split_for` 超限时会丢后缀（"不静默截断"只保证有告示，不保证内容都发出去）。从完整
+    answer 抽也能让所有正例全绿——漏的正是"未送达内容被印上群内可见的卡片"这条静默泄露。
+    """
+
+    async def scenario():
+        caps = replace(CAPS_ACTIONS, max_message_length=200, max_parts=2)
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_pages, caps=caps)
+        head = "开头提到 [[甲实体]]。\n" + "填充。\n" * 300
+        store.on_create = lambda c: setattr(c, "answer", head + "\n结尾提到 [[乙概念]]。")
+        await _run_text(intake, delivery, "问题")
+        sent = adapter.sent()
+        assert sent[-1].startswith("⚠️ 答案还有约"), "前置条件没成立：这一版答案并没有被截断"
+        assert "乙概念" not in "\n".join(sent[:-1]), "前置条件没成立：乙概念其实发出去了"
+        _chat, text, actions = adapter.actions[0]
+        assert [a.label for a in actions] == ["甲实体"]
+        assert "乙概念" not in text
+
+    asyncio.run(scenario())
+
+
+def test_actions_are_not_sent_when_the_body_failed(kb_pages):
+    """★ 决策P4.22-20：正文一片都没送达 → 整张卡片不发。
+
+    `_safe_send` 把出站异常吞成一条 WARNING（这本身是对的），于是"正文全挂、卡片成功"是可达
+    状态。**没有这条用例，`_safe_send` 的返回值被谁改回 `None` 都不会有测试变红。**
+    """
+
+    async def scenario():
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_pages, caps=CAPS_ACTIONS)
+        store.on_create = lambda c: setattr(c, "answer", "见 [[甲实体]]。")
+        adapter.send_error = lambda text: RuntimeError("出站挂了")
+        await _run_text(intake, delivery, "问题")
+        assert adapter.actions == []
+
+    asyncio.run(scenario())
+
+
+def test_actions_cover_only_the_parts_that_were_delivered(kb_pages):
+    """★ 决策P4.22-20 的另一半：只有末片失败 → 按钮只覆盖成功送达的那些片。"""
+
+    async def scenario():
+        caps = replace(CAPS_ACTIONS, max_message_length=200, max_parts=5)
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_pages, caps=caps)
+        store.on_create = lambda c: setattr(
+            c, "answer", "开头提到 [[甲实体]]。\n" + "填充。\n" * 120 + "\n结尾提到 [[乙概念]]。"
+        )
+        adapter.send_error = lambda text: RuntimeError("末片挂了") if "乙概念" in text else None
+        await _run_text(intake, delivery, "问题")
+        assert any("乙概念" in c[2] for c in adapter.calls if c[0] == "send"), "前置条件没成立"
+        _chat, _text, actions = adapter.actions[0]
+        assert [a.label for a in actions] == ["甲实体"]
+
+    asyncio.run(scenario())
+
+
+def test_actions_ride_on_the_edit_tier_too(kb_pages):
+    """edit 档（飞书）：按钮承载在**追发的独立消息**上，流式路径一个字不动（决策P4.22-6）。"""
+
+    async def scenario():
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_pages, caps=CAPS_EDIT_ACTIONS)
+        store.on_create = lambda c: setattr(c, "answer", "见 [[甲实体]]。")
+        await _run_text(intake, delivery, "问题")
+        kinds = adapter.kinds()
+        assert kinds == ["send", "edit", "send_actions"], kinds  # 占位 → 终稿 → 卡片
+        assert [a.label for a in adapter.actions[0][2]] == ["甲实体"]
+
+    asyncio.run(scenario())
+
+
+def test_edit_tier_skips_actions_when_the_final_edit_failed(kb_pages):
+    """edit 档的首片是**编辑**回占位消息的，故送达与否要看 writer 的回执，不能想当然。"""
+
+    async def scenario():
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_pages, caps=CAPS_EDIT_ACTIONS)
+        store.on_create = lambda c: setattr(c, "answer", "见 [[甲实体]]。")
+        adapter.send_error = lambda text: RuntimeError("编辑挂了") if "甲实体" in text else None
+        await _run_text(intake, delivery, "问题")
+        assert adapter.actions == []
+
+    asyncio.run(scenario())
+
+
+# ── 红线 1 的闸在**接收端**（决策P4.22-14）─────────────────────────────────
+
+
+def test_action_commands_is_a_strict_subset_of_commands():
+    """`ACTION_COMMANDS` 必须是 `COMMANDS` 的**真子集**：`/help` 是噪音、`/new` 会清上下文。"""
+    assert set(ACTION_COMMANDS) < set(COMMANDS)
+    assert "page" in ACTION_COMMANDS and "new" not in ACTION_COMMANDS
+
+
+def test_synthesized_messages_may_only_run_readonly_whitelisted_commands(kb_pages):
+    """★★ 红线 1：`origin="action"` 的消息，命令不在白名单里就**静默丢弃**。
+
+    只校验"以 `/` 开头"守不住这条——`classify()` 把**未知**斜杠命令当普通提问送进 LLM，
+    于是一个被改动过的回传串（外部输入）里塞 `/foo 帮我写一篇…` 就是一次不该发生的 LLM 调用。
+    `/help` 那条尤其重要：它是 `COMMANDS` 成员却**不在** `ACTION_COMMANDS` 里。
+    """
+    submitted: list[Ready] = []
+
+    async def scenario():
+        intake = Intake(CAPS_ACTIONS, AccessPolicy(frozenset({"u1"}), frozenset()))
+        intake.set_sink(submitted.append)
+        for text in ("/help", "/new", "/search x", "/foo 帮我写一篇…", "随便一句话"):
+            await intake.offer(msg(text, origin=ORIGIN_ACTION))
+        await asyncio.sleep(0.05)
+        assert submitted == [], f"越权的合成消息漏过去了：{[r.text for r in submitted]}"
+        assert intake.dropped_unauthorized == 5
+        # 对照组：同样的正文，人打出来的一律照常处理。
+        for text in ("/help", "/foo 帮我写一篇…"):
+            await intake.offer(msg(text, origin=ORIGIN_USER))
+        await asyncio.sleep(0.05)
+        assert [r.command for r in submitted] == ["help", None]
+        # 白名单内的合成消息照常放行。
+        await intake.offer(msg("/page 甲实体", origin=ORIGIN_ACTION))
+        assert submitted[-1].command == "page" and submitted[-1].argument == "甲实体"
+
+    asyncio.run(scenario())
+
+
+def test_page_truncation_notice_has_no_url_parameter():
+    """签名层面的守卫：`page_truncation_notice` **没有** `web_base_url` 可传（决策P4.22-12）。
+
+    不是"传了也忽略"——是日后有人顺手把站点入口加回来时，会先在签名上撞车。
+    """
+    import inspect as _inspect
+
+    assert list(_inspect.signature(page_truncation_notice).parameters) == ["dropped"]
+    assert "http" not in page_truncation_notice(42)
+
+
+# ── `/page` 的输出也出按钮（决策P4.22-25）──────────────────────────────────
+
+
+def _write(kb: Path, rel: str, body: str, *, title: str = "", aliases: str = "") -> None:
+    path = kb / "wiki" / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    head = f"---\ntitle: {title or path.stem}\ntype: entity\n{aliases}---\n\n"
+    path.write_text(head + body, encoding="utf-8")
+
+
+def test_page_output_also_offers_actions(kb_pages):
+    """`/page` 的输出里的引用同样出按钮——一跳接一跳地在库里走（决策P4.22-25）。"""
+
+    async def scenario():
+        _write(kb_pages, "entities/甲实体.md", "见 [[乙概念]] 与 [[丙实体]]。")
+        adapter, intake, delivery, *_ = make_stack(kb_pages, caps=CAPS_ACTIONS)
+        await _run_text(intake, delivery, "/page 甲实体")
+        assert len(adapter.actions) == 1
+        _chat, text, actions = adapter.actions[0]
+        # 引导语说"本页"而不是"本答案"——照抄答案那句就成了假话。
+        assert text == "本页引用的页面："
+        # 断链的 [[丙实体]] 不出按钮（决策P4.22-3 对页面输出同样成立）。
+        assert [a.label for a in actions] == ["乙概念"]
+        assert [a.command for a in actions] == ["/page 乙概念"]
+
+    asyncio.run(scenario())
+
+
+def test_page_never_offers_a_button_back_to_itself(kb_pages):
+    """自引用不出按钮——包括**经别名绕回来**的那一路（判据是解析到的 owner，不是名字）。
+
+    一个"打开你正在看的这一页"的按钮是纯噪音；只比名字会漏掉 `[[甲方]]` → `甲实体.md` 这种。
+    """
+
+    async def scenario():
+        _write(
+            kb_pages,
+            "entities/甲实体.md",
+            "本页是 [[甲实体]]，也叫 [[甲方]]，另见 [[乙概念]]。",
+            aliases="aliases:\n  - 甲方\n",
+        )
+        adapter, intake, delivery, *_ = make_stack(kb_pages, caps=CAPS_ACTIONS)
+        await _run_text(intake, delivery, "/page 甲实体")
+        _chat, _text, actions = adapter.actions[0]
+        assert [a.label for a in actions] == ["乙概念"]
+
+    asyncio.run(scenario())
+
+
+def test_page_actions_never_expose_names_from_the_truncated_tail(kb_pages):
+    """★ 决策P4.22-13 **对页面输出同样成立**的反向用例。
+
+    一页长到被截断时，只出现在**被丢弃尾巴**里的引用绝不能上卡片——否则群里所有人都看得到一个
+    "正文里根本没出现过"的页面名。答案那条路有同款用例，这条守的是别在新路径上把它漏掉。
+    """
+
+    async def scenario():
+        _write(
+            kb_pages,
+            "entities/甲实体.md",
+            "开头提到 [[乙概念]]。\n" + "填充。\n" * 300 + "\n结尾提到 [[multi-head-attention]]。",
+        )
+        caps = replace(CAPS_ACTIONS, max_message_length=200, max_parts=2)
+        adapter, intake, delivery, *_ = make_stack(kb_pages, caps=caps)
+        await _run_text(intake, delivery, "/page 甲实体")
+        sent = adapter.sent()
+        assert sent[-1].startswith("⚠️ 本页还有约"), "前置条件没成立：这一版页面并没有被截断"
+        _chat, text, actions = adapter.actions[0]
+        assert [a.label for a in actions] == ["乙概念"]
+        assert "multi-head-attention" not in text
+
+    asyncio.run(scenario())
+
+
+def test_page_builds_the_resolution_index_exactly_once(kb_pages, monkeypatch):
+    """★ 决策P4.22-25 的**性能守卫**：一次 `/page` 只建一次解析表。
+
+    `link_resolution_index` 要把全库 frontmatter 都 YAML 解析一遍——P3.8 那个 `loaded=` 参数
+    的存在就是为了消掉 `build_graph` 里的同款双解析。`/page` 号称毫秒级零 LLM，出按钮时再建
+    一次表就把它的盘开销直接翻倍，**而且不会有任何测试变红**。
+    """
+    from guanlan.im import pageview
+
+    calls = []
+    real = pageview.link_resolution_index
+    monkeypatch.setattr(
+        pageview,
+        "link_resolution_index",
+        lambda wiki, **kw: (calls.append(wiki), real(wiki, **kw))[1],
+    )
+
+    async def scenario():
+        _write(kb_pages, "entities/甲实体.md", "见 [[乙概念]]。")
+        adapter, intake, delivery, *_ = make_stack(kb_pages, caps=CAPS_ACTIONS)
+        await _run_text(intake, delivery, "/page 甲实体")
+        assert adapter.actions, "前置条件没成立：这一版根本没出按钮"
+        assert len(calls) == 1, f"解析表被建了 {len(calls)} 次"
+
+    asyncio.run(scenario())
+
+
+def test_page_output_offers_nothing_when_capability_is_off(kb_pages):
+    """**反向用例**：微信侧（`supports_actions=False`）`/page` 也一个字不变。"""
+
+    async def scenario():
+        _write(kb_pages, "entities/甲实体.md", "见 [[乙概念]]。")
+        adapter, intake, delivery, *_ = make_stack(kb_pages, caps=CAPS_TYPING)
+        await _run_text(intake, delivery, "/page 甲实体")
+        assert adapter.actions == []
+        assert "send_actions" not in adapter.kinds()
+
+    asyncio.run(scenario())
+
+
+def test_page_miss_offers_no_actions(kb_pages):
+    """未命中时的降级提示里是**路径**不是 `[[引用]]`，故不出卡片——顺带守住它别被改成引用形态。"""
+
+    async def scenario():
+        adapter, intake, delivery, *_ = make_stack(kb_pages, caps=CAPS_ACTIONS)
+        await _run_text(intake, delivery, "/page 甲实休")
+        assert adapter.actions == []
+
+    asyncio.run(scenario())
+
+
+# ── 去重口径：按**拥有页**，不是按名字 ──────────────────────────────────────
+
+
+def test_actions_dedupe_by_owner_page_not_by_link_text(kb_pages):
+    """★★ 同一页的**多种合法写法**只出一个按钮。
+
+    `extract_wikilinks` 的去重键是 `link_stem`，而同一页有多个写法解析键各不相同：
+    **别名**（`[[甲方]]` vs `[[甲实体]]`，P3.1）与 **fold variant**
+    （`[[multi_head_attention]]` vs `[[multi-head-attention]]`，P3.8）。只按名字去重就会出
+    **两个点开同一页的按钮**——既是噪音，又白占 `max_actions` 的名额、还把"另有 N 个"算多。
+    自引用那条用例只覆盖"绕回本页"，覆盖不到"绕到同一张别的页"。
+    """
+
+    async def scenario():
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_pages, caps=CAPS_ACTIONS)
+        store.on_create = lambda c: setattr(
+            c,
+            "answer",
+            "见 [[甲实体]] 又见 [[甲方]]；另见 [[multi-head-attention]] 与 "
+            "[[multi_head_attention]]。",
+        )
+        await _run_text(intake, delivery, "问题")
+        _chat, _text, actions = adapter.actions[0]
+        assert [a.label for a in actions] == ["甲实体", "multi-head-attention"]
+
+    asyncio.run(scenario())
+
+
+def test_page_output_dedupes_by_owner_page_too(kb_pages):
+    """`/page` 那条路（走已备好的键表、零盘 IO）**同样**按拥有页去重。"""
+
+    async def scenario():
+        _write(kb_pages, "entities/丁实体.md", "见 [[甲实体]] 与 [[甲方]]。")
+        adapter, intake, delivery, *_ = make_stack(kb_pages, caps=CAPS_ACTIONS)
+        await _run_text(intake, delivery, "/page 丁实体")
+        _chat, _text, actions = adapter.actions[0]
+        assert [a.label for a in actions] == ["甲实体"]
+
+    asyncio.run(scenario())
+
+
+def test_actions_never_offer_a_command_the_core_would_reject(kb_pages):
+    """★ 构造端与执行端量**同一把尺**：`validate_page_arg` 会拒的名字不该出成按钮。
+
+    页面名超 `MAX_PAGE_ARG` 时按钮点下去只会回一句"用法：`/page 页面名`"——正是决策P4.21-76
+    判据里"承诺一个不存在的东西"。**这一页是真的存在、也真的解析得到**，故不加这道过滤时
+    所有既有正例仍然全绿。
+    """
+    long_name = "甲" * (MAX_PAGE_ARG + 1)
+
+    async def scenario():
+        _write(kb_pages, f"entities/{long_name}.md", "示例页面。")
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_pages, caps=CAPS_ACTIONS)
+        store.on_create = lambda c: setattr(
+            c, "answer", f"见 [[{long_name}]] 与 [[乙概念]]。"
+        )
+        await _run_text(intake, delivery, "问题")
+        _chat, _text, actions = adapter.actions[0]
+        assert [a.label for a in actions] == ["乙概念"], "出了一个点了必然失败的按钮"
+
+    asyncio.run(scenario())

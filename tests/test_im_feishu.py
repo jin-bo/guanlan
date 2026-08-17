@@ -15,11 +15,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import enum
 import inspect
 import json
+import logging
 import os
 import sys
 import threading
+import tokenize
 import types
 from pathlib import Path
 
@@ -34,13 +38,27 @@ from guanlan.im.adapters.feishu import (
     ENV_APP_SECRET,
     ENV_BOT_OPEN_ID,
     ENV_DOMAIN,
+    MAX_CALLBACK_COMMAND,
     MIN_SDK_VERSION,
+    TOAST_ACK,
+    TOAST_BAD,
+    TOAST_EXPIRED,
     FeishuAdapter,
+    build_actions_card,
     build_markdown_post_rows,
+    callback_chat_key,
+    map_card_action,
     map_event,
     post_content,
 )
-from guanlan.im.contract import CHAT_DM, CHAT_GROUP, KIND_OTHER, KIND_TEXT
+from guanlan.im.contract import (
+    CHAT_DM,
+    CHAT_GROUP,
+    KIND_OTHER,
+    KIND_TEXT,
+    ORIGIN_ACTION,
+    Action,
+)
 from guanlan.im.state import CredentialLock
 
 BOT_OPEN_ID = "ou_bot"
@@ -162,6 +180,8 @@ class _FakeWSClient:
         # 真 SDK 在 `_connect()` 成功后把 socket 存进 `_conn`，断开时置回 None——首连看门狗
         # 就是读它当"连上了"的正面证据，故假件必须照着模型，否则整组用例都在测一个不存在的形状。
         self._conn = None
+        self.seen: list[str] = []  # `_handle_data_frame` 实际看到的帧类型（P4.22 兼容层用）
+        self.written: list[bytes] = []  # 实际写回的回执串（P4.22 帧头还原用）
         _FakeWSClient.instances.append(self)
 
     def start(self) -> None:  # 阻塞（真 SDK 亦然），故宿主放 daemon 线程里跑
@@ -172,10 +192,26 @@ class _FakeWSClient:
     def stop(self) -> None:
         self.stopped.set()
 
+    # 真 SDK 的帧分发入口。假件记下"父类看到的是哪种帧"——P4.22 的兼容层就是靠改写帧头
+    # 再委回父类工作的，故这里必须真的存在一个可被 `super()` 调到的方法。
+    async def _handle_data_frame(self, frame) -> None:
+        for header in frame.headers:
+            if header.key == "type":
+                self.seen.append(header.value)
+        # 真 SDK 末尾就是这两行（1.7.2 `ws/client.py`）：**回执复用入站那个帧对象**——
+        # 决策P4.22-26 的帧头还原就挂在这个接缝上，假件不照抄就测了个空气。
+        await asyncio.sleep(0)  # 建模"派发与写出之间存在 task 切换点"（并发串台用例靠它）
+        frame.payload = b"resp"
+        await self._write_message(frame.SerializeToString())
+
+    async def _write_message(self, data) -> None:
+        self.written.append(data)
+
 
 class _FakeEventHandler:
     def __init__(self) -> None:
         self.callback = None
+        self.card_callback = None
 
     @staticmethod
     def builder(a, b):
@@ -189,8 +225,39 @@ class _FakeEventHandler:
             self._h.callback = cb
             return self
 
+        def register_p2_card_action_trigger(self, cb):
+            self._h.card_callback = cb
+            return self
+
         def build(self):
             return self._h
+
+
+class _Header:
+    """WS 帧头的最小替身：**可变**（兼容层就是就地改写 `value`）。"""
+
+    def __init__(self, key: str, value: str) -> None:
+        self.key = key
+        self.value = value
+
+
+class _FakeFrame:
+    """WS 帧的最小替身：**可变帧头** + 照真 SDK 形状的 `SerializeToString`。
+
+    序列化结果**由帧头当场算出**（而不是构造时定死）：决策P4.22-26 要验的正是"写出的那一刻
+    帧头是什么"，若这里返回一个固定串，还原做没做都测不出来。
+    """
+
+    def __init__(self, message_type: str, tag: str = "y") -> None:
+        self.headers = [_Header("type", message_type), _Header("x", tag)]
+        self.payload = b""
+
+    def SerializeToString(self) -> bytes:  # noqa: N802 — protobuf 的方法名，照抄
+        return ";".join(f"{h.key}={h.value}" for h in self.headers).encode()
+
+
+def frame(message_type: str, tag: str = "y"):
+    return _FakeFrame(message_type, tag)
 
 
 class _FakeClient:
@@ -222,7 +289,6 @@ def fake_lark(monkeypatch):
     lark.LARK_DOMAIN = "https://open.larksuite.com"
     lark.Client = _FakeClient
     lark.EventDispatcherHandler = _FakeEventHandler
-    lark.ws = types.SimpleNamespace(Client=_FakeWSClient)
     lark.HttpMethod = types.SimpleNamespace(GET="GET")
     lark.AccessTokenType = types.SimpleNamespace(TENANT="tenant")
     lark.BaseRequest = types.SimpleNamespace(builder=lambda: _Builder(dict))
@@ -231,11 +297,23 @@ def fake_lark(monkeypatch):
     im_v1.CreateMessageRequestBody = _MessageBody
     im_v1.UpdateMessageRequest = _MessageRequest
     im_v1.UpdateMessageRequestBody = _MessageBody
+    # `lark_oapi.ws` 必须是**真模块**（不是 SimpleNamespace）：P4.22 的 CARD 帧兼容层要
+    # `from lark_oapi.ws.const import HEADER_TYPE`，那走的是 import 机制、查的是 sys.modules。
+    ws_mod = types.ModuleType("lark_oapi.ws")
+    ws_mod.Client = _FakeWSClient
+    ws_const = types.ModuleType("lark_oapi.ws.const")
+    ws_const.HEADER_TYPE = "type"
+    ws_enum = types.ModuleType("lark_oapi.ws.enum")
+    ws_enum.MessageType = enum.Enum("MessageType", {"EVENT": "event", "CARD": "card"})
+    lark.ws = ws_mod
     for name, mod in (
         ("lark_oapi", lark),
         ("lark_oapi.api", types.ModuleType("lark_oapi.api")),
         ("lark_oapi.api.im", types.ModuleType("lark_oapi.api.im")),
         ("lark_oapi.api.im.v1", im_v1),
+        ("lark_oapi.ws", ws_mod),
+        ("lark_oapi.ws.const", ws_const),
+        ("lark_oapi.ws.enum", ws_enum),
     ):
         monkeypatch.setitem(sys.modules, name, mod)
     monkeypatch.setenv(ENV_APP_ID, "cli_x")
@@ -887,3 +965,550 @@ def test_stale_lock_is_reclaimed():
     write_json_atomic(lock.path, {"pid": 999_999_997, "command": "guanlan im"})
     lock.acquire()
     lock.release()
+
+
+# ───────────────────── P4.22 可点引用：卡片、回调、会话事实缓存 ─────────────────
+
+
+def card_action(
+    *,
+    command: str | None = "/page 甲实体",
+    chat_id: str = "oc_1",
+    tenant: str = "tk_1",
+    operator_tenant: str | None = None,
+    user: str = "ou_user",
+    event_id: str = "ev_1",
+    value: object = None,
+):
+    """`P2CardActionTrigger` 的最小替身（字段名照 SDK 模型）。"""
+    if value is None:
+        value = {} if command is None else {"c": command}
+    return types.SimpleNamespace(
+        header=types.SimpleNamespace(tenant_key=tenant, event_id=event_id),
+        event=types.SimpleNamespace(
+            action=types.SimpleNamespace(value=value),
+            context=types.SimpleNamespace(open_chat_id=chat_id, open_message_id="om_9"),
+            operator=types.SimpleNamespace(
+                open_id=user, tenant_key=operator_tenant or tenant
+            ),
+        ),
+    )
+
+
+def test_map_card_action_full_mapping():
+    """回调 → `InboundMessage`：与 `map_event` 对称，映射完就与用户手打**无法区分**。"""
+    msg = map_card_action(card_action(), chat_type=CHAT_GROUP)
+    assert msg is not None
+    assert (msg.tenant, msg.chat_id, msg.user_id) == ("tk_1", "oc_1", "ou_user")
+    assert msg.text == "/page 甲实体"
+    assert msg.chat_type == CHAT_GROUP  # 由调用方查会话事实缓存后传入
+    assert msg.mentioned_me is True  # 点击即寻址（决策P4.22-4）
+    assert msg.origin == ORIGIN_ACTION  # 事实字段，核心据此收窄命令白名单
+    assert (msg.msg_kind, msg.has_attachments) == (KIND_TEXT, False)
+
+
+def test_card_msg_id_is_namespaced():
+    """`card:<event_id>`：与消息 id 分属两个命名空间，不加前缀理论上可撞。"""
+    msg = map_card_action(card_action(event_id="ev_x"), chat_type=CHAT_DM)
+    assert msg is not None and msg.msg_id == "card:ev_x"
+    other = map_event(event(msg_id="ev_x"), bot_open_id=BOT_OPEN_ID)
+    assert other is not None and other.msg_id != msg.msg_id
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"value": {}},  # 缺 `c`
+        {"value": {"c": ""}},  # 空串
+        {"value": {"c": "page 甲实体"}},  # 不以 `/` 开头
+        {"value": {"c": "/page " + "x" * MAX_CALLBACK_COMMAND}},  # 超信封上界
+        {"value": {"c": "/page 甲\n实体"}},  # 换行
+        {"value": {"c": "/page 甲\x00实体"}},  # 控制字符
+        {"value": {"c": 42}},  # 类型不对
+        {"value": "不是 JSON 也不是 dict"},
+        {"chat_id": ""},
+        {"event_id": ""},
+        {"user": ""},
+    ],
+)
+def test_map_card_action_rejects_malformed_envelopes(kw):
+    """**每条校验各一条反向用例**（仓规：给过滤器加规则必须配漏报用例）。
+
+    回传串经飞书服务端往返，是**外部输入**——"这是我们自己发出去的卡片回来的"不构成信任依据
+    （决策P4.22-8）。校验被整段删掉时，正例仍然全绿，只有这些反向用例会红。
+    """
+    assert map_card_action(card_action(**kw), chat_type=CHAT_DM) is None
+
+
+def test_stringified_value_is_still_understood():
+    """平台偶有把 `value` 回成 JSON 串的情形；解得开就用，解不开当没有、绝不猜。"""
+    msg = map_card_action(card_action(value=json.dumps({"c": "/page 甲实体"})), chat_type=CHAT_DM)
+    assert msg is not None and msg.text == "/page 甲实体"
+    assert map_card_action(card_action(value="{坏 JSON"), chat_type=CHAT_DM) is None
+
+
+def test_callback_key_uses_header_tenant_not_operator_tenant(fake_lark, tmp_path):
+    """★★★ 决策P4.22-17：会话缓存键的 `tenant` 取 **`header.tenant_key`**。
+
+    回调里**同时存在** `event.operator.tenant_key`，取错那一半的后果**不是报错、是查不到**
+    ——合法点击被回成"会话已过期"，且只在跨租户 / 外部群才复现。**任何只用单租户 fixture 的
+    正例都测不出来**，故这条用例专门构造两者不同值。
+    """
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        handler = _FakeWSClient.instances[0].kwargs["event_handler"]
+        handler.callback(event(chat_id="oc_1", tenant="tk_1", chat_type="group"))
+        await asyncio.sleep(0)
+        data = card_action(tenant="tk_1", operator_tenant="tk_OTHER")
+        assert callback_chat_key(data) == ("tk_1", "oc_1")
+        assert ad._on_card_action(data) == fs._toast(TOAST_ACK)
+        # 反过来：header 是别的租户 → 同一个 chat_id 也**不该**命中。
+        assert ad._on_card_action(
+            card_action(tenant="tk_OTHER", operator_tenant="tk_1")
+        ) == fs._toast(TOAST_EXPIRED)
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_chat_type_comes_from_the_session_fact_cache(fake_lark, tmp_path):
+    """★★ 决策P4.22-5：`chat_type` 只认**见过的会话**，绝不由白名单反推。
+
+    ③ 是本相位评审逼出来的反向用例：v1 稿的"在群名单里 → 群，否则 → 单聊"**方向反了**，
+    一个**未列入白名单的真实群**会被判成 DM，而 DM 分支不查 chat_id、不要求 @ ——转发出去的
+    卡片因此能把页面发进未授权群。
+    """
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        handler = _FakeWSClient.instances[0].kwargs["event_handler"]
+        handler.callback(event(chat_id="oc_group", chat_type="group"))
+        handler.callback(event(chat_id="oc_dm", chat_type="p2p"))
+        await asyncio.sleep(0)
+        got: list = []
+        ad._queue.put_nowait = got.append  # 直接看投进队列的是什么
+
+        assert ad._on_card_action(card_action(chat_id="oc_group")) == fs._toast(TOAST_ACK)
+        assert ad._on_card_action(card_action(chat_id="oc_dm")) == fs._toast(TOAST_ACK)
+        await asyncio.sleep(0)
+        assert [m.chat_type for m in got] == [CHAT_GROUP, CHAT_DM]
+
+        # ③ 没喂过任何消息的会话（＝卡片被转发到别处 / 进程重启后点了旧卡片）→ 整条丢弃。
+        got.clear()
+        assert ad._on_card_action(card_action(chat_id="oc_never_seen")) == fs._toast(
+            TOAST_EXPIRED
+        )
+        await asyncio.sleep(0)
+        assert got == [], "未见过的会话居然被投进了队列"
+
+        # ④ LRU 溢出后最老的会话被逐出 → 落进 ③ 的同一条路。
+        for i in range(fs.CHAT_CACHE_MAX + 1):
+            handler.callback(event(chat_id=f"oc_fill{i}", chat_type="group"))
+        await asyncio.sleep(0)
+        assert ad._on_card_action(card_action(chat_id="oc_group")) == fs._toast(TOAST_EXPIRED)
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_known_session_with_bad_payload_says_so(fake_lark, tmp_path):
+    """会话认识、载荷不对 → 另一句 toast：把"过期"与"按钮坏了"分开，现场才查得下去。"""
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        handler = _FakeWSClient.instances[0].kwargs["event_handler"]
+        handler.callback(event(chat_id="oc_1"))
+        await asyncio.sleep(0)
+        assert ad._on_card_action(card_action(chat_id="oc_1", value={})) == fs._toast(TOAST_BAD)
+        # 连 `open_chat_id` 都没有 ⇒ **信封**不合规，不是"这个会话没见过"。回"已过期"会把现场
+        # 引向错的方向（去查 LRU / 查重启），故与载荷不合规同归一句。
+        assert ad._on_card_action(card_action(chat_id="")) == fs._toast(TOAST_BAD)
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_toast_never_says_received_when_nothing_was_queued(fake_lark, tmp_path):
+    """★ 投不进队列就**别说"已收到"**：那条消息不会有任何后续，用户却会一直等那一页。
+
+    唯一走得到的时机是停机竞态（`close()` 已把 `_loop` 置空，SDK 线程还在派回调）。
+    `_toast(TOAST_ACK)` 无条件返回时，这条用例是**唯一**会红的。
+    """
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        handler = _FakeWSClient.instances[0].kwargs["event_handler"]
+        handler.callback(event(chat_id="oc_1"))
+        await asyncio.sleep(0)
+        assert ad._on_card_action(card_action(chat_id="oc_1")) == fs._toast(TOAST_ACK)
+        ad._loop = None  # 停机竞态：会话事实缓存还在，但已经无处可投
+        assert ad._on_card_action(card_action(chat_id="oc_1")) == fs._toast(TOAST_EXPIRED)
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_two_clicks_are_two_messages(fake_lark, tmp_path):
+    """★★★ 决策P4.22-19 的**反向用例**：同一按钮、两个 `event_id` → **两条都被处理**。
+
+    加"短期点击幂等键"等于把决策P4.21-34 删掉过一次的内容指纹去重请回来——**静默吞掉一次
+    合法点击**（表现为"按钮有时点了没反应"）比多发一页糟得多。重叠点击由既有单飞挡，
+    不重叠就照发两次（零 LLM、毫秒级）。
+    """
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        handler = _FakeWSClient.instances[0].kwargs["event_handler"]
+        handler.callback(event(chat_id="oc_1"))
+        await asyncio.sleep(0)
+        got: list = []
+        ad._queue.put_nowait = got.append
+        ad._on_card_action(card_action(chat_id="oc_1", event_id="ev_1"))
+        ad._on_card_action(card_action(chat_id="oc_1", event_id="ev_2"))
+        await asyncio.sleep(0)
+        assert [m.msg_id for m in got] == ["card:ev_1", "card:ev_2"]
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_card_callback_honours_the_three_second_contract(fake_lark, tmp_path, monkeypatch):
+    """§5.4：回调处理函数**同步返回**，且内部**不碰磁盘/网络**（3 秒硬约束）。
+
+    `/page` 要读整个 wiki 建解析表，放这里必然超时——故哨兵装在卸线程入口上，被调即失败。
+    """
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        handler = _FakeWSClient.instances[0].kwargs["event_handler"]
+        handler.callback(event(chat_id="oc_1"))
+        await asyncio.sleep(0)
+
+        def _boom(*a, **kw):
+            raise AssertionError("回调处理函数里出现了卸线程调用（磁盘/网络），必然撞 3 秒超时")
+
+        monkeypatch.setattr(fs.anyio.to_thread, "run_sync", _boom)
+        result = ad._on_card_action(card_action(chat_id="oc_1"))
+        assert not inspect.isawaitable(result), "回调必须**同步**作答"
+        assert result == {"toast": {"type": "info", "content": TOAST_ACK}}
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_card_callback_reaches_inbound_from_the_sdk_thread(fake_lark, tmp_path):
+    """线程边界与 `_on_message` 逐字同构：**真线程**里点的按钮能被 `inbound()` 取到。"""
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        handler = _FakeWSClient.instances[0].kwargs["event_handler"]
+        handler.callback(event(chat_id="oc_1"))
+        got: list = []
+
+        async def consume():
+            async for m in ad.inbound():
+                got.append(m)
+
+        task = asyncio.create_task(consume())
+        thread = threading.Thread(
+            target=lambda: handler.card_callback(card_action(chat_id="oc_1"))
+        )
+        thread.start()
+        for _ in range(400):
+            await asyncio.sleep(0.005)
+            if len(got) >= 2:
+                break
+        thread.join(timeout=5)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await ad.close()
+        assert [m.origin for m in got] == ["user", ORIGIN_ACTION]
+        assert got[1].text == "/page 甲实体"
+
+    asyncio.run(scenario())
+
+
+# ── 卡片构造 ───────────────────────────────────────────────────────────────
+
+
+def test_card_json_shape():
+    """按钮文本是 **`{"tag":"plain_text","content":…}` 对象**（决策P4.22-15），不是裸串。"""
+    card = build_actions_card("引用：", [Action(label="甲实体", command="/page 甲实体")])
+    assert card["schema"] == "2.0"
+    assert card["config"]["enable_forward"] is False  # 纵深防御，**不是**安全依据
+    elements = card["body"]["elements"]
+    assert elements[0] == {"tag": "markdown", "content": "引用："}
+    button = elements[1]
+    assert button["tag"] == "button"
+    assert button["text"] == {"tag": "plain_text", "content": "甲实体"}
+    assert button["behaviors"] == [{"type": "callback", "value": {"c": "/page 甲实体"}}]
+
+
+def test_card_value_never_carries_local_paths(tmp_path):
+    """**反向用例，守红线 5**：`value` 里只放核心生成的命令文本。
+
+    路径是本机信息，不该经飞书服务端往返；页面名本来就已经印在卡片上给人看了，不构成新泄露。
+    """
+    blob = json.dumps(
+        build_actions_card("引用：", [Action(label="甲实体", command="/page 甲实体")]),
+        ensure_ascii=False,
+    )
+    for leak in (str(tmp_path), "/Users/", "/home/", "wiki/entities/", "app_secret"):
+        assert leak not in blob
+
+
+def test_send_actions_uses_an_interactive_message(fake_lark, tmp_path, caplog):
+    """卡片是**追发的独立消息**（决策P4.22-6）：`interactive`，与正文的 `post` 互不相干。"""
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        with caplog.at_level("INFO", logger="guanlan.im"):
+            await ad.send_actions("oc_1", "引用：", [Action("甲实体", "/page 甲实体")])
+            await ad.send_actions("oc_1", "引用：", [Action("乙概念", "/page 乙概念")])
+        api = ad._client.im.v1.message
+        assert [r.body.msg_type for r in api.creates] == ["interactive", "interactive"]
+        # 漏配「回调 → 长连接」是静默故障，故留一条**只记一次**的可执行线索（§6.4）。
+        assert sum("回调" in r.message for r in caplog.records) == 1
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_send_actions_with_no_actions_sends_nothing(fake_lark, tmp_path):
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        await ad.send_actions("oc_1", "引用：", [])
+        assert ad._client.im.v1.message.creates == []
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_card_send_failure_does_not_fall_back_to_text(fake_lark, tmp_path):
+    """卡片被拒**不回退纯文本**（有别于正文的 post→text 降级）。
+
+    正文里的 `[[引用]]` 原文本来就还在（决策P4.21-76 在本相位继续成立），再补一条纯文本清单
+    只是重复噪音。核心那侧会把这次失败吞成一条 WARNING，已送达的正文不受影响。
+    """
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        api = ad._client.im.v1.message
+
+        def _reject(request):
+            api.creates.append(request)
+            return _FakeResponse(False, code=230001, msg="invalid card")
+
+        api.create = _reject
+        with pytest.raises(GuanlanError):
+            await ad.send_actions("oc_1", "引用：", [Action("甲实体", "/page 甲实体")])
+        assert [r.body.msg_type for r in api.creates] == ["interactive"], "居然降级重发了一次"
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+# ── 能力位、降级与 CARD 帧兼容层 ────────────────────────────────────────────
+
+
+def test_caps_advertise_actions():
+    assert CAPS.supports_actions is True and CAPS.max_actions == 8
+
+
+def test_missing_card_registration_degrades_instead_of_refusing(fake_lark, tmp_path, caplog):
+    """决策P4.22-10：SDK 缺卡片注册面 → **降级不拒启**（卡片是叠加层）。
+
+    与决策P4.21-29 的 `extra_ua_tags` 档次不同：那条缺了会**静默收不到群消息**（主功能），
+    故是拒启。**档次不同，处置不同。**
+    """
+
+    async def scenario():
+        # 换一个**没有** `register_p2_card_action_trigger` 的 builder（`hasattr` 探针据此降级）。
+        fake_lark.EventDispatcherHandler = types.SimpleNamespace(
+            builder=lambda a, b: _PlainBuilder()
+        )
+        with caplog.at_level("WARNING", logger="guanlan.im"):
+            ad = await started_adapter(tmp_path)
+        assert ad.caps.supports_actions is False and ad.caps.max_actions == 0
+        assert ad.caps.supports_edit is True, "降级只该关掉可点面，别把别的能力位也带走"
+        assert any("可点引用" in r.message for r in caplog.records)
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+class _PlainBuilder:
+    """只认得消息事件、**没有** `register_p2_card_action_trigger` 的旧 builder。"""
+
+    def __init__(self) -> None:
+        self._h = _FakeEventHandler()
+
+    def register_p2_im_message_receive_v1(self, cb):
+        self._h.callback = cb
+        return self
+
+    def build(self):
+        return self._h
+
+
+def test_card_frames_are_routed_into_the_event_branch(fake_lark, tmp_path):
+    """★★★ 决策P4.22-21：CARD 帧改写成 EVENT 再交回父类。
+
+    `lark-oapi` 的 WS 客户端对 `MessageType.CARD` **直接 return**，而只有 EVENT 分支才走
+    `_do_without_validation`（即查 `register_p2_card_action_trigger` 那张表的地方）。于是
+    "卡片回调走哪种帧"直接决定按钮能不能用——而那件事的证据是矛盾的（docs/P4.22 §0.2）。
+    本层让这个问题**不必先有答案**：两种假说下行为一致；若平台本来就走 EVENT，它一次都不触发。
+    """
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        ws = _FakeWSClient.instances[0]
+        await ws._handle_data_frame(frame("card"))
+        await ws._handle_data_frame(frame("event"))
+        assert ws.seen == ["event", "event"], "CARD 帧没有被并进 EVENT 分支"
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_card_frame_shim_leaves_other_frames_untouched(fake_lark, tmp_path):
+    """兼容层是**纯粹的超集**：非 CARD 帧一个字节都不改。"""
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        ws = _FakeWSClient.instances[0]
+        f = frame("ping")
+        await ws._handle_data_frame(f)
+        assert [h.value for h in f.headers] == ["ping", "y"]
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_card_frame_response_goes_back_labelled_as_a_card_frame(fake_lark, tmp_path):
+    """★★★ 决策P4.22-26：帧头改写只对**派发**成立，回执必须还原成 CARD 再写出。
+
+    父类末尾 `await self._write_message(frame.SerializeToString())` 复用的就是入站那个帧对象。
+    不还原的话，CARD 假说成立时应答会带着我们伪造的 `type=event` 回去；平台若按帧型路由应答，
+    那颗 toast 就没了——而页面照样会到（入队发生在应答之前）。「页面到了、toast 没有」是这一相位
+    最难排查的症状，绝不该由我们自己制造。
+    """
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        ws = _FakeWSClient.instances[0]
+        f = frame("card")
+        await ws._handle_data_frame(f)
+        assert ws.seen == ["event"], "派发时必须走 EVENT 分支"
+        assert ws.written == [b"type=card;x=y"], "回执带着伪造的 type=event 出去了"
+        assert [h.value for h in f.headers] == ["card", "y"], "帧对象没还原干净"
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_card_frames_do_not_cross_restore(fake_lark, tmp_path):
+    """并发的两帧各自还原各自的帧头——**这条用例才是 `ContextVar` 的存在理由**。
+
+    改写→还原之间跨了一个 await，若用实例属性传递帧对象，后进的帧会覆盖前一个，还原就落到
+    错的帧上（或干脆漏掉一帧）。单帧用例对此**全绿**，故必须专门有一条并发的。
+    """
+
+    async def scenario():
+        ad = await started_adapter(tmp_path)
+        ws = _FakeWSClient.instances[0]
+        a, b = frame("card", "a"), frame("card", "b")
+        await asyncio.gather(ws._handle_data_frame(a), ws._handle_data_frame(b))
+        assert sorted(ws.written) == [b"type=card;x=a", b"type=card;x=b"], "两帧的还原串台了"
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_shim_stands_down_when_the_write_seam_is_missing(fake_lark, tmp_path, caplog):
+    """还原不了就**整层不启用**：宁可回到"CARD 帧被父类丢弃"，也不放一个收不了尾的改写出去。"""
+
+    class _NoWriteClient:
+        def __init__(self, **kw) -> None:
+            self.kwargs = kw
+
+        async def _handle_data_frame(self, frame) -> None:  # 有派发接缝、没有写出接缝
+            pass
+
+    lark = types.SimpleNamespace(ws=types.SimpleNamespace(Client=_NoWriteClient))
+    with caplog.at_level(logging.WARNING, logger="guanlan.im"):
+        assert fs._card_aware_ws_client(lark) is _NoWriteClient
+    assert "_write_message" in caplog.text
+
+
+def test_real_sdk_still_exposes_the_card_seams():
+    """真 SDK 形状探针（与既有 `extra_ua_tags` 探针并列）：三个接缝都得在。
+
+    SDK 变形时这条先红——比运行期悄悄降级成"按钮点了没反应"要早得多。
+    **上游哪天把 CARD 帧接进 EVENT 分支，`_card_aware_ws_client` 即可整段删除。**
+    """
+    try:
+        import lark_oapi
+        from lark_oapi.ws.const import HEADER_TYPE
+        from lark_oapi.ws.enum import MessageType
+    except ImportError:
+        pytest.skip("本地未装 guanlan-wiki[im-feishu]；CI 必装并必跑")
+    builder = lark_oapi.EventDispatcherHandler.builder("", "")
+    assert hasattr(builder, "register_p2_card_action_trigger"), "SDK 没有卡片回调注册面"
+    assert hasattr(lark_oapi.ws.Client, "_handle_data_frame"), "兼容层挂靠的接缝没了"
+    assert hasattr(lark_oapi.ws.Client, "_write_message"), "回执帧头还原挂靠的接缝没了"
+    assert MessageType.CARD.value and HEADER_TYPE
+
+
+def test_adapter_never_learns_about_authorization():
+    """**架构验收，与核心那条"不许出现 `== \\"feishu\\"`"互为镜像**。
+
+    授权只在 `AccessPolicy` 里判一次。一条规则要是逼着授权数据往适配器里流，它多半在设计上
+    就站错了边——v1 稿的 `chat_type` 反推规则正是栽在这里。
+    """
+    source = Path("guanlan/im/adapters/feishu.py")
+    out: list[str] = []
+    with source.open("rb") as fh:
+        for tok in tokenize.tokenize(fh.readline):
+            if tok.type in (tokenize.COMMENT, tokenize.STRING):
+                continue
+            out.append(tok.string)
+    code = " ".join(out)
+    for name in ("allow_chats", "allow_users", "AccessPolicy", "allow_all"):
+        assert name not in code, f"适配器里出现了授权概念：{name}"
+
+
+def test_identify_mode_registers_no_card_callback(fake_lark, tmp_path):
+    """★ `im-identify` **绝不回复任何消息**（决策P4.21-28），故连卡片回调都不注册。
+
+    那个模式的安全性整个建立在"对方只看到发了没人理"上，而卡片回调**必须同步回一个 toast**：
+    上一次 `guanlan im` 发出的卡片在这 300 秒里被点一下，就等于告诉对方「机器人此刻正活着」。
+    这扇门只能在**注册之前**关，故它是构造期参数、不是运行期判断。
+    """
+
+    async def scenario():
+        ad = await started_adapter(tmp_path, actions_wanted=False)
+        handler = _FakeWSClient.instances[0].kwargs["event_handler"]
+        assert handler.card_callback is None, "identify 模式居然注册了卡片回调"
+        assert ad.caps.supports_actions is False and ad.caps.max_actions == 0
+        assert ad.caps.supports_group is True, "只该关掉可点面"
+        await ad.close()
+
+    asyncio.run(scenario())
+
+
+def test_identify_path_asks_for_no_actions(monkeypatch):
+    """装配处**真的**传了 `actions_wanted=False`——上一条只证明适配器听得懂这个参数。"""
+    seen: dict = {}
+
+    def _fake(platform, **kw):
+        seen.update(kw)
+        raise GuanlanError("到此为止", exit_code=EXIT_USAGE)
+
+    monkeypatch.setattr(im_server, "_make_adapter", _fake)
+    monkeypatch.setattr(im_server, "load_dotenv_for_im", lambda: None)
+    with pytest.raises(GuanlanError):
+        im_server.run_identify(platform="feishu", seconds=1.0)
+    assert seen.get("actions_wanted") is False

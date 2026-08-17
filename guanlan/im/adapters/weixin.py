@@ -79,6 +79,10 @@ CAPS = AdapterCaps(
     chunk_delay_s=1.5,  # 源码值（其文档写 0.3），防频控丢消息
     batch_delay_s=3.0,  # 源码实测值：iLink 逐条投递，合并静默期必须长
     batch_split_delay_s=5.0,
+    # P4.22：个人微信只有**纯文本出站面**，没有任何可点结构 ⇒ 恒关。核心据此完全走现状：
+    # 答案里的 `[[引用]]` 保留原文（决策P4.21-76），`send_actions` 一次都不会被调到。
+    supports_actions=False,
+    max_actions=0,
 )
 
 
@@ -425,6 +429,13 @@ class WeixinAdapter:
     ) -> None:
         """个人微信不支持 edit（`caps.supports_edit=False`），核心永不调到这里。"""
         raise NotImplementedError("个人微信不支持消息编辑（caps.supports_edit=False）")
+
+    async def send_actions(self, chat_id: str, text: str, actions: list) -> None:
+        """个人微信无可点面（`caps.supports_actions=False`），核心永不调到这里（P4.22 §6.5）。
+
+        与 `edit` / `typing` 的处置完全对称：抛异常只为"契约被违反时立刻炸"，不是运行期路径。
+        """
+        raise NotImplementedError("个人微信无可点面（caps.supports_actions=False）")
 
     async def typing(self, chat_id: str, on: bool) -> None:
         ticket = await self._typing_ticket(chat_id)

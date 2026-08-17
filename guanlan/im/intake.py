@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from .contract import CHAT_GROUP, KIND_TEXT, AdapterCaps, InboundMessage
+from .contract import CHAT_GROUP, KIND_TEXT, ORIGIN_ACTION, AdapterCaps, InboundMessage
 
 _logger = logging.getLogger("guanlan.im")
 
@@ -29,7 +29,17 @@ DEDUP_KEEP_ENTRIES = DEDUP_MAX_ENTRIES * 3 // 4  # 剪枝后的水位：留余�
 _MENTION_PREFIX = re.compile(r"^(?:@\S+\s*)+")
 
 # 零 LLM 的斜杠命令（§5.1 第 5 道闸）。`attachment` 不是用户能打出来的，由 `msg_kind` 触发。
-COMMANDS = ("search", "new", "help")
+COMMANDS = ("search", "new", "help", "page")
+
+# ★ **来源白名单**（P4.22 §5.5，决策P4.22-14）：`origin == ORIGIN_ACTION` 的合成消息**只能**
+# 跑这几条命令，其余一律静默丢弃。**这是红线 1（按钮永不承载写操作）的唯一有效闸**，因为
+# 它必须在**接收端**：`classify()` 对**未知**斜杠命令并不拒绝，而是当普通提问返回
+# `(None, text)`（见下），于是一个被改动过的回传串（经平台服务端往返 = 外部输入）里塞
+# `/foo 帮我写一篇…` 就成了一次不该发生的 LLM 调用。只在构造 `Action` 那一端"自觉"是挡不住的。
+#
+# **必须是 `COMMANDS` 的真子集**：`/help` `/new` 都是零 LLM 的，却都**不在**这里——
+# 前者是噪音、后者会**清掉用户的上下文**，都不该由一次误点/伪造回传触发。
+ACTION_COMMANDS = ("page",)
 
 
 @dataclass(frozen=True)
@@ -71,7 +81,7 @@ class Ready:
     session_key: str
     chat_id: str
     text: str
-    command: str | None  # "search" / "new" / "help" / "attachment"；None = 走 LLM
+    command: str | None  # "search"/"new"/"help"/"page"/"attachment"；None = 走 LLM
     argument: str = ""
 
 
@@ -101,8 +111,10 @@ def classify(text: str, *, msg_kind: str, has_attachments: bool) -> tuple[str | 
     """第 5 道闸：把一条已剥前缀的正文分流成 `(command, argument)`。
 
     非文本 / 带附件 → `("attachment", "")`：固定提示、零 LLM（决策P4.21-36）。
-    `/search` `/new` `/help` → 对应命令（零 LLM，**不建会话、不烧 token**）。
-    其余 → `(None, text)` 走 LLM。
+    `/search` `/new` `/help` `/page` → 对应命令（零 LLM，**不建会话、不烧 token**）。
+    其余 → `(None, text)` 走 LLM——**包括未知的斜杠命令**。这条"未知即提问"是有意的
+    （用户打错命令名不该被当哑巴），但它也意味着"以 `/` 开头"**不构成任何安全闸**：
+    合成消息的只读约束由 `ACTION_COMMANDS` 在 `offer()` 里单独兜（决策P4.22-14）。
     """
     if msg_kind != KIND_TEXT or has_attachments:
         return "attachment", ""
@@ -138,6 +150,19 @@ class Intake:
     def set_sink(self, on_ready: Callable[[Ready], None]) -> None:
         """接 `Delivery.submit`——**同步**（建 task + 登记，不 await），使 intake 永不阻塞（§4.4）。"""
         self._sink = on_ready
+
+    def set_caps(self, caps: AdapterCaps) -> None:
+        """`adapter.start()` **之后**重读一次能力位（★ 决策P4.22-27）。
+
+        `Intake` 是在 `start()` 之前构造的（`serve_im` 装配期），而适配器**会在 `start()` 里就地
+        降级**能力位（如飞书探不到卡片回调注册面 → 关掉 `supports_actions`）。`Delivery` 每次派发
+        都现读 `self._adapter.caps`，故天然跟得上；`Intake` 拿的是**构造期快照**，跟不上。
+
+        今天恰好无害——降级只动 `supports_actions`/`max_actions`，而 `Intake` 只读长度与节流阈值。
+        但"下一个会在 `start()` 里降级、且恰好被 `Intake` 读到的能力位"（`max_message_length` /
+        `batch_delay_s` …）会**静默**用陈旧值，且没有任何用例会红。这个方法把那类 bug 一次性掐掉。
+        """
+        self._caps = caps
 
     # ── 闸① 去重 ────────────────────────────────────────────────────────────
     def _is_duplicate(self, msg_id: str) -> bool:
@@ -185,6 +210,12 @@ class Intake:
         command, argument = classify(  # 闸⑤（先于合并：命令不该被合进下一条正文）
             text, msg_kind=msg.msg_kind, has_attachments=msg.has_attachments
         )
+        if msg.origin == ORIGIN_ACTION and command not in ACTION_COMMANDS:  # 闸⑤′
+            # **静默丢弃，绝不落进 LLM 分支**（决策P4.22-14）。走 `dropped_unauthorized`
+            # 而不是另开一个计数器：它就是"这条消息没被授权做这件事"，语义同源。
+            self.dropped_unauthorized += 1
+            _logger.debug("丢弃越权的合成消息：command=%s", command)
+            return
         if command is not None:
             await self._flush(key)  # 命令到达即先把缓冲里的散文送走，保序
             self._emit(Ready(key, msg.chat_id, text, command, argument))

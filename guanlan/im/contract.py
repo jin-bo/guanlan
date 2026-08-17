@@ -1,4 +1,4 @@
-"""IM 适配器契约：`AdapterCaps` / `InboundMessage` / `OutboundRef` / `IMAdapter`（P4.21 §3.2）。
+"""IM 适配器契约：`AdapterCaps` / `InboundMessage` / `OutboundRef` / `Action` / `IMAdapter`（P4.21 §3.2）。
 
 **本模块是整个 IM 宿主里唯一的"平台相关面"**，且它只描述形状、不含任何平台代码——
 无第三方依赖（不 import httpx / lark-oapi），故核心与测试可零 extra 导入。
@@ -22,6 +22,12 @@ KIND_OTHER = "other"
 CHAT_DM = "dm"
 CHAT_GROUP = "group"
 
+# `origin` 的两个取值（P4.22 §5.5，决策P4.22-14）。**这是事实字段，不是策略字段**：
+# 适配器只回答"这条消息是人打出来的还是点按钮点出来的"，**不判断**点出来的能干什么——
+# 那条只读白名单（`intake.ACTION_COMMANDS`）留在核心。
+ORIGIN_USER = "user"
+ORIGIN_ACTION = "action"
+
 
 @dataclass(frozen=True)
 class AdapterCaps:
@@ -40,11 +46,30 @@ class AdapterCaps:
     chunk_delay_s: float  # 分片之间的间隔（防频控）
     batch_delay_s: float  # 入站分片合并的静默期
     batch_split_delay_s: float  # 上一片接近上限时的加长静默期
+    # ── P4.22：可点引用 ──────────────────────────────────────────────────
+    # **默认关**：新增能力位一律默认关，使既有平台（与既有测试夹具）行为零变化——
+    # 一个"默认开"的能力位等于要求每个适配器都记得关掉它，漏一个就是运行期 AttributeError。
+    supports_actions: bool = False  # 出站能否携带可点动作（飞书卡片按钮）
+    max_actions: int = 0  # 一次最多几个按钮；超出部分**显式告示**、不静默丢（决策P4.21-31）
+
+
+@dataclass(frozen=True)
+class Action:
+    """一个可点动作（P4.22 §5.1，★ 决策P4.22-2）。
+
+    `command` 是**核心生成的入站正文**（`"/page 甲实体"`），不是"页面名"也不是"动作类型"：
+    适配器只负责把这句话塞进按钮、并在回调时**原样取回**，它**不知道 `/page` 是什么**。
+    这条边界一划，新增动作类型（将来的 `/graph`、`/related`）适配器零改，且核心不必为
+    "点击"新开一条处理路径——点击最终变成一条与用户手打**无法区分**的入站消息。
+    """
+
+    label: str  # 按钮上显示的字
+    command: str  # 点击后要合成的入站正文
 
 
 @dataclass(frozen=True)
 class InboundMessage:
-    """一条入站消息的**平台无关**表示（八个字段，映射规则见 §7.2.1 / §8.3）。"""
+    """一条入站消息的**平台无关**表示（映射规则见 §7.2.1 / §8.3 / P4.22 §5.2）。"""
 
     tenant: str  # account_id / tenant_key：防跨租户撞号
     chat_id: str
@@ -55,6 +80,10 @@ class InboundMessage:
     mentioned_me: bool  # 群内是否 @ 了机器人（**平台结构化字段**，绝不靠文本猜）
     msg_kind: str  # KIND_TEXT | KIND_OTHER
     has_attachments: bool
+    # P4.22：ORIGIN_USER（人打的）| ORIGIN_ACTION（点按钮点出来的合成消息）。
+    # **默认 `user`**：只有明确知道自己在合成消息的适配器才填 `action`，故忘了填 = 更严
+    # （走完整的五道闸 + LLM 分流），而不是更松。
+    origin: str = ORIGIN_USER
 
 
 @dataclass(frozen=True)
@@ -102,4 +131,12 @@ class IMAdapter(Protocol):
 
     async def typing(self, chat_id: str, on: bool) -> None:
         """打字指示（仅 `supports_typing` 的平台会被调用）。"""
+        ...
+
+    async def send_actions(self, chat_id: str, text: str, actions: list[Action]) -> None:
+        """发一条**带可点动作**的消息（仅 `supports_actions` 的平台会被调用，P4.22 §5）。
+
+        与 `typing()` **完全对称**：能力位为 False 的平台永不被调到，故那些平台里这个方法
+        抛 `NotImplementedError` 即可——它是"契约被违反时立刻炸"，不是运行期路径。
+        """
         ...

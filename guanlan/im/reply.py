@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import re
 
+from ..pages import WIKILINK_RE, link_stem, strip_html_comments
+
 # 围栏块识别：mermaid（P4.13）/ KaTeX（P4.14）/ flint（P4.20）在 IM 里都无渲染器，沿用那三个
 # 半阶段一致的**降级契约：保留源码，绝不静默丢弃**（§6.5）。
 # 公开名：飞书适配器的 `post` 分行（§8.4）用的是**同一条**判据，不再各写一份正则（否则两处漂移时
@@ -21,6 +23,10 @@ FENCE_LINE = re.compile(r"^\s{0,3}(?:```|~~~)")
 
 TRUNCATION_HINT = "⚠️ 答案还有约 {dropped} 字未发送；请在 Web 端**重新提问**以获取完整回答。"
 WEB_ENTRY_HINT = "Web 入口：{url}"
+# `/page` 的截断告示（P4.22 §4.2，决策P4.22-12）：**不附 Web 入口**。这里与答案截断的处境
+# 不同——那时被舍弃的内容"没有存在任何地方"，而这里内容明明在盘上，但 **Web 宿主没有按名开页
+# 的路由**（决策P4.21-76 核实过），给出去的仍是死链。等 Web 补了路由，这一行再改。
+PAGE_TRUNCATION_HINT = "⚠️ 本页还有约 {dropped} 字未发送。"
 
 
 def to_im_markdown(answer: str, *, web_base_url: str | None) -> str:
@@ -131,3 +137,35 @@ def truncation_notice(dropped: int, *, web_base_url: str | None) -> str:
     if web_base_url:
         lines.append(WEB_ENTRY_HINT.format(url=web_base_url.rstrip("/")))
     return "\n".join(lines)
+
+
+def page_truncation_notice(dropped: int) -> str:
+    """`/page` 的截断告示（决策P4.22-12）：**永不附 Web 入口**，理由见 `PAGE_TRUNCATION_HINT`。
+
+    刻意**不**接受 `web_base_url` 参数——不是"传了也忽略"，是**没有那个参数可传**，
+    于是"日后有人顺手把站点入口加回来"这件事会先在签名上撞车。
+    """
+    return PAGE_TRUNCATION_HINT.format(dropped=dropped)
+
+
+def extract_wikilinks(text: str) -> list[str]:
+    """抽出正文里的 `[[引用]]`，按**首次出现**保序去重（P4.22 §6.1）。
+
+    **与 `check` / `graph` 同一条正则**（`pages.WIKILINK_RE` + `strip_html_comments`），
+    不再各写一份——否则"答案里算引用"与"check 里算断链"两处会漂移。
+
+    返回的是**给人看的名字**（剥掉 `|别名` 与 `#锚点`，但**保留原始大小写与间距**）：它既是
+    按钮上的字，也是 `/page` 的参数。去重键则用 `link_stem`（小写归一），与解析口径对称——
+    故 `[[甲实体]]` 与 `[[甲实体#某节]]` 只出一个按钮。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in WIKILINK_RE.finditer(strip_html_comments(text)):
+        raw = match.group(1)
+        key = link_stem(raw)
+        name = raw.split("|", 1)[0].split("#", 1)[0].strip()
+        if not key or not name or key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out

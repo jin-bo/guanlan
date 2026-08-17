@@ -378,6 +378,9 @@ async def _run(
             with contextlib.suppress(Exception):
                 await adapter.close()  # start() 可能已建了一半连接
             return EXIT_AGENT_ERROR
+        # ★ 决策P4.22-27：`Intake` 是装配期构造的，而适配器**会在 `start()` 里就地降级**能力位。
+        # `Delivery` 每次派发现读 `adapter.caps`、天然跟得上；`Intake` 拿的是快照，必须在这里补一次。
+        intake.set_caps(adapter.caps)
         if banner:
             # ★ **打在 `start()` 成功之后**（决策P4.21-80）：连接建立之前打「已连上」就是撒谎，
             # 而「进程起来了、连接没建起来」恰恰是 §15.6 首连看门狗刚消灭的那种活死人——
@@ -558,7 +561,10 @@ def run_identify(*, platform: str, seconds: float = DEFAULT_IDENTIFY_SECONDS) ->
     lock = CredentialLock(platform, command="guanlan im-identify")
     lock.acquire()
     try:
-        ad = _make_adapter(platform)
+        # ★ `actions_wanted=False`（P4.22）：identify 的安全性**整个建立在「绝不回复任何消息」上**。
+        # 卡片回调却必须**同步回一个 toast**——上一次 `guanlan im` 发出的卡片在这 300 秒里被点一下，
+        # 就等于告诉对方「机器人此刻正活着」。故连回调都不注册，让"绝不回复"是结构上的。
+        ad = _make_adapter(platform, actions_wanted=False)
         return asyncio.run(_identify_loop(ad, platform=platform, seconds=float(seconds)))
     finally:
         lock.release()
@@ -610,7 +616,9 @@ async def _identify_loop(adapter: IMAdapter, *, platform: str, seconds: float) -
     return EXIT_OK
 
 
-def _make_adapter(platform: str, *, group_wanted: bool = False) -> IMAdapter:
+def _make_adapter(
+    platform: str, *, group_wanted: bool = False, actions_wanted: bool = True
+) -> IMAdapter:
     from .adapters import ADAPTERS
 
     factory = ADAPTERS.get(platform)
@@ -618,7 +626,9 @@ def _make_adapter(platform: str, *, group_wanted: bool = False) -> IMAdapter:
         raise GuanlanError(
             f"未知平台 {platform!r}；可用：{', '.join(sorted(ADAPTERS))}。", exit_code=EXIT_USAGE
         )
-    return factory(state_dir(platform), group_wanted=group_wanted)
+    return factory(
+        state_dir(platform), group_wanted=group_wanted, actions_wanted=actions_wanted
+    )
 
 
 __all__ = [

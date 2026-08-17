@@ -16,16 +16,25 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import anyio.to_thread
 from agentao.cancellation import AgentCancelledError
 
 from ..search import CorpusCache, search_result_dict
-from .contract import IMAdapter, OutboundRef
+from .contract import Action, IMAdapter, OutboundRef
 from .intake import Ready
-from .reply import split_for, to_im_markdown, truncation_notice
+from .pageview import filter_resolvable, open_page, resolve_many, validate_page_arg
+from .reply import (
+    extract_wikilinks,
+    page_truncation_notice,
+    split_for,
+    to_im_markdown,
+    truncation_notice,
+)
 from .session import AcquireStatus, SessionRegistry
 
 _logger = logging.getLogger("guanlan.im")
@@ -45,15 +54,28 @@ HELP_TEXT = (
     "观澜知识库机器人：\n"
     "· 直接提问 → 走知识库问答（较慢，会分片回复）\n"
     "· /search 关键词 → 零 LLM 全库检索（快，推荐）\n"
+    "· /page 页面名 → 零 LLM 按名开页（答案里的 [[引用]] 就是页面名）\n"
     "· /new → 清空上下文，开始新对话\n"
     "· /help → 本帮助"
 )
+PAGE_USAGE = "用法：`/page 页面名`（页面名就是答案里 [[ ]] 中间那几个字）"
+PAGE_MISS = "没有找到名为「{name}」的页面。"
+PAGE_MISS_SUGGEST = "没有找到名为「{name}」的页面。你也许想找："
+# 可点引用卡片的引导语与超限告示（P4.22 §6.1）。**超限不静默**（继承决策P4.21-31）：
+# 正文里的 `[[…]]` 原文本来就还在，故告示指回手打 `/page` 是**真的能用**的出路。
+ACTIONS_TITLE = "本答案引用的页面："
+PAGE_ACTIONS_TITLE = "本页引用的页面："  # `/page` 输出的引导语（说"本答案"就成了假话）
+ACTIONS_OVERFLOW = "另有 {extra} 个引用未列出，可直接发送 `/page <名字>` 打开。"
 # 提示语按状态分（§4.5）：`FIRST` **不提示**——第一次说话被告知"上下文已过期"很荒谬。
 STATUS_NOTICE = {
     AcquireStatus.EXPIRED: "（上下文已过期，已开始新的对话）",
     AcquireStatus.LOST: "（会话已重置，已开始新的对话）",
 }
 SEARCH_LIMIT = 8
+# `/page` 未命中时的降级召回条数（决策P4.22-11）。**top-3 而不是 `/search` 的 8**：
+# 这是**降级提示**、不是检索结果，长了会喧宾夺主。未命中的现实来源是**手打错别字**
+# （按钮点出来的名字出按钮前已经解析过一遍），而 BM25 + CJK 2-gram 正擅长救错别字。
+PAGE_MISS_LIMIT = 3
 
 
 @dataclass
@@ -63,6 +85,10 @@ class _EditState:
     latest: str = ""
     final: bool = False
     abort: bool = False
+    # ★ 终稿那次 `edit` **确认写回**了吗（P4.22 决策P4.22-20）。writer 整段 `suppress(Exception)`
+    # （这本身是对的——一条消息发不出去不该杀死主循环），于是"正文全挂"是可达状态；没有这个
+    # 标志，`_offer_actions` 就会给一段**用户根本没读到的文字**配上一排按钮。
+    final_ok: bool = False
     wake: asyncio.Event = field(default_factory=asyncio.Event)
 
     def touch(self) -> None:
@@ -194,12 +220,19 @@ class Delivery:
         self._notices.add(task)
         task.add_done_callback(self._notices.discard)
 
-    async def _safe_send(self, chat_id: str, text: str) -> None:
-        """出站失败只记日志、绝不冒泡——一条消息发不出去不该杀死主循环（§4.6）。"""
+    async def _safe_send(self, chat_id: str, text: str) -> bool:
+        """出站失败只记日志、绝不冒泡——一条消息发不出去不该杀死主循环（§4.6）。
+
+        **返回值是"确认送达了吗"**（P4.22 决策P4.22-20），不是装饰：`_offer_actions` 只吃
+        确认送达的片，否则"正文全挂、卡片发成功"会让用户看到一排指向他没读到的文字的按钮。
+        绝大多数调用方忽略它，这没问题——但**别把它改回 `None`**，那样测试也不会变红。
+        """
         try:
             await self._adapter.send(chat_id, text)
         except Exception:  # noqa: BLE001 — 出站失败只记日志
             _logger.warning("向 %s 发送消息失败", chat_id, exc_info=True)
+            return False
+        return True
 
     async def _run(self, ready: Ready) -> None:
         task = asyncio.current_task()
@@ -240,6 +273,9 @@ class Delivery:
         if ready.command == "search":
             await self._search(ready)
             return
+        if ready.command == "page":
+            await self._page(ready)
+            return
         await self._answer(act, ready)
 
     async def _search(self, ready: Ready) -> None:
@@ -264,6 +300,100 @@ class Delivery:
             if snippet:
                 lines.append(f"   {snippet}")
         await self._send_parts("\n".join(lines), ready.chat_id)
+
+    async def _page(self, ready: Ready) -> None:
+        """`/page 名字`：零 LLM 按名开页（P4.22 §4）。**本相位的地基，与卡片正交。**
+
+        参数走**核心唯一的**那份校验器（决策P4.22-18）——手打与点按钮在这里已经分不出来了，
+        这正是"点击 = 一条合成的入站消息"想要的效果。
+        """
+        name = validate_page_arg(ready.argument)
+        if name is None:
+            await self._safe_send(ready.chat_id, PAGE_USAGE)
+            return
+        # ★ 卸线程（§4.3）：`link_resolution_index` 要遍历 wiki/ 读 frontmatter，是同步磁盘 + CPU。
+        # v1 **不做缓存**：`/page` 是低频交互命令，而缓存要处理失效；`CorpusCache` 那套是为高频
+        # `/search` 建的，别照抄。**但同一次调用里只建一次表**——页内引用也在这一跳里算完
+        # （`PageView.links`），故下面出按钮时不必再建一次（决策P4.22-25）。
+        view = await anyio.to_thread.run_sync(partial(open_page, self._kb, name))
+        if view is None:
+            await self._send_parts(
+                await self._page_miss(name), ready.chat_id, truncation=page_truncation_notice
+            )
+            return
+        delivered = await self._send_parts(
+            view.text, ready.chat_id, truncation=page_truncation_notice
+        )
+        await self._offer_actions(
+            ready.chat_id, delivered, title=PAGE_ACTIONS_TITLE, resolvable=view.links
+        )
+
+    async def _page_miss(self, name: str) -> str:
+        """未命中 → 降级为一次 top-3 检索，**不空手而归**（决策P4.22-11）。"""
+        result = await anyio.to_thread.run_sync(
+            lambda: self._cache.search(self._kb / "wiki", name, limit=PAGE_MISS_LIMIT)
+        )
+        hits = search_result_dict(result)["results"]
+        if not hits:
+            return PAGE_MISS.format(name=name)
+        lines = [PAGE_MISS_SUGGEST.format(name=name)]
+        for i, hit in enumerate(hits, 1):
+            lines.append(f"{i}. {hit['title']}　{hit['page']}")
+        return "\n".join(lines)
+
+    async def _offer_actions(
+        self,
+        chat_id: str,
+        delivered: list[str],
+        *,
+        title: str = ACTIONS_TITLE,
+        resolvable: Mapping[str, str] | None = None,
+    ) -> None:
+        """★ 可点引用：把**已送达正文**里的 wikilink 变成一排按钮（P4.22 §6.1）。
+
+        输入是 `delivered`（**实际成功送达的片**），不是完整正文——两条理由，分量不同：
+
+        - **安全**（决策P4.22-13）：`split_for` 超限时会**丢掉后缀**（"不静默截断"只保证有告示，
+          不保证内容都发出去）。从完整正文抽，一个**只出现在被丢弃后缀里**的页面名会被印在
+          群内可见的卡片上——那是"只有授权者问得到的内容"变成群内公开展示。
+          **这条对 `/page` 的输出同样成立**：一页长到被截断时，只在被丢弃尾巴里的引用不该上卡片。
+        - **一致性**（决策P4.22-20）：正文发送失败时不发按钮。收件人本来就该看到这些名字，
+          故这条**不是**越权泄露；做它是因为成本近零。
+
+        `resolvable` 给出**已经算好的「解析键 → 拥有页」表**时就不再建解析表（`/page` 走这条，
+        决策P4.22-25）；缺省 `None` 是答案那条路——它没有现成的表，得自己解析一次。
+        两条路都**按拥有页去重**（见 `pageview._dedupe_by_owner`）：别名与 fold variant 的名字不同、
+        页却是同一张，只按名字去重会出两个点开同一页的按钮。
+
+        `caps.supports_actions=False` 的平台（个人微信）在这里直接返回，`send_actions` 一次都
+        不会被调到——与 `typing()` 的处置完全对称。
+        """
+        caps = self._adapter.caps
+        if not caps.supports_actions or caps.max_actions <= 0 or not delivered:
+            return
+        # 名字要先过**核心那份唯一的**参数校验器：按钮点下去合成的正是 `/page <名字>`，一个
+        # `validate_page_arg` 会拒的名字（超 `MAX_PAGE_ARG`、带控制字符）出成按钮，点了只会回一句
+        # "用法：…"——正是决策P4.21-76 判据里"承诺一个不存在的东西"。构造端与执行端量同一把尺。
+        names = [n for n in extract_wikilinks("\n".join(delivered)) if validate_page_arg(n)]
+        if not names:
+            return
+        # **出按钮前先解析一次**（决策P4.22-3）：断链的引用出个按钮、点了回"没有找到"，正是
+        # 决策P4.21-76 判据里"承诺一个不存在的东西"的翻版。
+        if resolvable is None:
+            hits = await anyio.to_thread.run_sync(partial(resolve_many, self._kb, names))
+        else:
+            hits = filter_resolvable(names, resolvable)  # 键集已备好 ⇒ 零盘 IO、不用卸线程
+        if not hits:
+            return
+        shown, extra = hits[: caps.max_actions], len(hits) - caps.max_actions
+        text = title
+        if extra > 0:  # 超限**不静默**（决策P4.21-31）
+            text = f"{text}\n{ACTIONS_OVERFLOW.format(extra=extra)}"
+        actions = [Action(label=name, command=f"/page {name}") for name in shown]
+        try:
+            await self._adapter.send_actions(chat_id, text, actions)
+        except Exception:  # noqa: BLE001 — 叠加层发不出去不该影响已经送达的正文
+            _logger.warning("向 %s 发送可点引用失败", chat_id, exc_info=True)
 
     async def _answer(self, act: Activity, ready: Ready) -> None:
         try:
@@ -315,7 +445,8 @@ class Delivery:
             if typing_on:  # typing-off 必须在 finally，否则异常路径下「正在输入…」永不消失
                 with contextlib.suppress(Exception):
                     await self._adapter.typing(ready.chat_id, False)
-        await self._send_parts(self._compose(answer, notice), ready.chat_id)
+        delivered = await self._send_parts(self._compose(answer, notice), ready.chat_id)
+        await self._offer_actions(ready.chat_id, delivered)  # ★ P4.22：叠加层，可整条不发
 
     # ── 档①：占位 → 原地改写（节流）→ finalize（飞书）────────────────────
     async def _answer_edit(self, act: Activity, ready: Ready, conv, notice: str | None) -> None:
@@ -358,14 +489,19 @@ class Delivery:
         st.final = True
         st.touch()
         await self._stop_writer(act)
+        # ★ 首片是**编辑**回占位消息的，故它是否送达要看 writer 的回执（`final_ok`），
+        # 不能想当然（P4.22 决策P4.22-20）。
+        delivered = [parts[0]] if parts and st.final_ok else []
         for part in parts[1:]:
             await asyncio.sleep(caps.chunk_delay_s)
-            await self._safe_send(ready.chat_id, part)
+            if await self._safe_send(ready.chat_id, part):
+                delivered.append(part)
         if dropped > 0:
             await asyncio.sleep(caps.chunk_delay_s)
             await self._safe_send(
                 ready.chat_id, truncation_notice(dropped, web_base_url=self._web_base_url)
             )
+        await self._offer_actions(ready.chat_id, delivered)  # ★ P4.22：叠加层，可整条不发
 
     async def _writer_loop(self, ref: OutboundRef, st: _EditState) -> None:
         """**单 writer task**：取快照 → edit → 睡一会（§6.2）。
@@ -389,6 +525,7 @@ class Delivery:
                 if text:
                     with contextlib.suppress(Exception):
                         await self._adapter.edit(ref, text, finalize=True)
+                        st.final_ok = True  # ★ 只有真写回了才置位（P4.22 决策P4.22-20）
                 return
             text = self._clip(st.latest)
             if text and len(text) - len(sent) >= EDIT_MIN_CHARS:
@@ -436,16 +573,33 @@ class Delivery:
             body = EMPTY_HINT
         return f"{notice}\n{body}" if notice else body
 
-    async def _send_parts(self, text: str, chat_id: str) -> None:
+    async def _send_parts(
+        self,
+        text: str,
+        chat_id: str,
+        *,
+        truncation: Callable[[int], str] | None = None,
+    ) -> list[str]:
+        """分片发出，**返回确认送达的片**（P4.22 决策P4.22-20 的输入）。
+
+        `truncation` 让调用方换掉截断告示的文案：`/page` 用 `page_truncation_notice`，
+        它**不附 Web 入口**（决策P4.22-12）。缺省是答案那一份。
+        """
         caps = self._adapter.caps
         parts, dropped = split_for(text, caps.max_message_length, max_parts=caps.max_parts)
+        delivered: list[str] = []
         for i, part in enumerate(parts):
             if i:
                 await asyncio.sleep(caps.chunk_delay_s)  # 防频控：微信是真的会丢消息
-            await self._safe_send(chat_id, part)
+            if await self._safe_send(chat_id, part):
+                delivered.append(part)
         if dropped > 0:
             # 告示**自己占一片**，所以用户**永远看得到「这里被截断了」**——这正是「不静默」的含义。
             await asyncio.sleep(caps.chunk_delay_s)
-            await self._safe_send(
-                chat_id, truncation_notice(dropped, web_base_url=self._web_base_url)
+            notice = (
+                truncation(dropped)
+                if truncation is not None
+                else truncation_notice(dropped, web_base_url=self._web_base_url)
             )
+            await self._safe_send(chat_id, notice)
+        return delivered
