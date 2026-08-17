@@ -2719,7 +2719,11 @@ def test_actions_never_offer_a_command_the_core_would_reject(kb_pages):
     判据里"承诺一个不存在的东西"。**这一页是真的存在、也真的解析得到**，故不加这道过滤时
     所有既有正例仍然全绿。
     """
-    long_name = "甲" * (MAX_PAGE_ARG + 1)
+    # **必须是 ASCII**：`MAX_PAGE_ARG` 量的是**字符数**，而文件名上限量的是**字节数**，且两个
+    # 平台的口径还不同——Linux 是 255 **字节**（201 个 `甲` = 603 字节，`OSError: 36`），macOS 按
+    # 255 **UTF-16 码元**算（201 个 `甲` 照写不误）。用汉字的话这条用例**只在 macOS 上能过**，
+    # 而它测的是长度语义、与字符集无关。（本仓其余用例用中文占位是对的，这条是例外，故记在这里。）
+    long_name = "a" * (MAX_PAGE_ARG + 1)
 
     async def scenario():
         _write(kb_pages, f"entities/{long_name}.md", "示例页面。")
