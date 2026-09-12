@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-from ..pages import WIKILINK_RE, link_stem, strip_html_comments
+from ..pages import WIKILINK_RE, link_scan_text, link_stem
 
 # 围栏块识别：mermaid（P4.13）/ KaTeX（P4.14）/ flint（P4.20）在 IM 里都无渲染器，沿用那三个
 # 半阶段一致的**降级契约：保留源码，绝不静默丢弃**（§6.5）。
@@ -151,7 +151,8 @@ def page_truncation_notice(dropped: int) -> str:
 def extract_wikilinks(text: str) -> list[str]:
     """抽出正文里的 `[[引用]]`，按**首次出现**保序去重（P4.22 §6.1）。
 
-    **与 `check` / `graph` 同一条正则**（`pages.WIKILINK_RE` + `strip_html_comments`），
+    **与 `check` / `graph` 同一条正则、同一道预处理**（`pages.WIKILINK_RE` + `link_scan_text`，
+    后者抹掉整行 HTML 注释与代码里的引用），
     不再各写一份——否则"答案里算引用"与"check 里算断链"两处会漂移。
 
     返回的是**给人看的名字**（剥掉 `|别名` 与 `#锚点`，但**保留原始大小写与间距**）：它既是
@@ -160,7 +161,7 @@ def extract_wikilinks(text: str) -> list[str]:
     """
     out: list[str] = []
     seen: set[str] = set()
-    for match in WIKILINK_RE.finditer(strip_html_comments(text)):
+    for match in WIKILINK_RE.finditer(link_scan_text(text)):
         raw = match.group(1)
         key = link_stem(raw)
         name = raw.split("|", 1)[0].split("#", 1)[0].strip()

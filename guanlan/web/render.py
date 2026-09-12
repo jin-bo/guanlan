@@ -21,6 +21,7 @@ from pathlib import Path
 
 from ..pages import (
     WIKILINK_RE,
+    code_span_wikilink,
     link_resolution_index,
     link_stem,
     load_page,
@@ -346,12 +347,6 @@ def _retag(el, tag: str, attrib: dict[str, str], text: str) -> None:
     el.text = text
 
 
-def _code_wikilink_raw(content: str) -> str | None:
-    """行内 code 的整段内容恰好是 `[[...]]` 时返回内部 raw，否则 None。"""
-    match = WIKILINK_RE.fullmatch(content.strip())
-    return match.group(1) if match is not None else None
-
-
 if _HAS_MARKDOWN:
 
     class _StripCommentsPreprocessor(_Preprocessor):
@@ -669,7 +664,9 @@ if _HAS_MARKDOWN:
             for el in root.iter("code"):
                 if id(el) in skip or len(el) or el.text is None:
                     continue  # 代码块内 / 链接内 / 含子元素 / 空 → 不碰
-                raw_wikilink = _code_wikilink_raw(el.text)
+                # 判据归口 `pages.code_span_wikilink`：扫描器的"整段是引用则不抹"用的是同一条，
+                # 两处各写一份就会漂移（页面上是链接、`check` 却不校验它）。
+                raw_wikilink = code_span_wikilink(el.text)
                 if raw_wikilink is not None:
                     # 整段就是 `[[…]]`：与行内 [[…]] 完全同路（_resolve_wikilink，含 `[[raw/…]]` 拦截）。
                     _retag(

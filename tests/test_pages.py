@@ -425,3 +425,177 @@ def test_link_regexes_do_not_span_a_line_break():
             "entities/A.md",
             "entities/B.md",
         }
+
+
+# ---------- link_scan_text：代码里的 [[…]] 不算引用（§2.1，对应 llm_wiki 0013ca3） ----------
+#
+# 语义权威是渲染器自己写的那句：「围栏内本就不成链，扫描器也不该把代码示例算作引用」
+# （`web/render.py`）。下面每条「不抹」的断言都对应一次实测的渲染器行为，别凭直觉改。
+
+
+def test_link_scan_text_masks_fenced_and_inline_code():
+    """围栏块 / 行内 code 里的 `[[…]]` 不再被扫成引用（幽灵断链的根因）。"""
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    for text in (
+        '```python\ncols = df[["date","value"]]\n```',
+        '~~~\n[[Foo]]\n~~~',
+        '````\n[[Foo]]\n````',
+        '```flint\n{"values": [[1,2]]}\n```',
+        '行内 `df[["x"]]` 示例',
+        '双反引号 ``x = [[Foo]]`` 示例',
+    ):
+        assert WIKILINK_RE.findall(link_scan_text(text)) == [], text
+
+
+def test_link_scan_text_keeps_inline_code_that_is_exactly_one_wikilink():
+    """`` `[[Foo]]` `` 是渲染器**有意**兜底成链接的形状，扫描器必须跟着认。
+
+    抹掉它会造出反向漂移：页面上是链接、`check` 却不校验它，断链能静默上线。
+    """
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    assert WIKILINK_RE.findall(link_scan_text("看 `[[Foo]]` 这个")) == ["Foo"]
+    assert WIKILINK_RE.findall(link_scan_text("看 ` [[Foo]] ` 这个")) == ["Foo"]
+
+
+def test_link_scan_text_preserves_length_lines_and_offsets():
+    """长度、行数、列偏移三保——与 `strip_html_comments` 同契约（`reindex --prune` 逐行对齐依赖它）。"""
+    from guanlan.pages import link_scan_text
+
+    for text in (
+        '```py\n[[Foo]]\n```\n后面 [[Bar]]\n',
+        '```py\r\n[[Foo]]\r\n```\r\n后面 [[Bar]]\r\n',
+        '```py\r[[Foo]]\r```\r后面 [[Bar]]\r',
+        '行内 `x=[[Foo]]` 与 [[Bar]]\n',
+    ):
+        out = link_scan_text(text)
+        assert len(out) == len(text)
+        assert out.count("\n") == text.count("\n")
+        assert out.count("\r") == text.count("\r")
+        assert len(out.splitlines()) == len(text.splitlines())
+
+
+# ---------- 漏报护栏：过滤规则最危险的方向是「本该报出却被吞掉」 ----------
+#
+# 正例（代码里的引用不再报）测不出漏报：抹多了同样"没有断链违规"。故每条收窄都配一条
+# 反向用例，钉住「围栏/反引号附近的真引用必须活下来」。
+
+
+def test_link_scan_text_never_swallows_links_outside_code():
+    """围栏块前后的真引用一个都不能少。"""
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    text = '前面 [[Before]]\n\n```py\nx = [[InCode]]\n```\n\n后面 [[After]]\n'
+    assert WIKILINK_RE.findall(link_scan_text(text)) == ["Before", "After"]
+
+
+def test_link_scan_text_unclosed_fence_does_not_swallow_rest():
+    """未闭合围栏**不抹**、不吃到文末——同 `strip_html_comments` 对未闭合 `<!--` 的处置。
+
+    让一个落单的围栏吞掉后文全部链接，是把漏报伪装成通过。渲染器同样不认未闭合围栏（实测）。
+    """
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    text = '```py\nx = 1\n\n后面 [[Real]] 还在\n'
+    assert WIKILINK_RE.findall(link_scan_text(text)) == ["Real"]
+
+
+def test_link_scan_text_asymmetric_fence_is_not_a_block():
+    """开闭栏不对称一律当未闭合：CommonMark 与 python-markdown 在此分歧，取更严的那档。"""
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    assert WIKILINK_RE.findall(link_scan_text('```\n[[Foo]]\n`````')) == ["Foo"]  # 闭栏更长
+    assert WIKILINK_RE.findall(link_scan_text('~~~\n[[Foo]]\n```\n[[Bar]]')) == ["Foo", "Bar"]  # 异字符
+
+
+def test_link_scan_text_does_not_mask_indented_code_or_list_continuations():
+    """缩进块**有意不抹**：列表项的缩进续行 / 嵌套项在渲染器里是正常成链的（实测）。
+
+    裸 `^(?: {4}|\\t)` 分不开"缩进代码块"与"列表续行"，抹了就是把真链接静默吞掉。
+    缩进围栏同理不抹（渲染器在缩进 1–3 上的行为随 info string 而变，无法对齐）。
+    """
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    assert WIKILINK_RE.findall(link_scan_text("- 一项\n\n    续行 [[Foo]] 在这\n")) == ["Foo"]
+    assert WIKILINK_RE.findall(link_scan_text("- 一项\n    - 子项 [[Foo]]\n")) == ["Foo"]
+    assert WIKILINK_RE.findall(link_scan_text("   ```yaml\n   [[Foo]]\n   ```")) == ["Foo"]
+
+
+def test_link_scan_text_unpaired_backtick_is_ordinary_text():
+    """未配对的反引号 run 是普通文本，其后的真引用照常参与扫描。"""
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    assert WIKILINK_RE.findall(link_scan_text("单个 ` 反引号 [[Foo]] 后面")) == ["Foo"]
+    assert WIKILINK_RE.findall(link_scan_text("``不配对 [[Foo]] 后面")) == ["Foo"]
+    # 跨行的行内 code 不识别（两行各自当未配对 run）——同样是宁可多报。
+    assert WIKILINK_RE.findall(link_scan_text("开头 `代码\n[[Foo]] 续行`")) == ["Foo"]
+
+
+def test_link_scan_text_escape_only_when_backslash_count_is_odd():
+    r"""`\[[X]]` 被转义（渲染器不成链），`\\[[X]]` 没有（渲染器成链）——两边都实测过。"""
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    assert WIKILINK_RE.findall(link_scan_text(r"转义 \[[Foo]] 不算")) == []
+    assert WIKILINK_RE.findall(link_scan_text(r"转义 \\[[Foo]] 仍算")) == ["Foo"]
+
+
+def test_link_scan_text_keeps_embed_shape_scannable():
+    """`![[X]]` 在观澜里**仍是引用**：渲染器实测会成链，故不借 llm_wiki 的 `!` 跳过。
+
+    观澜没有 Obsidian 嵌入语义（嵌图走 `![](路径)`，见 conventions §图片引用），
+    照抄上游那条会凭空造出一类漏报。
+    """
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    assert WIKILINK_RE.findall(link_scan_text("图 ![[Foo]] 在这")) == ["Foo"]
+
+
+def test_link_scan_text_tab_after_fence_marker_is_still_a_fence():
+    """开栏标记后跟 Tab 也是**合法开栏**——渲染器的 `normalize_whitespace`(30) 先于
+    `fenced_code`(25) 把 Tab 展成空格（实测）。
+
+    只认半角空格时，扫描器认不出这个开栏，转而把它的**闭栏**当成下一个开栏——奇偶整体错位一格，
+    随后一整段正文被当代码抹掉。这不是多报，是**漏报**：实证里 `check` 对下面这页的真断链退 0。
+    闭栏那侧本来就用 `.strip(" \t")` 认 Tab，两侧必须对称。
+    """
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    text = "```\t\nx = 1\n```\n\n见 [[Real]]\n\n```\ny = 2\n```\n"
+    assert WIKILINK_RE.findall(link_scan_text(text)) == ["Real"]
+
+
+def test_link_scan_text_non_ascii_blank_line_is_not_a_block_boundary():
+    """只含 NBSP / 全角空格的行**不是空行**——渲染器的 `(?<=\\n) +\\n` 只抹半角空格行。
+
+    误当空行会提前重置"悬空反引号"状态（块边界），把渲染器明明成链的 `[[…]]` 当行内 code 抹掉。
+    中文库里一行只打了个全角空格再常见不过，故这条是**实际会踩到的漏报**，不是理论边界。
+    """
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    for blank in ("\u00a0", "\u3000"):
+        text = f"a ` b\n{blank}\nc `x=[[Foo]]` d"
+        assert WIKILINK_RE.findall(link_scan_text(text)) == ["Foo"], repr(blank)
+
+
+def test_link_scan_text_splits_lines_the_way_markdown_does():
+    """切行只认 `\\r\\n` / `\\r` / `\\n`：`str.splitlines` 多认的那几个字符不许切出围栏。
+
+    拿 `splitlines` 切行，会在渲染器眼里的**一行中间**凭空切出开/闭栏，把那一行里的真链接抹掉
+    （渲染器只把它们当普通字符，实测下面每个都照常成链）。PDF→markdown（P5.2 `convert`）
+    产出的页里这些字符并不罕见。
+    """
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    for sep in ("\u2028", "\u2029", "\x0b", "\x0c", "\x85", "\x1c", "\x1d", "\x1e"):
+        text = f"a{sep}```{sep}[[Foo]]{sep}```"
+        assert WIKILINK_RE.findall(link_scan_text(text)) == ["Foo"], repr(sep)
+
+
+def test_link_scan_text_still_strips_whole_line_comments():
+    """注释那半的老行为原样保留（顺序：注释在前、代码在后）。"""
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+
+    assert WIKILINK_RE.findall(link_scan_text("<!-- [[Hidden]] -->\n[[Real]]")) == ["Real"]
+    # 整行注释注掉一整段围栏：注释先抹，围栏开栏随之消失，后文不被当成代码。
+    assert WIKILINK_RE.findall(link_scan_text("<!--\n```\n-->\n[[Real]]\n")) == ["Real"]

@@ -33,12 +33,12 @@ from .pages import (
     WIKILINK_RE,
     iter_pages,
     link_resolution_index,
+    link_scan_text,
     link_stem,
     load_page,
     page_title,
     page_type,
     resolve_owner,
-    strip_html_comments,
 )
 from .paths import require_kb_root
 
@@ -135,9 +135,10 @@ def build_graph(wiki: Path) -> Graph:
     resolved_pairs: set[tuple[str, str]] = set()
     broken_pairs: set[tuple[str, str]] = set()
     for nid, body in bodies:
-        # 先抹闭合 HTML 注释（与 check 同口径）：注释里的 `[[…]]` 不该造出幽灵边/幽灵断链。
-        # lint.broken_link 与 heal 的 missing_entity 都源自本图，故一处修，三处同时不再误报。
-        for raw in WIKILINK_RE.findall(strip_html_comments(body)):
+        # 先过 link_scan_text（与 check / IM 同口径）：整行注释与代码里的 `[[…]]` 不该造出幽灵边/
+        # 幽灵断链。lint.broken_link 与 heal 的 missing_entity 都源自本图，故一处修，三处同时不再误报
+        # ——代码块那半尤其要紧：heal 会把 missing_entity 喂进 LLM 写路径。
+        for raw in WIKILINK_RE.findall(link_scan_text(body)):
             target = link_stem(raw)
             if not target:
                 continue

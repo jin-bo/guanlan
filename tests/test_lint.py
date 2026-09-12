@@ -444,3 +444,35 @@ def test_suggestion_deterministic_and_lint_avoids_heavy_paths(tmp_path: Path):
     assert a == b  # 字节稳定、可重放
     for heavy in ("build_corpus", "search_pages", "alias_index"):
         assert not hasattr(lint_mod, heavy)
+
+
+# ---------- 代码块里的 [[…]] 不进图、不成缺失实体（§2.1） ----------
+
+
+def test_fenced_code_sample_does_not_produce_missing_entity(tmp_path: Path):
+    """两张页写同一段代码示例，不该升级成 `missing_entity` 进而喂进 `heal` 的 LLM 写路径。
+
+    `MISSING_ENTITY_MIN_REFS` 只有 2，一个惯用写法出现在两张页上就够触发——实证里
+    `df[["date","value"]]` 正是这样变成「建议建 entities/"date","value".md」的。
+    """
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    snippet = '```python\ncols = df[["date","value"]]\n```'
+    _page(wiki, "concepts/DataFrame.md", body=snippet)
+    _page(wiki, "concepts/Pandas.md", body=snippet)
+
+    kinds = _kinds(run_lint(wiki))
+    assert "lint.missing_entity" not in kinds
+    assert "lint.broken_link" not in kinds
+
+
+def test_real_missing_entity_still_detected_alongside_code(tmp_path: Path):
+    """漏报护栏：代码示例旁边的**真**高频缺失实体必须照报。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    body = '见 [[真缺失实体]]\n\n```python\ncols = df[["a","b"]]\n```'
+    for i in range(MISSING_ENTITY_MIN_REFS):
+        _page(wiki, f"concepts/P{i}.md", body=body)
+
+    missing = [f.detail for f in run_lint(wiki).findings if f.kind == "lint.missing_entity"]
+    assert len(missing) == 1 and "真缺失实体" in missing[0]
