@@ -24,6 +24,12 @@
     ——顺手修掉 `apply_origin` 一直以来把 CRLF 源切成"块 LF + 正文 CRLF"、并把**已有的 CRLF frontmatter
     块静默改成 LF** 的老毛病。
 
+- **文档：用户指南补 `parsed_by` 与 `remove` 入链预览，中英双语** —— `docs/guide/{zh,en}/07-*` 的行为契约
+  节补上落源时新增的 `parsed_by` 键（是什么、为什么记、只记最终后端、读不到不写、Web 晋级后仍在）；
+  `docs/guide/{zh,en}/04-*` 的 `remove` 节补上预览新增的 `⚠ 入链页` 段与 `--json` 的 `backlinks` 键，
+  并写明同-stem 两侧相反的处置及其理由。两个功能本身见本段前两条，此条只是把它们写进面向使用者的文档
+  ——新增的用户可见字段与输出不进指南，用户就只能从 CHANGELOG 里发现。
+
 - **`remove` 预览列出"谁链向这张摘要页"**（OpenKB 2026-09 反向评审 §1.B，对应其 `#198`
   `page_ops.pages_linking_to`）——撤回一个源之前，最该知道的是**撤完谁会悬链**，而此前预览只肯
   转嫁一句"撤回后请跑 `guanlan lint`"。现在预览多一段 `⚠ 入链页`，`--json` 多一个 `backlinks` 键。
