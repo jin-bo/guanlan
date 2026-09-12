@@ -249,3 +249,33 @@ def test_unterminated_comment_does_not_swallow_later_links(tmp_path: Path):
     assert any(
         v.kind == "wikilink.broken" and "确实没有" in v.detail for v in result.violations
     )
+
+
+# ---------- 代码块里的 [[…]] 不是断链（§2.1） ----------
+
+
+def test_fenced_code_sample_does_not_fail_check(tmp_path: Path):
+    """含 ```python 代码示例的合法页不该让 `check` 退 3。
+
+    实证原样：`df[["date","value"]]` 被扫成幽灵引用 `"date","value"` → `wikilink.broken`
+    → 整库 check 失败。渲染器从来不把它当链接（`web/render.py` 的注释早写明了这条语义）。
+    """
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki / "concepts" / "DataFrame.md", body='选列：\n\n```python\ncols = df[["date","value"]]\n```\n')
+
+    report = run_check(wiki)
+    assert [v.kind for v in report.violations] == []
+
+
+def test_real_broken_link_on_a_page_with_code_is_still_reported(tmp_path: Path):
+    """漏报护栏：同一页里既有代码示例、又有真断链时，真断链必须照报。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(
+        wiki / "concepts" / "DataFrame.md",
+        body='见 [[压根不存在的页]]\n\n```python\ncols = df[["a","b"]]\n```\n',
+    )
+
+    kinds = [(v.kind, v.detail) for v in run_check(wiki).violations]
+    assert kinds == [("wikilink.broken", "[[压根不存在的页]] 无对应页面")]

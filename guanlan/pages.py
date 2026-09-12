@@ -41,6 +41,9 @@ __all__ = [
     "Finding",
     "WIKILINK_RE",
     "strip_html_comments",
+    "mask_code_spans",
+    "code_span_wikilink",
+    "link_scan_text",
     "split_frontmatter",
     "parse_frontmatter",
     "load_page",
@@ -124,9 +127,48 @@ _HTML_COMMENT_RE = re.compile(
 _LINEBREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 
 
+# 抹白用：一次 C 级 `re.sub` 顶掉逐字符 genexp+join（实测占 `link_scan_text` 近三成耗时），
+# 语义逐字等价——补集里正是 `_LINEBREAK_CHARS`，故行分隔符照旧逐字留下。
+_NON_LINEBREAK_RE = re.compile("[^" + re.escape("".join(sorted(_LINEBREAK_CHARS))) + "]")
+
+# **markdown 的**行分隔符只有 `\r\n` / `\r` / `\n`（python-markdown 的 normalize_whitespace 把前两者
+# 归一成 `\n`，其余一概当普通字符）。围栏扫描必须按**这一套**切行：`str.splitlines` 还认
+# `\v \f \x1c \x1d \x1e \x85 \u2028 \u2029`，拿它切，会在渲染器眼里的**一行中间**凭空切出围栏开/闭栏，
+# 把那一行里的真链接抹掉——评审实测 `"a\u2028```\u2028[[A]]\u2028```"` 渲染器成链、扫描器抹掉，
+# 正是**漏报**。这些字符在 PDF→markdown（P5.2 `convert`）产出的页里并不罕见，不是理论风险。
+# （`_LINEBREAK_CHARS` 仍是"抹白时要逐字保留的字符"，那是**保长度/行数**的事，与切行是两回事。）
+_MD_LINE_RE = re.compile(r"[^\r\n]*(?:\r\n|[\r\n])")
+_MD_EOL = "\r\n"
+# `str.splitlines` 比 markdown 多认的那几个——只用来判断能否走 `splitlines` 快路，见 `_split_md_lines`。
+_FAKE_EOL_RE = re.compile("[" + re.escape("".join(sorted(_LINEBREAK_CHARS - set(_MD_EOL)))) + "]")
+
+
+def _split_md_lines(text: str) -> list[str]:
+    """按 markdown 口径切行、**保留行尾**（`"".join(_split_md_lines(t)) == t` 恒成立）。见 `_MD_LINE_RE`。
+
+    绝大多数页一个"伪行分隔符"也没有，此时 `str.splitlines(keepends=True)` 与本口径**逐字等价**且
+    快得多（C 实现，正则 findall 比不了）——先一次 C 级扫描筛掉，只给真含这些字符的页走慢路。
+    """
+    if _FAKE_EOL_RE.search(text) is None:
+        return text.splitlines(keepends=True)
+    lines = _MD_LINE_RE.findall(text)
+    consumed = sum(map(len, lines))
+    if consumed < len(text):
+        lines.append(text[consumed:])  # 末行无行尾
+    return lines
+
+
+def _blank_run(text: str) -> str:
+    """把一段文本抹成**等长空白**：行分隔符逐字留下，其余字符一律换成空格。
+
+    注释豁免（`strip_html_comments`）与代码豁免（`mask_code_spans`）共用这一条"抹"的定义——
+    两处各写一份，迟早会有一处忘了保行分隔符，把长度/行数三保悄悄破掉。
+    """
+    return _NON_LINEBREAK_RE.sub(" ", text)
+
+
 def _blank_comment(match: re.Match[str]) -> str:
-    """把一段注释抹成**等长空白**：行分隔符逐字留下，其余字符一律换成空格。"""
-    return "".join(c if c in _LINEBREAK_CHARS else " " for c in match.group(0))
+    return _blank_run(match.group(0))
 
 
 def strip_html_comments(text: str) -> str:
@@ -154,6 +196,238 @@ def strip_html_comments(text: str) -> str:
     静默吞掉，把"漏报断链"伪装成"通过"——门禁宁可多报也不能少报。
     """
     return _HTML_COMMENT_RE.sub(_blank_comment, text)
+
+
+# 围栏代码块的**开栏**：行首（列 0，不许前导空白）连续 ≥3 个反引号或波浪号 + **渲染器认得的**
+# info string。**只认缩进 0**，理由见 `mask_code_spans` 的「缩进」一节——不是懒，是渲染器在缩进
+# 1–3 上不自洽。
+#
+# info string **不是随便写什么都算代码**（评审修复，实测）：python-markdown 的 `FENCED_BLOCK_RE`
+# 只认 `{attrs}` 或 `.?lang`（`[\w#.+-]*`，可再带 `hl_lines="…"`）。于是 `~~~text/plain`、
+# `~~~py(3)`、`~~~lang:py`、`~~~json 示例` 在**渲染器眼里根本不是代码块**，其中的 `[[X]]` 照常
+# 成链；旧的 `[^\r\n]*` 把它们当代码抹掉 → **漏报**，断链能静默上线。故此处照着渲染器收窄。
+# （反引号那一族即使 info 非法也大多被「跨行行内 code」兜住、渲染不出链接，但那是巧合不是契约；
+#  两族一律按渲染器口径，多报的那点噪音换的是"绝不漏报"。）
+# **Tab 与半角空格一视同仁**（评审修复，实测漏报）：渲染器的 `normalize_whitespace`(30) 先于
+# `fenced_code`(25) 跑，把 Tab 展成空格，故 ```` ```\t ```` 在它眼里是**合法开栏**。只认 `[ ]` 时扫描器
+# 认不出这个开栏，于是把它的**闭栏**当成下一个开栏——奇偶整体错位一格，随后一整段正文被当代码抹掉。
+# 这不是"多报"，是**漏报**：实测 ```` "```\t\nx\n```\n\n见 [[不存在的页]]\n\n```\ny\n```" ```` 里的真断链
+# 被 `check` 静默吃掉、退 0。闭栏那侧本就用 `.strip(" \t")` 认 Tab，此处补齐对称。
+_FENCE_OPEN_RE = re.compile(
+    r"^(`{3,}|~{3,})[ \t]*"
+    r"(?:\{[^\r\n]*\}"
+    r"|\.?[\w#.+\-]*[ \t]*(?:hl_lines=(?:\"[^\"\r\n]*\"|'[^'\r\n]*')[ \t]*)?)$"
+)
+
+
+def _mask_fenced_blocks(lines: list[str]) -> list[str]:
+    """把**闭合的**围栏代码块（含开闭栏两行）抹成等长空白。开闭栏须逐字对称，否则当作未闭合。
+
+    收/返**行列表**而非整串：调用方 `mask_code_spans` 随后还要逐行处理，切一次就够
+    （旧版 join 完再 `splitlines` 一遍，白切一趟）。
+    """
+    out = list(lines)
+    dead: set[str] = set()  # 已知"此后再无闭栏"的标记，见下方剪枝
+    i = 0
+    while i < len(lines):
+        m = _FENCE_OPEN_RE.match(lines[i].rstrip(_MD_EOL))
+        if m is None or m.group(1) in dead:
+            i += 1
+            continue
+        marker = m.group(1)
+        # 闭栏 = 与开栏**逐字相同**的标记（同字符、同长度、同在列 0），其后**只允许半角空格/Tab**。
+        # 这里**不能用裸 `.strip()`**（评审修复）：它连 NBSP、全角空格 U+3000 都吃，而渲染器要的是
+        # `[ ]*$`（Tab 已被 normalize_whitespace 展开成空格）。中文库里闭栏后顺手打个全角空格再常见
+        # 不过——旧口径当它闭合、把整块抹掉，渲染器却当普通正文照样成链，正是**漏报**。
+        close = None
+        for j in range(i + 1, len(lines)):
+            tail = lines[j].rstrip(_MD_EOL)
+            # 「其后只允许空格」自带「挡更长的同字符栏」：``` 开栏遇 ````` 时余下 `` 非空白 → 不闭合。
+            if tail.startswith(marker) and tail[len(marker) :].strip(" \t") == "":
+                close = j
+                break
+        if close is None:
+            # 未闭合 → **不抹**，整段原样参与扫描（宁可多报，不可漏报）。
+            # 同时记下这个标记：闭栏只往后找，第 i 行之后都没有，第 j>i 行之后更不会有——
+            # 没这条剪枝，一页里几个落单的围栏样式行就能把整趟扫描拖成 O(行数²)。
+            dead.add(marker)
+            i += 1
+            continue
+        for k in range(i, close + 1):
+            out[k] = _blank_run(lines[k])
+        i = close + 1
+    return out
+
+
+def code_span_wikilink(content: str) -> str | None:
+    """行内 code 的整段内容恰好是一条 `[[…]]` 时返回内部 raw，否则 `None`。
+
+    **渲染器的 code 兜底（`web/render._CodePathLinkTreeprocessor`）与扫描器的"不抹"例外
+    （`_mask_inline_code`）共用这一条判据**——两处各写一份，改了一处忘了另一处就立刻造出漂移：
+    页面上是链接、`check` 却不校验它，断链能静默上线。
+    """
+    match = WIKILINK_RE.fullmatch(content.strip())
+    return match.group(1) if match is not None else None
+
+
+def _mask_inline_code(line: str) -> tuple[str, bool]:
+    """把一行里**成对**反引号 run 之间的内容抹成等长空白。
+
+    返回 `(抹后的行, 是否留下了配不上对的 run)`。第二个值供调用方按**块**止损，见下。
+
+    **例外**：整段内容恰好是一条 `[[…]]` 的行内 code 不抹——渲染器对这种形状**有意**兜底成链接
+    （`code_span_wikilink`——渲染器的 code 兜底与此处**同一条**判据）。若把它一并抹掉，
+    就造出反向漂移：页面上是链接、`check` 却不校验它，断链能静默上线。
+
+    **反斜杠转义的反引号不是定界符**（评审修复，实测）：渲染器的 `BACKTICK_RE` 带 `(?<!\\\\)`，
+    故 `` 转义 \\`[[Foo]]\\` 后 `` 里的 `[[Foo]]` **照常成链**；旧版把那两个反引号当一对 code
+    定界符、把中间抹掉，正是**漏报**。按**奇偶**判定（`\\`` 是字面反引号；`\\\\`` 里的 `\\\\` 先被
+    吃成一个 `\\`、反引号照常开 code），与渲染器逐字对齐。
+
+    **未配对的 run → 本行余下不再抹、并告知调用方**：渲染器的配对是按**块**从左到右做的，一个
+    悬着的 run 会把其后所有配对整体错位一格。继续按行各配各的，就会抹掉渲染器明明成链的
+    `[[…]]`（实测 `"a ` b\\nc ` d [[Foo]] ` e"` 即是）。宁可多报。
+    """
+    out: list[str] = []
+    cursor = 0
+    n = len(line)
+    while cursor < n:
+        start = line.find("`", cursor)
+        if start < 0:
+            out.append(line[cursor:])
+            return "".join(out), False
+        out.append(line[cursor:start])  # run 之前的普通文本原样带过（漏了它就会吞字）。
+        backslashes = 0
+        while start - 1 - backslashes >= 0 and line[start - 1 - backslashes] == "\\":
+            backslashes += 1
+        if backslashes % 2 == 1:  # `\`` 是**字面**反引号，跳过它继续扫（同渲染器）
+            out.append("`")
+            cursor = start + 1
+            continue
+        run_end = start
+        while run_end < n and line[run_end] == "`":
+            run_end += 1
+        delim = line[start:run_end]
+        # 找**长度完全相同**的收尾 run（前后都不能再紧邻反引号，否则那是更长的 run）。
+        close = -1
+        probe = run_end
+        while probe < n:
+            hit = line.find(delim, probe)
+            if hit < 0:
+                break
+            after = hit + len(delim)
+            if line[hit - 1] != "`" and (after >= n or line[after] != "`"):  # hit>0 恒成立
+                close = hit
+                break
+            probe = hit + len(delim)
+        if close < 0:
+            out.append(line[start:])  # 未配对 run：本行余下原样，并让调用方停掉本块后续的抹。
+            return "".join(out), True
+        content = line[run_end:close]
+        keep = code_span_wikilink(content) is not None
+        out.append(delim + (content if keep else _blank_run(content)) + delim)
+        cursor = close + len(delim)
+    return "".join(out), False
+
+
+# `[[` 前有**奇数**个反斜杠 → 被转义，不是引用（`\[[X]]` 渲染器不成链、`\\[[X]]` 成链，已实测）。
+_ESCAPED_LINK_RE = re.compile(r"(?<!\\)((?:\\\\)*\\)\[\[")
+
+
+def _mask_escaped_links(text: str) -> str:
+    """把被反斜杠转义的 `[[` 抹成等长空白——**与"代码"无关**，故不塞进 `mask_code_spans`。
+
+    （放在那里会让 `mask_code_spans` 这个名字说谎：单独调它的人会莫名其妙地拿到转义语义，
+    而单独调 `strip_html_comments` 的人拿不到。转义属于扫描面预处理，归口 `link_scan_text`。）
+    """
+    return _ESCAPED_LINK_RE.sub(lambda m: m.group(1) + "  ", text)
+
+
+def mask_code_spans(text: str) -> str:
+    """把**代码里的** `[[…]]` 从链接扫描面上抹掉——等长空白，与 `strip_html_comments` 同契约。
+
+    围栏块 / 行内 code 里的 `[[…]]` 是**代码示例**，渲染后不成链接，不该产生断链违规、图谱边、
+    `lint.missing_entity`（进而喂进 `heal` 的 LLM 写路径）。`web/render.py` 的注释早写明了这条语义
+    （「围栏内本就不成链，扫描器也不该把代码示例算作引用」），但扫描器一直没兑现：`df[["a","b"]]`、
+    flint 规格里的 `[[1,2]]`、KaTeX 的 `x_{[[i]]}` 都会被扫成幽灵引用。
+
+    **本函数与 `strip_html_comments` 一样是长度、行数、列偏移三保的**：输出与输入逐字符一一对应。
+
+    ## 缩进：只认列 0 的围栏（有意收窄）
+
+    渲染器（python-markdown）对缩进 1–3 的围栏**行为不自洽**——实测 `   ```yaml` 当代码、
+    `   ``` `（无 info string）不当代码。既然无法对齐，就取**只认列 0**：缩进围栏一律当普通正文
+    继续扫描。代价是缩进在列表项里的围栏仍可能扫出幽灵引用（多报），这是有意接受的残余。
+
+    ## 长度：开闭栏逐字对称才算闭合
+
+    CommonMark 说闭栏 ≥ 开栏即可，python-markdown 不是（实测 ```` ``` ```` 开、`````` ````` `````` 闭**不**闭合）。
+    两边不一致的地方一律取**更严**的那档：闭栏必须与开栏同字符、同长度。任何不对称都当作未闭合。
+    闭栏之后**只允许半角空格/Tab**（不是任意空白）：全角空格 / NBSP 渲染器不认，详见
+    `_mask_fenced_blocks`。
+
+    ## info string：只认渲染器认的那几种
+
+    `~~~text/plain` / `~~~py(3)` / `~~~json 示例` 在渲染器眼里**不是代码块**（它的 lang 只收
+    `[\\w#.+-]*`），其中的 `[[X]]` 照常成链。故开栏正则跟着收窄，详见 `_FENCE_OPEN_RE` 上方。
+
+    ## 未闭合：原样保留，不吃到文末
+
+    同 `strip_html_comments` 对未闭合 `<!--` 的处置。让一个落单的围栏吞掉后文全部链接，是把漏报
+    伪装成通过——门禁宁可多报也不能少报。（渲染器同样不认未闭合围栏，此处顺带对齐。）
+
+    ## 行与空行：一律按 **markdown 的**口径，不按 Python 的
+
+    切行只认 `\r\n` / `\r` / `\n`（`_split_md_lines`），空行只认「全是半角空格/Tab」。两处都**不能**
+    图省事用 `str.splitlines` / 裸 `.strip()`：前者多认 `\v \f \x85 \u2028 …`，会在渲染器眼里的一行
+    中间切出围栏；后者把 NBSP / 全角空格行当空行，会提前重置下面的悬空 run 状态。两者都是**漏报**
+    （评审实测），不是多报。
+
+    ## 不做缩进代码块（有意）
+
+    四空格 / Tab 缩进块**不抹**。列表项的缩进续行与嵌套项在渲染器里是**正常成链**的（实测），
+    而裸 `^(?: {4}|\t)` 分不开二者——抹了就是把真链接静默吞掉。多报只是吵，漏报会让坏库一路绿灯。
+
+    ## 行内 code 逐行抹、但**一遇悬空 run 就停到块尾**
+
+    跨行的行内 code span 不识别（渲染器识别）。这**不是**天然的"宁可多报"——渲染器按**块**从左到右
+    配对，一个悬着的 run 会把其后所有配对整体错位一格，逐行各配各的反而会抹掉渲染器明明成链的
+    `[[…]]`（评审实测 `"a ` b\\nc ` d [[Foo]] ` e"`）。故一旦某行留下配不上对的 run，**本块余下
+    各行一律不抹**（空行 = 块边界，状态在此重置）。代价是那种块里的真代码示例仍会多报，有意接受。
+    """
+    lines = _mask_fenced_blocks(_split_md_lines(text))
+    out: list[str] = []
+    dangling = False  # 本块内是否已出现配不上对的反引号 run
+    for line in lines:
+        eol_at = len(line.rstrip(_MD_EOL))
+        body = line[:eol_at]
+        # 空行 = 块边界（渲染器的行内配对按块做），状态重置。**判据只认半角空格/Tab**
+        # （评审修复，实测漏报）：裸 `.strip()` 连 NBSP、全角空格 U+3000 都当空白，而渲染器的
+        # `(?<=\n) +\n` 只抹**半角空格**行——中文库里一行只打了个全角空格再常见不过，旧判据在那里
+        # 提前重置 dangling、把渲染器明明成链的 `[[…]]` 当行内 code 抹掉（实测
+        # `"a ` b\n\u3000\nc `x=[[A]]` d"` 渲染成链、扫描器抹掉）。Tab 已被 normalize_whitespace 展成空格。
+        if not body.strip(" \t"):
+            dangling = False
+            out.append(line)
+            continue
+        if dangling:
+            out.append(line)
+            continue
+        masked, dangling = _mask_inline_code(body)
+        out.append(masked + line[eol_at:])
+    return "".join(out)
+
+
+def link_scan_text(text: str) -> str:
+    """`[[…]]` 扫描的**单一预处理归口**：先抹整行 HTML 注释，再抹代码里的引用。
+
+    `check` / `graph` / IM 可点引用三处共用本函数——**不要各写一份**，否则「答案里算引用」与
+    「check 里算断链」两处会漂移（`im/reply.extract_wikilinks` 的 docstring 早写明了这条纪律）。
+
+    顺序不可换：注释在前（整行注释里可能注掉一整段围栏），代码在后；转义豁免最后一道，
+    它与前两者正交（`_mask_escaped_links`）。
+    """
+    return _mask_escaped_links(mask_code_spans(strip_html_comments(text)))
 
 
 @dataclass(frozen=True)

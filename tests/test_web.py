@@ -7455,3 +7455,77 @@ def test_render_py_untouched_by_flint_phase() -> None:
     low = src.lower()
     for forbidden in ("flint", "echarts", "vega", "chart"):
         assert forbidden not in low, f"render.py 不应引入 {forbidden}（决策P4.20-8：渲染只在前端）"
+
+
+# ---------- 扫描器 ↔ 渲染器口径对齐（§2.1） ----------
+#
+# `web/render.py` 自己写明了语义权威：「围栏内本就不成链，扫描器也不该把代码示例算作引用」。
+# 两边一旦分道扬镳就会出事：渲染器多认 → 页面上的链接 `check` 不校验（断链静默上线）；
+# 扫描器多认 → 幽灵断链，还会顺着 lint.missing_entity 喂进 heal 的 LLM 写路径。
+# 本表把每个形状的两边行为钉住，python-markdown 升级改了行为时这里先炸。
+
+# 比的是**成链的名字序列**、不是"有没有链接"（评审修复）：布尔判据看不见**错位**那一类漏报——
+# 渲染器成链 `[[Bar]]`、扫描器改成链 `[[Foo]]`，两边都"有链接"，表却是绿的。实证里 ```` ```\t ````
+# 那条正是这样溜过去的：一个认不出的开栏让奇偶整体错位一格，整段正文被当代码抹掉。
+_ALIGNED_SHAPES = [
+    ("裸引用", "正文 [[Foo]] 结束", ["Foo"]),
+    ("反引号围栏", "```python\nx = [[Foo]]\n```", []),
+    ("波浪围栏", "~~~\n[[Foo]]\n~~~", []),
+    ("开4闭4", "````\n[[Foo]]\n````", []),
+    ("未闭合围栏后", "```python\nx = 1\n\n后面 [[Foo]] 还在", ["Foo"]),
+    ("开3闭5不闭合", "```\n[[Foo]]\n`````", ["Foo"]),
+    ("行内code含引用", "看 `x = [[Foo]]` 这个", []),
+    ("行内code整段是引用", "看 `[[Foo]]` 这个", ["Foo"]),
+    ("双反引号", "看 ``x=[[Foo]]`` 这个", []),
+    ("未配对反引号", "单个 ` 反引号 [[Foo]] 后面", ["Foo"]),
+    ("转义单斜杠", r"转义 \[[Foo]] 不算", []),
+    ("转义双斜杠", r"转义 \\[[Foo]] 仍算", ["Foo"]),
+    ("嵌入形状", "图 ![[Foo]] 在这", ["Foo"]),
+    ("列表4空格续行", "- 一项\n\n    续行 [[Foo]] 在这", ["Foo"]),
+    # ↓ 三条"错位型漏报"护栏：布尔判据看不出来，故一并钉在这张表上。
+    ("开栏后跟Tab", "```\t\n[[Foo]]\n```\n\n见 [[Bar]]", ["Bar"]),
+    ("NBSP行不是空行", "a ` b\n\u00a0\nc `x=[[Foo]]` d", ["Foo"]),
+    ("全角空格行不是空行", "a ` b\n\u3000\nc `x=[[Foo]]` d", ["Foo"]),
+    ("伪行分隔符U+2028", "a\u2028```\u2028[[Foo]]\u2028```", ["Foo"]),
+    ("伪行分隔符换页符", "a\x0c```\x0c[[Foo]]\x0c```", ["Foo"]),
+]
+
+# 渲染结果里被**当成页面引用**的名字（命中 `a.wikilink` 与断链 `span.wikilink.broken` 都算——
+# 后者也说明渲染器把它解析成了引用，正是 `check` 该报断链的那一类）。
+_RENDERED_WIKILINK_RE = re.compile(r'class="wikilink[^"]*"[^>]*>([^<]*)<')
+
+
+@pytest.mark.parametrize("name,src,expected", _ALIGNED_SHAPES, ids=[s[0] for s in _ALIGNED_SHAPES])
+def test_wikilink_scanner_matches_renderer(kb, name, src, expected) -> None:
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+    from guanlan.web.render import render_markdown
+
+    write_page(kb, "wiki/concepts/Foo.md")
+    write_page(kb, "wiki/concepts/Bar.md")
+    rendered = _RENDERED_WIKILINK_RE.findall(render_markdown(src, kb / "wiki"))
+    scanned = WIKILINK_RE.findall(link_scan_text(src))
+    assert rendered == expected, f"{name}：渲染器行为变了"
+    assert scanned == expected, f"{name}：扫描器与渲染器不一致"
+
+
+_KNOWN_DIVERGENCES = [
+    # 缩进 1–3 的围栏：渲染器行为**随 info string 而变**（带 `yaml` 当代码、不带则不当），
+    # 无法对齐，故扫描器一律不抹 → 多报。多报只是吵，抹错了是把真链接静默吞掉。
+    ("缩进围栏带info", "   ```yaml\n   [[Foo]]\n   ```"),
+    # 闭栏比开栏短：python-markdown 认它闭合、CommonMark 不认。取更严的一档 → 多报。
+    ("开4闭3", "````\n[[Foo]]\n```"),
+]
+
+
+@pytest.mark.parametrize("name,src", _KNOWN_DIVERGENCES, ids=[s[0] for s in _KNOWN_DIVERGENCES])
+def test_known_scanner_renderer_divergences_are_over_report_only(kb, name, src) -> None:
+    """已知分歧必须**只在多报方向**：渲染器不成链、扫描器仍扫得到。
+
+    反过来（渲染器成链而扫描器看不见）就是漏报，断链能静默上线——那是不可接受的方向。
+    """
+    from guanlan.pages import WIKILINK_RE, link_scan_text
+    from guanlan.web.render import render_markdown
+
+    write_page(kb, "wiki/concepts/Foo.md")
+    assert "wikilink" not in render_markdown(src, kb / "wiki"), f"{name}：渲染器行为变了"
+    assert WIKILINK_RE.findall(link_scan_text(src)) == ["Foo"], f"{name}：分歧方向反了"
