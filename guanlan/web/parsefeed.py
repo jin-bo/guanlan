@@ -32,7 +32,7 @@ from ..imageio import (
     commit_md_with_images,
 )
 from ..imageio import _MD_IMAGE as _MD_IMAGE
-from ..rawio import raw_slug
+from ..rawio import apply_parsed_by, raw_slug
 
 __all__ = [
     "_BACKENDS",
@@ -72,9 +72,20 @@ def parse_upload(
         )
         return EXIT_USAGE
 
+    # 解析出身留痕（P5.2 §B′）：把实际生效的 backend 记进 parsed 产物的 frontmatter，晋级时随
+    # 正文一起进 `raw/`（`apply_origin` 只插 origin、保留其余键）。**读不到标记就不写**；写不进去
+    # 也不写——转换产物可能以 `---` 开头却不是合法 mapping（文档正文里的分隔线），那属正常输入，
+    # 不该让解析作业失败，留痕本就是尽力而为的元数据。
+    markdown = result.markdown
+    if result.backend:
+        try:
+            markdown = apply_parsed_by(markdown, result.backend)
+        except ValueError:
+            pass  # frontmatter 位置不是键值映射 → 放弃留痕，正文原样落盘
+
     # 图 + md 原子提交（共用归口，决策P4.6.1-4）：staging-swap → md 末步提交 → 失败回滚。parsed scratch：
     # overwrite=True 整盘替换（区别于 raw/ 默认不覆盖）。OSError 上抛 → worker 500。
-    code = commit_md_with_images(target, result.markdown, result.images, overwrite=True)
+    code = commit_md_with_images(target, markdown, result.images, overwrite=True)
     if code != EXIT_OK:
         return code
 

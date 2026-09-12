@@ -65,6 +65,7 @@ class ConvertResult:
     markdown: str  # 引用已重写为 images/<stem>/<stem>-<n>.<ext>
     images: tuple[ConvertedImage, ...] = ()  # 按 md 内首次出现序；无图 → 空 tuple
     skipped: int = 0  # 未准入/未搬运的图片引用数（原样保留），供命令壳 stderr 计数
+    backend: str | None = None  # 实际生效的转换后端（skill stderr `[done] backend=`）；读不到 → None
 
 
 @dataclass(frozen=True)

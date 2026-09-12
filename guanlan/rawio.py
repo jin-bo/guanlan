@@ -162,6 +162,54 @@ def check_text_admission(content: str) -> None:
         raise ValueError("raw/ 只收文本素材；检测到 NUL/控制字符。")
 
 
+PARSED_BY_KEY = "parsed_by"  # 解析后端留痕键（P5.2 §B′，见 docs/backlog/notes/sag-2026-09-反向评审.md §1.B）
+
+
+def _insert_meta_key(text: str, key: str, value: str, *, bad_block: str) -> str:
+    """把 `key: value` 按 provenance 规则注入 frontmatter 的**单一归口**。返回归一后的内容。
+
+    `apply_origin` / `apply_parsed_by` 两处共用，杜绝四分支逻辑两处漂移；`bad_block` 是各自的
+    报错文案（同一种损坏，两条调用路径对用户说的话不同）。四分支见 `apply_origin` 的 docstring。
+
+    **块按原 EOL 重出**（`eol=detect_eol(text)`，同 `remove._drop_slug_from_page` /
+    `provenance.stamp_raw_digest`）：不传则 CRLF 源会被切成「块 LF + 正文 CRLF」的混合体，且**已有
+    的 CRLF frontmatter 块会被静默改成 LF**——正是本模块开篇「读→改→写不许静默改用户行尾」要挡的。
+    """
+    eol = detect_eol(text)
+    block, body = split_frontmatter(text)
+    if block is None:  # ① 无块（含未闭合）→ 新建块、原文作 body
+        return dump_frontmatter({key: value}, text, eol=eol)
+    try:
+        meta = yaml.safe_load(block)
+    except yaml.YAMLError:
+        raise ValueError(bad_block) from None
+    if meta is None:
+        meta = {}  # 空块（`---\n---` / 纯空白 / `null`）→ 视作空映射、插入键（非坏块）
+    elif not isinstance(meta, dict):  # ④ 非 mapping（list / 标量）
+        raise ValueError(bad_block)
+    if key in meta:  # ③ 已有该键 → 永久保留、忽略传入值
+        return text
+    meta[key] = value  # ② 缺键 → 插入、重序列化（body 逐字保留）
+    return dump_frontmatter(meta, body, eol=eol)
+
+
+def apply_parsed_by(text: str, backend: str) -> str:
+    """把**实际生效的转换后端**记进 frontmatter `parsed_by`（P5.2 §B′）。返回归一后的内容。
+
+    为什么要记：`convert` 的分层兜底（mineru→marker→python）质量差一个数量级，而 `raw/` 不可变、
+    wiki 层从它长出来——不留痕就**没有任何字段能回答"这库里哪些页建在降级文本上"**。它与 `origin`
+    （来自哪个文件）、`raw_digest`（建自哪个版本）同属 provenance 家族，是其中"**怎么来的**"那一格。
+
+    三条边界（评审收敛）：**只记最终 backend**（不记降级链路 / 失败原因 / 状态机）；**读不到标记就
+    不写该字段、绝不猜**（见 `convert.parse_backend_marker`）；**对 `check` 不可见**——`check` 只扫
+    `wiki/`，`raw/` 上的键本就不参与校验，此处不必额外开口子。已有 `parsed_by` → 保留原值（同
+    `apply_origin` ③ 分支：晋级/覆盖不重载它表达"改写解析出身"）。
+    """
+    return _insert_meta_key(
+        text, PARSED_BY_KEY, backend, bad_block="frontmatter 损坏或非键值映射，无法记录解析后端。"
+    )
+
+
 def apply_origin(text: str, origin: str) -> str:
     """按 provenance 规则把 `origin` 注入 frontmatter（决策P4.6-10）。返回归一后的内容。
 
@@ -175,22 +223,12 @@ def apply_origin(text: str, origin: str) -> str:
     `origin` 一律作 YAML 标量经 `yaml.safe_dump` 写入，**绝不裸拼** `origin: <值>`——否则含
     `:`、引号、`#`、换行、前后空白的出处会生成坏 frontmatter（决策P4.6-10）。
     """
-    block, body = split_frontmatter(text)
-    bad_block = ValueError("parsed frontmatter 损坏或非键值映射，请在可写会话修正后再晋级。")
-    if block is None:  # ① 无块（含未闭合）→ 新建块、原文作 body
-        return dump_frontmatter({"origin": origin}, text)
-    try:
-        meta = yaml.safe_load(block)
-    except yaml.YAMLError:
-        raise bad_block from None
-    if meta is None:
-        meta = {}  # 空块（`---\n---` / 纯空白 / `null`）→ 视作空映射、插入 origin（非坏块）
-    elif not isinstance(meta, dict):  # ④ 非 mapping（list / 标量）
-        raise bad_block
-    if "origin" in meta:  # ③ 已有 origin → 永久保留、忽略传入值
-        return text
-    meta["origin"] = origin  # ② 缺 origin → 插入键、重序列化（body 逐字保留）
-    return dump_frontmatter(meta, body)
+    return _insert_meta_key(
+        text,
+        "origin",
+        origin,
+        bad_block="parsed frontmatter 损坏或非键值映射，请在可写会话修正后再晋级。",
+    )
 
 
 def _preserve_metadata(tmp: str, target: Path) -> None:

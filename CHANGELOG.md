@@ -7,6 +7,23 @@
 
 ### 新增
 
+- **`convert` 记下"这份源是被谁解析出来的"**（SAG 2026-09 反向评审 §1.B，决策P5.2-13）——`--backend auto` 是
+  mineru→marker→python 的分层兜底，三档质量差一个数量级，可实际用了哪一档此前**只在 stderr 里闪一下就没了**。
+  而 `raw/` 不可变、wiki 层从它长出来：一次静默降级到 python 兜底的版面错乱文本会被当作正典源，事后**没有任何
+  字段能回答"这库里哪些页建在降级文本上"**。现在落源时多一个 frontmatter 键 `parsed_by`。
+
+  - **只记最终 backend**，不记降级链路、失败原因、状态机，也不加产物缓存——那些服务的是"跨重启续跑"，观澜没有。
+  - **读不到标记就不写、绝不猜**：值取 skill stderr 末条 `[done] backend=<名>`，认行首、取末条。这不是跨仓契约
+    ——宿主与那个脚本随同一个 wheel 发布（`_skill_convert_script()` 只解析随包/仓库根），故无需版本兼容机制。
+  - **两个写点都覆盖**：CLI `convert` 直写 `raw/`；Web 在**解析期**写进 `workspace/parsed/` 产物，晋级时
+    `apply_origin` 只插 `origin`、其余键逐字保留（有专测钉死"晋级后 `parsed_by` 仍在"）。解析期**写不进去也不写**
+    ——转换产物可能以 `---` 开头却非合法映射（文档里的分隔线），那属正常输入，不该让解析作业失败。
+  - 与 `origin`（来自哪个文件）、`raw_digest`（建自哪个版本）同属 provenance 家族，补上"**怎么来的**"那一格；
+    对 `check` 不可见（`check` 只扫 `wiki/`）。`apply_origin` / `apply_parsed_by` 共用同一套四分支归口
+    （`_insert_meta_key`），该归口**按原 EOL 重出 frontmatter 块**（同 `remove` / `provenance` 的写侧口径）
+    ——顺手修掉 `apply_origin` 一直以来把 CRLF 源切成"块 LF + 正文 CRLF"、并把**已有的 CRLF frontmatter
+    块静默改成 LF** 的老毛病。
+
 - **`remove` 预览列出"谁链向这张摘要页"**（OpenKB 2026-09 反向评审 §1.B，对应其 `#198`
   `page_ops.pages_linking_to`）——撤回一个源之前，最该知道的是**撤完谁会悬链**，而此前预览只肯
   转嫁一句"撤回后请跑 `guanlan lint`"。现在预览多一段 `⚠ 入链页`，`--json` 多一个 `backlinks` 键。
@@ -29,6 +46,12 @@
     审计面，不该只出现在屏幕上。
 
 ### 修复
+
+- **上传端点先把整个文件读进内存、再判大小**（SAG 2026-09 反向评审 §1.A）——`POST /api/upload` 的 50 MiB 闸判在
+  `await file.read()` **之后**，于是一次注定 `400` 的请求也要先为超限体分配全量内存。改成只读 `上限+1` 字节，多读
+  的那一字节只用来判超限。**作用域说准**：进入端点前 multipart 已接收完毕并暂存（Starlette 超 1 MiB 即转存临时
+  文件），故这一改**不限制网络接收、也不限制临时磁盘占用**，它只消除端点内的那一次全量内存读取；测试断言的也只是
+  **端点读取尺寸**（记录 `read()` 实参的假 `UploadFile`），不断言内存或磁盘峰值——只断言结果的用例证明不了"没多读"。
 
 - **`SCHEMA.md` 模板与 skill 约定承诺了机器不支持的自定义页型**（OpenKB 2026-09 反向评审 §1.A）——
   模板原话是「新增类型也在此声明」、skill conventions 又说「任何本库可在 `SCHEMA.md` 中覆盖或补充」，

@@ -22,11 +22,12 @@ from guanlan.convert import (
     _skill_convert_script,
     convert_entrypoint,
     convert_to_markdown,
+    parse_backend_marker,
     run_convert,
 )
 from guanlan.errors import EXIT_OK, EXIT_USAGE
 from guanlan.pages import split_frontmatter
-from guanlan.rawio import MAX_RAW_BYTES, apply_origin, find_source_page
+from guanlan.rawio import MAX_RAW_BYTES, apply_origin, apply_parsed_by, find_source_page
 
 
 def _mock_convert(md: str, images=()):
@@ -797,3 +798,119 @@ def test_collect_for_promotion_traversal_raises(tmp_path):
     src.write_text(body, encoding="utf-8")
     with pytest.raises(ValueError):
         imgmod.collect_for_promotion(body, source_md=src, root=root, stem="y")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 解析后端留痕 parsed_by（P5.2 §B′，见 docs/backlog/notes/sag-2026-09-反向评审.md §1.B）
+#   raw/ 不可变、wiki 层从它长出来 —— 不留痕就没有任何字段能回答
+#   「这库里哪些页建在降级文本上」。只记最终 backend；读不到标记就不写。
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("[done] backend=mineru\n", "mineru"),
+        ("[mineru] unavailable: no mineru\n[done] backend=marker\n", "marker"),
+        ("[done] backend=python", "python"),  # 无末换行
+        ("[done] backend=marker \n", "marker"),  # 行尾空白
+        ("", None),
+        ("Error: all backends exhausted:\n", None),
+        ("讲到 [done] backend=mineru 但不在行首\n", None),  # 只认行首，防日志正文误匹配
+        ("[done] backend=\n", None),  # 空值不算标记
+    ],
+)
+def test_parse_backend_marker_reads_last_or_nothing(stderr, expected):
+    """从 skill stderr 读回实际后端：认行首标记、取末条；读不到 → None（不猜）。"""
+    assert parse_backend_marker(stderr) == expected
+
+
+def test_parse_backend_marker_takes_last_when_repeated():
+    """多条标记取**最后一条**（skill 每次成功只打一条，取末条对将来多段输出也稳）。"""
+    assert parse_backend_marker("[done] backend=mineru\n[done] backend=python\n") == "python"
+
+
+def test_convert_to_markdown_carries_backend_from_stderr(tmp_path, monkeypatch, kb):
+    """内核把 stderr 里的后端标记挂上 `ConvertResult.backend`（stdout 只有产物路径）。"""
+    src = _src(tmp_path)
+    fake = _fake_run(
+        "# 转换产物\n", stderr="[mineru] unavailable: x\n[done] backend=marker\n"
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    result = convert_to_markdown(src, stem="报告", backend="auto", cwd=kb)
+    assert result.backend == "marker"
+
+
+def test_convert_to_markdown_backend_none_without_marker(tmp_path, monkeypatch, kb):
+    """stderr 无标记（老脚本 / 输出变形）→ `backend is None`，调用方据此不写字段。"""
+    src = _src(tmp_path)
+    monkeypatch.setattr(subprocess, "run", _fake_run("# 转换产物\n", stderr="随便什么日志\n"))
+
+    assert convert_to_markdown(src, stem="报告", backend="auto", cwd=kb).backend is None
+
+
+def test_run_convert_stamps_parsed_by_after_origin(tmp_path, monkeypatch, kb):
+    """落源时把实际后端写进 frontmatter：`origin` 在前、`parsed_by` 在后，YAML 安全。"""
+    src = _src(tmp_path)
+    monkeypatch.setattr(
+        convmod,
+        "convert_to_markdown",
+        lambda *a, **k: ConvertResult(markdown="# 标题\n正文。\n", backend="python"),
+    )
+
+    assert run_convert(src, root=kb, origin="src://x") == EXIT_OK
+    block, body = split_frontmatter((kb / "raw" / "报告.md").read_text(encoding="utf-8"))
+    assert yaml.safe_load(block) == {"origin": "src://x", "parsed_by": "python"}
+    assert body == "# 标题\n正文。\n"  # 正文逐字保留
+
+
+def test_run_convert_omits_parsed_by_without_marker(tmp_path, monkeypatch, kb):
+    """读不到后端标记 → **不写** `parsed_by`（绝不猜），origin 照常。"""
+    src = _src(tmp_path)
+    monkeypatch.setattr(convmod, "convert_to_markdown", _mock_convert("# 标题\n正文。\n"))
+
+    assert run_convert(src, root=kb, origin="src://x") == EXIT_OK
+    block, _ = split_frontmatter((kb / "raw" / "报告.md").read_text(encoding="utf-8"))
+    assert yaml.safe_load(block) == {"origin": "src://x"}
+
+
+def test_run_convert_keeps_converter_own_parsed_by(tmp_path, monkeypatch, kb):
+    """产物自带 `parsed_by` → 保留原值（同 origin ③ 分支，不重载它表达"改写解析出身"）。"""
+    src = _src(tmp_path)
+    monkeypatch.setattr(
+        convmod,
+        "convert_to_markdown",
+        lambda *a, **k: ConvertResult(
+            markdown="---\nparsed_by: 手工\n---\n正文。\n", backend="python"
+        ),
+    )
+
+    assert run_convert(src, root=kb, origin="src://x") == EXIT_OK
+    block, _ = split_frontmatter((kb / "raw" / "报告.md").read_text(encoding="utf-8"))
+    assert yaml.safe_load(block)["parsed_by"] == "手工"
+
+
+@pytest.mark.parametrize("backend", ["mineru", "marker", "python"])
+def test_apply_parsed_by_is_yaml_safe_for_all_backend_names(backend):
+    """三个后端名过 `yaml.safe_dump` 单一归口往返一致（绝不裸拼 `parsed_by: <值>`）。"""
+    block, body = split_frontmatter(apply_parsed_by("正文。\n", backend))
+    assert yaml.safe_load(block) == {"parsed_by": backend}
+    assert body == "正文。\n"
+
+
+def test_apply_parsed_by_rejects_non_mapping_block():
+    """frontmatter 位置是 list/标量 → ValueError（不静默当 body、不插坏块；同 apply_origin ④）。"""
+    with pytest.raises(ValueError, match="无法记录解析后端"):
+        apply_parsed_by("---\n- a\n- b\n---\n正文。\n", "marker")
+
+
+@pytest.mark.parametrize("apply", [lambda t: apply_origin(t, "src://x"), lambda t: apply_parsed_by(t, "marker")])
+def test_provenance_injection_keeps_crlf(apply):
+    """CRLF 源注入 provenance 后**整份仍 CRLF**：块按原 EOL 出（同 remove / provenance 的写侧口径）。
+
+    不传 `eol=` 时两处都会把 CRLF 文件切成「块 LF + 正文 CRLF」的混合体，且**已有的 CRLF
+    frontmatter 块会被静默改成 LF**——正是 rawio 开篇「读→改→写不许静默改用户行尾」要挡的。
+    """
+    assert "\n" not in apply("# 标题\r\n\r\n正文。\r\n").replace("\r\n", "")  # 无块 → 新建
+    assert "\n" not in apply("---\r\ntitle: t\r\n---\r\n正文。\r\n").replace("\r\n", "")  # 有块 → 插键
