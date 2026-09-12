@@ -415,6 +415,37 @@ def test_web_defaults_module_is_a_dependency_free_leaf():
     assert proc.returncode == 0, proc.stderr
 
 
+def test_im_parser_touches_neither_the_sdk_nor_the_host_module():
+    """建 `guanlan im` 的 parser 必须**既不**拉平台 SDK、**也不**拉 `guanlan.im.server`。
+
+    两条断言缺一不可：`im.server` 拉 agentao + anyio（`cli.py` 注释实测模块数 177 → 242），
+    是本守卫真正要挡的"宿主提前导入"；而 `import guanlan.im.server` 本身**不会**带起
+    `lark_oapi`（适配器把平台 SDK 留在工厂里按需 import），所以只断 `lark_oapi` 是空守卫——
+    宿主被提前导入时它照样绿。形状同上面两条 mcp/web 叶子守卫。
+
+    **不塞 `sys.modules['lark_oapi'] = None` 那种哨兵**：塞了之后"`lark_oapi` 不在 sys.modules"
+    永真（哨兵自己就是 None、被任何 `is not None` 过滤掉），而真正的漏法——工厂外某处
+    `try: import lark_oapi / except ImportError: ...`——照样静默通过。裸断即可：CI 两个 im extra
+    都装（见 CLAUDE.md），真有顶层 import 时 `lark_oapi` 会实打实出现在 sys.modules 里。
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys;"
+        "import guanlan.im.defaults as d;"
+        "from guanlan.cli import build_parser;"
+        "a = build_parser().parse_args(['im', '--platform', 'feishu']);"
+        # 默认值取自零依赖叶子 `im/defaults.py`（同两条兄弟守卫）：只断 platform 是空断言，
+        # 它就是命令行原样回读，parser 从哪儿取的默认值根本没被覆盖到。
+        "assert (a.platform, a.max_conversations) == ('feishu', d.DEFAULT_MAX_CONVERSATIONS);"
+        "assert 'lark_oapi' not in sys.modules;"
+        "assert 'guanlan.im.server' not in sys.modules"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_p3_dispatch_end_to_end(tmp_path):
     """三命令经 main 真正分发到各 entrypoint：在 init 出的库上各自退 0。"""
     from guanlan.cli import main

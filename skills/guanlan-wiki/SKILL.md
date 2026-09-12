@@ -14,7 +14,8 @@ description: >
 
 > 默认约定（页面类型、frontmatter、命名、index/log 格式、页面模板、矛盾标记）见
 > [`references/conventions.md`](references/conventions.md)，**按需载入**。本库可在根级
-> `SCHEMA.md` 中**覆盖**这些默认；行为硬约束见根级 `AGENTAO.md`。
+> `SCHEMA.md` 中**覆盖**这些默认（**合法 `type` 集与四个目录除外——那是 `check`/`reindex` 硬编码的，
+> 覆盖不了**，见 conventions §页面类型）；行为硬约束见根级 `AGENTAO.md`。
 
 ## 三层架构
 
@@ -56,7 +57,7 @@ description: >
 1. **读源 + 建上下文 + 查路由**：
    - 读 `raw/` 的 `.md` 源；路径按 wrapper 给出的原样使用，不替换其中的引号/空格/CJK 字符。
    - 读 `wiki/index.md` 与 `wiki/overview.md`。
-   - **先查根级 `SCHEMA.md`**：本库若定义了自定义页面类型或目录（如 `论文/` `模型/` `数据集/`），按它路由；未给更具体去处时才回落默认 `entities/` `concepts/`。SCHEMA.md 是路由权威。
+   - **先查根级 `SCHEMA.md`**：读本库的领域边界、口径、标签词表与命名偏好，据此判断该建哪几页、算实体还是概念。**但页型与目录只有内置那四种**（`sources/ entities/ concepts/ syntheses/`），`SCHEMA.md` **改不了**：合法 `type` 集硬编码在 `guanlan check` 里，自造 `type`（如 `论文` `模型` `数据集`）会被判 `frontmatter.bad_type` 并**阻断本次写入**，落在四目录之外的页 `reindex` 也不会登记进 `index.md`。领域细分走 `tags` 或正文小节——详见 `references/conventions.md` §目录结构。
 2. 在 `wiki/sources/<slug>.md` 写**摘要页**（slug = 同源文件名 kebab-case；`type: source`）。
    - **选择性保留承载知识的嵌图**（流程图/架构图/数据流图、关键表格或图表截图等），丢弃装饰图（logo/分隔线/版式件）——编译而非全量搬运。**只引不拷**、`../../raw/images/<slug>/<文件名>` 路径口径、`alt` 写法（vision 看图 / 无 vision 据上下文推断）详见 conventions §图片引用。实体/概念页同理。
    - **新综合**的关系 / 流程 / 状态 / 架构图可**直接写 ` ```mermaid ` 围栏块**（标准 DSL，无需外部画图工具；Web 端渲染、CLI 回退源码）——详见 conventions §图表（mermaid 直绘）。区别于上一条：`raw/` 源里**已有**的插图仍按图片引用，**别重画成 mermaid**。
@@ -101,7 +102,7 @@ description: >
 把**高频缺失实体**（被 ≥2 页引用却无页的断链，即 `lint.missing_entity`）一次性物化成内容页。wrapper 已把本批**目标名 + 各自引用页清单**算好喂进 prompt（确定性事实，你不必自己找谁引用了它），你只需对每个目标：
 
 1. **只读所列引用页**与 `wiki/index.md` 建上下文（别读全库；目标名已是归一键，可直接作文件名）。
-2. **先判实体还是概念**，定目录 `<dir>`：实体（人物/组织/模型/系统）→ `entities/`；概念（方法/理论/术语、**算法/架构/训练技巧**等）→ `concepts/`；拿不准当实体。（本库若 `SCHEMA.md` 给了更具体去处则从它，但 heal 新建只允许落 `entities/`∪`concepts/`，自定义目录请走 ingest。）
+2. **先判实体还是概念**，定目录 `<dir>`：实体（人物/组织/模型/系统）→ `entities/`；概念（方法/理论/术语、**算法/架构/训练技巧**等）→ `concepts/`；拿不准当实体。（`SCHEMA.md` 只影响"算实体还是概念"的口径，改不了这两个目录——没有第三个可落之处。）
 3. 若上下文**足以确认该目标值得建页**，按决定树物化（建页一律落第 2 步定的 `<dir>/`）：
 
    ```

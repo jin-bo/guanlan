@@ -23,7 +23,7 @@ import argparse
 import json
 import shutil
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -31,6 +31,7 @@ import yaml
 
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .gate import _trusted_sources  # 读衍生页可信 sources 的单一归口（坏/缺 → None）
+from .graph import build_graph  # 入链清单的单一归口（同 check/lint/heal 的解析表）
 from .pages import iter_pages, load_page, split_frontmatter
 from .paths import require_kb_root
 from .rawio import (  # slug 归一 + 逐字读写（避免半写、不静默改行尾）同口径
@@ -80,6 +81,7 @@ class RemovePlan:
     drop_slug: list[DropSlug]  # 多源页待摘 slug
     orphans: list[str]  # 独源衍生页（advisory，一期不删；相对库根 posix）
     index_lines: list[str]  # 待删的 index.md 登记行原文（通常 0/1 条）
+    backlinks: list[str] = field(default_factory=list)  # 入链页：撤回后将悬链（advisory，不改）
 
 
 def _resolve_slug(src: str) -> str:
@@ -150,6 +152,48 @@ def _plan_index_lines(wiki: Path, slug: str) -> list[str]:
     return removed
 
 
+def _backlink_pages(root: Path, slug: str) -> list[str]:
+    """反扫「谁 `[[链向]]` 这张摘要页」——撤回后会悬链的页（相对库根 posix，排自环、去重排序）。
+
+    **复用 `graph.build_graph` 已解析的边**（与 check/lint/heal 同一张解析表，故别名 / fold 变体
+    链接一样算数），不新写第二套反链逻辑。**不用 `compute_backlinks`**：它只出入链**计数**
+    （`dict[str, int]`），拿不到页面清单。摘要页不在盘上（只剩 `raw/`）→ 图里无此节点 → 空列表。
+
+    **按节点 id（小写 stem）定位目标、不拿路径字面比**：`_locate` 用的是 `Path.exists()`，在大小写
+    不敏感的文件系统（macOS/Windows）上 `remove foo` 照样能定位到盘上的 `sources/Foo.md`，而
+    `n.path == "wiki/sources/foo.md"` 字面比会落空 → 静默报"无入链"，恰好瞒掉本功能唯一要说的事。
+
+    **同-stem 歧义（目标侧）一律退回空清单**（docs/P3.9 §7 评审发现4 点名的那道）：`sources/<slug>`
+    与 `entities/<slug>` 同 stem 时二者共用 `Node.id`，入链归属不到具体一页；且此时撤走摘要页后
+    `[[<slug>]]` 仍被同名页兜住、**根本不会悬链**，照报只会是假告警。退空即回落到"跑 `guanlan lint`
+    复核全库断链"那条兜底（`format_plan` 末尾那句一直在）。
+
+    **同-stem 歧义（来源侧）反过来：宁可多列、绝不少列。** 两张链者页同 stem（`concepts/bar` 与
+    `entities/bar`）时它们也共用 `Node.id`，`{id: path}` 只会留下其中一条 → 另一条**静默漏报**，而
+    漏报恰好瞒掉本功能唯一要说的事。故按 id 反查出**全部**同 id 的页一并列出：多列一页人一眼可辨，
+    少列一页无人察觉（目标侧退空是因为那种情形下"不会悬链"是确定的，与此处不同）。
+
+    **已知过报**：若别的内容页把 `<slug>` 声明成 `aliases`，撤走摘要页后 `[[<slug>]]` 会被该别名接管、
+    并不悬链，而这里照列。此撞名本身已被 `check` 判 `aliases.collides_stem`（见 `pages.
+    _base_resolution_index`），属库已违规的状态，不为它再扫一遍全库别名表。
+
+    代价是整库再建一次图（`_scan_derivatives` 已扫过一遍 frontmatter）。`remove` 是一次性的人发起
+    命令、默认先出预览，这点重复可接受；**不**为它给 `build_graph` 开预加载入口（那是另一件事）。
+    """
+    target_id = slug.lower()  # Node.id = 小写 stem，与 build_graph 的寻址口径同基。
+    g = build_graph(root / "wiki")
+    owners = [n.path for n in g.nodes if n.id == target_id]
+    # len != 1 → 图里无此节点（摘要页不在盘上）或同-stem 歧义；非 sources/ 下 → 同名页不是本摘要页。
+    if len(owners) != 1 or not owners[0].startswith("wiki/sources/"):
+        return []
+    linkers = {  # 早退之后再算，源页不在盘上时不白扫全库边。
+        e.source
+        for e in g.edges
+        if e.resolved and e.target == target_id and e.source != target_id
+    }
+    return sorted(n.path for n in g.nodes if n.id in linkers)
+
+
 def run_remove_result(root: Path, slug: str) -> RemovePlan:
     """算一次撤回的 plan。**纯函数、只读、不写盘**（仿 `reindex.run_reindex` / `heal.run_heal_result`）。"""
     root = Path(root)
@@ -159,7 +203,13 @@ def run_remove_result(root: Path, slug: str) -> RemovePlan:
     drops, orphans = _scan_derivatives(root, slug)
     index_lines = _plan_index_lines(root / "wiki", slug)
     return RemovePlan(
-        ok=True, slug=slug, relocate=relocate, drop_slug=drops, orphans=orphans, index_lines=index_lines
+        ok=True,
+        slug=slug,
+        relocate=relocate,
+        drop_slug=drops,
+        orphans=orphans,
+        index_lines=index_lines,
+        backlinks=_backlink_pages(root, slug),
     )
 
 
@@ -251,6 +301,7 @@ def _execute(root: Path, plan: RemovePlan) -> Path:
             for d in plan.drop_slug
         ],
         "orphaned": list(plan.orphans),  # 独源孤儿（未改动）——记入审计/blast-radius，非恢复所需
+        "backlinks": list(plan.backlinks),  # 入链页（未改动）——同属 blast-radius，二期 restore 的复核面
         "index_lines_removed": list(plan.index_lines),
     }
     # 原子写：半写的恢复配方会让二期 restore 无法解析 JSON；新建文件下失败则不残留半截。
@@ -279,6 +330,7 @@ def format_plan(plan: RemovePlan, *, executed: bool, json_output: bool) -> str:
                 "drop_slug": [asdict(d) for d in plan.drop_slug],
                 "orphans": list(plan.orphans),
                 "index_lines": list(plan.index_lines),
+                "backlinks": list(plan.backlinks),
             },
             ensure_ascii=False,
             indent=2,
@@ -296,9 +348,13 @@ def format_plan(plan: RemovePlan, *, executed: bool, json_output: bool) -> str:
     if plan.orphans:
         out.append("    ⚠ 独源孤儿（advisory，一期不删——如需删留未来 prune-orphans）：")
         out.extend(f"        {o}" for o in plan.orphans)
+    if plan.backlinks:
+        # 措辞对预览/已执行两态都成立（`executed=True` 时链接已经悬空，不能只说"将"）。
+        out.append("    ⚠ 入链页（指向本摘要页的 `[[链接]]` 撤回后即悬空，advisory——这些页一字不改）：")
+        out.extend(f"        {b}" for b in plan.backlinks)
     if plan.drop_slug:
         out.append("    注：被摘 slug 的多源页正文可能仍含已撤源内容，建议重 `ingest` 复核。")
-    out.append("    注：撤回后请跑 `guanlan lint` 复核断链（remove 不自算入链）。")
+    out.append("    注：撤回后请跑 `guanlan lint` 复核全库断链（上面只列指向本摘要页的入链）。")
     return "\n".join(out)
 
 

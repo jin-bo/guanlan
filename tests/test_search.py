@@ -937,3 +937,19 @@ def test_singleflight_concurrent_corpus_builds_each_page_once(tmp_path: Path, mo
         list(ex.map(lambda _: cache.corpus(wiki), range(8)))
     # 每页恰建一次（共 15 页）；无锁时 8 路并发会重复 build。
     assert len(builds) == 15 and len(set(builds)) == 15
+
+
+def test_search_module_import_stays_graph_free():
+    """`import guanlan.search` 不得带起 `guanlan.graph`（`search.py` 两处函数级导入的不变量）。
+
+    `build_graph` 只在 backlink 重排那条路上按需用；把它挪回模块顶层，核心 import 面会静默变重，
+    而所有功能用例照样全绿——故用子进程锁住（同 `test_cli.py` 的三条叶子守卫）。
+    注意这条约束**只属 search**：`guanlan.cli` 顶层就 `from .graph import graph_entrypoint`，
+    `graph` 是它的正经依赖，不要把两者混成一条断言。
+    """
+    import subprocess
+    import sys
+
+    code = "import sys; import guanlan.search; assert 'guanlan.graph' not in sys.modules"
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr

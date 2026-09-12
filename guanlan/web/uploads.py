@@ -16,7 +16,7 @@ from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
 from agentao.media_limits import MAX_IMAGE_BYTES, MAX_IMAGES_PER_TURN
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 
 from ..errors import EXIT_OK
 from .rawfeed import _normalize_basename, _raw_slug
@@ -29,6 +29,19 @@ from .rawfeed import _normalize_basename, _raw_slug
 # 上传后该文件可作 chat **附件**（见 ChatBody.attachments / _augment_with_attachments）。
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 上传单文件大小上限（默认 50 MiB，> 投喂的 5 MiB；PDF 体量大）。
+
+
+async def read_upload_capped(file: UploadFile) -> bytes:
+    """读上传体，**最多读 `MAX_UPLOAD_BYTES + 1` 字节**——多出的那一字节只用来判超限。
+
+    裸 `await file.read()` 会把整个上传一次性读进内存**再**判大小：拖一个 5 GB 的文件进来，一次
+    注定 400 的请求也要先分配 5 GB。多读一字节即可判定"超了"，无需读完。
+
+    **作用域说准**（见 docs/backlog/notes/sag-2026-09-反向评审.md §1.A）：进入端点处理函数之前，
+    multipart **已接收完毕并暂存**（Starlette 的 `UploadFile` 超过 1 MiB 即转存临时文件），故本函数
+    **不限制网络接收、也不限制临时磁盘占用**，它只消除端点内的那一次全量内存读取。
+    """
+    return await file.read(MAX_UPLOAD_BYTES + 1)
 
 # 图像扩展名 → MIME（与 agentao 视觉通道同口径白名单，镜像 chahua `_EXT_TO_MIME`）：命中者除
 # `<attachment>` 标签外，还经 `arun(images=)` 传 base64 走视觉通道；其余扩展名只发标签（agent 自己

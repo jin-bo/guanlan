@@ -300,7 +300,7 @@ def test_dangling_after_remove_reported_by_lint_not_stripped(tmp_path):
 
     assert remove_entrypoint(root, src="foo", yes=True, json_output=False) == EXIT_OK
 
-    # remove 不自算入链、不 auto-strip：引用页正文一字不改
+    # remove 只把入链页列进 `backlinks` advisory、绝不 auto-strip：引用页正文一字不改
     assert referer.exists()
     assert _body_of(referer) == body_before
     # 撤回后断链由既有 lint 如实报出（口径不漂移）
@@ -416,3 +416,147 @@ def test_crlf_index_and_page_keep_crlf_through_remove(tmp_path):
     assert body.count(b"\n") == body.count(b"\r\n")  # 衍生页整份仍 CRLF（含重出的 frontmatter 块）
     assert _sources_of(page) == ["bar"]  # slug 已摘掉，值仍可解析
     assert "正文内容。\r\n".encode("utf-8") in body  # 正文逐字未动
+
+
+# ---------- 入链预览（撤回后会悬链的页，advisory、不改盘） ----------
+
+
+def test_preview_lists_pages_linking_to_the_source_page(tmp_path, capsys):
+    """预览列出「谁 `[[链向]]` 这张摘要页」——它们**不在** drop_slug/orphans 里，此前完全不可见。
+
+    链者的 `sources` 不含 foo（故不摘 slug、也不是独源孤儿），只是正文里引了 `[[foo]]`：
+    撤回后这条链就悬空。这正是决定撤不撤所需、而旧预览只肯转嫁给事后 `lint` 的信息。
+    """
+    root = _kb(tmp_path)
+    _raw(root, "foo")
+    _source_page(root, "foo")
+    linker = _page(root, "wiki/concepts/引用者.md", sources="['bar']", body="见 [[foo]] 的结论。")
+    before = linker.read_bytes()
+
+    plan = run_remove_result(root, "foo")
+    assert plan.backlinks == ["wiki/concepts/引用者.md"]
+    assert plan.drop_slug == [] and plan.orphans == []  # 既不摘 slug、也不是孤儿
+
+    assert remove_entrypoint(root, src="foo", yes=False, json_output=False) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "入链页" in out and "wiki/concepts/引用者.md" in out
+    assert linker.read_bytes() == before  # advisory：入链页一字不改
+
+
+def test_backlinks_go_through_the_resolution_table_not_a_string_match(tmp_path):
+    """入链认定复用 `build_graph` 的解析表：大小写变体算数、自环不算。
+
+    `[[FOO]]` 经 `link_stem` 归一后命中 `sources/foo.md`——若这里改成字面匹配 slug，就会漏掉
+    它（也会与 check/lint/heal 的口径分叉，正是 P3.8 要消的那类漂移）。
+    """
+    root = _kb(tmp_path)
+    _raw(root, "foo")
+    # 摘要页自己引自己：自环不该算入链（同 graph._inlink_counts 排自环的口径）。
+    _source_page(root, "foo", body="本页见 [[foo]]。")
+    _page(root, "wiki/entities/Bar.md", sources="['bar']", body="参见 [[FOO]]。")
+
+    assert run_remove_result(root, "foo").backlinks == ["wiki/entities/Bar.md"]
+
+
+def test_backlinks_ignore_wikilinks_inside_code_blocks(tmp_path):
+    """代码块里的 `[[foo]]` 不算入链（继承 #59 的 `link_scan_text` 口径，不新造第二套扫描）。"""
+    root = _kb(tmp_path)
+    _raw(root, "foo")
+    _source_page(root, "foo")
+    _page(
+        root,
+        "wiki/concepts/示例.md",
+        sources="['bar']",
+        body="写法示例：\n\n```markdown\n[[foo]]\n```\n",
+    )
+
+    assert run_remove_result(root, "foo").backlinks == []
+
+
+def test_backlinks_empty_when_only_raw_survives(tmp_path):
+    """摘要页不在盘上（只剩 `raw/<slug>.md`）→ 图里无此节点 → 空清单，且不炸。"""
+    root = _kb(tmp_path)
+    _raw(root, "foo")
+    _page(root, "wiki/concepts/引用者.md", sources="['bar']", body="见 [[foo]]。")  # 悬链，早已存在
+
+    plan = run_remove_result(root, "foo")
+    assert plan.ok is True and plan.relocate == ["raw/foo.md"]
+    assert plan.backlinks == []
+
+
+def test_backlinks_count_alias_links(tmp_path):
+    """别名链也算入链——docstring/CHANGELOG 都宣称"复用解析表故别名算数"，这条把它钉住。
+
+    只有大小写用例守着的话，把 `resolve_owner` 换成朴素 `link_stem` 相等仍会全绿，而别名链
+    （`[[富富报告]]` → `sources/foo.md`）会静静漏掉：那正是撤回后真会悬空的一条。
+    """
+    root = _kb(tmp_path)
+    _raw(root, "foo")
+    p = _source_page(root, "foo")
+    p.write_text(
+        p.read_text(encoding="utf-8").replace("tags: []", "tags: []\naliases: ['富富报告']"),
+        encoding="utf-8",
+    )
+    _page(root, "wiki/concepts/引用者.md", sources="['bar']", body="见 [[富富报告]]。")
+
+    assert run_remove_result(root, "foo").backlinks == ["wiki/concepts/引用者.md"]
+
+
+def test_backlinks_bail_out_on_same_stem_ambiguity(tmp_path):
+    """同-stem（`sources/foo` 与 `entities/foo`）→ 退空清单，不报假告警。
+
+    二者共用 `Node.id`（小写 stem），入链归不到具体一页；且此时撤走摘要页后 `[[foo]]` 仍被
+    实体页兜住、**根本不会悬链**。这正是 docs/P3.9 §7 评审发现4 点名的那道歧义——按路径找到
+    target 再拿 id 收边，会把本不悬链的页当成"将悬空"报出来。
+    """
+    root = _kb(tmp_path)
+    _raw(root, "foo")
+    _source_page(root, "foo")
+    _page(root, "wiki/entities/foo.md", type="entity", body="同 stem 的实体页。")
+    _page(root, "wiki/concepts/引用者.md", sources="['bar']", body="见 [[foo]]，我指的是实体页。")
+
+    plan = run_remove_result(root, "foo")
+    assert plan.ok is True and plan.backlinks == []  # 退空：全库断链仍由末尾那句 lint 兜底
+
+
+def test_backlinks_list_every_same_stem_linker_not_just_one(tmp_path):
+    """两张**链者**页同 stem（共用 `Node.id`）→ 两张都列出，绝不只留一张。
+
+    目标侧同-stem 退空是因为"那种情形下本就不会悬链"确定成立；来源侧没有这条护身符——
+    `{id: path}` 收边会让 `concepts/bar` 与 `entities/bar` 只剩其一，另一条**静默漏报**，
+    而漏报恰好瞒掉本功能唯一要说的事。宁可多列一页（人一眼可辨），不可少列一页。
+    """
+    root = _kb(tmp_path)
+    _raw(root, "foo")
+    _source_page(root, "foo")
+    _page(root, "wiki/concepts/bar.md", sources="['x']", body="见 [[foo]]。")
+    _page(root, "wiki/entities/bar.md", type="entity", sources="['x']", body="也见 [[foo]]。")
+
+    assert run_remove_result(root, "foo").backlinks == [
+        "wiki/concepts/bar.md",
+        "wiki/entities/bar.md",
+    ]
+
+
+def test_manifest_records_backlinks_as_blast_radius(tmp_path):
+    """`manifest.json` 记下入链页——与 `orphaned` 同属 blast-radius 审计面，不该只进屏幕。"""
+    root = _kb(tmp_path)
+    _raw(root, "foo")
+    _source_page(root, "foo")
+    _page(root, "wiki/concepts/引用者.md", sources="['bar']", body="见 [[foo]]。")
+
+    assert remove_entrypoint(root, src="foo", yes=True, json_output=False) == EXIT_OK
+    assert _manifest(root)["backlinks"] == ["wiki/concepts/引用者.md"]
+
+
+def test_json_contract_carries_backlinks(tmp_path, capsys):
+    """`--json` 契约加法：新增 `backlinks` 键，既有键不动。"""
+    root = _kb(tmp_path)
+    _raw(root, "foo")
+    _source_page(root, "foo")
+    _page(root, "wiki/concepts/引用者.md", sources="['bar']", body="见 [[foo]]。")
+
+    assert remove_entrypoint(root, src="foo", yes=False, json_output=True) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["backlinks"] == ["wiki/concepts/引用者.md"]
+    assert payload["orphans"] == [] and payload["drop_slug"] == []

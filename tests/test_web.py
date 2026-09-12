@@ -7529,3 +7529,142 @@ def test_known_scanner_renderer_divergences_are_over_report_only(kb, name, src) 
     write_page(kb, "wiki/concepts/Foo.md")
     assert "wikilink" not in render_markdown(src, kb / "wiki"), f"{name}：渲染器行为变了"
     assert WIKILINK_RE.findall(link_scan_text(src)) == ["Foo"], f"{name}：分歧方向反了"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P5.2 §B′ 解析后端留痕 + §1.A 上传限读
+#   见 docs/backlog/notes/sag-2026-09-反向评审.md §1.A / §1.B
+# ══════════════════════════════════════════════════════════════════════════════
+def test_parse_stamps_parsed_by_into_parsed_md(kb, monkeypatch) -> None:
+    """解析作业把实际后端写进 parsed 产物 frontmatter（Web 这条写点不能漏，否则只覆盖 CLI）。"""
+    import yaml
+
+    from guanlan.web import parsefeed
+
+    monkeypatch.setattr(
+        parsefeed,
+        "convert_to_markdown",
+        lambda src, *, stem, backend, cwd, progress=None: ConvertResult(
+            markdown="# 解析\n正文。\n", backend="marker"
+        ),
+    )
+    with TestClient(create_app(kb)) as client:
+        client.post("/api/upload", files={"file": ("报告.pdf", b"%PDF fake", "application/pdf")})
+        r = client.post("/api/parse", json={"upload": "workspace/uploads/报告.pdf"})
+        assert _wait_job(client, r.json()["job_id"])["exit_code"] == 0
+
+    block, body = _split_fm((kb / "workspace" / "parsed" / "报告.md").read_text("utf-8"))
+    assert yaml.safe_load(block) == {"parsed_by": "marker"}
+    assert body == "# 解析\n正文。\n"
+
+
+def test_parse_without_backend_marker_writes_no_frontmatter(kb, monkeypatch) -> None:
+    """读不到后端标记 → parsed 产物**一个字节都不多**（保持历史形状，绝不猜）。"""
+    from guanlan.web import parsefeed
+
+    monkeypatch.setattr(
+        parsefeed,
+        "convert_to_markdown",
+        lambda src, *, stem, backend, cwd, progress=None: ConvertResult(markdown="# 解析\n"),
+    )
+    with TestClient(create_app(kb)) as client:
+        client.post("/api/upload", files={"file": ("b.pdf", b"%PDF fake", "application/pdf")})
+        r = client.post("/api/parse", json={"upload": "workspace/uploads/b.pdf"})
+        assert _wait_job(client, r.json()["job_id"])["exit_code"] == 0
+
+    assert (kb / "workspace" / "parsed" / "b.md").read_text("utf-8") == "# 解析\n"
+
+
+def test_parse_survives_non_mapping_frontmatter_in_converted_output(kb, monkeypatch) -> None:
+    """产物以 `---` 开头却非键值映射（文档里的分隔线）→ 放弃留痕，**解析作业照样成功**。"""
+    from guanlan.web import parsefeed
+
+    body = "---\n- 一\n- 二\n---\n正文。\n"
+    monkeypatch.setattr(
+        parsefeed,
+        "convert_to_markdown",
+        lambda src, *, stem, backend, cwd, progress=None: ConvertResult(
+            markdown=body, backend="python"
+        ),
+    )
+    with TestClient(create_app(kb)) as client:
+        client.post("/api/upload", files={"file": ("c.pdf", b"%PDF fake", "application/pdf")})
+        r = client.post("/api/parse", json={"upload": "workspace/uploads/c.pdf"})
+        assert _wait_job(client, r.json()["job_id"])["exit_code"] == 0
+
+    assert (kb / "workspace" / "parsed" / "c.md").read_text("utf-8") == body
+
+
+def test_promote_preserves_parsed_by_and_adds_origin(client, kb) -> None:
+    """**晋级后 `parsed_by` 仍在**（`apply_origin` 只插 origin、其余键逐字保留）。
+
+    这条是 §1.B 的收尾断言：解析期写、晋级期必须带进 `raw/`——否则 Web 那条路径等于没记。
+    """
+    import yaml
+
+    src = _put_workspace(kb, "parsed", "p.md", "---\nparsed_by: mineru\n---\n正文。\n")
+    client.post("/api/raw", json={"name": "p", "source": src, "origin": "src://x"})
+    block, body = _split_fm((kb / "raw" / "p.md").read_text(encoding="utf-8"))
+    assert yaml.safe_load(block) == {"parsed_by": "mineru", "origin": "src://x"}
+    assert body == "正文。\n"
+
+
+# ── 上传限读（§1.A）：断言的是**端点读取尺寸**，不是内存/磁盘峰值 ────────────────────
+class _RecordingUpload:
+    """假 `UploadFile`：记下每次 `read(size)` 的实参——只断言结果的用例证明不了"没多读"。"""
+
+    filename = "oversized.pdf"
+
+    def __init__(self) -> None:
+        self.read_sizes: list[int] = []
+
+    async def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        return b"x" * max(0, size)
+
+
+def test_read_upload_capped_never_reads_more_than_limit_plus_one(monkeypatch) -> None:
+    """限读归口只要 `MAX_UPLOAD_BYTES + 1` 字节——多出的一字节只用来判超限。
+
+    上限临时调小（归口在调用时读模块全局）：证明"不为超限体全量分配"的用例自己先分配 50 MiB，
+    未免可笑，且断言与真实 50 MiB 字面值无关——它断的是"要了 上限+1、而不是裸 `read()` 的 -1"。
+    """
+    import anyio
+
+    from guanlan.web import uploads as uploadsmod
+
+    monkeypatch.setattr(uploadsmod, "MAX_UPLOAD_BYTES", 64)
+    upload = _RecordingUpload()
+    data = anyio.run(uploadsmod.read_upload_capped, upload)
+
+    assert upload.read_sizes == [65]  # 绝不是裸 read() 的 -1
+    assert len(data) == 65  # 多读的那一字节使 `len(data) > 上限` 成立
+
+
+def test_upload_endpoint_rejects_oversize_without_reading_all(kb, monkeypatch) -> None:
+    """端点对超限体仍 400，且**实测读取量有界**：体 200 字节、上限 64 → 只读进 65。
+
+    spy **包住真函数**而不是替掉它：若只记一个自己编的常数（`seen.append(上限+1)`），那条断言
+    无论端点怎么读都成立，等于什么也没测。上限两处都要调——`uploads` 侧供限读归口取值、`app`
+    侧供端点比大小。
+    """
+    from guanlan.web import app as appmod
+    from guanlan.web import uploads as uploadsmod
+
+    monkeypatch.setattr(uploadsmod, "MAX_UPLOAD_BYTES", 64)
+    monkeypatch.setattr(appmod, "MAX_UPLOAD_BYTES", 64)
+    real = appmod.read_upload_capped
+    seen: list[int] = []
+
+    async def spy(file):
+        data = await real(file)
+        seen.append(len(data))
+        return data
+
+    monkeypatch.setattr(appmod, "read_upload_capped", spy)
+    with TestClient(create_app(kb)) as client:
+        r = client.post("/api/upload", files={"file": ("big.pdf", b"%PDF" * 50, "application/pdf")})
+
+    assert r.status_code == 400
+    assert "上限" in r.json()["detail"]
+    assert seen == [65]  # 200 字节的体只读进 65：多出的一字节判超限，其余没碰

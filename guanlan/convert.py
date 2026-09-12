@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
@@ -48,7 +50,13 @@ from .imageio import (
 )
 from .ingest import run_ingest
 from .paths import require_kb_root
-from .rawio import apply_origin, atomic_write_raw, check_text_admission, safe_raw_target
+from .rawio import (
+    apply_origin,
+    apply_parsed_by,
+    atomic_write_raw,
+    check_text_admission,
+    safe_raw_target,
+)
 from .skill import bundled_skill_dir
 
 # skill `convert.py` 支持的后端（透传给 skill；格式白名单归口在 skill，不在此重复，决策P5.2-2/5）。
@@ -56,6 +64,24 @@ _BACKENDS = ("auto", "mineru", "marker", "python")
 
 # 同名已存在文案归口（早预检 + atomic_write_raw TOCTOU 回退两处共用，免改一处漏一处）。
 _RAW_EXISTS_MSG = "raw/{name} 已存在；改名（`--name`）或加 `--overwrite` 覆盖。"
+
+# skill `convert.py` 成功收尾时打在 **stderr** 的后端标记（`log(f"[done] backend={name}")`）。
+_DONE_BACKEND_RE = re.compile(r"^\[done\] backend=(\S+)[ \t]*$", re.MULTILINE)
+
+
+def parse_backend_marker(stderr: str) -> str | None:
+    """从 skill stderr 读回**实际生效的转换后端**；读不到 → `None`（不猜、调用方就不写该字段）。
+
+    为什么要读：`--backend auto` 是 mineru→marker→python 的**分层兜底**，质量差一个数量级，而
+    stdout 只留产物路径、分级日志全在 stderr——不读回来，"这份源是被谁解析出来的"就**永久丢失**
+    （见 docs/backlog/notes/sag-2026-09-反向评审.md §1.B）。
+
+    **这不是跨仓契约**：`_skill_convert_script()` 只解析安装态 `guanlan/_skill/` 或开发期仓库根
+    `skills/`，宿主与该脚本随同一个 wheel 发布；故无需版本兼容机制，按"**读不到就不写**"处理即可。
+    取**最后一条**匹配（skill 每次成功只打一条；取末条对将来多段输出也稳）。
+    """
+    matches = _DONE_BACKEND_RE.findall(stderr or "")
+    return matches[-1] if matches else None
 
 
 def _collect_and_rewrite_images(
@@ -189,9 +215,11 @@ def convert_to_markdown(
             raise ConvertError(f"skill 报告的产物路径不存在：{produced}")
         md_text = produced.read_text(encoding="utf-8", errors="replace")
         # 图片字节必须在 TemporaryDirectory 销毁前读入（决策P5.2.1-4）。
-        return _collect_and_rewrite_images(
+        result = _collect_and_rewrite_images(
             md_text, produced_md=produced, tmp_root=tmp_root, stem=stem
         )
+        # 实际生效的后端只在 stderr 里（stdout 只留产物路径）；读不到 → None、调用方不写该字段。
+        return replace(result, backend=parse_backend_marker(stderr))
 
 
 def _default_origin(src: Path, root: Path) -> str:
@@ -274,6 +302,8 @@ def run_convert(
     try:
         check_text_admission(result.markdown)  # 空/超限/控制字符 → ValueError（决策P5.2-6）。
         content = apply_origin(result.markdown, origin_value)  # provenance（YAML 安全、绝不裸拼）。
+        if result.backend:  # 解析出身留痕；读不到标记就不写（P5.2 §B′）。origin 在前、parsed_by 在后。
+            content = apply_parsed_by(content, result.backend)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_USAGE

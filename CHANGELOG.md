@@ -5,7 +5,65 @@
 
 ## [未发布]
 
+### 新增
+
+- **`convert` 记下"这份源是被谁解析出来的"**（SAG 2026-09 反向评审 §1.B，决策P5.2-13）——`--backend auto` 是
+  mineru→marker→python 的分层兜底，三档质量差一个数量级，可实际用了哪一档此前**只在 stderr 里闪一下就没了**。
+  而 `raw/` 不可变、wiki 层从它长出来：一次静默降级到 python 兜底的版面错乱文本会被当作正典源，事后**没有任何
+  字段能回答"这库里哪些页建在降级文本上"**。现在落源时多一个 frontmatter 键 `parsed_by`。
+
+  - **只记最终 backend**，不记降级链路、失败原因、状态机，也不加产物缓存——那些服务的是"跨重启续跑"，观澜没有。
+  - **读不到标记就不写、绝不猜**：值取 skill stderr 末条 `[done] backend=<名>`，认行首、取末条。这不是跨仓契约
+    ——宿主与那个脚本随同一个 wheel 发布（`_skill_convert_script()` 只解析随包/仓库根），故无需版本兼容机制。
+  - **两个写点都覆盖**：CLI `convert` 直写 `raw/`；Web 在**解析期**写进 `workspace/parsed/` 产物，晋级时
+    `apply_origin` 只插 `origin`、其余键逐字保留（有专测钉死"晋级后 `parsed_by` 仍在"）。解析期**写不进去也不写**
+    ——转换产物可能以 `---` 开头却非合法映射（文档里的分隔线），那属正常输入，不该让解析作业失败。
+  - 与 `origin`（来自哪个文件）、`raw_digest`（建自哪个版本）同属 provenance 家族，补上"**怎么来的**"那一格；
+    对 `check` 不可见（`check` 只扫 `wiki/`）。`apply_origin` / `apply_parsed_by` 共用同一套四分支归口
+    （`_insert_meta_key`），该归口**按原 EOL 重出 frontmatter 块**（同 `remove` / `provenance` 的写侧口径）
+    ——顺手修掉 `apply_origin` 一直以来把 CRLF 源切成"块 LF + 正文 CRLF"、并把**已有的 CRLF frontmatter
+    块静默改成 LF** 的老毛病。
+
+- **`remove` 预览列出"谁链向这张摘要页"**（OpenKB 2026-09 反向评审 §1.B，对应其 `#198`
+  `page_ops.pages_linking_to`）——撤回一个源之前，最该知道的是**撤完谁会悬链**，而此前预览只肯
+  转嫁一句"撤回后请跑 `guanlan lint`"。现在预览多一段 `⚠ 入链页`，`--json` 多一个 `backlinks` 键。
+
+  - **复用 `graph.build_graph` 已解析的边**，不新写第二套反链逻辑：别名（`aliases:` 里的名字）
+    与 fold 变体一样算数、大小写一样归一，代码块里的 `[[…]]` 一样不算（继承 `link_scan_text`
+    归口）。**没用 `compute_backlinks`**——它只出入链**计数**，拿不到页面清单。
+  - **同-stem 歧义显式退让**（决策P3.9-11）：`sources/foo` 与 `entities/foo` 共用 `Node.id`，
+    入链归不到具体一页，故一律退回空清单——那种情形下撤走摘要页后 `[[foo]]` 仍被同名页兜住、
+    本就不会悬链，照报只是假告警。这正是 决策P3.9-10 当初降级此项时点名的那道歧义。
+    目标节点**按 id 定位而非路径字面比**：否则在大小写不敏感的文件系统（macOS/Windows）上
+    `remove foo` 撤得动盘上的 `sources/Foo.md`、却静默报"无入链"。
+  - **来源侧同-stem 反过来：宁可多列、绝不少列。** 两张**链者**页同 stem（`concepts/bar` 与
+    `entities/bar`）也共用 `Node.id`，按 `{id: path}` 收边只会留下其中一张、另一张**静默漏报**
+    ——而漏报恰好瞒掉本功能唯一要说的事。故按 id 反查出全部同 id 的页一并列出（目标侧退空是因
+    为那种情形下"不会悬链"确定成立，来源侧没有这条护身符）。
+  - **advisory，不改盘**：入链页一字不动（决策8：断链只报不改，随后续资料自然消除）。
+    原提示里"（remove 不自算入链）"随之失实、已删；"撤回后跑 `lint` 复核全库断链"保留。
+    `backlinks` 同时记进 `.trash/<slug>@ts>/manifest.json`——与 `orphaned` 同属 blast-radius
+    审计面，不该只出现在屏幕上。
+
 ### 修复
+
+- **上传端点先把整个文件读进内存、再判大小**（SAG 2026-09 反向评审 §1.A）——`POST /api/upload` 的 50 MiB 闸判在
+  `await file.read()` **之后**，于是一次注定 `400` 的请求也要先为超限体分配全量内存。改成只读 `上限+1` 字节，多读
+  的那一字节只用来判超限。**作用域说准**：进入端点前 multipart 已接收完毕并暂存（Starlette 超 1 MiB 即转存临时
+  文件），故这一改**不限制网络接收、也不限制临时磁盘占用**，它只消除端点内的那一次全量内存读取；测试断言的也只是
+  **端点读取尺寸**（记录 `read()` 实参的假 `UploadFile`），不断言内存或磁盘峰值——只断言结果的用例证明不了"没多读"。
+
+- **`SCHEMA.md` 模板与 skill 约定承诺了机器不支持的自定义页型**（OpenKB 2026-09 反向评审 §1.A）——
+  模板原话是「新增类型也在此声明」、skill conventions 又说「任何本库可在 `SCHEMA.md` 中覆盖或补充」，
+  但合法 `type` 集硬编码在 `check` 里（`pages.VALID_TYPES`），`SCHEMA.md` **从不被解析**（决策P3.10-1）。
+  照做的后果实测有三：① 自定义 `type` 被判 `frontmatter.bad_type`，且该 kind 不在 `gate._WARNING_KINDS`
+  里 → **阻断写入**；② 落四目录之外的页 `reindex` 不登记，`health.index_missing_page` 不因跑 `reindex`
+  而消解；③ 复用既有目录时按目录登记进对应分区，index 分区与页自称的 `type` 不一致且无 advisory 兜底。
+  **修的是承诺、不是机制**：`examples/SCHEMA.md` 模板、`references/conventions.md` **以及 `SKILL.md` 本身**
+  都写明四种内置页型是全部，领域细分走 `tags` 或正文小节。`SKILL.md` 那处尤其要紧——ingest 第 1 步原话是
+  "本库若定义了自定义页面类型或目录（如 `论文/` `模型/` `数据集/`），按它路由……SCHEMA.md 是路由权威"，
+  那是 Agent **最先读到**的一句，照做即撞 `bad_type` 阻断。
+  可配置分类法仍属 E 轨、继续后置。**已 init 出的老库不会自动更新模板**，按需自行对齐。
 
 - **代码块里的 `[[…]]` 被扫成引用，一路污染到 `heal` 的 LLM 写路径**（反向评审 v0.6.11 §2.1，
   对应 llm_wiki `0013ca3`）——`WIKILINK_RE` 的扫描面此前只抹整行 HTML 注释，**不跟踪围栏代码块

@@ -101,6 +101,7 @@ from .uploads import (
     _classify_upload,
     _safe_upload_file,
     _safe_workspace_target,
+    read_upload_capped,
 )
 from .workspace import (
     _delete_workspace_scratch,
@@ -706,7 +707,7 @@ def create_app(
     @_writer_only(app.post("/api/upload"))  # reader 下不注册（上传是写，决策P4.9-2）
     async def upload(file: UploadFile = File(...)) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
-        data = await file.read()  # 网络接收不持锁（大文件不阻塞队列）
+        data = await read_upload_capped(file)  # 网络接收不持锁；只读到上限+1，不为超限体全量分配内存
         if not data:
             raise HTTPException(status_code=400, detail="空文件。")
         if len(data) > MAX_UPLOAD_BYTES:
