@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -117,10 +118,18 @@ async def collect(adapter: WeixinAdapter, *, count: int, extra_polls: int = 1) -
             got.append(m)
 
     task = asyncio.create_task(consume())
+    # **先烧 tick（快路径），烧完仍不够量再用真 sleep 续等。** 4000 次 `sleep(0)` 只花掉约 50 ms 墙钟
+    # （实测；本地这条路径 45 个 tick 就够），于是这个"预算"名为 4000 轮、实为几十毫秒——而每轮 poll
+    # 的游标落盘走 `anyio.to_thread` + fsync（理由同下面 extra_polls 那段），线程池在负载高的机器上排
+    # 一次队就能吃掉它，测试便随机空手而归。2026-09-12 CI 的 3.12 job 即如此红过一次，同一提交的
+    # 3.10/3.11 全绿。快路径保持原样（常见情形字节等价），只在烧穿预算后多给一段**真实时间**。
     for _ in range(4000):
         await asyncio.sleep(0)
         if len(got) >= count:
             break
+    deadline = time.monotonic() + 5.0  # 慢机兜底；正常路径永不进入
+    while len(got) < count and time.monotonic() < deadline:
+        await asyncio.sleep(0.005)
     for _ in range(extra_polls * 8):  # 再放几轮，让批次收尾的游标推进落地
         # **必须是真 sleep**：游标/context-token 落盘经 `anyio.to_thread`（§4.3 卸线程通则，
         # `write_json_atomic` 会 fsync），纯 `sleep(0)` 只让出一个 tick，等不到线程池回话，
