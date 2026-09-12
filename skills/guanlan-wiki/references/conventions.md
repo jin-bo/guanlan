@@ -1,7 +1,8 @@
 # 通用默认约定（conventions）
 
 > `guanlan-wiki` skill 的默认约定，**按需载入**。这些是 wiki-无关、可复用的默认；
-> 任何本库可在根级 `SCHEMA.md` 中**覆盖或补充**之（`SCHEMA.md` 优先）。
+> 任何本库可在根级 `SCHEMA.md` 中**覆盖或补充**之（`SCHEMA.md` 优先）——**但只限"写给 Agent 的约定"那一半**；
+> `check`/`reindex`/`health` 里硬编码的那几项（合法 `type` 集、必备 frontmatter 键……）`SCHEMA.md` 覆盖不了，见下节末。
 
 ## 页面类型
 
@@ -13,6 +14,10 @@
 | `synthesis` | query 回填的跨资料综述（**时点快照**，ingest 不级联改写其知识内容，详见〈页面模板〉synthesis 节） | `wiki/syntheses/` | `kebab-case` |
 
 子目录在首次写入对应类型页面时**自动创建**；空库 init 只生成 `index.md` / `log.md` / `overview.md`。
+
+> **这四种 `type` 值 `SCHEMA.md` 覆盖不了。** 合法 `type` 集硬编码在 `guanlan check` 里，写出第四种之外的 `type` 会被判 `frontmatter.bad_type` 并**阻断本次写入**；页落在四目录之外则 `reindex` 不会登记进 `index.md`。本库若要更细的分类，走 `tags` 或正文小节——**不要新造 `type` 值或新目录**。
+>
+> 一般规律：`SCHEMA.md` 覆盖的是**写给 Agent 的约定**（领域、口径、页面小节、标签词表……），**不是确定性检查器的规则**。凡 `check`/`reindex`/`health` 里硬编码的那几项——合法 `type` 集、必备 frontmatter 键（`title`/`type`/`tags`/`sources`/`last_updated`）、`last_updated` 的 `YYYY-MM-DD` 形、`aliases` 的形状、四目录↔index 分区映射——都**不随 `SCHEMA.md` 变**。
 
 ## frontmatter（统一，每页必带）
 

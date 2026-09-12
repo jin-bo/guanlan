@@ -5,7 +5,42 @@
 
 ## [未发布]
 
+### 新增
+
+- **`remove` 预览列出"谁链向这张摘要页"**（OpenKB 2026-09 反向评审 §1.B，对应其 `#198`
+  `page_ops.pages_linking_to`）——撤回一个源之前，最该知道的是**撤完谁会悬链**，而此前预览只肯
+  转嫁一句"撤回后请跑 `guanlan lint`"。现在预览多一段 `⚠ 入链页`，`--json` 多一个 `backlinks` 键。
+
+  - **复用 `graph.build_graph` 已解析的边**，不新写第二套反链逻辑：别名（`aliases:` 里的名字）
+    与 fold 变体一样算数、大小写一样归一，代码块里的 `[[…]]` 一样不算（继承 `link_scan_text`
+    归口）。**没用 `compute_backlinks`**——它只出入链**计数**，拿不到页面清单。
+  - **同-stem 歧义显式退让**（决策P3.9-11）：`sources/foo` 与 `entities/foo` 共用 `Node.id`，
+    入链归不到具体一页，故一律退回空清单——那种情形下撤走摘要页后 `[[foo]]` 仍被同名页兜住、
+    本就不会悬链，照报只是假告警。这正是 决策P3.9-10 当初降级此项时点名的那道歧义。
+    目标节点**按 id 定位而非路径字面比**：否则在大小写不敏感的文件系统（macOS/Windows）上
+    `remove foo` 撤得动盘上的 `sources/Foo.md`、却静默报"无入链"。
+  - **来源侧同-stem 反过来：宁可多列、绝不少列。** 两张**链者**页同 stem（`concepts/bar` 与
+    `entities/bar`）也共用 `Node.id`，按 `{id: path}` 收边只会留下其中一张、另一张**静默漏报**
+    ——而漏报恰好瞒掉本功能唯一要说的事。故按 id 反查出全部同 id 的页一并列出（目标侧退空是因
+    为那种情形下"不会悬链"确定成立，来源侧没有这条护身符）。
+  - **advisory，不改盘**：入链页一字不动（决策8：断链只报不改，随后续资料自然消除）。
+    原提示里"（remove 不自算入链）"随之失实、已删；"撤回后跑 `lint` 复核全库断链"保留。
+    `backlinks` 同时记进 `.trash/<slug>@ts>/manifest.json`——与 `orphaned` 同属 blast-radius
+    审计面，不该只出现在屏幕上。
+
 ### 修复
+
+- **`SCHEMA.md` 模板与 skill 约定承诺了机器不支持的自定义页型**（OpenKB 2026-09 反向评审 §1.A）——
+  模板原话是「新增类型也在此声明」、skill conventions 又说「任何本库可在 `SCHEMA.md` 中覆盖或补充」，
+  但合法 `type` 集硬编码在 `check` 里（`pages.VALID_TYPES`），`SCHEMA.md` **从不被解析**（决策P3.10-1）。
+  照做的后果实测有三：① 自定义 `type` 被判 `frontmatter.bad_type`，且该 kind 不在 `gate._WARNING_KINDS`
+  里 → **阻断写入**；② 落四目录之外的页 `reindex` 不登记，`health.index_missing_page` 不因跑 `reindex`
+  而消解；③ 复用既有目录时按目录登记进对应分区，index 分区与页自称的 `type` 不一致且无 advisory 兜底。
+  **修的是承诺、不是机制**：`examples/SCHEMA.md` 模板、`references/conventions.md` **以及 `SKILL.md` 本身**
+  都写明四种内置页型是全部，领域细分走 `tags` 或正文小节。`SKILL.md` 那处尤其要紧——ingest 第 1 步原话是
+  "本库若定义了自定义页面类型或目录（如 `论文/` `模型/` `数据集/`），按它路由……SCHEMA.md 是路由权威"，
+  那是 Agent **最先读到**的一句，照做即撞 `bad_type` 阻断。
+  可配置分类法仍属 E 轨、继续后置。**已 init 出的老库不会自动更新模板**，按需自行对齐。
 
 - **代码块里的 `[[…]]` 被扫成引用，一路污染到 `heal` 的 LLM 写路径**（反向评审 v0.6.11 §2.1，
   对应 llm_wiki `0013ca3`）——`WIKILINK_RE` 的扫描面此前只抹整行 HTML 注释，**不跟踪围栏代码块

@@ -16,7 +16,7 @@
 | `concept` | 方法/理论/术语等概念 | `TitleCase.md` |
 | `synthesis` | query 回填的跨资料综述 | `kebab-case` |
 
-<!-- 删掉本库用不到的类型；新增类型也在此声明。 -->
+> **上表四种就是机器认的全部页型。** `type:` 的合法值硬编码在 `guanlan check` 里，**自造新类型会被判为 `frontmatter.bad_type` 违规并阻断写入**（落在四目录之外的页 `reindex` 也不会登记进 `index.md`）。本库用不到的类型可以从上表删掉——那只是写给 Agent 的约定；**但领域细分请走 `tags` 或正文小节，不要造新的 `type` 值。**
 
 > `source` 页 frontmatter 上的 `raw_digest`（`'raw/<原文件名>@sha256:<hex>'`）是 **wrapper 托管的 provenance 字段**（P3.7）：ingest 后自动写、`guanlan audit` 复核后刷新，用于检测 source-drift（源被替换但 wiki 未重综合）。**人与 Agent 都勿手改**；`check` 对它不可见。
 
