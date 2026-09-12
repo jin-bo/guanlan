@@ -135,7 +135,9 @@ guanlan -C my-wiki remove raw/old-report.md --yes  # confirm and execute (move i
 |---|---|
 | `src` | Source id: `<slug>` / `raw/<slug>.md` / `wiki/sources/<slug>.md` |
 | `--yes` | Confirm and execute (without it, only prints the worklist with zero disk write — more conservative than `reindex`/`convert`) |
-| `--json` | JSON contract |
+| `--json` | JSON contract (includes `backlinks`: the pages linking to this summary page) |
+
+**The preview tells you upfront who will be left dangling**: a `⚠ 入链页` (incoming links) section lists the pages whose body `[[links]]` point at this summary page — retract it and those links dangle. Aliases and case variants count, and `[[…]]` inside code blocks does not (the same scanning chokepoint `check`/`graph` use). It stays advisory: the linking pages are not touched, so run `guanlan lint` after a retraction to re-check broken links base-wide. **Two pages sharing a stem share one graph node**, so on the target side an ambiguity (`sources/foo` and `entities/foo` both existing) falls back to an empty list — in that case the links are still caught by the same-stem page after the retraction and would not dangle anyway; on the source side the rule is inverted and it would rather over-list, because under-listing would hide the one thing this feature exists to say.
 
 A **human-initiated correction path**, symmetric with feeding (a human adding a source) — just the opposite direction. Re-synthesizing a page that lost a source is an LLM job that `remove` does **not** do; it's left to a later `ingest`/human (an advisory is emitted). The recycle area is the audit trail; to undo, recover manually from `.trash/`.
 
