@@ -567,6 +567,15 @@ def report_outcome(
         print("✗ raw/ 被改动（只读不可变被破坏）：", file=err)
         for change in gate.raw_changes:
             print(f"    [{change.kind}] raw/{change.path}", file=err)
+        # **不把归因写死在 agent 头上**：门禁只比对前后两次快照，分不清改动出自本轮 agent 还是
+        # 另一个进程。观澜的写协调是**进程级**的（`web/jobs.py` 单写者 + `workers=1`），跨进程无锁
+        # （P2 §11 把并发锁明确推后、P4 §4.2 重申）。同时开着 `guanlan web` 或另一个终端在写时，
+        # 这条红线会如实报出改动、却把因归错人——故文案里留出这一种可能，别让人去审一个没越界的 agent。
+        print(
+            "  注：若同时开着 `guanlan web` 或另一个终端在写本库，改动也可能来自那一侧"
+            "——门禁只比对前后快照，分不清是谁改的。",
+            file=err,
+        )
         print("  raw/ 未保留副本，无法自动还原；请人工检查后重跑。", file=err)
     elif gate.kind == "check_failed":
         print(f"✗ 内容校验失败（{len(gate.violations)} 条新阻断性违规）：", file=err)

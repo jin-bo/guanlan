@@ -19,6 +19,7 @@ from guanlan.gate import (
     SHRINK_RATIO,
     GateResult,
     PageMetaFingerprint,
+    RawChange,
     _check_source_regression,
     check_baseline,
     diff_raw,
@@ -831,6 +832,21 @@ def test_report_outcome_reports_shrink_line(capsys):
     report_outcome(gate, AgentRunResult(ok=True, final_text="答案"))
     out = capsys.readouterr().out
     assert "骤缩" in out and "答案" in out
+
+
+def test_report_outcome_raw_mutated_does_not_blame_the_agent_alone(capsys):
+    """`raw_mutated` 文案须留出「另一个进程改的」这种可能——门禁只比前后快照，分不清是谁改的。
+
+    观澜的写协调是**进程级**的（`web/jobs.py` 单写者 + `workers=1`），跨进程无锁（P2 §11 推后、
+    P4 §4.2 重申）。同时开着 `guanlan web` 或另一个终端在写时，这条最严重的红线会**如实报出改动、
+    却把因归错人**，让人去审一个没越界的 agent。故文案必须同时给出两种可能。
+    """
+    gate = GateResult.raw_mutated([RawChange("modified", "a.md")])
+    report_outcome(gate, AgentRunResult(ok=True, final_text=""))
+    err = capsys.readouterr().err
+    assert "raw/ 被改动" in err and "[modified] raw/a.md" in err  # 事实照报
+    assert "guanlan web" in err and "另一个终端" in err  # 归因留余地
+    assert "未保留副本" in err  # 原有处置指引不丢
 
 
 def test_report_outcome_dangling_and_shrink_separate(capsys):
