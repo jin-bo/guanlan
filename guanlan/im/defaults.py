@@ -25,3 +25,8 @@ __all__ = [
     "DEFAULT_MAX_CONVERSATIONS",
     "DEFAULT_MCP_REQUEST_TIMEOUT",
 ]
+
+# 日志出口默认级别（P4.21.1）。默认 `warning` = **加本旋钮之前就能看见的那一档**：
+# 此前无 handler 时 `logging.lastResort` 也只兜 WARNING+，故默认档不改变"看得见什么"，
+# 只改变"长什么样"（多了时刻与 logger 名，长驻宿主排障要靠时刻对齐动作与日志行）。
+DEFAULT_LOG_LEVEL = "warning"

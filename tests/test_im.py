@@ -1747,6 +1747,29 @@ def test_hard_exit_actually_exits(kb_im, tmp_path):
 # ───────────────────────── 拒启矩阵（§9）─────────────────────────
 
 
+def test_log_sink_is_installed_before_the_first_gate(kb_im, capsys):
+    """日志出口须**早于每一道闸**装好（P4.21.1）——否则拒启那条路上的记录一个字也看不见。
+
+    用"白名单全空 → 拒启"这条最早的闸做探针：拒启发生时 sink 若已装好，本例先打的那条 DEBUG
+    就出得来。装晚了（比如挪到 `adapter.start()` 之后）本例即红。
+    """
+    import logging
+
+    adapter = FakeAdapter()
+    with pytest.raises(GuanlanError):
+        im_server.serve_im(
+            kb_im, platform="fake", adapter=adapter, no_mcp=True, log_level="debug"
+        )
+    logging.getLogger("guanlan.im").debug("闸后仍可见")
+    assert "闸后仍可见" in capsys.readouterr().err
+
+    logger = logging.getLogger("guanlan")  # 复原，别把 handler 串给别的用例
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+        h.close()
+    logger.setLevel(logging.NOTSET)
+
+
 def test_refuses_without_any_whitelist(kb_im):
     """白名单四者全空 → `EXIT_USAGE`，报错文案含 `im-identify`，且**未建立任何连接**。"""
     adapter = FakeAdapter()

@@ -38,10 +38,12 @@ from .contract import CHAT_GROUP, IMAdapter
 from .defaults import (
     DEFAULT_IDENTIFY_SECONDS,
     DEFAULT_IDLE_TTL,
+    DEFAULT_LOG_LEVEL,
     DEFAULT_MAX_CONVERSATIONS,
     DEFAULT_MCP_REQUEST_TIMEOUT,
 )
 from .delivery import Delivery
+from .logsink import install_log_sink
 from .intake import AccessPolicy, Intake
 from .mcp_bound import BoundedTimeoutRegistry, _finite_positive
 from .session import SessionRegistry
@@ -434,6 +436,7 @@ def serve_im(
     idle_ttl: float = DEFAULT_IDLE_TTL,
     mcp_request_timeout: float = DEFAULT_MCP_REQUEST_TIMEOUT,
     no_mcp: bool = False,
+    log_level: str = DEFAULT_LOG_LEVEL,
     adapter: IMAdapter | None = None,
     store: object | None = None,
     clock: Callable[[], float] = time.monotonic,
@@ -446,6 +449,11 @@ def serve_im(
     那是**一次性子进程**契约（`runtime.AgentRunner`），与多轮进程内会话无关。
     """
     from ..web.chat import ConversationStore  # 惰性：核心命令不为会话层背 import 成本
+
+    # ★ **日志出口要最先装**（P4.21.1）：下面每一道闸（`.env` 加载、只读门、白名单、凭据锁）
+    # 失败时都可能带日志，装晚了那些记录就看不见。handler 只挂 `guanlan` 树、不碰 root，故
+    # `--log-level debug` 在结构上打不开第三方 SDK 的 DEBUG（见 `logsink` 模块 docstring）。
+    install_log_sink(log_level)
 
     # ★ **早于 `build_policy` 与 `adapter.start()`**（决策P4.21-78）：前者要读
     # `--allow-user-env` 指向的变量，后者要读平台凭据——两者都该能从 `.env` 取到，
