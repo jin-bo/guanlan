@@ -48,6 +48,7 @@ from pathlib import Path
 import anyio
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 
 from .. import __version__
 from ..errors import EXIT_OK, GuanlanError
@@ -79,6 +80,17 @@ _INSTRUCTIONS = (
     "本服务是 guanlan 作 MCP 服务端（与 Agentao 作 MCP 客户端的『Tool 注入』方向相反）。"
     "建议工作流：先用 `search`+`read_page` 召回并读取候选页自行综合；仅当需要观澜式带 `[[引用]]` 的"
     "服务端综合时才用较慢、较贵的 `ask`。`list_pages`/`graph` 无分页，大库上先 `search` 收窄。"
+)
+
+# 只读契约（决策P4.10-3）经 MCP `ToolAnnotations` 显式告知客户端：带只读门的客户端（如 agentao
+# read-only 模式）只放行 `readOnlyHint=true` 且非 destructive 的工具，缺注解即一律拒——茶话室只读
+# 记忆茶客正是撞在这里。六个零 LLM 工具只读 + 幂等 + 闭域；`ask` 同样只读，但综合结果不幂等、且会调
+# 外部 LLM（openWorld）。
+_READ_ONLY = ToolAnnotations(
+    read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+)
+_READ_ONLY_ASK = ToolAnnotations(
+    read_only_hint=True, destructive_hint=False, idempotent_hint=False, open_world_hint=True
 )
 
 _SEARCH_DESC = (
@@ -145,31 +157,31 @@ def build_mcp(
     # worker thread，但我们保留显式卸载：零行为风险，且 ask 的慢子进程仍须自己控）；返回类型注解
     # （TypedDict）驱动 SDK 自动生成 output schema → structuredContent + JSON 文本块兜底（决策P4.10-10）。
 
-    @mcp.tool(name="search", description=_SEARCH_DESC)
+    @mcp.tool(name="search", description=_SEARCH_DESC, annotations=_READ_ONLY)
     async def search(query: str, limit: int = 10) -> SearchEnvelope:
         return await anyio.to_thread.run_sync(
             functools.partial(tool_search, query, limit, search_cache=cache, wiki=wiki)
         )
 
-    @mcp.tool(name="read_page", description=_READ_PAGE_DESC)
+    @mcp.tool(name="read_page", description=_READ_PAGE_DESC, annotations=_READ_ONLY)
     async def read_page(path: str) -> PageEnvelope:
         return await anyio.to_thread.run_sync(
             functools.partial(tool_read_page, path, root=root)
         )
 
-    @mcp.tool(name="list_pages", description=_LIST_PAGES_DESC)
+    @mcp.tool(name="list_pages", description=_LIST_PAGES_DESC, annotations=_READ_ONLY)
     async def list_pages() -> PagesEnvelope:
         return await anyio.to_thread.run_sync(functools.partial(tool_list_pages, root=root))
 
-    @mcp.tool(name="graph", description=_GRAPH_DESC)
+    @mcp.tool(name="graph", description=_GRAPH_DESC, annotations=_READ_ONLY)
     async def graph() -> GraphEnvelope:
         return await anyio.to_thread.run_sync(functools.partial(tool_graph, root=root))
 
-    @mcp.tool(name="health", description=_HEALTH_DESC)
+    @mcp.tool(name="health", description=_HEALTH_DESC, annotations=_READ_ONLY)
     async def health() -> ReportEnvelope:
         return await anyio.to_thread.run_sync(functools.partial(tool_health, root=root))
 
-    @mcp.tool(name="lint", description=_LINT_DESC)
+    @mcp.tool(name="lint", description=_LINT_DESC, annotations=_READ_ONLY)
     async def lint() -> ReportEnvelope:
         return await anyio.to_thread.run_sync(functools.partial(tool_lint, root=root))
 
@@ -178,7 +190,7 @@ def build_mcp(
     # `--allow-ask` 显式承担。六个零 LLM 工具已无条件注册在上、与此门无关。
     if allow_ask:
 
-        @mcp.tool(name="ask", description=_ASK_DESC)
+        @mcp.tool(name="ask", description=_ASK_DESC, annotations=_READ_ONLY_ASK)
         async def ask(question: str, model: str | None = None) -> AskEnvelope:
             # ask 子进程可数十秒，须卸 to_thread——否则一次 ask 饿死并发廉价 search（决策P4.10-15）。
             # model（工具入参）or startup_model（启动 --model）or None，在 tool_ask 内解析（决策P4.10-5）。
