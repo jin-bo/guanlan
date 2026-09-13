@@ -20,6 +20,9 @@ from pathlib import Path
 
 import pytest
 
+import math
+
+from guanlan import search as search_mod
 from guanlan.search import build_corpus, score, search_pages
 
 # ---------------------------------------------------------------------------
@@ -353,26 +356,44 @@ def test_config_pages_never_recalled(wiki: Path):
         assert not (pages & _CONFIG), f"[{c.query}] 召回了 config 页：{pages & _CONFIG}"
 
 
-def test_backlink_rerank_lifts_hub(wiki: Path):
-    """rerank 护栏有牙：枢纽页（多入链）在 boost 路径下被温和上浮，纯 BM25 下则不会。
+def test_backlink_prior_is_applied_but_does_not_overturn_relevance(wiki: Path):
+    """文档先验**生效**（因子逐字可验），但**不得**把相关性落后一截的枢纽页翻上来。
 
-    用「Transformer 架构」一例钉死：`attention.md`（5 入链）在带 boost 的产线路径排到
-    `gpt-4.md`（0 入链）**之前**，而纯 BM25（inlinks=None）下两者次序**相反**——证明 P5.3
-    文档先验确实在产线路径生效（移除/削弱 boost 即此断言失败）；同时 primary `transformer.md`
-    在两条路径下都仍是 rank-1（boost 上浮枢纽、但绝不挤掉题面最相关页）。
+    **本用例 2026-09-13 反转过，反转本身是结论的一部分，别改回去**：原断言要求
+    `attention.md`（5 入链、纯 BM25 **1.5100**）在 boost 路径下排到 `gpt-4.md`
+    （0 入链、纯 BM25 **1.9676**）之前——那是**相关性落后 30% 的页靠入链翻盘**，不是
+    P5.3 §1 写的「枢纽页**同分时**上浮」。它只在 `W=0.5` 下成立，而 `W=0.5` 经
+    `docs/P5.3-检索backlink重排.md` §4.5 的扩样扫描实测为**净质量回退**（三真实库 ×
+    三探针 n=1720，微平均 P@1 .784→.699；最差一组配对 +16/−79），据此默认值降到 0.05。
+    也就是说：**旧断言是在给那条被测出有害的行为发合格证**，故整条反转——
+
+    1. **先验确实在算**（有牙、且不写死 W）：枢纽页的 boost 分 == 纯 BM25 分 × `1+W·ln(1+c)`，
+       零入链页两路**逐字节相同**（决策P5.3-2 的 c=0 因子 1.0）。
+    2. **先验不越权**：分差 30% 的枢纽页**不得**越过分高者——这正是 gbrain 0.48.4 修掉、
+       而真实库上实测在咬人的那类失败（枢纽页顶掉精确命中页）。
+
+    `boost 非 no-op` 另由 `test_boost_is_live_and_never_demotes_primary` 覆盖（聚合口径）。
     """
     q = "Transformer 架构"
     primary = "wiki/concepts/transformer.md"
-    hub = "wiki/concepts/attention.md"
-    leaf = "wiki/entities/gpt-4.md"
+    hub = "wiki/concepts/attention.md"  # 5 入链，纯 BM25 落后 leaf 约 30%
+    leaf = "wiki/entities/gpt-4.md"  # 0 入链，纯 BM25 更高
 
-    boost = [h.page for h in search_pages(wiki, q, limit=10).hits]
-    pure = [h.page for h in score(build_corpus(wiki), q, limit=10, inlinks=None).hits]
+    docs = build_corpus(wiki)
+    inlinks = _inlinks(wiki)
+    boosted = {h.page: h.score for h in score(docs, q, limit=20, inlinks=inlinks).hits}
+    pure = {h.page: h.score for h in score(docs, q, limit=20, inlinks=None).hits}
+    order = [h.page for h in search_pages(wiki, q, limit=10).hits]
 
-    assert boost[0] == primary and pure[0] == primary  # primary 两路都 rank-1
-    # boost：枢纽 attention 在 gpt-4 之前；pure：相反。
-    assert boost.index(hub) < boost.index(leaf), f"boost 未上浮枢纽：{boost[:4]}"
-    assert pure.index(leaf) < pure.index(hub), f"pure 次序应相反：{pure[:4]}"
+    # 1. 因子逐字可验：读模块现值，W 日后再变本断言仍成立（变的只该是取值，不是公式）。
+    factor = 1.0 + search_mod.BACKLINK_WEIGHT * math.log1p(inlinks[hub])
+    assert boosted[hub] == pytest.approx(pure[hub] * factor, abs=1e-6)
+    assert boosted[leaf] == pure[leaf]  # c=0 → 因子恰 1.0，分数原样
+
+    # 2. 先验不越权：相关性落后一截的枢纽页不得翻到分高者之前。
+    assert pure[leaf] > pure[hub]
+    assert order.index(leaf) < order.index(hub), f"文档先验越权改写了名次：{order[:4]}"
+    assert order[0] == primary  # 题面最相关页两路都仍是 rank-1
 
 
 def test_boost_is_live_and_never_demotes_primary(corpus):
