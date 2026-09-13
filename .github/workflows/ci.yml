@@ -47,8 +47,27 @@ jobs:
       - name: 装依赖
         run: uv sync --extra web --extra mcp --extra im-weixin --extra im-feishu --python ${{ matrix.python-version }}
 
-      - name: 跑测试
-        run: uv run --extra web --extra mcp --extra im-weixin --extra im-feishu --python ${{ matrix.python-version }} pytest -q
+      # 上一步装齐四个 extra，但**没有任何东西验证它装成功了**——`pytest.importorskip` 的 skip
+      # 在 CI 里照样是绿的（tests/test_im_feishu.py 里那条 skip 的理由甚至写着「CI 必装并必跑」，
+      # 那只是一句注释）。故这里加一道闸：**CI 里出现任何 skip 即失败**。
+      #
+      # 立这道闸的依据是实测而非想当然：2026-09-13 三个 Python 版本在 CI 上都是 `1595 passed`、
+      # 零 skip（本地 macOS 会跳 1 条——大小写不敏感的文件系统构造不出 Foo.md/foo.md 并存，
+      # 而 Linux 上那条会真跑）。所以零 skip 是当下的事实，不是期望值。
+      #
+      # 限度（别高估它）：它只能证明**没有用例被跳过**，不能证明该有的用例都存在。
+      # 若日后确有一条在 CI 上必须跳过的用例，正确做法是**显式**处理（deselect 或在此注明），
+      # 而不是把这道闸摘掉——摘掉就回到「最关键的回归永远不跑，而 CI 一直是绿的」那个状态。
+      - name: 跑测试（CI 不许静默跳过）
+        run: |
+          set -o pipefail
+          uv run --extra web --extra mcp --extra im-weixin --extra im-feishu \
+            --python ${{ matrix.python-version }} pytest -q -rs --color=no | tee pytest.out
+          if grep -qE '[0-9]+ skipped' pytest.out; then
+            echo "::error::CI 里有用例被跳过——最关键的回归可能根本没跑（多半是某个 extra 没装上）"
+            grep '^SKIPPED' pytest.out || true
+            exit 1
+          fi
 
   # 改 workflow 时校验：YAML 语法 / action input / ${{ }} 表达式，并对 run: 里的内联 shell 跑 shellcheck
   # （release.yml 那段抽 CHANGELOG 的 awk/bash 由此受检）。单跑一次、不进 Python 矩阵。

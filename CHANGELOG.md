@@ -29,6 +29,16 @@
 
 ### 修复
 
+- **CI 装了四个 extra，却没有任何东西验证它装上了**（gbrain v0.50 反向评审 §4.2）——
+  `pytest.importorskip` 的 skip 在 CI 里**照样是绿的**：某个 extra 万一没装成功，对应整组测试
+  静默跳过，而 CI 依旧通过。`tests/test_im_feishu.py` 里那条 skip 的理由甚至写着「CI 必装并必跑」，
+  但那只是一句注释，没有任何东西在执行它。现在测试步骤改为 `pytest -q -rs` + **出现任何 skip 即
+  失败**（`::error::` 点名，并打印 `SKIPPED` 明细）。依据是实测：2026-09-13 三个 Python 版本在
+  CI 上都是 `1595 passed`、零 skip（本地 macOS 少 1 条，是大小写不敏感的文件系统构造不出
+  `Foo.md`/`foo.md` 并存，Linux 上那条会真跑），所以零 skip 是**当下的事实**而非期望值。
+  **限度写在 workflow 注释里**：它只能证明没有用例被跳过，**不能**证明该有的用例都存在；日后真有
+  一条必须在 CI 跳过的用例，正确做法是显式 deselect 并注明，而不是把这道闸摘掉。
+
 - **检索反链先验权重 0.5 → 0.05：原值实测是净质量回退**（gbrain v0.50 反向评审 §1.1，收据见
   [`docs/P5.3-检索backlink重排.md`](docs/P5.3-检索backlink重排.md) §4.5）——P5.3 的 `BACKLINK_WEIGHT=0.5`
   是**没有测量过的直觉值**（"10 入链 ×2.2、温和、不喧宾夺主"），而守着它的 `tests/test_search_quality.py`
