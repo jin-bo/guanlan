@@ -70,8 +70,8 @@
 
 - **只读客户端调不动 MCP 工具：七个工具补 `ToolAnnotations` 只读声明**——只读契约（决策P4.10-3）
   此前只写在描述文字里，**没进协议**。带只读门的客户端据 MCP 规范的注解放行：agentao read-only 模式
-  要求服务端 `trust` 且工具 `readOnlyHint=true`、非 destructive，缺注解即一律拒。实测茶话室只读记忆
-  茶客（`permission="read-only"`，经 Streamable HTTP 连本库）每次 `search` 都被权限引擎拦下、从没
+  要求服务端 `trust` 且工具 `readOnlyHint=true`、非 destructive，缺注解即一律拒。实测某只读记忆客户端
+  （`permission="read-only"`，经 Streamable HTTP 连本库）每次 `search` 都被权限引擎拦下、从没
   真正读到库，只能凭模型自身印象作答。现在六个零 LLM 工具声明「只读 + 非 destructive + 幂等 + 闭域」，
   `ask` 声明「只读 + 非 destructive + 非幂等 + openWorld」（会调外部 LLM）。工具集、入参、返回形状、
   零写契约全不变，wire 上只多 `annotations` 字段；有专测钉死七个工具的 camelCase 线上形态。
