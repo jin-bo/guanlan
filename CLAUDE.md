@@ -35,6 +35,7 @@ uv run guanlan -C /tmp/demo convert 报告.pdf  # P5.2: multi-format → raw/<sl
 uv run guanlan -C /tmp/demo web --no-browser   # P4: optional local Web host (needs guanlan-wiki[web]; 127.0.0.1 only)
 uv run guanlan -C /tmp/demo mcp          # P4.10/P4.17: optional read-only MCP server (stdio; --transport http for Streamable HTTP) (needs guanlan-wiki[mcp])
 uv run guanlan -C /tmp/demo im --platform weixin --allow-user <id>   # P4.21: optional IM host (read-only, no listening port; needs guanlan-wiki[im-weixin] or [im-feishu])
+#   └─ P4.21.1: --log-level {warning,info,debug} scopes to guanlan's own loggers only (cannot enable third-party SDK DEBUG, which would print message bodies)
 uv run guanlan im-identify --platform feishu    # P4.21: zero-LLM, NEVER replies, time-boxed — prints the full inbound IDs you need for --allow-user
 uv run guanlan im-login --platform weixin       # P4.21: WeChat QR login → ~/.guanlan/im/weixin/account.json
 uv run guanlan install-skill             # copy the bundled skills (guanlan-wiki + the pdf-to-markdown / flint-chart-author aux pair) into ~/.agentao/skills/ (external-base mode)

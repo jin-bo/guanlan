@@ -216,6 +216,7 @@ def _cmd_im(args: argparse.Namespace) -> int:
             idle_ttl=args.idle_ttl,
             mcp_request_timeout=args.mcp_request_timeout,
             no_mcp=args.no_mcp,
+            log_level=args.log_level,
         )
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
@@ -625,9 +626,11 @@ def _add_im_parser(sub, dir_parent) -> None:
     # （它拉 agentao + anyio，实测模块数 177 → 242，核心命令没理由为 IM 付这笔钱）。
     from .im.defaults import (
         DEFAULT_IDLE_TTL,
+        DEFAULT_LOG_LEVEL,
         DEFAULT_MAX_CONVERSATIONS,
         DEFAULT_MCP_REQUEST_TIMEOUT,
     )
+    from .im.logsink import LOG_LEVELS
 
     p = sub.add_parser(
         "im",
@@ -696,6 +699,16 @@ def _add_im_parser(sub, dir_parent) -> None:
     )
     p.add_argument(
         "--no-mcp", action="store_true", help="彻底不加载外部 MCP server（连文件发现都关掉）"
+    )
+    p.add_argument(
+        "--log-level",
+        choices=LOG_LEVELS,
+        default=DEFAULT_LOG_LEVEL,
+        help=(
+            f"日志级别（默认 {DEFAULT_LOG_LEVEL}）。**只作用于 guanlan 自己的日志**——"
+            "`debug` 打不开第三方 SDK 的 DEBUG（那会把消息正文打出来）。真机排障看"
+            "「丢弃未授权消息」「卡片回调走哪种帧」这类记录时开 debug"
+        ),
     )
     p.set_defaults(func=_cmd_im)
 

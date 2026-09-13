@@ -359,6 +359,7 @@ guanlan -C <base> im --platform {weixin,feishu} [options]
 | `--idle-ttl` | `1800` | Seconds before an idle conversation is reclaimed; must be a **finite positive number** (`0` would make every round count as expired) |
 | `--mcp-request-timeout` | `120` | Upper bound, in seconds, on **waiting for one `tools/call` response** from an external MCP tool. **It is not a bound on one tool execution**, and it does not even cover a full request: the step that **sends** the request is outside this timer; the handshake and other phases have their own timeouts that this value does not govern; and for SSE/stdio, connection setup and disconnect cleanup have **no timeout protection at all**. This is a **host-level ceiling**: a longer value configured in `mcp.json` is clamped down to it (with a log warning). Raise it here if you need longer. Must be positive |
 | `--no-mcp` | off | Do not load the external MCP servers configured for this base at all (answer from the knowledge base alone) |
+| `--log-level` | `warning` | `warning` / `info` / `debug`. **Scoped to GuānLán's own loggers** — `debug` cannot enable DEBUG for third-party SDKs such as `lark_oapi` / `httpx`, which would print **message bodies**. Turn it up to `debug` to see records like which gate dropped a message, or which frame type a card callback arrived on. Logs go to stderr; redirect with `2>im.log` to keep a file |
 
 ```bash
 guanlan im-login    --platform weixin          # QR login; does not accept -C
