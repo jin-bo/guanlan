@@ -120,6 +120,24 @@ def test_every_tool_has_output_schema(kb_mcp):
         assert t.output_schema, f"{t.name} 缺 output schema（漏返回类型注解？）"
 
 
+def test_every_tool_declares_read_only_annotations(kb_mcp):
+    """七个工具都经 `ToolAnnotations` 声明只读、非 destructive（决策P4.10-3 的线上表达）。
+
+    带只读门的客户端（agentao read-only 模式：`trust` + `readOnlyHint` 才放行）缺注解即一律拒——
+    茶话室只读记忆茶客曾因此调不动任何工具。wire 上走 camelCase，故断言 by_alias 形态。
+    """
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    res = _run(mcp, lambda c: c.list_tools())
+    assert len(res.tools) == 7
+    for t in res.tools:
+        assert t.annotations is not None, f"{t.name} 缺 ToolAnnotations"
+        wire = t.annotations.model_dump(by_alias=True, exclude_none=True)
+        assert wire.get("readOnlyHint") is True, f"{t.name} 未声明 readOnlyHint"
+        assert wire.get("destructiveHint") is False, f"{t.name} 未声明非 destructive"
+    ask = next(t for t in res.tools if t.name == "ask")
+    assert ask.annotations.model_dump(by_alias=True)["openWorldHint"] is True  # ask 调外部 LLM
+
+
 # ───────────── SDK v2 in-memory 双 mode（P4.18，决策P4.18-11）─────────────
 
 
