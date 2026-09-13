@@ -101,6 +101,30 @@ It is the recall front-end for `query`/skill, and is reused by the Web `/api/sea
 
 ---
 
+## `guanlan grep <pattern>`
+
+Deterministic **literal** search: find a string as it literally appears in `wiki/` page bodies, printing `page:line` plus a snippet. **Zero-LLM, zero index, zero disk write.**
+
+```bash
+guanlan -C my-wiki grep "bge-m3"
+guanlan -C my-wiki grep "决策P4.22-14" --json
+guanlan -C my-wiki grep "[[SomeEntity]]" --limit 200
+```
+
+| Arg | Meaning |
+|---|---|
+| `pattern` | The **literal** string to find (**not a regex**) |
+| `--limit` | Cap on matches base-wide (default 50, must be ≥ 1; the per-page cap is fixed at 5) |
+| `--json` | JSON contract |
+
+**When to use which**: `search` finds by **meaning** and suits natural-language questions, concepts and fuzzy phrasing; `grep` finds by **literal text** and suits **proper nouns, identifiers, version numbers, decision ids and fixed phrases**. Both scan the same pages (non-config pages under `wiki/`); neither replaces the other.
+
+The reason is that `search` tokenizes non-CJK runs as `[a-z0-9]+`, so `bge-m3` becomes `bge`+`m3` and `P4.22` becomes `p4`+`22`. Recall is not lost (query and documents share one tokenizer) but **precision** is: an identifier query effectively degrades to whichever of its fragments is rarest, and the numeric fragment is high-frequency noise. Reach for `grep` when you want to pin down an exact id or version.
+
+Several aspects are **fixed, with no flags to change them**: the input is **never treated as a regex** (`.*` matches only a literal `.*`); matching is **case-insensitive**; there is **no width/NFKC normalization** (a normalized "match" is not literally present in the file, which would undermine the line number as evidence); frontmatter **is not matched**, yet line numbers are counted against the **original file** so you can jump straight there. When matches exceed the caps the receipt **says so explicitly** rather than dropping them silently.
+
+---
+
 ## Other commands
 
 - **Maintenance** `health` / `lint` / `graph` / `reindex` / `heal` → [Maintenance](04-maintenance.md)

@@ -17,6 +17,8 @@ from .convert import _BACKENDS as _CONVERT_BACKENDS
 from .convert import convert_entrypoint
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .graph import graph_entrypoint
+from .grep import DEFAULT_LIMIT as GREP_DEFAULT_LIMIT
+from .grep import MAX_MATCHES_PER_PAGE, grep_entrypoint
 from .heal import DEFAULT_LIMIT, heal_entrypoint, positive_int
 from .health import health_entrypoint
 from .ingest import run_ingest
@@ -105,6 +107,12 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
 
 def _cmd_remove(args: argparse.Namespace) -> int:
     return remove_entrypoint(args.dir, src=args.src, yes=args.yes, json_output=args.json)
+
+
+def _cmd_grep(args: argparse.Namespace) -> int:
+    return grep_entrypoint(
+        args.dir, pattern=args.pattern, limit=args.limit, json_output=args.json
+    )
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
@@ -425,6 +433,25 @@ def _add_search_parser(sub, dir_parent) -> None:
     )
     p.add_argument("--json", action="store_true", help="输出 JSON 契约")
     p.set_defaults(func=_cmd_search)
+
+
+def _add_grep_parser(sub, dir_parent) -> None:
+    # grep（P5.5）：`search` 之外的**第二条召回路**——字面子串、不打分、不建索引。
+    # 刻意**不设**大小写/正则/归一旋钮：口径钉死为「字面 + 大小写不敏感」（决策P5.5-2）。
+    p = sub.add_parser(
+        "grep",
+        parents=[dir_parent],
+        help="确定性字面检索：在 wiki/ 正文里找字面出现的串，打印 页:行号 + 片段（零 LLM）",
+    )
+    p.add_argument("pattern", help="要找的**字面**串（不是正则；专名/编号/版本号/标识符用它）")
+    p.add_argument(
+        "--limit",
+        type=positive_int,
+        default=GREP_DEFAULT_LIMIT,
+        help=f"全库命中上限（默认 {GREP_DEFAULT_LIMIT}，须 ≥ 1；单页上限固定 {MAX_MATCHES_PER_PAGE} 条）",
+    )
+    p.add_argument("--json", action="store_true", help="输出 JSON 契约")
+    p.set_defaults(func=_cmd_grep)
 
 
 def _add_convert_parser(sub, dir_parent) -> None:
@@ -756,6 +783,7 @@ _SUBCOMMAND_BUILDERS = (
     _add_reindex_parser,
     _add_remove_parser,
     _add_search_parser,
+    _add_grep_parser,
     _add_convert_parser,
     _add_web_parser,
     _add_mcp_parser,

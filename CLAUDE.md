@@ -25,6 +25,7 @@ uv run guanlan -C /tmp/demo lint         # P3: orphans / broken links / missing 
 uv run guanlan -C /tmp/demo graph        # P3: write graph/graph.json + graph.html (--json-only skips html)
 uv run guanlan -C /tmp/demo reindex      # P3.4: register disk pages missing from index.md (zero-LLM; --dry-run / --prune)
 uv run guanlan -C /tmp/demo search 关键词 # P5.0: BM25 + CJK 2-gram whole-page recall, top-N (zero-LLM; --limit / --json)
+uv run guanlan -C /tmp/demo grep 'bge-m3'  # P5.5: literal substring scan → page:line + snippet (zero-LLM; --limit / --json)
 # (P4.22 adds no CLI subcommand — `/page <name>` is an in-chat slash command of the IM host, zero-LLM,
 #  resolving through the same P3.8 owner index as check/graph; on Feishu the `[[links]]` in an answer also
 #  come back as tappable card buttons whose taps are normalized into synthesized inbound messages.)

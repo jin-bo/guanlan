@@ -29,6 +29,7 @@
 | `guanlan ingest` | 投喂一篇资料,Agent 生成/更新 wiki 页 | 是 |
 | `guanlan query` | 对知识库提问(`--backfill` 可把答案沉淀回 wiki) | 是 |
 | `guanlan search` | 整页全文检索(BM25 + 中文分词) | 否 |
+| `guanlan grep` | 字面子串检索(专名/编号/标识符),出 `页:行号` | 否 |
 | `guanlan check` / `health` / `lint` | 校验 / 体检 / 结构 lint | 否 |
 | `guanlan graph` | 生成可交互的 `[[wikilink]]` 知识图谱 | 否 |
 | `guanlan web` | 在浏览器里浏览、问答、维护(可选叠加层) | 部分 |
