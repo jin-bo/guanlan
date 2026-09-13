@@ -83,8 +83,8 @@ _INSTRUCTIONS = (
 )
 
 # 只读契约（决策P4.10-3）经 MCP `ToolAnnotations` 显式告知客户端：带只读门的客户端（如 agentao
-# read-only 模式）只放行 `readOnlyHint=true` 且非 destructive 的工具，缺注解即一律拒——茶话室只读
-# 记忆茶客正是撞在这里。六个零 LLM 工具只读 + 幂等 + 闭域；`ask` 同样只读，但综合结果不幂等、且会调
+# read-only 模式）只放行 `readOnlyHint=true` 且非 destructive 的工具，缺注解即一律拒——某只读
+# 记忆客户端正是撞在这里。六个零 LLM 工具只读 + 幂等 + 闭域；`ask` 同样只读，但综合结果不幂等、且会调
 # 外部 LLM（openWorld）。
 _READ_ONLY = ToolAnnotations(
     read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
