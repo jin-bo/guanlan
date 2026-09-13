@@ -20,6 +20,9 @@ from pathlib import Path
 
 import pytest
 
+import math
+
+from guanlan import search as search_mod
 from guanlan.search import build_corpus, score, search_pages
 
 # ---------------------------------------------------------------------------
@@ -62,7 +65,9 @@ CORPUS: list[dict] = [
             "Transformer 架构完全基于 [[attention]]，摒弃了循环与卷积结构。\n"
             "它由编码器与解码器堆叠而成，每层包含 [[multi-head-attention]] 与前馈网络，"
             "并配合 [[positional-encoding]] 注入顺序信息。\n"
-            "Transformer 架构是现代大语言模型的基础。"
+            "Transformer 架构是现代大语言模型的基础。\n"
+            # 困难档诱饵（HARD）：8 入链的枢纽页也弱命中"涌现能力"，但正确页是下面那张 source 页。
+            "规模扩大后出现的涌现能力，常被归因于该架构的可扩展性。"
         ),
     },
     {
@@ -196,6 +201,21 @@ CORPUS: list[dict] = [
         ),
     },
     {
+        # 困难档正确页（HARD）：query"涌现能力"**只出现在正文**，标题与别名都不含它——
+        # 故它不靠 P5.0 字段加权取胜，只能靠正文 tf。纯 BM25 领先枢纽页 1.69 倍，
+        # 而枢纽页有 8 入链：W 一旦调大到 0.32 以上就会被顶掉（见 test_hard_body_only_answer_survives_prior）。
+        "path": "sources/emergent-ability-report.md",
+        "title": "模型规模实证报告",
+        "type": "source",
+        "aliases": [],
+        "body": (
+            "本报告统计不同参数规模下的任务表现。涌现能力指模型规模跨过某一阈值后，"
+            "在小模型上几乎为零的任务突然出现可用表现。\n"
+            "报告在十二项基准上观察到涌现能力，并给出阈值区间与复现方法。\n"
+            "涌现能力的度量口径依赖指标是否连续，附录单独讨论。"
+        ),
+    },
+    {
         "path": "syntheses/llm-overview.md",
         "title": "大语言模型综述",
         "type": "synthesis",
@@ -243,6 +263,20 @@ GOLDEN: list[Case] = [
     Case("分词", "concepts/tokenization.md", {"concepts/tokenization.md"}),
     Case("GPT-4", "entities/gpt-4.md", {"entities/gpt-4.md"}),
     Case("BERT", "entities/bert.md", {"entities/bert.md"}),
+]
+
+
+# ---------------------------------------------------------------------------
+# 困难档：`GOLDEN` 的每条 primary 都靠**标题**精确命中取胜（见模块 docstring），于是文档先验
+# 无从改变它们的名次——那组闸挡得住分词/BM25 参数被改崩，**挡不住 `BACKLINK_WEIGHT` 的取值**
+# （W 取 0 还是 2 都绿）。`HARD` 补的正是这一档：正确页**只在正文命中**、且有一张入链多得多的
+# 枢纽页同时弱命中，名次因此**真的取决于 W**。单列而不并进 `GOLDEN`，是因为后者三条聚合断言
+# 恒等于 1.0、口径不同。取值依据见 docs/P5.3-检索backlink重排.md §4.5。
+# ---------------------------------------------------------------------------
+
+HARD: list[Case] = [
+    Case("涌现能力", "sources/emergent-ability-report.md",
+         {"sources/emergent-ability-report.md", "concepts/transformer.md"}),
 ]
 
 
@@ -353,26 +387,82 @@ def test_config_pages_never_recalled(wiki: Path):
         assert not (pages & _CONFIG), f"[{c.query}] 召回了 config 页：{pages & _CONFIG}"
 
 
-def test_backlink_rerank_lifts_hub(wiki: Path):
-    """rerank 护栏有牙：枢纽页（多入链）在 boost 路径下被温和上浮，纯 BM25 下则不会。
+def test_hard_body_only_answer_survives_prior(wiki: Path):
+    """困难档护栏：正确页**只在正文命中**时，入链多得多的枢纽页不得把它顶掉。
 
-    用「Transformer 架构」一例钉死：`attention.md`（5 入链）在带 boost 的产线路径排到
-    `gpt-4.md`（0 入链）**之前**，而纯 BM25（inlinks=None）下两者次序**相反**——证明 P5.3
-    文档先验确实在产线路径生效（移除/削弱 boost 即此断言失败）；同时 primary `transformer.md`
-    在两条路径下都仍是 rank-1（boost 上浮枢纽、但绝不挤掉题面最相关页）。
+    `GOLDEN` 测不出 `BACKLINK_WEIGHT` 的取值（那里的正确页都靠标题精确命中、以大比分领先，
+    boost 无从改名次）。本用例是补上的那一档——query「涌现能力」在正确页
+    `sources/emergent-ability-report.md` 的**标题与别名里都不出现**、只在正文出现三次；
+    而 `concepts/transformer.md`（8 入链）正文也弱命中一次。于是名次**真的取决于 W**。
+
+    **本用例自证有牙**（同"扫描器加过滤规则必须配一条本该报出的正例"那条纪律）：它算出这对页的
+    **翻盘阈值** `w_flip`——W 超过它，枢纽页就靠入链把正确页顶下去——并同时断言
+    ① 现值在阈值之下（护栏此刻是绿的有意义）；② 阈值 < 0.5（**旧默认值确实会让本用例变红**，
+    即它挡得住那次真实回归，而不是一条永远绿的装饰）。实测 `w_flip ≈ 0.315`：W=0.05/0.1/0.25
+    正确页 rank-1，W=0.5 枢纽页夺冠。旧值为何被换掉见 docs/P5.3-检索backlink重排.md §4.5。
+    """
+    (case,) = HARD
+    docs = build_corpus(wiki)
+    inlinks = _inlinks(wiki)
+    hub = "wiki/concepts/transformer.md"
+
+    pure = {h.page: h.score for h in score(docs, case.query, limit=20, inlinks=None).hits}
+    order = [h.page for h in search_pages(wiki, case.query, limit=10).hits]
+
+    # 前提：正确页不靠标题赢（字段加权对它不生效），纯 BM25 领先枢纽页但不是碾压。
+    assert case.primary not in _CONFIG and pure[case.primary] > pure[hub]
+    assert inlinks.get(case.primary, 0) == 0 and inlinks[hub] >= 5
+
+    # ① 产线路径（当前 W）下正确页仍是 rank-1。
+    assert order[0] == case.primary, f"文档先验把只在正文命中的正确页顶掉了：{order[:3]}"
+
+    # ② 有牙：算出翻盘阈值，现值须在其下，且旧默认值 0.5 须在其上。
+    w_flip = (pure[case.primary] / pure[hub] - 1) / math.log1p(inlinks[hub])
+    assert search_mod.BACKLINK_WEIGHT < w_flip, f"当前 W 已过翻盘阈值 {w_flip:.3f}"
+    assert w_flip < 0.5, (
+        f"本用例对旧默认值 0.5 没有牙（翻盘阈值 {w_flip:.3f} ≥ 0.5）："
+        "语料被改软了，它已挡不住 backlink 先验越权那类回归"
+    )
+
+
+def test_backlink_prior_is_applied_but_does_not_overturn_relevance(wiki: Path):
+    """文档先验**生效**（因子逐字可验），但**不得**把相关性落后一截的枢纽页翻上来。
+
+    **本用例 2026-09-13 反转过，反转本身是结论的一部分，别改回去**：原断言要求
+    `attention.md`（5 入链、纯 BM25 **1.5100**）在 boost 路径下排到 `gpt-4.md`
+    （0 入链、纯 BM25 **1.9676**）之前——那是**相关性落后 30% 的页靠入链翻盘**，不是
+    P5.3 §1 写的「枢纽页**同分时**上浮」。它只在 `W=0.5` 下成立，而 `W=0.5` 经
+    `docs/P5.3-检索backlink重排.md` §4.5 的扩样扫描实测为**净质量回退**（三真实库 ×
+    三探针 n=1720，微平均 P@1 .784→.699；最差一组配对 +16/−79），据此默认值降到 0.05。
+    也就是说：**旧断言是在给那条被测出有害的行为发合格证**，故整条反转——
+
+    1. **先验确实在算**（有牙、且不写死 W）：枢纽页的 boost 分 == 纯 BM25 分 × `1+W·ln(1+c)`，
+       零入链页两路**逐字节相同**（决策P5.3-2 的 c=0 因子 1.0）。
+    2. **先验不越权**：分差 30% 的枢纽页**不得**越过分高者——这正是 gbrain 0.48.4 修掉、
+       而真实库上实测在咬人的那类失败（枢纽页顶掉精确命中页）。
+
+    `boost 非 no-op` 另由 `test_boost_is_live_and_never_demotes_primary` 覆盖（聚合口径）。
     """
     q = "Transformer 架构"
     primary = "wiki/concepts/transformer.md"
-    hub = "wiki/concepts/attention.md"
-    leaf = "wiki/entities/gpt-4.md"
+    hub = "wiki/concepts/attention.md"  # 5 入链，纯 BM25 落后 leaf 约 30%
+    leaf = "wiki/entities/gpt-4.md"  # 0 入链，纯 BM25 更高
 
-    boost = [h.page for h in search_pages(wiki, q, limit=10).hits]
-    pure = [h.page for h in score(build_corpus(wiki), q, limit=10, inlinks=None).hits]
+    docs = build_corpus(wiki)
+    inlinks = _inlinks(wiki)
+    boosted = {h.page: h.score for h in score(docs, q, limit=20, inlinks=inlinks).hits}
+    pure = {h.page: h.score for h in score(docs, q, limit=20, inlinks=None).hits}
+    order = [h.page for h in search_pages(wiki, q, limit=10).hits]
 
-    assert boost[0] == primary and pure[0] == primary  # primary 两路都 rank-1
-    # boost：枢纽 attention 在 gpt-4 之前；pure：相反。
-    assert boost.index(hub) < boost.index(leaf), f"boost 未上浮枢纽：{boost[:4]}"
-    assert pure.index(leaf) < pure.index(hub), f"pure 次序应相反：{pure[:4]}"
+    # 1. 因子逐字可验：读模块现值，W 日后再变本断言仍成立（变的只该是取值，不是公式）。
+    factor = 1.0 + search_mod.BACKLINK_WEIGHT * math.log1p(inlinks[hub])
+    assert boosted[hub] == pytest.approx(pure[hub] * factor, abs=1e-6)
+    assert boosted[leaf] == pure[leaf]  # c=0 → 因子恰 1.0，分数原样
+
+    # 2. 先验不越权：相关性落后一截的枢纽页不得翻到分高者之前。
+    assert pure[leaf] > pure[hub]
+    assert order.index(leaf) < order.index(hub), f"文档先验越权改写了名次：{order[:4]}"
+    assert order[0] == primary  # 题面最相关页两路都仍是 rank-1
 
 
 def test_boost_is_live_and_never_demotes_primary(corpus):
@@ -432,7 +522,7 @@ def test_corpus_and_golden_integrity(wiki: Path):
     assert recalled == declared, f"语料漂移：{recalled ^ declared}"
     assert not (recalled & _CONFIG)
     # 每条黄金 case 的 primary/relevant 都真实存在于语料里。
-    for c in GOLDEN:
+    for c in (*GOLDEN, *HARD):  # HARD 同受体检：困难档引用了不存在的页同样要当场抓到
         assert c.primary in declared, f"[{c.query}] primary {c.primary} 不在语料"
         assert c.relevant <= declared, f"[{c.query}] relevant 越界：{c.relevant - declared}"
         assert c.primary in c.relevant  # primary 必属相关集

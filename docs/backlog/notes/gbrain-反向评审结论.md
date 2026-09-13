@@ -138,3 +138,9 @@ gbrain 让脑库**自带 skillpack**（随该库版本化、连入的 harness �
 > 范围：本次 pull `9bf96db8→814258dd`，仅 2 commit（v0.42.52 autopilot 死任务风暴 / supervisor 楔死 / sync·status·minion 可靠性；v0.42.53 `op_checkpoints` jsonb 双编码致每次 sync 中止 + 全仓同类清扫 + CI 静态守卫）。**90% 是 gbrain 重型架构的运维修复，对观澜架构上不适用** —— 故本次不走 feature-borrow，而是把每类修复当**探针反向审观澜自己的代码**。
 
 把 gbrain 这批 bug 当审计清单钓出**观澜自身 6 条真缺陷 + 一批低危一致性**，并区分「设计上安全」的旁证 —— 详见专篇 **[`gbrain-v0.42.53-反向审计-guanlan缺陷.md`](gbrain-v0.42.53-反向审计-guanlan缺陷.md)**。摘要：**②**（`read_goal`/`_prune` 漏 `AttributeError` 致毒 sidecar 永久 500）+ **③**（convert 非 ASCII 路径走 locale 解码）**本次已修 + 回归测试**；**①**（续跑循环零前向进展感知，常态烧满 25 轮）/ **④**（convert 无超时）/ **⑤**（续跑路径 D 漏计时间）/ **⑥**（convert 真后端 pypdf+LANG parity 测试）/ **⑦**（非原子写等低危一致性）**落 backlog**。状态诚实 / `-C` 作用域 / `raw/` 只读 / 单写者 single-flight 等 gbrain 坑，观澜已结构性做对（旁证）。
+
+## 13. 增量评审：v0.42.59–v0.50.0（2026-09-13 pull）
+
+> 范围：本次 pull `a25209bb→a6be012a`，**729 commits / 3656 文件 / +60.4 万行**，跨 101 个发布（v0.42.59…v0.50.0）。体量九成落在本笔记 §8 既有分档没动过的地方（授权码连接/托管多 agent = E2；backup-restore + Postgres 引擎检测 = E1/E2；reranker provider 日落 = E1 + agentao 绑定红线；dream 22 相位与 retriage = E3）。
+
+本轮结论**经一轮评审修订后收窄**——详见专篇 **[`gbrain-v0.50-反向评审.md`](gbrain-v0.50-反向评审.md)**。摘要：**① 确认一条**——gbrain 0.48.4 ranker wave 的纪律（每个移动过的排序默认值都带预注册收据、调参集与回归闸集分开）值得借；观澜 `BACKLINK_WEIGHT=0.5` **没有任何实测**，而 `tests/test_search_quality.py` 的断言方向是对的、**缺的是困难语料**（每条 GOLDEN 的 primary 靠标题精确命中赢，故 W 取 0 还是 2 都绿）。注意**不是"同一个坑"**：gbrain 那道门的触发条件是"只有向量臂投票"，观澜 BM25 是唯一臂，借的是同一类风险而非同一个 bug。**② 一条基建**——CI 装了四个 extra 但没有任何东西验证它们真装上了（`importorskip` 的 skip 照样绿），workflow 里加一个 import step 即可，且须如实写明它只证明依赖可导入、不证明测试执行。**③ 两条不排期**——"数字字面缺失提示"（借 gbrain 0.47.8 的 warn-only 那半）**只能测字面存在、不能证明事实有据**（张冠李戴照过、合法派生误报），降为待验证提案、先离线量误报率、任何阶段不接写门禁；heal 重复重试**是 P3.2 §10 风险与 §11 后续工作早已逐字记录的在案取舍**（决策P3.2-12 明确不要求机器跳过信号），**暂缓**、等实际成本证据。已覆盖项：`--json` stdout 纯净、`atom_provenance_drift`、slug 边界校验。
