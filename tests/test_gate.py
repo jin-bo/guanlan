@@ -834,6 +834,31 @@ def test_report_outcome_reports_shrink_line(capsys):
     assert "骤缩" in out and "答案" in out
 
 
+def test_report_outcome_wiki_missing_does_not_claim_changes_are_on_disk(capsys):
+    """`wiki.missing` 下不许再说"改动已留在磁盘"——目录都没了，那是字面上的假话。
+
+    这句话在别的 check 失败下仍然成立（见下一例），故是**分岔**不是删除。同时主动告知 `raw/`
+    完好：`enforce` 先判 raw 再跑 check，能走到 `check_failed` 就意味着 raw 快照 diff 为空——
+    生成层没了的时候，这是唯一还能让人松口气的事实。
+    """
+    gate = GateResult.check_failed([Violation("wiki", "wiki.missing", "wiki/ 不存在或不是目录")])
+    report_outcome(gate, AgentRunResult(ok=True, final_text=""))
+    err = capsys.readouterr().err
+    assert "[wiki.missing] wiki: wiki/ 不存在或不是目录" in err  # 事实照报
+    assert "改动已留在磁盘" not in err  # 假话不许出现
+    assert "`raw/` 完好" in err  # 给出那条还能让人松口气的事实
+
+
+def test_report_outcome_ordinary_check_failure_keeps_the_on_disk_line(capsys):
+    """反向用例：普通 check 失败下"改动已留在磁盘"仍要说——分岔不能把它整条删掉。"""
+    gate = GateResult.check_failed(
+        [Violation("wiki/entities/X.md", "frontmatter.missing_key", "缺 title")]
+    )
+    report_outcome(gate, AgentRunResult(ok=True, final_text=""))
+    err = capsys.readouterr().err
+    assert "wiki/ 改动已留在磁盘" in err and "`raw/` 完好" not in err
+
+
 def test_report_outcome_raw_mutated_does_not_blame_the_agent_alone(capsys):
     """`raw_mutated` 文案须留出「另一个进程改的」这种可能——门禁只比前后快照，分不清是谁改的。
 

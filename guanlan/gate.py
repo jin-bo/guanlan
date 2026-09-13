@@ -581,7 +581,18 @@ def report_outcome(
         print(f"✗ 内容校验失败（{len(gate.violations)} 条新阻断性违规）：", file=err)
         for v in gate.violations:
             print(f"    [{v.kind}] {v.page}: {v.detail}", file=err)
-        print("  wiki/ 改动已留在磁盘，供人工修正后重跑。", file=err)
+        # `wiki.missing` 下那句"改动已留在磁盘"是**字面上的假话**——目录都没了，没有"改动"留在
+        # 任何地方，而这句话恰好出现在用户最慌的时刻。故按违规类型分岔：别的 check 失败下它仍成立。
+        # 顺带说一句 `raw/` 完好：`enforce` 先判 raw 再跑 check（见其 docstring），能走到
+        # `check_failed` 就意味着 raw 快照 diff 为空——生成层没了的时候，这是唯一还能让人松口气的事实。
+        if any(v.kind == "wiki.missing" for v in gate.violations):
+            print(
+                "  wiki/ 已不存在或不是目录，没有改动留在磁盘上。"
+                "`raw/` 完好（快照门禁先于本检查核对过），生成层可从源重建。",
+                file=err,
+            )
+        else:
+            print("  wiki/ 改动已留在磁盘，供人工修正后重跑。", file=err)
         _report_warnings(gate.warnings, file=err)
 
 
