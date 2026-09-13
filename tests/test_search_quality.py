@@ -65,7 +65,9 @@ CORPUS: list[dict] = [
             "Transformer 架构完全基于 [[attention]]，摒弃了循环与卷积结构。\n"
             "它由编码器与解码器堆叠而成，每层包含 [[multi-head-attention]] 与前馈网络，"
             "并配合 [[positional-encoding]] 注入顺序信息。\n"
-            "Transformer 架构是现代大语言模型的基础。"
+            "Transformer 架构是现代大语言模型的基础。\n"
+            # 困难档诱饵（HARD）：8 入链的枢纽页也弱命中"涌现能力"，但正确页是下面那张 source 页。
+            "规模扩大后出现的涌现能力，常被归因于该架构的可扩展性。"
         ),
     },
     {
@@ -199,6 +201,21 @@ CORPUS: list[dict] = [
         ),
     },
     {
+        # 困难档正确页（HARD）：query"涌现能力"**只出现在正文**，标题与别名都不含它——
+        # 故它不靠 P5.0 字段加权取胜，只能靠正文 tf。纯 BM25 领先枢纽页 1.69 倍，
+        # 而枢纽页有 8 入链：W 一旦调大到 0.32 以上就会被顶掉（见 test_hard_body_only_answer_survives_prior）。
+        "path": "sources/emergent-ability-report.md",
+        "title": "模型规模实证报告",
+        "type": "source",
+        "aliases": [],
+        "body": (
+            "本报告统计不同参数规模下的任务表现。涌现能力指模型规模跨过某一阈值后，"
+            "在小模型上几乎为零的任务突然出现可用表现。\n"
+            "报告在十二项基准上观察到涌现能力，并给出阈值区间与复现方法。\n"
+            "涌现能力的度量口径依赖指标是否连续，附录单独讨论。"
+        ),
+    },
+    {
         "path": "syntheses/llm-overview.md",
         "title": "大语言模型综述",
         "type": "synthesis",
@@ -246,6 +263,20 @@ GOLDEN: list[Case] = [
     Case("分词", "concepts/tokenization.md", {"concepts/tokenization.md"}),
     Case("GPT-4", "entities/gpt-4.md", {"entities/gpt-4.md"}),
     Case("BERT", "entities/bert.md", {"entities/bert.md"}),
+]
+
+
+# ---------------------------------------------------------------------------
+# 困难档：`GOLDEN` 的每条 primary 都靠**标题**精确命中取胜（见模块 docstring），于是文档先验
+# 无从改变它们的名次——那组闸挡得住分词/BM25 参数被改崩，**挡不住 `BACKLINK_WEIGHT` 的取值**
+# （W 取 0 还是 2 都绿）。`HARD` 补的正是这一档：正确页**只在正文命中**、且有一张入链多得多的
+# 枢纽页同时弱命中，名次因此**真的取决于 W**。单列而不并进 `GOLDEN`，是因为后者三条聚合断言
+# 恒等于 1.0、口径不同。取值依据见 docs/P5.3-检索backlink重排.md §4.5。
+# ---------------------------------------------------------------------------
+
+HARD: list[Case] = [
+    Case("涌现能力", "sources/emergent-ability-report.md",
+         {"sources/emergent-ability-report.md", "concepts/transformer.md"}),
 ]
 
 
@@ -356,6 +387,44 @@ def test_config_pages_never_recalled(wiki: Path):
         assert not (pages & _CONFIG), f"[{c.query}] 召回了 config 页：{pages & _CONFIG}"
 
 
+def test_hard_body_only_answer_survives_prior(wiki: Path):
+    """困难档护栏：正确页**只在正文命中**时，入链多得多的枢纽页不得把它顶掉。
+
+    `GOLDEN` 测不出 `BACKLINK_WEIGHT` 的取值（那里的正确页都靠标题精确命中、以大比分领先，
+    boost 无从改名次）。本用例是补上的那一档——query「涌现能力」在正确页
+    `sources/emergent-ability-report.md` 的**标题与别名里都不出现**、只在正文出现三次；
+    而 `concepts/transformer.md`（8 入链）正文也弱命中一次。于是名次**真的取决于 W**。
+
+    **本用例自证有牙**（同"扫描器加过滤规则必须配一条本该报出的正例"那条纪律）：它算出这对页的
+    **翻盘阈值** `w_flip`——W 超过它，枢纽页就靠入链把正确页顶下去——并同时断言
+    ① 现值在阈值之下（护栏此刻是绿的有意义）；② 阈值 < 0.5（**旧默认值确实会让本用例变红**，
+    即它挡得住那次真实回归，而不是一条永远绿的装饰）。实测 `w_flip ≈ 0.315`：W=0.05/0.1/0.25
+    正确页 rank-1，W=0.5 枢纽页夺冠。旧值为何被换掉见 docs/P5.3-检索backlink重排.md §4.5。
+    """
+    (case,) = HARD
+    docs = build_corpus(wiki)
+    inlinks = _inlinks(wiki)
+    hub = "wiki/concepts/transformer.md"
+
+    pure = {h.page: h.score for h in score(docs, case.query, limit=20, inlinks=None).hits}
+    order = [h.page for h in search_pages(wiki, case.query, limit=10).hits]
+
+    # 前提：正确页不靠标题赢（字段加权对它不生效），纯 BM25 领先枢纽页但不是碾压。
+    assert case.primary not in _CONFIG and pure[case.primary] > pure[hub]
+    assert inlinks.get(case.primary, 0) == 0 and inlinks[hub] >= 5
+
+    # ① 产线路径（当前 W）下正确页仍是 rank-1。
+    assert order[0] == case.primary, f"文档先验把只在正文命中的正确页顶掉了：{order[:3]}"
+
+    # ② 有牙：算出翻盘阈值，现值须在其下，且旧默认值 0.5 须在其上。
+    w_flip = (pure[case.primary] / pure[hub] - 1) / math.log1p(inlinks[hub])
+    assert search_mod.BACKLINK_WEIGHT < w_flip, f"当前 W 已过翻盘阈值 {w_flip:.3f}"
+    assert w_flip < 0.5, (
+        f"本用例对旧默认值 0.5 没有牙（翻盘阈值 {w_flip:.3f} ≥ 0.5）："
+        "语料被改软了，它已挡不住 backlink 先验越权那类回归"
+    )
+
+
 def test_backlink_prior_is_applied_but_does_not_overturn_relevance(wiki: Path):
     """文档先验**生效**（因子逐字可验），但**不得**把相关性落后一截的枢纽页翻上来。
 
@@ -453,7 +522,7 @@ def test_corpus_and_golden_integrity(wiki: Path):
     assert recalled == declared, f"语料漂移：{recalled ^ declared}"
     assert not (recalled & _CONFIG)
     # 每条黄金 case 的 primary/relevant 都真实存在于语料里。
-    for c in GOLDEN:
+    for c in (*GOLDEN, *HARD):  # HARD 同受体检：困难档引用了不存在的页同样要当场抓到
         assert c.primary in declared, f"[{c.query}] primary {c.primary} 不在语料"
         assert c.relevant <= declared, f"[{c.query}] relevant 越界：{c.relevant - declared}"
         assert c.primary in c.relevant  # primary 必属相关集
