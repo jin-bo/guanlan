@@ -29,6 +29,19 @@
 
 ### 修复
 
+- **微信游标用例把「等时长」当成「等事件」，CI 随机变红**（第二次撞同族竞态）——
+  `test_getupdates_maps_and_advances_cursor` 断言的是**第二轮 poll 的游标**落盘（`cur3`），但
+  `collect(count=1)` 只等到**第一条消息**就往下走，再靠 `extra_polls * 8` 次 5 ms sleep ≈ 40 ms
+  赌落盘跑到。那 40 ms 要覆盖「poll① 游标落盘（`anyio.to_thread` + `write_json_atomic` 的 fsync）
+  → poll② HTTP 往返 → poll② 再落盘」，负载高的 runner 上根本不够——2026-09-13 CI 的 3.11 job 即
+  因此红过（读到上一轮的 `cur2`），同一提交的 3.10/3.12 全绿、重跑即过。
+  `tests/test_im_weixin.py:118` 那段注释记的 2026-09-12 那次是同一病根的**另一半**（消息到达），
+  这次补完游标落盘这半。
+  `collect()` 新增 `until` 条件：调用方声明**要等的那件事**，在 consume task 仍存活时（下一轮 poll
+  照跑）轮询到它为真，正常几毫秒、慢机才多等，超时报错并说清等的是什么。两处断言落盘状态的用例
+  改用它；另两处（token 在 yield **之前**就已落盘）本就确定，不动。
+  **红证**：把 `write_json_atomic` 拖慢 60 ms 复现——旧写法稳定读到 `cur2`、新写法稳定 `cur3`。
+
 - **CI 装了四个 extra，却没有任何东西验证它装上了**（gbrain v0.50 反向评审 §4.2）——
   `pytest.importorskip` 的 skip 在 CI 里**照样是绿的**：某个 extra 万一没装成功，对应整组测试
   静默跳过，而 CI 依旧通过。`tests/test_im_feishu.py` 里那条 skip 的理由甚至写着「CI 必装并必跑」，
