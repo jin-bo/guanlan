@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -104,8 +105,24 @@ def make_adapter(
     )
 
 
-async def collect(adapter: WeixinAdapter, *, count: int, extra_polls: int = 1) -> list:
+async def collect(
+    adapter: WeixinAdapter,
+    *,
+    count: int,
+    extra_polls: int = 1,
+    until: Callable[[], bool] | None = None,
+    until_what: str = "",
+    until_timeout: float = 5.0,
+) -> list:
     """在独立 task 里收 `count` 条，再多轮询几次（让批次收尾的游标推进跑到），然后**取消**它。
+
+    **断言落盘状态的用例必须传 `until`**（`extra_polls` 那段固定时长对它们不够用）：游标/token
+    的落盘在**交出事件之后**（`weixin.py` 的「offset 在事件全部交出去之后才推进」），要经
+    `anyio.to_thread` + `write_json_atomic` 的 fsync；而收到第 `count` 条消息**只**意味着那一批
+    已 yield，落盘还在路上。`extra_polls * 8` 次 5 ms sleep ≈ 40 ms，在负载高的 runner 上不够两次
+    线程池排队 + 两次 fsync——2026-09-13 CI 的 3.11 job 即如此红过一次（读到上一轮的 `cur2`），
+    同一提交的 3.10/3.12 全绿。`until` 把「等时长」换成**等那件事真的发生**：consume task 仍存活
+    （所以下一轮 poll 照跑），条件一真立刻收工，正常几毫秒，只有慢机才多等。
 
     **不能用 `async for … break`**：`break` 发生在生成器挂在 `yield` 的那一刻，批次收尾的
     「推进 offset」根本没跑——这正是「取消点上不留半提交状态」的契约（决策P4.21-56），
@@ -130,6 +147,16 @@ async def collect(adapter: WeixinAdapter, *, count: int, extra_polls: int = 1) -
     deadline = time.monotonic() + 5.0  # 慢机兜底；正常路径永不进入
     while len(got) < count and time.monotonic() < deadline:
         await asyncio.sleep(0.005)
+    if until is not None:
+        # 等**事件**：条件为真即收工；超时报错并说清等的是什么（别再靠固定时长赌概率）。
+        deadline = time.monotonic() + until_timeout
+        while not until():
+            if time.monotonic() >= deadline:
+                task.cancel()
+                raise AssertionError(
+                    f"{until_what or '期待的落盘状态'} 在 {until_timeout}s 内未出现"
+                )
+            await asyncio.sleep(0.005)
     for _ in range(extra_polls * 8):  # 再放几轮，让批次收尾的游标推进落地
         # **必须是真 sleep**：游标/context-token 落盘经 `anyio.to_thread`（§4.3 卸线程通则，
         # `write_json_atomic` 会 fsync），纯 `sleep(0)` 只让出一个 tick，等不到线程池回话，
@@ -223,7 +250,13 @@ def test_getupdates_maps_and_advances_cursor(state):
         )
         ad = make_adapter(state, rec)
         await ad.start()
-        got = await collect(ad, count=1)
+        got = await collect(
+            ad,
+            count=1,
+            until=lambda: (read_json(state / "sync.json") or {}).get("get_updates_buf")
+            == "cur3",
+            until_what="第二轮 poll 的游标 cur3 落盘",
+        )
         await ad.close()
         assert got[0].chat_id == "peer1" and got[0].user_id == "peer1"
         assert read_json(state / "sync.json")["get_updates_buf"] == "cur3"
@@ -434,7 +467,13 @@ def test_sync_cursor_survives_restart(state):
         )
         ad = make_adapter(state, rec)
         await ad.start()
-        assert await collect(ad, count=1)
+        assert await collect(
+            ad,
+            count=1,
+            until=lambda: (read_json(state / "sync.json") or {}).get("get_updates_buf")
+            == "cursorX",
+            until_what="批次收尾的游标 cursorX 落盘",
+        )
         await ad.close()
         assert read_json(state / "sync.json")["get_updates_buf"] == "cursorX"
         # 模拟重启：新适配器必须**带着上次的游标**发第一次请求，否则重放旧消息
