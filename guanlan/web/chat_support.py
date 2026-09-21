@@ -345,7 +345,7 @@ def purge_model_specific(messages: list[dict]) -> int:
     return _purge_thinking_artifacts(messages)
 
 
-# ── 轮次结论（P4.23 §3.1，见 docs/P4.23-Agentao0.5.3接入调研.md）─────────────────
+# ── 轮次结论（P4.23 §3.1，见 docs/P4.23-Agentao0.5.3接入.md）─────────────────
 #
 # `arun` 正常返回**不等于**模型答出来了：agentao 会把 `[LLM API error: …]`、空响应占位、
 # 截断/循环终止提示当**普通字符串**返回，没有异常。宿主若只看"没抛"，就会把这些当正常答案

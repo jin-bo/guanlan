@@ -1,4 +1,4 @@
-"""Agentao 接缝契约测试（P4.23 §5 第 4 步，见 docs/P4.23-Agentao0.5.3接入调研.md）。
+"""Agentao 接缝契约测试（P4.23 §5 第 4 步，见 docs/P4.23-Agentao0.5.3接入.md）。
 
 **本文件与其它 Web 用例的根本区别：这里的 agent 是真的。** `tests/test_web.py` 把
 `build_from_environment` 猴补成 `_FakeAgent`——那对验宿主逻辑很好用，但它**验不出上游签名

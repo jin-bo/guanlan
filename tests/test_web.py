@@ -7671,7 +7671,7 @@ def test_upload_endpoint_rejects_oversize_without_reading_all(kb, monkeypatch) -
 
 
 # ── P4.23 轮次结论 / 失败轮契约 / 无进展护栏 ──────────────────────────────────
-#   见 docs/P4.23-Agentao0.5.3接入调研.md §3.1。核心事实：`arun` 正常返回 ≠ 模型答出来了。
+#   见 docs/P4.23-Agentao0.5.3接入.md §3.1。核心事实：`arun` 正常返回 ≠ 模型答出来了。
 
 
 class _Outcome:
