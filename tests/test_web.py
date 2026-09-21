@@ -7668,3 +7668,224 @@ def test_upload_endpoint_rejects_oversize_without_reading_all(kb, monkeypatch) -
     assert r.status_code == 400
     assert "上限" in r.json()["detail"]
     assert seen == [65]  # 200 字节的体只读进 65：多出的一字节判超限，其余没碰
+
+
+# ── P4.23 轮次结论 / 失败轮契约 / 无进展护栏 ──────────────────────────────────
+#   见 docs/P4.23-Agentao0.5.3接入调研.md §3.1。核心事实：`arun` 正常返回 ≠ 模型答出来了。
+
+
+class _Outcome:
+    """镜像 agentao `TurnOutcome` **被宿主读到的那几个字段**（只读面，非全量复刻）。
+
+    刻意用普通类而非 MagicMock：Mock 对任何属性都答真值，正是 `read_turn_outcome` 要挡掉的
+    东西——用 Mock 当替身就测不出它有没有真的在验类型。
+    """
+
+    def __init__(
+        self,
+        *,
+        status="ok",
+        incomplete_reason=None,
+        tool_count=0,
+        error=None,
+        finish_reason_missing=False,
+    ):
+        self.status = status
+        self.incomplete_reason = incomplete_reason
+        self.tool_count = tool_count
+        self.error = error
+        self.finish_reason_missing = finish_reason_missing
+
+    @property
+    def is_answer(self) -> bool:  # 存在但**不该被读**（宿主自己按公开公式算，见下面的用例）
+        raise AssertionError("宿主不应读 is_answer 属性：Mock 下它恒真")
+
+
+def _outcome_script(per_turn: dict):
+    """fake action：按「第 N 个 goal 轮」给 agent 装本轮的 `last_turn`（缺省 = 正常答出）。"""
+    state = {"n": 0}
+
+    def action(agent):
+        state["n"] += 1
+        agent.last_turn = per_turn.get(state["n"], _Outcome())
+
+    return action
+
+
+def _set_outcome(outcome):
+    """fake action：每轮都装同一个 `last_turn` 读数。"""
+
+    def action(agent):
+        agent.last_turn = outcome
+
+    return action
+
+
+def test_done_frame_carries_incomplete_when_model_did_not_answer(chat_client):
+    """`last_turn` 说这轮没答出来 → done 帧带 `incomplete`（不再冒充正常答案）。"""
+    client, captured = chat_client
+    cid = _new_conv(client)  # 必须复用同一会话：新会话 = 新 agent，装好的读数就跟丢了
+    captured["agents"][-1].action = _set_outcome(
+        _Outcome(status="error", incomplete_reason="llm_error", error="502 Bad Gateway")
+    )
+    _t, done, error = _chat(client, "再问一次", conversation_id=cid)
+    assert error is None  # 未完成**不是**异常：流照常收尾，只是帧里多了实情
+    inc = done["incomplete"]
+    assert inc["reason"] == "llm_error"
+    assert inc["status"] == "error"
+    assert inc["error"] == "502 Bad Gateway"
+    assert "模型服务调用失败" in inc["message"]
+
+
+def test_answered_turn_has_no_incomplete_key(chat_client):
+    """正常答出的轮**不带** `incomplete`——"键在 = 失败"这条口径要真成立。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+    captured["agents"][-1].action = _set_outcome(_Outcome())  # status=ok / reason=None
+    _t, done, _e = _chat(client, "问", conversation_id=cid)
+    assert "incomplete" not in done
+
+
+def test_outcome_unreadable_degrades_to_old_behaviour(chat_client):
+    """替身不填 `last_turn`（现有绝大多数用例）→ 整段跳过 = 旧行为，绝不误报失败。"""
+    client, _captured = chat_client
+    _t, done, error = _chat(client, "问")  # _FakeAgent 默认就没有 last_turn 属性
+    assert error is None
+    assert "incomplete" not in done and "finish_reason_missing" not in done
+
+
+def test_mock_agent_is_not_trusted_as_an_outcome(kb, monkeypatch):
+    """`MagicMock` 对任何属性都答真值 → 必须判为不可信读数（None），不能当成一轮真结论。"""
+    from unittest.mock import MagicMock
+
+    from guanlan.web.chat_support import read_turn_outcome
+
+    assert read_turn_outcome(MagicMock()) is None
+    # 只有 status 可信、reason 是 Mock 的半残读数同样出局（否则会拿 Mock 当闭集字符串用）
+    half = MagicMock()
+    half.last_turn.status = "ok"
+    assert read_turn_outcome(half) is None
+
+
+def test_is_answer_is_computed_not_read(kb):
+    """宿主按公开公式自算 `is_answer`，**不读属性**——`_Outcome.is_answer` 一读就炸。"""
+    from guanlan.web.chat_support import read_turn_outcome
+
+    class _A:
+        last_turn = _Outcome(status="ok")
+
+    assert read_turn_outcome(_A())["is_answer"] is True  # 没炸 = 确实没读属性
+
+
+def test_finish_reason_missing_is_diagnostic_not_failure(chat_client):
+    """`finish_reason_missing` 单独出帧作诊断，**不**把这一轮判成失败（上游明确的口径）。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+    captured["agents"][-1].action = _set_outcome(
+        _Outcome(status="ok", incomplete_reason=None, finish_reason_missing=True)
+    )
+    _t, done, _e = _chat(client, "问", conversation_id=cid)
+    assert done["finish_reason_missing"] is True
+    assert "incomplete" not in done  # 诊断位绝不等同失败
+
+
+def test_bg_store_is_disabled(chat_client):
+    """P4.23 §3.4：显式传 `bg_store=None` 关掉后台子 Agent 执行面。"""
+    client, captured = chat_client
+    _new_conv(client)
+    kwargs = captured["agents"][-1].kwargs
+    assert "bg_store" in kwargs and kwargs["bg_store"] is None
+
+
+def test_goal_failed_turn_still_emits_turn_done_with_meta(chat_client):
+    """失败轮契约：轮内真异常也要出 `turn_done`（带 turn_meta），不能把撤销入口一起丢掉。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+
+    def boom(agent):
+        raise RuntimeError("轮内炸了")
+
+    captured["agents"][-1].action = boom
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 3})
+    frames = _drive_goal(client, cid)
+    td = _first(frames, "turn_done")
+    assert td is not None and td.get("failed") is True  # 原先这条帧根本不会出现
+    assert _first(frames, "error") is not None  # 真异常仍向上传播成 error 帧
+    info = client.get(f"/api/chat/{cid}/info").json()["goal"]
+    assert info["status"] == "paused"  # 异常不搁浅 active 目标
+    assert info["time_used_seconds"] > 0  # 失败轮的墙钟照样记账（否则 --for 永不 trip）
+
+
+def test_goal_blocks_after_consecutive_no_progress(chat_client):
+    """连续 `_MAX_EMPTY_CONTINUATIONS` 轮无进展 → 宿主把目标收为 blocked 并说明是自己收的。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+    captured["agents"][-1].action = _set_outcome(
+        _Outcome(status="ok", incomplete_reason="no_output")
+    )
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 20})
+    frames = _drive_goal(client, cid)
+    blocked = _first(frames, "goal_blocked")
+    assert blocked is not None
+    assert blocked["blocked_by"] == "host"  # 与 agent 自陈的 blocked 分开，不误报"它在等你"
+    assert blocked["reason"] == "no_output" and blocked["streak"] == 3
+    assert len([p for e, p in frames if e == "turn_start"]) == 3  # 第 3 轮即停，不烧满 20 轮
+    assert _first(frames, "goal_done")["status"] == "blocked"
+
+
+def test_goal_progress_resets_no_progress_streak(chat_client):
+    """中途有一轮真答出来 → 连击清零，不会被先前的空轮累计拖成 blocked。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+    empty = _Outcome(status="ok", incomplete_reason="no_output")
+    # 空、空、答出、空、空 —— 任一时刻连击都没到 3
+    captured["agents"][-1].action = _outcome_script(
+        {1: empty, 2: empty, 3: _Outcome(), 4: empty, 5: empty}
+    )
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 5})
+    frames = _drive_goal(client, cid)
+    assert _first(frames, "goal_blocked") is None
+    assert _first(frames, "goal_done")["status"] == "limit_reached"  # 烧完预算而非被护栏掐断
+
+
+def test_goal_tool_calls_excuse_empty_turns_but_not_llm_error(chat_client):
+    """调过工具算有进展——**但 `llm_error` 不吃这条豁免**，否则 provider 挂了会永远空转。"""
+    client, captured = chat_client
+
+    # ① 调过工具的空轮：算有进展，不该被掐断
+    cid = _new_conv(client)
+    captured["agents"][-1].action = _set_outcome(
+        _Outcome(status="ok", incomplete_reason="no_output", tool_count=3)
+    )
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 4})
+    frames = _drive_goal(client, cid)
+    assert _first(frames, "goal_blocked") is None
+
+    # ② 同样调过工具，但原因是 llm_error：**照样**计入连击并掐断
+    cid2 = _new_conv(client)
+    captured["agents"][-1].action = _set_outcome(
+        _Outcome(status="error", incomplete_reason="llm_error", tool_count=3, error="503")
+    )
+    client.post(f"/api/chat/{cid2}/goal", json={"objective": "x", "turns": 20})
+    frames2 = _drive_goal(client, cid2)
+    blocked = _first(frames2, "goal_blocked")
+    assert blocked is not None and blocked["reason"] == "llm_error"
+    assert len([p for e, p in frames2 if e == "turn_start"]) == 3
+
+
+def test_goal_agent_verdict_wins_over_no_progress_guard(chat_client):
+    """一轮既没产出、又调了 update_goal 标终态 → 以 **agent 自陈**为准（护栏排在其后）。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+    marker = _goal_marker({1: "complete"})
+    empty = _Outcome(status="ok", incomplete_reason="no_output")
+
+    def action(agent):
+        agent.last_turn = empty
+        marker(agent)
+
+    captured["agents"][-1].action = action
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 9})
+    frames = _drive_goal(client, cid)
+    assert _first(frames, "goal_blocked") is None
+    assert _first(frames, "goal_done")["status"] == "complete"

@@ -195,6 +195,8 @@ class FakeConv:
         self.raises: BaseException | None = None
         self.gate: asyncio.Event | None = None  # 置了就在 turn 里等它（模拟长 turn）
         self.emit_threads: list[int] = []
+        # 置了就让本轮往 meta_out 写 `incomplete`（P4.23 §3.1：未完成是**结构化返回**、不抛）
+        self.incomplete: dict | None = None
 
     def begin_turn(self) -> None:
         self.begun += 1
@@ -212,8 +214,12 @@ class FakeConv:
             return True
         return False
 
-    async def turn(self, msg: str, emit) -> str:
+    async def turn(self, msg: str, emit, meta_out: dict | None = None) -> str:
+        # `meta_out` 是真 `Conversation.turn` 的第三个位置参数（决策P4.5-9 的 per-turn meta）；
+        # P4.23 起 IM 也传它来收本轮结论，故替身必须跟上真签名。默认值让老用例原样可用。
         self.turns.append(msg)
+        if meta_out is not None and self.incomplete is not None:
+            meta_out["incomplete"] = self.incomplete
         import threading
 
         for chunk in self.tokens:
@@ -1664,7 +1670,7 @@ class NeverConv:
     def begin_turn(self): pass
     def end_turn(self): pass
     def request_stop(self): return True
-    async def turn(self, msg, emit):
+    async def turn(self, msg, emit, meta_out=None):
         await asyncio.Event().wait()      # 模拟卡死的 executor 线程：永不返回
     def close(self): pass
 
@@ -2759,3 +2765,59 @@ def test_actions_never_offer_a_command_the_core_would_reject(kb_pages):
         assert [a.label for a in actions] == ["乙概念"], "出了一个点了必然失败的按钮"
 
     asyncio.run(scenario())
+
+
+# ── P4.23 §3.1：本轮没答出来，IM 必须说出来 ─────────────────────────────────
+
+
+def test_incomplete_turn_is_flagged_to_the_user(kb_im):
+    """模型服务挂了的时候，agentao 把 `[LLM API error: …]` 当**普通字符串**返回、不抛异常。
+
+    不加前缀的话它会被原样当成"知识库的回答"发出去，用户只会以为知识库疯了。
+    """
+
+    async def scenario():
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_im)
+
+        def prep(c):
+            c.answer = "[LLM API error: 502 Bad Gateway]"
+            c.incomplete = {"reason": "llm_error", "message": "模型服务调用失败"}
+
+        store.on_create = prep
+        await intake.offer(msg("问题"))
+        await asyncio.sleep(0.05)
+        await drain_tasks(delivery)
+        body = "\n".join(adapter.sent())
+        assert "⚠️ 模型服务调用失败" in body
+        assert "502 Bad Gateway" in body  # 原文照留：告示是**叠加**，不吞掉实情
+
+    asyncio.run(scenario())
+
+
+def test_answered_turn_gets_no_incomplete_prefix(kb_im):
+    """答出来的轮不多发一个字——告示只在真未完成时出现。"""
+
+    async def scenario():
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_im)
+        store.on_create = lambda c: setattr(c, "answer", "正常答案")
+        await intake.offer(msg("问题"))
+        await asyncio.sleep(0.05)
+        await drain_tasks(delivery)
+        body = "\n".join(adapter.sent())
+        assert "⚠️" not in body and body.strip() == "正常答案"
+
+    asyncio.run(scenario())
+
+
+def test_incomplete_notice_stacks_with_session_status_notice(kb_im):
+    """会话状态告示与未完成告示是**两件事**，同时成立时都要在（拼接而非二选一）。"""
+    from guanlan.im.delivery import _merge_notice
+
+    assert _merge_notice(None, {}) is None  # 答出来了 → 原样
+    assert _merge_notice("（已开始新的对话）", {}) == "（已开始新的对话）"
+    merged = _merge_notice("（已开始新的对话）", {"incomplete": {"message": "模型服务调用失败"}})
+    assert merged == "（已开始新的对话）\n⚠️ 模型服务调用失败"
+    # 读不到可信读数（宿主降级）→ 不多发一个字
+    assert _merge_notice(None, {"incomplete": "坏类型"}) is None
+    # message 缺失/坏类型 → 回落通用文案，绝不发出空告示
+    assert _merge_notice(None, {"incomplete": {}}) == "⚠️ 本轮未能得到完整答案"

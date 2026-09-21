@@ -50,6 +50,10 @@ FULL_HINT = "当前会话数已满（上限 {cap}），请稍后再试。"
 ATTACHMENT_HINT = "暂不处理图片/语音/文件等附件，请用文字提问。"
 EMPTY_HINT = "（本次没有得到任何回答内容，请换个说法再试。）"
 NEW_HINT = "（已开始新的对话）"
+# 本轮没拿到完整答案时的前缀（P4.23 §3.1）。**不能什么都不说**：模型服务挂了的时候，agentao
+# 把 `[LLM API error: …]` 当普通字符串返回，不加这一句的话它会被当成"知识库的回答"原样发出去，
+# 用户只会以为知识库疯了。文案由 `chat_support.incomplete_message` 按 `incomplete_reason` 给。
+INCOMPLETE_PREFIX = "⚠️ {message}"
 HELP_TEXT = (
     "观澜知识库机器人：\n"
     "· 直接提问 → 走知识库问答（较慢，会分片回复）\n"
@@ -76,6 +80,23 @@ SEARCH_LIMIT = 8
 # 这是**降级提示**、不是检索结果，长了会喧宾夺主。未命中的现实来源是**手打错别字**
 # （按钮点出来的名字出按钮前已经解析过一遍），而 BM25 + CJK 2-gram 正擅长救错别字。
 PAGE_MISS_LIMIT = 3
+
+
+def _merge_notice(notice: str | None, meta: Mapping) -> str | None:
+    """把「本轮未得到完整答案」的告示并进既有会话状态告示（P4.23 §3.1）。
+
+    两条告示是**不同的事**、都可能同时成立（"已开始新的对话" + "模型服务调用失败"），故拼接
+    而非二选一；`_compose` 只吃一个 `notice`，拼在这里比改它的签名省事。`meta` 拿不到
+    `incomplete`（答出来了，或宿主读不到可信读数 → 降级）时原样返回，不多发一个字。
+    """
+    incomplete = meta.get("incomplete")
+    if not isinstance(incomplete, dict):
+        return notice
+    message = incomplete.get("message")
+    if not isinstance(message, str) or not message:
+        message = "本轮未能得到完整答案"
+    line = INCOMPLETE_PREFIX.format(message=message)
+    return f"{notice}\n{line}" if notice else line
 
 
 @dataclass
@@ -435,7 +456,10 @@ class Delivery:
                     await self._adapter.typing(ready.chat_id, True)
                     typing_on = True
             # 非 edit 档：`emit` **丢弃全部 token**（逐条推会刷屏并撞频控，§6.2）。
-            answer = await conv.turn(ready.text, lambda _kind, _data: None)
+            # `meta` 收本轮结论（P4.23 §3.1）：turn() 把未完成写成结构化返回而非异常，
+            # 不传这只 dict 就看不见"模型其实没答出来"。
+            meta: dict = {}
+            answer = await conv.turn(ready.text, lambda _kind, _data: None, meta)
         except AgentCancelledError:
             # **主动停机不是处理失败**（决策P4.21-54）：一个字也不发。按 v4 的兜底，用户在关机时
             # 会收到一句莫名其妙的「处理出错了」——更糟的是这会**训练用户去重试一个正在退出的进程**。
@@ -445,6 +469,7 @@ class Delivery:
             if typing_on:  # typing-off 必须在 finally，否则异常路径下「正在输入…」永不消失
                 with contextlib.suppress(Exception):
                     await self._adapter.typing(ready.chat_id, False)
+        notice = _merge_notice(notice, meta)
         delivered = await self._send_parts(self._compose(answer, notice), ready.chat_id)
         await self._offer_actions(ready.chat_id, delivered)  # ★ P4.22：叠加层，可整条不发
 
@@ -468,8 +493,9 @@ class Delivery:
                 st.latest += data
                 st.touch()
 
+        meta: dict = {}  # 同 _answer_plain：收本轮结论（P4.23 §3.1）
         try:
-            answer = await conv.turn(ready.text, emit)
+            answer = await conv.turn(ready.text, emit, meta)
         except AgentCancelledError:
             # 停 writer，**一个字也不发**（§4.6）。占位消息就停在最后一次中间 edit 的内容上，
             # 这比改成「处理出错了」诚实。
@@ -480,6 +506,7 @@ class Delivery:
             # **顺序不能反**（§6.2）：先发提示再停 writer，writer 会把提示又改回旧的局部文本。
             await self._stop_writer(act, abort=True)
             raise
+        notice = _merge_notice(notice, meta)
         parts, dropped = split_for(
             self._compose(answer, notice), caps.max_message_length, max_parts=caps.max_parts
         )

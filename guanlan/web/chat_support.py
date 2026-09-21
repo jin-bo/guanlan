@@ -300,6 +300,77 @@ def _lean_messages(messages: list[dict]) -> list[dict]:
     return out
 
 
+# ── 轮次结论（P4.23 §3.1，见 docs/P4.23-Agentao0.5.3接入调研.md）─────────────────
+#
+# `arun` 正常返回**不等于**模型答出来了：agentao 会把 `[LLM API error: …]`、空响应占位、
+# 截断/循环终止提示当**普通字符串**返回，没有异常。宿主若只看"没抛"，就会把这些当正常答案
+# 发出去（Web 的 done 帧、IM 的回复），用户无从分辨。
+#
+# 判定口径取 agentao 公开的 `agent.last_turn`（`runtime/outcome.py::TurnOutcome`）。
+
+#: `incomplete_reason` 的闭集 → 出站中文短语。**两个版本的词表不同**：0.4.17 无
+#: `max_iterations`（0.5.x 才加），故这里取并集；读到表外的新值走 `_INCOMPLETE_FALLBACK`，
+#: 绝不 KeyError——上游扩词表不该让宿主崩在一句文案上。
+_INCOMPLETE_LABELS: dict[str, str] = {
+    "no_output": "模型这一轮没有输出内容",
+    "reasoning_only": "模型只产生了推理过程，没有给出答案",
+    "length_truncated": "答案被模型的长度上限截断",
+    "doom_loop": "模型陷入重复，本轮已被终止",
+    "max_iterations": "本轮工具调用次数达到上限",
+    "llm_error": "模型服务调用失败",
+}
+_INCOMPLETE_FALLBACK = "本轮未能得到完整答案"
+
+
+def incomplete_message(reason: str | None) -> str:
+    """`incomplete_reason` → 面向人的中文短语（表外值回落到通用文案）。"""
+    return _INCOMPLETE_LABELS.get(reason or "", _INCOMPLETE_FALLBACK)
+
+
+def read_turn_outcome(agent: object) -> dict | None:
+    """读 `agent.last_turn` 的结构化轮次结论；**读不到可信读数就返回 `None`**。
+
+    返回 `None` = "本宿主拿不到这一轮的结论"，调用方据此**降级回旧行为**（把 `arun` 的返回
+    值当答案）。这不是容错摆设，是必须的：
+
+    - `last_turn` 在 **0.4.17 与 0.5.x 都存在**（本项目升级前后都能用，见调研 §3.1），但
+      任何不填它的替身（含 `tests/test_web.py::_FakeAgent`）都没有这个属性；
+    - `MagicMock` **对任何属性都返回真值**，直接信 `is_answer` 会把每一轮都读成"有答案"或
+      每一轮都读成"失败"，取决于运气。故这里**逐字段验类型**，任一字段不是预期类型就整体
+      判为不可信 → `None` → 降级。同一姿态见上游 `cli/input_loop.py::_no_progress_reason`。
+
+    `is_answer` **自己按公开公式算**（`status == "ok" and incomplete_reason is None`）而不读
+    属性：既避开 Mock 的真值陷阱，也使 0.4.17（其 `TurnOutcome` 同样有这两个字段）与 0.5.x
+    得到同一口径。
+
+    `finish_reason_missing` 是 0.5.x 才有的**纯诊断位**，用 `getattr` 取：上游明确它**不**参与
+    `is_answer`——有些兼容服务从不发 `finish_reason`，当失败会让每轮都变失败。
+    """
+    outcome = getattr(agent, "last_turn", None)
+    if outcome is None:
+        return None
+    status = getattr(outcome, "status", None)
+    reason = getattr(outcome, "incomplete_reason", None)
+    # 闸门：status 必须是字符串、reason 必须是字符串或 None。Mock / 未填的替身在此出局。
+    if not isinstance(status, str):
+        return None
+    if reason is not None and not isinstance(reason, str):
+        return None
+    tool_count = getattr(outcome, "tool_count", 0)
+    if not isinstance(tool_count, int) or isinstance(tool_count, bool):
+        tool_count = 0  # 坏类型不判整轮不可信：它只影响 goal 的"调过工具算有进展"豁免
+    error = getattr(outcome, "error", None)
+    return {
+        "status": status,
+        "incomplete_reason": reason,
+        "tool_count": tool_count,
+        "error": error if isinstance(error, str) else None,
+        # 0.4.17 没有这个字段 → getattr 取默认 False；`is True` 兼防 Mock。
+        "finish_reason_missing": getattr(outcome, "finish_reason_missing", False) is True,
+        "is_answer": status == "ok" and reason is None,
+    }
+
+
 def configure_agent_log(root: Path) -> Path:
     """把嵌入 chat 的会话日志接到 `<root>/agentao.log`（与 CLI 同名同轮转），**全进程仅挂一次**。
 
