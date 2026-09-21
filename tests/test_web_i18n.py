@@ -131,3 +131,19 @@ def test_rerender_dynamic_repaints_search_view():
     assert '"search"' in body and "paintSearch(" in body, (
         "rerenderDynamic 未覆盖 kind=='search' 的纯重绘——切语言后搜索态文案会停在旧语言"
     )
+
+
+def test_incomplete_labels_match_server():
+    """P4.23：前端 zh 的 `incomplete.*` 须与服务端 `_INCOMPLETE_LABELS` 逐字一致。
+
+    同一件事（"本轮没答出来的原因"）Web 走前端词表、IM 走服务端文案——两边各存一份，不钉住
+    就会一处改了一处没改，同一个故障在网页和微信里说法不同。表外的新 reason 两边都回落通用文案，
+    故 fallback 也在比对之列。
+    """
+    from guanlan.web.chat_support import _INCOMPLETE_FALLBACK, _INCOMPLETE_LABELS
+
+    for reason, label in _INCOMPLETE_LABELS.items():
+        key = f"incomplete.{reason}"
+        assert key in ZH_ENTRIES, f"前端缺 {key}（服务端已有这个 reason）"
+        assert ZH_ENTRIES[key] == label, f"{key} 前后端文案不一致：{ZH_ENTRIES[key]!r} vs {label!r}"
+    assert ZH_ENTRIES["incomplete.fallback"] == _INCOMPLETE_FALLBACK

@@ -15,6 +15,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from agentao.runtime.model import purge_thinking_artifacts as _purge_thinking_artifacts
 from agentao.tools.base import Tool
 
 from ..check import Violation
@@ -175,6 +176,29 @@ def make_guanlan_search_tool(search_cache: CorpusCache, *, wiki: Path) -> Tool:
         def is_read_only(self) -> bool:
             return True  # 硬要求：只读姿态不被 DENY（镜像 tool_planning._decide）
 
+        @property
+        def copies_to_subagents(self) -> bool:
+            """让**前台**子 Agent 也拿到这把召回工具（P4.23 §2.1/§3.4）。
+
+            0.4.24 起 agentao 反转了默认：宿主工具不声明就**不进**子 Agent（0.4.17 是把父
+            Agent 的实例直接共享给子 Agent）。不声明的后果不是"少个工具"这么轻——skill 与
+            `query.py` 的指令都写着"先用可用的 search 入口召回"，子 Agent 读得到指令却没有
+            工具，那就成了死指令，正是 P5.1 要治的那个病。
+
+            **必须是 `@property`**：上游把"可调用"专门判为**未声明**并告警——绑定方法恒真，
+            `def copies_to_subagents(self): return False` 会被读成"是"，这是该机制唯一会
+            fail-open 的误写法，故上游宁可不认。
+
+            声明为真的三个前提本工具都满足：
+            ① 可被 `copy.copy` 浅拷贝（无 `__copy__`，默认浅拷贝即新实例）；
+            ② 副本名字不变（`name` 返回常量 `_GUANLAN_SEARCH_NAME`）——否则会顶掉子 Agent
+               正留着的同名内建；
+            ③ 副本与父实例**共享同一个 `CorpusCache`**（浅拷贝的必然结果）且这是安全的：
+               `CorpusCache` 自带 `threading.Lock`，锁只护纯字典短临界区，glob + stat 在锁外。
+               共享正是我们要的——子 Agent 不该重建一遍全库索引。
+            """
+            return True
+
         def execute(self, *, query: str = "", limit: int = 10, **_kw) -> str:
             # 工具路径自校验 limit（决策P5.0-15）：HTTP 有 Query(ge=1) 兜底，工具是 LLM 填参、无此门。
             # `score` 对 limit<1 raise ValueError，故先 clamp 到 ≥1（坏类型也回落 10），不让它冒泡成
@@ -298,6 +322,98 @@ def _lean_messages(messages: list[dict]) -> list[dict]:
             m = {**m, "content": text}
         out.append(m)
     return out
+
+
+def purge_model_specific(messages: list[dict]) -> int:
+    """恢复历史时清掉**模型/协议专属**的推理数据，返回清掉的字段数（P4.23 §3.2）。
+
+    为什么必须清：这些字段由**某一个具体模型**铸出、也只对它有意义——Anthropic 的签名
+    thinking 块换个模型会被直接拒绝，Gemini 的 `thought_signature` 要按签发它的模型校验。
+    agentao 会把它们序列化进历史并**原样发回**（OpenAI SDK 不会剥掉未知键）。观澜的恢复
+    路径**有意不回放盘上的 model**、一律绑当前进程模型（见 `ConversationStore.restore`），
+    所以"换模型恢复"是常态而非边角，不清就会在下一次 LLM 调用时炸。
+
+    **只在恢复/切换边界调**，绝不每轮去删活跃会话的推理数据——那是模型本轮要用的上下文。
+
+    直接 import 上游私有的 `runtime.model.purge_thinking_artifacts`，而**不是**自己抄一份
+    字段清单，这是有意的取舍：上游新增一种 wire 时只需往 `WIRE_CARRIER_KEYS` 加一项，抄来
+    的副本会**静默漏掉**它，而漏清理是沉默的——正向用例全绿、只有真换模型时才炸。直接引则
+    上游一改名就立刻 ImportError（在 Web 启动时炸，不是恢复到一半才炸），`tests/test_web.py`
+    另有一条契约用例逐项断言 `WIRE_CARRIER_KEYS` 都被清掉。私有依赖在本仓已有先例：
+    `runtime.drop_poisoned_api_keys` 用的 `agentao._env.safe_load_dotenv` 同此姿态。
+    """
+    return _purge_thinking_artifacts(messages)
+
+
+# ── 轮次结论（P4.23 §3.1，见 docs/P4.23-Agentao0.5.3接入.md）─────────────────
+#
+# `arun` 正常返回**不等于**模型答出来了：agentao 会把 `[LLM API error: …]`、空响应占位、
+# 截断/循环终止提示当**普通字符串**返回，没有异常。宿主若只看"没抛"，就会把这些当正常答案
+# 发出去（Web 的 done 帧、IM 的回复），用户无从分辨。
+#
+# 判定口径取 agentao 公开的 `agent.last_turn`（`runtime/outcome.py::TurnOutcome`）。
+
+#: `incomplete_reason` 的闭集 → 出站中文短语。**两个版本的词表不同**：0.4.17 无
+#: `max_iterations`（0.5.x 才加），故这里取并集；读到表外的新值走 `_INCOMPLETE_FALLBACK`，
+#: 绝不 KeyError——上游扩词表不该让宿主崩在一句文案上。
+_INCOMPLETE_LABELS: dict[str, str] = {
+    "no_output": "模型这一轮没有输出内容",
+    "reasoning_only": "模型只产生了推理过程，没有给出答案",
+    "length_truncated": "答案被模型的长度上限截断",
+    "doom_loop": "模型陷入重复，本轮已被终止",
+    "max_iterations": "本轮工具调用次数达到上限",
+    "llm_error": "模型服务调用失败",
+}
+_INCOMPLETE_FALLBACK = "本轮未能得到完整答案"
+
+
+def incomplete_message(reason: str | None) -> str:
+    """`incomplete_reason` → 面向人的中文短语（表外值回落到通用文案）。"""
+    return _INCOMPLETE_LABELS.get(reason or "", _INCOMPLETE_FALLBACK)
+
+
+def read_turn_outcome(agent: object) -> dict | None:
+    """读 `agent.last_turn` 的结构化轮次结论；**读不到可信读数就返回 `None`**。
+
+    返回 `None` = "本宿主拿不到这一轮的结论"，调用方据此**降级回旧行为**（把 `arun` 的返回
+    值当答案）。这不是容错摆设，是必须的：
+
+    - `last_turn` 在 **0.4.17 与 0.5.x 都存在**（本项目升级前后都能用，见调研 §3.1），但
+      任何不填它的替身（含 `tests/test_web.py::_FakeAgent`）都没有这个属性；
+    - `MagicMock` **对任何属性都返回真值**，直接信 `is_answer` 会把每一轮都读成"有答案"或
+      每一轮都读成"失败"，取决于运气。故这里**逐字段验类型**，任一字段不是预期类型就整体
+      判为不可信 → `None` → 降级。同一姿态见上游 `cli/input_loop.py::_no_progress_reason`。
+
+    `is_answer` **自己按公开公式算**（`status == "ok" and incomplete_reason is None`）而不读
+    属性：既避开 Mock 的真值陷阱，也使 0.4.17（其 `TurnOutcome` 同样有这两个字段）与 0.5.x
+    得到同一口径。
+
+    `finish_reason_missing` 是 0.5.x 才有的**纯诊断位**，用 `getattr` 取：上游明确它**不**参与
+    `is_answer`——有些兼容服务从不发 `finish_reason`，当失败会让每轮都变失败。
+    """
+    outcome = getattr(agent, "last_turn", None)
+    if outcome is None:
+        return None
+    status = getattr(outcome, "status", None)
+    reason = getattr(outcome, "incomplete_reason", None)
+    # 闸门：status 必须是字符串、reason 必须是字符串或 None。Mock / 未填的替身在此出局。
+    if not isinstance(status, str):
+        return None
+    if reason is not None and not isinstance(reason, str):
+        return None
+    tool_count = getattr(outcome, "tool_count", 0)
+    if not isinstance(tool_count, int) or isinstance(tool_count, bool):
+        tool_count = 0  # 坏类型不判整轮不可信：它只影响 goal 的"调过工具算有进展"豁免
+    error = getattr(outcome, "error", None)
+    return {
+        "status": status,
+        "incomplete_reason": reason,
+        "tool_count": tool_count,
+        "error": error if isinstance(error, str) else None,
+        # 0.4.17 没有这个字段 → getattr 取默认 False；`is True` 兼防 Mock。
+        "finish_reason_missing": getattr(outcome, "finish_reason_missing", False) is True,
+        "is_answer": status == "ok" and reason is None,
+    }
 
 
 def configure_agent_log(root: Path) -> Path:

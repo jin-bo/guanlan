@@ -34,7 +34,22 @@ dependencies = [
     # 若留在 0.4.13：已装 0.4.13–0.4.16 的用户装本 extra 时，pip 认为下限已满足、只把 mcp 抬到 2.x，
     # 于是 guanlan mcp 照常工作，但 agentao 侧每次 ingest/query/Web 问答都死在 Tool schema 上
     # （agentao CHANGELOG 0.4.17：「every MCP path failed」）——故障点看起来与真凶毫不相干。
-    "agentao[cli]>=0.4.17",
+    #
+    # >=0.5.3（P4.23，见 docs/P4.23-Agentao0.5.3接入.md §5 第 3 步）。下限抬到 0.5.3 的理由
+    # 是**两个必需能力都在 0.5.x 才有**，不是"跟新"：
+    #   ① `runtime.model.purge_thinking_artifacts` + `llm._stream_response.WIRE_CARRIER_KEYS`
+    #      ——恢复历史时清掉模型专属推理数据。0.4.17 两者都没有，换模型/换协议恢复会请求失败。
+    #   ② `TurnOutcome.finish_reason_missing` 与上游 goal 无进展词表里的 `max_iterations`
+    #      ——0.4.17 的闭集没有它。（`last_turn` 本身 0.4.17 就有，故轮次结论判定已先行交付。）
+    #
+    # **首次加上界 `<0.6`**：0.5.0 是实打实的破坏性 minor（删 `agentao.harness` / `agentao.session`、
+    # 删旧 callback 构造参数、构造器第五参后强制关键字、sessions API 强制 `project_root`），证明这个
+    # 项目的 minor 号会带不兼容改动。没有上界时新装可能悄悄解析到下一个 minor，而 CI 锁文件仍在验
+    # 旧版——真出问题时现象是"用户装出来的和我们测的不是一个东西"。
+    #
+    # 注意 0.5.x 起 `anthropic>=1.6.0` 是 agentao 的**核心依赖**（`anthropic-messages` 线协议），
+    # 故升级必须重新解析锁文件并安装，不能只换源码。
+    "agentao[cli]>=0.5.3,<0.6",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
 ]
 

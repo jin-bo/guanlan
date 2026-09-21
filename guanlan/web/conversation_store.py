@@ -21,7 +21,13 @@ from agentao.embedding import delete_session, list_sessions
 from ..search import CorpusCache
 from .defaults import DEFAULT_CONFIRM_TIMEOUT
 from ..skill import SKILL_NAME
-from .chat_support import _UNSET, IDLE_TTL_SECONDS, _is_canonical_uuid
+from .chat_support import (
+    _UNSET,
+    IDLE_TTL_SECONDS,
+    _is_canonical_uuid,
+    _logger,
+    purge_model_specific,
+)
 from .goal_io import clear_goal_sidecar, goal_sidecar_path, read_goal
 from .jobs import WriteGate
 
@@ -295,6 +301,13 @@ class ConversationStore:
             messages, _model, _ = chat.load_session(cid, project_root=self._kb)  # 全 UUID + 已确认存在
         except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
             return None  # 竞态/坏文件（含非对象/坏字节毒快照）→ 当未知 id（404），绝不冒泡成流式 error
+        # P4.23 §3.2：装回历史**前**清掉模型专属推理数据（镜像 0.5.3 的 cli/commands/sessions.py
+        # 与 acp/session_load.py 的 resume——两处恢复都清）。下方构造处的注释解释了为什么恢复**有意**
+        # 绑当前进程模型而非盘上的 model：正因如此，"换模型恢复"是常态，不清就会在下一次 LLM 调用时
+        # 被 provider 拒掉。纯内存改刚读出的这份 `messages`，故放在 store 锁**外**做。
+        removed = purge_model_specific(messages)
+        if removed:
+            _logger.info("会话 %s 恢复：清掉 %d 个模型专属推理字段", cid, removed)
         evicted: list[Conversation] = []
         try:
             with self._lock:  # 同 create：构造慢但本地单用户罕见，换无并发绕过
@@ -327,7 +340,7 @@ class ConversationStore:
                     clock=self._clock,
                     mcp_registry=self._mcp_registry,  # P4.21：新建/恢复两路零漂移
                 )
-                conv.agent.messages = messages  # 镜像 agentao cli/commands/sessions.py 的 resume
+                conv.agent.messages = messages  # 已在锁外清过推理数据（P4.23 §3.2，见上）
                 # 只认构造已激活的 SKILL_NAME，**不**回放盘上任意 active_skills（扩大姿态，决策P4.2-4/6）
                 conv.turns = len([m for m in messages if m.get("role") == "user"])  # 还原轮次
                 first_user = next(

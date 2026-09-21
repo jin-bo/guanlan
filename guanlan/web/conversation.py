@@ -39,7 +39,9 @@ from .chat_support import (
     _logger,
     _prune_old_snapshots,
     _violation_key,
+    incomplete_message,
     make_guanlan_search_tool,
+    read_turn_outcome,
 )
 from .goal_io import (
     clear_goal_sidecar,
@@ -62,6 +64,46 @@ from .policy_fs import (
 # 续跑/收尾 prompt **镜像** agentao `input_loop._continuation_prompt`/`_wrap_up_prompt`
 # （私有不可 import）+ 加 wiki 语境。两者**只吃 objective 串**（=循环在 `_goal_lock` 内快照出
 # 的那份，§4），不接 `g` 对象——杜绝在锁外读 GoalState（评审 Medium #1，§4.1）。
+
+
+# ── goal 无进展护栏（P4.23 §3.1，镜像上游 `cli/input_loop.py`）────────────────────
+#
+# 「模型连着好几轮什么都没产出」必须让 goal 停下来，否则 provider 一挂，续跑会在一个死服务上
+# 空转到预算耗尽。下面三个常量与上游**逐值对齐**（`_NO_PROGRESS_REASONS` / `_LLM_ERROR_REASON`
+# / `_MAX_EMPTY_CONTINUATIONS`），改动前先看上游是否也改了。
+
+#: 判为「本轮没有进展」的 `incomplete_reason`。**注意不是全部未完成原因**：`length_truncated`
+#: / `max_iterations` 说明模型确实干了活、只是没干完，不该计入无进展。
+_NO_PROGRESS_REASONS = frozenset({"no_output", "reasoning_only", "llm_error"})
+_LLM_ERROR_REASON = "llm_error"
+#: 连续多少轮无进展就把目标收为 blocked。
+_MAX_EMPTY_CONTINUATIONS = 3
+
+
+def _no_progress_reason(turn_meta: dict) -> str | None:
+    """本轮「没有进展」的原因，有进展则 `None`（P4.23 §3.1）。
+
+    输入取 `turn()` 写进 per-turn meta 的 `incomplete`（结构化返回，**不是**异常），故读到
+    `None` 的正常情形有两种：真答出来了，或宿主拿不到可信读数（`read_turn_outcome` 降级）。
+    两者都按「有进展」处理——降级必须偏向继续跑，而不是把目标误判成 blocked。
+
+    **调过工具算有进展，但 `llm_error` 不吃这条豁免**（上游同款例外，原文在
+    `cli/input_loop.py::_no_progress_reason`）：`tool_count` 是按**轮**累计的，只要本轮早先
+    成功调过一次工具，后面每轮都会重置连击数——provider 挂掉后 goal 会永远空转下去，而那
+    正是这条护栏存在的理由。删这条例外前请先想清楚这一点。
+    """
+    incomplete = turn_meta.get("incomplete")
+    if not isinstance(incomplete, dict):
+        return None
+    reason = incomplete.get("reason")
+    if not (isinstance(reason, str) and reason in _NO_PROGRESS_REASONS):
+        return None
+    if reason == _LLM_ERROR_REASON:
+        return reason
+    tool_count = incomplete.get("tool_count", 0)
+    if isinstance(tool_count, int) and not isinstance(tool_count, bool) and tool_count > 0:
+        return None
+    return reason
 
 
 class GoalActiveError(RuntimeError):
@@ -235,6 +277,22 @@ class Conversation:
             logger=_logger,
             filesystem=self._policy_fs,  # 层①：透传到 agent.filesystem → 绑定每个写工具（C0 已验）
             transport=transport,
+            # P4.23 §3.4：关掉**后台**子 Agent 执行面。factory 默认塞一个
+            # `BackgroundTaskStore(persistence_dir=wd)`（0.4.17 与 0.5.3 逐字相同、非新增），
+            # 而后台子任务能**活过父轮收尾**——那时本轮写日志已 `end_journal()`、写锁已释放，
+            # 于是它的写①拿不到撤销 token、②混进下一轮的 per-turn 写日志、③脱离本轮 check
+            # 范围（可能压根没有下一轮、下一轮可能只读、或被收进 `before_check` 基线从此静默）。
+            # 这三条正面违背「确定性写门禁」这条不变量，故关死，而不是赌"当前没人配 agent 定义"。
+            #
+            # **只关后台、关不掉子 Agent 本身**：`agents/manager.py::create_agent_tools` 的
+            # docstring 写明，传 None 只是让每个 wrapper 去掉 `run_in_background` 参数、不再
+            # 追加 `CheckBackgroundAgentTool`——`agent_<name>` 工具照常注册、前台可用。前台子
+            # Agent 在父轮内跑完，不越界，故不在本条射程内；它带来的**工具继承**问题另行解决
+            # （`guanlan_search` 声明 `copies_to_subagents`，见 chat_support.py）。
+            #
+            # 显式 `None` 是文档化的关闭姿态：factory 的 `if "bg_store" not in overrides` 只看
+            # 键在不在，键在就跳过默认、原样转发 None（与 `mcp_registry=None` 同形）。
+            bg_store=None,
         )
         if model is not None:
             # --model 仅在给定时入 overrides：显式 model=None 会盖掉 .env 发现的模型、
@@ -531,8 +589,8 @@ class Conversation:
 
         可写姿态（workspace-write）下还在收尾把**层②还原 / 写后 check / 撤销可用性**写进 `meta_out`
         （由端点装进 done/error/stopped 帧的可选字段，§7）。`meta_out` 由端点持有 → 无论本轮返回
-        还是抛错，端点都读到自己这只 dict，杜绝跨轮读串（决策P4.5-9）。read-only 姿态零开销、
-        `meta_out` 保持空。
+        还是抛错，端点都读到自己这只 dict，杜绝跨轮读串（决策P4.5-9）。read-only 姿态不写这三样；
+        两种姿态都可能写入轮次结论 `incomplete` / `finish_reason_missing`（P4.23，见 `_record_outcome`）。
 
         **锁序（决策P4.5-6/13，评审 High）**：先持 `self.lock`（本方法 `async with`）、再异步取进程
         `write_lock`——所有会话态写操作（可写 turn 与撤销端点）同序，绝不反序。
@@ -610,13 +668,36 @@ class Conversation:
                 answer = await self.agent.arun(
                     msg, cancellation_token=token, images=images or None
                 )
+                # ── 轮次结论（P4.23 §3.1）：`arun` 没抛 ≠ 模型答出来了 ──────────────
+                # 未完成一律走**结构化返回**、绝不改成抛异常：一抛就落进 run_goal 的通用
+                # except，`empty_streak` 永远攒不到阈值，§3.1"连续无进展才 blocked"直接失效
+                # （上游能计数正是因为这些结果正常返回、返回后才读 last_turn）。
+                # 读不到可信读数时 `read_turn_outcome` 返回 None → 本段整体跳过 = 旧行为。
+                outcome = self._record_outcome(meta_out)
                 if self._persist:
-                    # 仅成功轮落盘、off-loop 不堵事件循环；任何异常（prune / save_session）只记日志，
-                    # **绝不**让它冒泡把已成功的 arun 答案翻成 error（失败不毁答案，同 §4.4 降级精神）。
+                    # **失败轮同样落盘**（P4.23 §3.1 显式取舍，改了旧注释"仅成功轮落盘"——那句
+                    # 与实际不符：API 错误文本走的也是这条路）。取"存"而非"不存"，因为占位/错误
+                    # 文本**已经在 `agent.messages` 里**：不存会丢掉用户刚发的那条消息，恢复出的
+                    # 历史缺一个 user 轮，与内存态漂移；存则历史里留一句 `[LLM API error…]`，这是
+                    # live 会话本来就看得见的东西，诚实且无漂移。
+                    #
+                    # off-loop 不堵事件循环；**落盘自身失败只记日志**（prune / save_session 的任何
+                    # 异常）：绝不让它冒泡把已成功的 arun 答案翻成 error（失败不毁答案，同 §4.4
+                    # 降级精神）。注意与上面一段区分——那是"这一轮没答出来"，这是"答出来了只是
+                    # 没存住"：磁盘满/只读目录绝不该中断一次本来成功的问答，更不该打断 goal 续跑。
                     try:
                         await anyio.to_thread.run_sync(self._save)
                     except Exception:  # noqa: BLE001 — 落盘失败仅记日志，本轮答案照常返回
                         _logger.warning("会话 %s 落盘失败，本轮未持久化", self.id, exc_info=True)
+                # ── 停止 ≠ 没答出来：还原成 AgentCancelledError ──────────────────────
+                # agentao 的 `runtime/turn.py::run_turn` 把 `AgentCancelledError` **吞成返回值**
+                # `[Cancelled: <reason>]` + `last_turn.status == "cancelled"`，`arun` 并不抛。而宿主
+                # 各处都按「停止 = AgentCancelledError」写成：Web 的 stopped 帧、IM 停机"一个字也不发"
+                # （决策P4.21-54）、goal 的暂停并收尾。不在此还原，停止就会被当成一次普通答完的轮
+                # （goal 还会 turns_used+1、吃掉首轮附件）。**落盘之后才抛**：该轮已进 `agent.messages`，
+                # 与"失败轮同样落盘"同一取舍，免内存/盘上漂移。读不到可信读数（替身）→ None → 旧行为。
+                if outcome is not None and outcome["status"] == "cancelled":
+                    raise AgentCancelledError(outcome["error"] or "cancelled")
                 return answer
             finally:
                 # ── 可写 turn 收尾（决策P4.5-3/4，评审 High：还原须早于 error SSE / 计数-- / 释锁）──
@@ -632,6 +713,45 @@ class Conversation:
                 # 任何退出路径（closed 早退 / arun 抛 / 正常返回）都清掉 emit 与令牌（一处归口）。
                 self._emit = None
                 self._cancel_token = None
+
+    def _record_outcome(self, meta_out: dict | None) -> dict | None:
+        """把本轮 `agent.last_turn` 的结论写进 `meta_out`，并返回读数（P4.23 §3.1）。
+
+        走 `meta_out` 而不是改 `turn()` 的返回类型：这只 dict 本就由调用方持有、逐轮独立
+        （决策P4.5-9），Web 端点把它 `**` 进 done 帧、`run_goal` 把它 `**` 进 turn_done 帧——
+        两条路**不改一行**就拿到了结论，也不必动 IM/Web 既有的 `answer: str` 契约。
+
+        写入两个键，**语义互不相干**：
+
+        - `incomplete`：本轮没拿到完整答案。只在 `is_answer` 为假时出现，故"键在 = 失败"，
+          调用方一个 `in` 判断即可。
+        - `finish_reason_missing`：纯诊断位，只在为真时出现。**绝不**参与失败判定——上游明确
+          有些兼容服务从不发 `finish_reason`，当失败会让每一轮都变失败。当前无人 branch 它，
+          留在帧里供排障。
+
+        `status == "cancelled"` **不写** `incomplete`：停止不是"没答出来"，`turn()` 据返回的读数
+        把它还原成 `AgentCancelledError`、走各宿主既有的停止路径。
+
+        `read_turn_outcome` 返回 `None`（拿不到可信读数）时整体跳过 = 旧行为，见其 docstring。
+        """
+        outcome = read_turn_outcome(self.agent)
+        if outcome is None or meta_out is None or outcome["status"] == "cancelled":
+            return outcome
+        if outcome["finish_reason_missing"]:
+            meta_out["finish_reason_missing"] = True
+        if outcome["is_answer"]:
+            return outcome
+        # 只放 reason / message / tool_count，**不放 status 与 error**：它们在这里是死字段。
+        # agentao 只在 `status == "ok"` 时才设 `incomplete_reason`，`error` 只在异常/取消分支赋值
+        # （`runtime/turn.py` 的 finally）；而 status="error" 会重抛、"cancelled" 上面已还原成
+        # 异常——能走到这一行的未完成轮，status 恒为 "ok"、error 恒为 None。放进帧里只会让人
+        # 以为能从 error 里读到失败详情（先前的用例就据此造了一个真实现不会产生的形状）。
+        meta_out["incomplete"] = {
+            "reason": outcome["incomplete_reason"],
+            "message": incomplete_message(outcome["incomplete_reason"]),
+            "tool_count": outcome["tool_count"],
+        }
+        return outcome
 
     async def _finalize_writable(
         self,
@@ -1019,6 +1139,7 @@ class Conversation:
         if g is None:
             return
         idx = 0
+        empty_streak = 0  # 连续无进展轮数（P4.23 §3.1 护栏），有进展即清零
         turn_task: asyncio.Future | None = None
         prior = None
         # `_in_goal=True` 紧贴 try（其间无可抛点），使 finally **必**清——否则任何早退/异常（g is None
@@ -1081,6 +1202,24 @@ class Conversation:
                     #   never retrieved" 噪声）。
                     await asyncio.gather(turn_task, return_exceptions=True)
                     raise  # 流已断，向上传播
+                except Exception:  # 轮内真异常（非取消）：P4.23 §3.1 失败轮契约
+                    # 与上面两条中断路径**同口径收尾**再传播。原先只有最外层那个 `except
+                    # Exception` 接住它，而那条路①不累计本轮耗时②不出 turn_done 帧——于是
+                    # 「已写文件、随后 API 失败」时 `_finalize_writable` 明明已生成 check 结果
+                    # 和撤销 token，却随 turn_meta 一起被丢掉，用户拿不到撤销入口；本轮真实
+                    # 墙钟也一并蒸发，反复 resume 会让 `--for` 预算永不 trip。
+                    #
+                    # 注意射程：这里接的是**真异常**（传输中断、渲染前的意外等）。"模型没答出来"
+                    # 不走这条路——它是结构化返回，见 `turn()` 里 `_record_outcome` 那段。
+                    # **会话持久化失败也不走这条路**：`turn()` 自己吞掉并只记日志（磁盘满不该
+                    # 中断一次本来成功的问答，更不该打断 goal），那是既有降级契约、本次未改。
+                    #
+                    # 这里只记账 + 出帧；pause 与落盘交给最外层 `except Exception` 的
+                    # `_pause_active_goal()`（它必接住这次 raise），免同一次失败写两遍 sidecar。
+                    with self._goal_lock:
+                        g.time_used_seconds += self._clock() - t0
+                    emit("turn_done", {"idx": idx, "failed": True, **turn_meta})
+                    raise
                 answer = turn_task.result()
                 with self._goal_lock:
                     g.time_used_seconds += self._clock() - t0
@@ -1101,6 +1240,40 @@ class Conversation:
                 emit("turn_done", frame)
                 if tripped or done:  # 收尾轮跑完即停；agent 标终态即停
                     break
+                # ── 无进展护栏（P4.23 §3.1）──────────────────────────────────────
+                # **必须排在 `done` 之后**（上游同序）：一轮若既没产出、又调了 update_goal 标了
+                # 终态，以 **agent 自陈的终态**为准，不被这条护栏抢先改判成 blocked。
+                reason = _no_progress_reason(turn_meta)
+                if reason is None:
+                    empty_streak = 0
+                else:
+                    empty_streak += 1
+                    if empty_streak >= _MAX_EMPTY_CONTINUATIONS:
+                        with self._goal_lock:
+                            blocked = g.is_active  # 轮间已被端点 pause 等 → 不是宿主收的，别报 goal_blocked
+                            if blocked:
+                                g.mark_blocked()
+                        if not blocked:
+                            break  # 已非 active：下一圈顶部本来也会停，只是不冒领这次 block
+                        self._persist_goal()
+                        # `blocked_by="host"` 把**宿主设的 block** 与 agent 自陈的 block 分开
+                        # （上游同款考量）：前端若照搬"它需要你补充信息"的通用文案，就把一个
+                        # 「模型连 %d 轮没出声」误报成模型在等人——而这恰是本护栏要区分的那件事。
+                        emit(
+                            "goal_blocked",
+                            {
+                                "idx": idx,
+                                "blocked_by": "host",
+                                "reason": reason,
+                                "streak": empty_streak,
+                                "message": incomplete_message(reason),
+                            },
+                        )
+                        _logger.warning(
+                            "会话 %s 的目标因连续 %d 轮无进展（%s）被收为 blocked",
+                            self.id, empty_streak, reason,
+                        )
+                        break
                 idx += 1
         except Exception:  # 轮内异常 → 暂停 active 目标再抛（对齐 agentao，不让异常搁浅 active 目标）
             self._pause_active_goal()
