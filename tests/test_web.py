@@ -1009,10 +1009,14 @@ def test_ingest_job_emits_progress_heartbeat(kb, monkeypatch) -> None:
 
     monkeypatch.setattr(jobs_mod, "_JOB_HEARTBEAT_INTERVAL_S", 0.05)
     target = _put_raw(kb)
+    # 作业静默到轮询方**真看见**一帧才放行，而不是睡固定时长：原先 sleep(0.25) 只留 ~0.2s 可见
+    # 窗口，CI 慢 runner 上轮询线程被饿一次就整窗错过（main 上 3.11 连红两次）。心跳真坏了则
+    # 等满超时、seen 仍空，下面的断言照样报——不会因此漏报。
+    observed = threading.Event()
 
     def action(root):
         write_page(root, "wiki/concepts/New.md")  # 落一页，使心跳可数到「已写 N 页」
-        time.sleep(0.25)  # 静默 > 数个心跳间隔，逼出 progress 帧
+        observed.wait(timeout=3.0)  # < 下方轮询 deadline，超时也能让作业先收尾
 
     runner = make_runner(action)
     seen: list[str] = []
@@ -1023,6 +1027,7 @@ def test_ingest_job_emits_progress_heartbeat(kb, monkeypatch) -> None:
             data = client.get(f"/api/jobs/{job_id}").json()
             if data.get("progress"):
                 seen.append(data["progress"])
+                observed.set()
             if data["state"] == "done":
                 break
             time.sleep(0.02)
