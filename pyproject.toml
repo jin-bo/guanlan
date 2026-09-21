@@ -35,7 +35,7 @@ dependencies = [
     # 于是 guanlan mcp 照常工作，但 agentao 侧每次 ingest/query/Web 问答都死在 Tool schema 上
     # （agentao CHANGELOG 0.4.17：「every MCP path failed」）——故障点看起来与真凶毫不相干。
     #
-    # >=0.5.3（P4.23，见 docs/P4.23-Agentao0.5.3接入调研.md §5 第 3 步）。下限抬到 0.5.3 的理由
+    # >=0.5.3（P4.23，见 docs/P4.23-Agentao0.5.3接入.md §5 第 3 步）。下限抬到 0.5.3 的理由
     # 是**两个必需能力都在 0.5.x 才有**，不是"跟新"：
     #   ① `runtime.model.purge_thinking_artifacts` + `llm._stream_response.WIRE_CARRIER_KEYS`
     #      ——恢复历史时清掉模型专属推理数据。0.4.17 两者都没有，换模型/换协议恢复会请求失败。

@@ -45,6 +45,22 @@
   依赖上界 `<0.6` 是首次加：0.5.0 证明了这个项目的 minor 号会带不兼容改动，没有上界时新装可能
   悄悄解析到下一个 minor，而 CI 锁文件仍在验旧版。
 
+### 修复
+
+- **停止在真实运行中从未走到宿主的停止路径**（P4.23 评审发现，**既有缺陷**，非本次引入）。agentao
+  的 `runtime/turn.py::run_turn` 把 `AgentCancelledError` **吞成返回值** `[Cancelled: <reason>]`
+  并置 `last_turn.status = "cancelled"`，`arun` 并不抛——本项目一直钉的 0.4.17 就是如此。宿主各处
+  却都按"停止 = 抛 `AgentCancelledError`"写，于是那些 `except` 分支在真实运行中全是死代码：
+  - Web 点停止，收到的是一条内容为 `[Cancelled: user-stop]` 的普通 `done` 帧，而不是 `stopped`；
+  - goal 里点停止**只打断当前一轮**：该轮被当成正常答完（`turns_used` +1、吃掉首轮附件），下一轮
+    换一枚新令牌照常续跑（按 `request_stop` 与 `run_goal` 的代码推断，未做真机复现）；
+  - IM 停机时把 `[Cancelled: …]` 当答案发出去，违背决策P4.21-54"一个字也不发"。
+
+  测试一直全绿，是因为替身 `_FakeAgent.arun` **会抛**——替身符合的是我们对上游的记忆，而不是上游
+  的实现。修法：`turn()` 读到 `status == "cancelled"` 即（落盘之后）还原成 `AgentCancelledError`，
+  各宿主既有的停止路径原样生效；另在真 `Agentao` 的契约用例里钉死"停止不抛"这条上游行为，上游哪天
+  改成抛了会立刻知道。
+
 ## [0.1.25] - 2026-09-13
 
 ### 新增

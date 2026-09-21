@@ -589,8 +589,8 @@ class Conversation:
 
         可写姿态（workspace-write）下还在收尾把**层②还原 / 写后 check / 撤销可用性**写进 `meta_out`
         （由端点装进 done/error/stopped 帧的可选字段，§7）。`meta_out` 由端点持有 → 无论本轮返回
-        还是抛错，端点都读到自己这只 dict，杜绝跨轮读串（决策P4.5-9）。read-only 姿态零开销、
-        `meta_out` 保持空。
+        还是抛错，端点都读到自己这只 dict，杜绝跨轮读串（决策P4.5-9）。read-only 姿态不写这三样；
+        两种姿态都可能写入轮次结论 `incomplete` / `finish_reason_missing`（P4.23，见 `_record_outcome`）。
 
         **锁序（决策P4.5-6/13，评审 High）**：先持 `self.lock`（本方法 `async with`）、再异步取进程
         `write_lock`——所有会话态写操作（可写 turn 与撤销端点）同序，绝不反序。
@@ -673,7 +673,7 @@ class Conversation:
                 # except，`empty_streak` 永远攒不到阈值，§3.1"连续无进展才 blocked"直接失效
                 # （上游能计数正是因为这些结果正常返回、返回后才读 last_turn）。
                 # 读不到可信读数时 `read_turn_outcome` 返回 None → 本段整体跳过 = 旧行为。
-                self._record_outcome(meta_out)
+                outcome = self._record_outcome(meta_out)
                 if self._persist:
                     # **失败轮同样落盘**（P4.23 §3.1 显式取舍，改了旧注释"仅成功轮落盘"——那句
                     # 与实际不符：API 错误文本走的也是这条路）。取"存"而非"不存"，因为占位/错误
@@ -689,6 +689,15 @@ class Conversation:
                         await anyio.to_thread.run_sync(self._save)
                     except Exception:  # noqa: BLE001 — 落盘失败仅记日志，本轮答案照常返回
                         _logger.warning("会话 %s 落盘失败，本轮未持久化", self.id, exc_info=True)
+                # ── 停止 ≠ 没答出来：还原成 AgentCancelledError ──────────────────────
+                # agentao 的 `runtime/turn.py::run_turn` 把 `AgentCancelledError` **吞成返回值**
+                # `[Cancelled: <reason>]` + `last_turn.status == "cancelled"`，`arun` 并不抛。而宿主
+                # 各处都按「停止 = AgentCancelledError」写成：Web 的 stopped 帧、IM 停机"一个字也不发"
+                # （决策P4.21-54）、goal 的暂停并收尾。不在此还原，停止就会被当成一次普通答完的轮
+                # （goal 还会 turns_used+1、吃掉首轮附件）。**落盘之后才抛**：该轮已进 `agent.messages`，
+                # 与"失败轮同样落盘"同一取舍，免内存/盘上漂移。读不到可信读数（替身）→ None → 旧行为。
+                if outcome is not None and outcome["status"] == "cancelled":
+                    raise AgentCancelledError(outcome["error"] or "cancelled")
                 return answer
             finally:
                 # ── 可写 turn 收尾（决策P4.5-3/4，评审 High：还原须早于 error SSE / 计数-- / 释锁）──
@@ -705,8 +714,8 @@ class Conversation:
                 self._emit = None
                 self._cancel_token = None
 
-    def _record_outcome(self, meta_out: dict | None) -> None:
-        """把本轮 `agent.last_turn` 的结论写进 `meta_out`（P4.23 §3.1）。
+    def _record_outcome(self, meta_out: dict | None) -> dict | None:
+        """把本轮 `agent.last_turn` 的结论写进 `meta_out`，并返回读数（P4.23 §3.1）。
 
         走 `meta_out` 而不是改 `turn()` 的返回类型：这只 dict 本就由调用方持有、逐轮独立
         （决策P4.5-9），Web 端点把它 `**` 进 done 帧、`run_goal` 把它 `**` 进 turn_done 帧——
@@ -720,24 +729,29 @@ class Conversation:
           有些兼容服务从不发 `finish_reason`，当失败会让每一轮都变失败。当前无人 branch 它，
           留在帧里供排障。
 
+        `status == "cancelled"` **不写** `incomplete`：停止不是"没答出来"，`turn()` 据返回的读数
+        把它还原成 `AgentCancelledError`、走各宿主既有的停止路径。
+
         `read_turn_outcome` 返回 `None`（拿不到可信读数）时整体跳过 = 旧行为，见其 docstring。
         """
-        if meta_out is None:
-            return
         outcome = read_turn_outcome(self.agent)
-        if outcome is None:
-            return
+        if outcome is None or meta_out is None or outcome["status"] == "cancelled":
+            return outcome
         if outcome["finish_reason_missing"]:
             meta_out["finish_reason_missing"] = True
         if outcome["is_answer"]:
-            return
+            return outcome
+        # 只放 reason / message / tool_count，**不放 status 与 error**：它们在这里是死字段。
+        # agentao 只在 `status == "ok"` 时才设 `incomplete_reason`，`error` 只在异常/取消分支赋值
+        # （`runtime/turn.py` 的 finally）；而 status="error" 会重抛、"cancelled" 上面已还原成
+        # 异常——能走到这一行的未完成轮，status 恒为 "ok"、error 恒为 None。放进帧里只会让人
+        # 以为能从 error 里读到失败详情（先前的用例就据此造了一个真实现不会产生的形状）。
         meta_out["incomplete"] = {
             "reason": outcome["incomplete_reason"],
-            "status": outcome["status"],
             "message": incomplete_message(outcome["incomplete_reason"]),
-            "error": outcome["error"],
             "tool_count": outcome["tool_count"],
         }
+        return outcome
 
     async def _finalize_writable(
         self,
@@ -1199,11 +1213,11 @@ class Conversation:
                     # 不走这条路——它是结构化返回，见 `turn()` 里 `_record_outcome` 那段。
                     # **会话持久化失败也不走这条路**：`turn()` 自己吞掉并只记日志（磁盘满不该
                     # 中断一次本来成功的问答，更不该打断 goal），那是既有降级契约、本次未改。
+                    #
+                    # 这里只记账 + 出帧；pause 与落盘交给最外层 `except Exception` 的
+                    # `_pause_active_goal()`（它必接住这次 raise），免同一次失败写两遍 sidecar。
                     with self._goal_lock:
                         g.time_used_seconds += self._clock() - t0
-                        if g.is_active:
-                            g.pause()
-                    self._persist_goal()
                     emit("turn_done", {"idx": idx, "failed": True, **turn_meta})
                     raise
                 answer = turn_task.result()
@@ -1236,8 +1250,11 @@ class Conversation:
                     empty_streak += 1
                     if empty_streak >= _MAX_EMPTY_CONTINUATIONS:
                         with self._goal_lock:
-                            if g.is_active:
+                            blocked = g.is_active  # 轮间已被端点 pause 等 → 不是宿主收的，别报 goal_blocked
+                            if blocked:
                                 g.mark_blocked()
+                        if not blocked:
+                            break  # 已非 active：下一圈顶部本来也会停，只是不冒领这次 block
                         self._persist_goal()
                         # `blocked_by="host"` 把**宿主设的 block** 与 agent 自陈的 block 分开
                         # （上游同款考量）：前端若照搬"它需要你补充信息"的通用文案，就把一个

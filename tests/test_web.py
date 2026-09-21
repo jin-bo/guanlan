@@ -7725,16 +7725,20 @@ def test_done_frame_carries_incomplete_when_model_did_not_answer(chat_client):
     """`last_turn` 说这轮没答出来 → done 帧带 `incomplete`（不再冒充正常答案）。"""
     client, captured = chat_client
     cid = _new_conv(client)  # 必须复用同一会话：新会话 = 新 agent，装好的读数就跟丢了
+    # **真实形状**：agentao 只在 status == "ok" 时才设 incomplete_reason，error 此时恒为 None
+    # （`runtime/turn.py` 的 finally）。先前这里写的是 status="error" + error="502…"——真实现
+    # 正常返回时不可能产生这种组合，用例测的是一个不存在的状态。替身偏离真实现，正是"停止
+    # 从不抛异常"那个 bug 一直没被测出来的原因，故替身一律按真实形状构造。
     captured["agents"][-1].action = _set_outcome(
-        _Outcome(status="error", incomplete_reason="llm_error", error="502 Bad Gateway")
+        _Outcome(status="ok", incomplete_reason="llm_error")
     )
     _t, done, error = _chat(client, "再问一次", conversation_id=cid)
     assert error is None  # 未完成**不是**异常：流照常收尾，只是帧里多了实情
     inc = done["incomplete"]
     assert inc["reason"] == "llm_error"
-    assert inc["status"] == "error"
-    assert inc["error"] == "502 Bad Gateway"
     assert "模型服务调用失败" in inc["message"]
+    # status / error 在这里是死字段（见 `_record_outcome`），不进帧，免得让人以为能读到失败详情
+    assert "status" not in inc and "error" not in inc
 
 
 def test_answered_turn_has_no_incomplete_key(chat_client):
@@ -7787,6 +7791,35 @@ def test_finish_reason_missing_is_diagnostic_not_failure(chat_client):
     _t, done, _e = _chat(client, "问", conversation_id=cid)
     assert done["finish_reason_missing"] is True
     assert "incomplete" not in done  # 诊断位绝不等同失败
+
+
+def test_cancelled_outcome_is_a_stop_not_an_incomplete_answer(chat_client):
+    """真 `arun` 停止时**正常返回** `[Cancelled: …]` + `status="cancelled"`（不抛）。
+
+    `turn()` 须把它还原成 AgentCancelledError → 端点发 `stopped` 帧（而非带 `incomplete` 的
+    done 帧冒充一次"没答完的回答"）。替身默认"会抛"，故这里只装读数、让 arun 正常返回。
+    """
+    client, captured = chat_client
+    cid = _new_conv(client)
+    captured["agents"][-1].action = _set_outcome(_Outcome(status="cancelled", error="user-stop"))
+    frames = _chat_interactive(client, "问", conversation_id=cid)
+    kinds = _frame_kinds(frames)
+    assert "stopped" in kinds and "done" not in kinds
+    assert "incomplete" not in _first(frames, "stopped")
+
+
+def test_goal_stopped_via_cancelled_outcome_pauses_instead_of_continuing(chat_client):
+    """goal 轮被停（真 agentao：正常返回 + status=cancelled）→ 走停止路径：收为 paused、
+    turn_done 标 stopped、**不**计 turns_used——而不是当成普通一轮接着续跑。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+    captured["agents"][-1].action = _set_outcome(_Outcome(status="cancelled", error="user-stop"))
+    client.post(f"/api/chat/{cid}/goal", json={"objective": "x", "turns": 5})
+    frames = _drive_goal(client, cid)
+    assert len([p for e, p in frames if e == "turn_start"]) == 1
+    assert _first(frames, "turn_done").get("stopped") is True
+    info = client.get(f"/api/chat/{cid}/info").json()["goal"]
+    assert info["status"] == "paused" and info["turns_used"] == 0
 
 
 def test_bg_store_is_disabled(chat_client):
@@ -7864,7 +7897,7 @@ def test_goal_tool_calls_excuse_empty_turns_but_not_llm_error(chat_client):
     # ② 同样调过工具，但原因是 llm_error：**照样**计入连击并掐断
     cid2 = _new_conv(client)
     captured["agents"][-1].action = _set_outcome(
-        _Outcome(status="error", incomplete_reason="llm_error", tool_count=3, error="503")
+        _Outcome(status="ok", incomplete_reason="llm_error", tool_count=3)  # 真实形状
     )
     client.post(f"/api/chat/{cid2}/goal", json={"objective": "x", "turns": 20})
     frames2 = _drive_goal(client, cid2)

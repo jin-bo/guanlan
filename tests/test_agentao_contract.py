@@ -18,7 +18,6 @@ bg_store）、只读与可写双姿态、取消、持久化恢复、以及 §3.2
 from __future__ import annotations
 
 import copy
-import os
 from pathlib import Path
 
 import pytest
@@ -214,6 +213,30 @@ def test_cancelled_error_type_is_where_we_catch_it() -> None:
     assert issubclass(AgentCancelledError, Exception)
 
 
+def test_stopped_turn_surfaces_as_agent_cancelled_error(real_conv, monkeypatch) -> None:
+    """**真** `arun` 在停止时并不抛：`run_turn` 把 `AgentCancelledError` 吞成 `[Cancelled: …]`
+    + `last_turn.status == "cancelled"` 返回。宿主的停止路径（Web stopped 帧、IM 停机静默、goal
+    暂停）全按"抛 AgentCancelledError"写成，故 `turn()` 必须把它还原回来，且**不**记成 incomplete。
+
+    猴补的是 `_chat_inner`（`run_turn` 包的那层），这样 `run_turn` 的异常映射与 `last_turn` 落值
+    都是真的——替身 agent 天然"会抛"，正是它把这个缺口藏了起来。
+    """
+    import asyncio
+
+    from agentao.cancellation import AgentCancelledError
+
+    def inner(msg, max_iterations, token, images=None):
+        token.cancel("user-stop")
+        raise AgentCancelledError("user-stop")
+
+    monkeypatch.setattr(real_conv.agent, "_chat_inner", inner)
+    meta: dict = {}
+    with pytest.raises(AgentCancelledError):
+        asyncio.run(real_conv.turn("问", lambda _k, _d: None, meta))
+    assert real_conv.agent.last_turn.status == "cancelled"  # 上游确实是"返回"而非"抛"
+    assert "incomplete" not in meta  # 停止不是"没答出来"
+
+
 # ── 持久化与恢复 ──────────────────────────────────────────────────────────────
 
 
@@ -405,17 +428,21 @@ def test_an_undeclared_host_tool_is_still_left_out(real_kb: Path) -> None:
     的情况下照样绿（漏报）。
     """
     from agentao.agents.tools._wrapper import _copy_declared_host_tool
+    from agentao.tools.base import Tool
 
     from guanlan.web.chat_support import make_guanlan_search_tool
 
     tool = make_guanlan_search_tool(CorpusCache(), wiki=real_kb / "wiki")
 
-    class _Undeclared:
-        """名字/接口同形，但没有 `copies_to_subagents` 声明。"""
-
-        name = tool.name
-
-    assert _copy_declared_host_tool(_Undeclared(), tool.name, "reviewer") is None
+    # 同一个工具类、只把声明回落到 `Tool` 基类的默认（False）——走的是上游"未声明、静默不给"
+    # 那条路。**不能**用一个没有该属性的裸类：那会走"读声明抛 AttributeError"的另一条拒绝路径，
+    # 照样返回 None，对照组就不是在对照"声明"本身了。
+    undeclared_cls = type(
+        "_Undeclared", (type(tool),), {"copies_to_subagents": Tool.copies_to_subagents}
+    )
+    undeclared = undeclared_cls()
+    assert undeclared.copies_to_subagents is False
+    assert _copy_declared_host_tool(undeclared, tool.name, "reviewer") is None
 
 
 # ── 内部依赖面（§3.3：收敛前先钉死现状）──────────────────────────────────────

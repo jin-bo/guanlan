@@ -766,6 +766,7 @@ function handleSSE(frame, botEl) {
       botEl.textContent = payload.answer;
     }
     appendCopyButton(botEl, payload.answer); // 右下角「复制原始 Markdown」：复制答案源（非渲染后文本）
+    appendIncompleteNote(botEl, payload); // P4.23：本轮没答出来要说出来，不让 `[LLM API error…]` 冒充答案
     renderWritableReceipts(payload); // 可写 turn 收尾：check 回执 / 撤销 / immutable 告警
     appendBackfillButton(botEl); // 气泡尾部挂「沉淀」按钮：预填该轮问题（P4.8）
     refreshStagingIfOpen(); // 修订 turn 收尾：暂存区开着则重拉刷新池（决策P4.6-9）
@@ -789,6 +790,34 @@ function handleSSE(frame, botEl) {
     botEl.textContent = t("chat.error", payload.message);
     renderWritableReceipts(payload); // 可写 turn 抛错前的写已被服务端收尾捕获
   }
+}
+
+// P4.23 §3.1：done / turn_done 帧带 `incomplete` = 本轮没拿到完整答案（模型服务失败、空输出、截断…）。
+// agentao 把这些当普通字符串返回，不在气泡尾部标一句，用户会把错误占位当成知识库的回答。
+//
+// 文案按 `reason` 查**前端词表**，而**不用**服务端给的 `incomplete.message`：那句是中文
+// （`chat_support.incomplete_message` 是给 IM 出站用的），英文界面直接显示它就成了中英混排
+// （P4.7 双语的反例）。逐个 case 写死 `t("…")` 字面量：i18n 用例要求 t() 首参必为字面量（决策P4.7-8）。
+// 表外的新 reason（上游扩了闭集）回落通用文案，绝不显示 undefined。
+function incompleteReasonText(reason) {
+  switch (reason) {
+    case "no_output": return t("incomplete.no_output");
+    case "reasoning_only": return t("incomplete.reasoning_only");
+    case "length_truncated": return t("incomplete.length_truncated");
+    case "doom_loop": return t("incomplete.doom_loop");
+    case "max_iterations": return t("incomplete.max_iterations");
+    case "llm_error": return t("incomplete.llm_error");
+    default: return t("incomplete.fallback");
+  }
+}
+
+function appendIncompleteNote(botEl, payload) {
+  const inc = payload && payload.incomplete;
+  if (!botEl || !inc || typeof inc !== "object") return;
+  const note = document.createElement("div");
+  note.className = "stop-note";
+  note.textContent = t("chat.incomplete", incompleteReasonText(inc.reason));
+  botEl.appendChild(note);
 }
 
 // 可写 turn 收尾的三类回执，**各看各的字段、相互独立**（P4.5 §8 评审 Medium）：
@@ -1570,6 +1599,7 @@ function handleGoalSSE(frame, ctx) {
         el.textContent = payload.answer;
       }
       appendCopyButton(el, payload.answer);
+      appendIncompleteNote(el, payload); // P4.23：逐轮标出没答出来的轮
       renderWritableReceipts(payload); // 可写 goal 轮收尾：check/撤销/告警（逐轮）
       if (payload.stopped) {
         const note = document.createElement("span");
@@ -1580,6 +1610,12 @@ function handleGoalSSE(frame, ctx) {
     }
     refreshStagingIfOpen();
     log.scrollTop = log.scrollHeight;
+  } else if (event === "goal_blocked") {
+    // P4.23 §3.1：宿主因连续无进展收的 block（blocked_by="host"）。随后的 goal_done 只会说「受阻」，
+    // 不单独说明就像是模型在等人补充信息——而这恰是本护栏要区分的那件事。
+    addNote((div) => {
+      div.textContent = t("goal.hostBlocked", payload.streak || 0, incompleteReasonText(payload.reason));
+    });
   } else if (event === "goal_done") {
     finalizeGoalBanner(ctx.banner, payload);
     log.scrollTop = log.scrollHeight;
