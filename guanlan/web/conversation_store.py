@@ -21,7 +21,13 @@ from agentao.embedding import delete_session, list_sessions
 from ..search import CorpusCache
 from .defaults import DEFAULT_CONFIRM_TIMEOUT
 from ..skill import SKILL_NAME
-from .chat_support import _UNSET, IDLE_TTL_SECONDS, _is_canonical_uuid
+from .chat_support import (
+    _UNSET,
+    IDLE_TTL_SECONDS,
+    _is_canonical_uuid,
+    _logger,
+    purge_model_specific,
+)
 from .goal_io import clear_goal_sidecar, goal_sidecar_path, read_goal
 from .jobs import WriteGate
 
@@ -327,6 +333,13 @@ class ConversationStore:
                     clock=self._clock,
                     mcp_registry=self._mcp_registry,  # P4.21：新建/恢复两路零漂移
                 )
+                # P4.23 §3.2：装回历史**前**清掉模型专属推理数据（镜像 0.5.3 的
+                # cli/commands/sessions.py 与 acp/session_load.py 的 resume——两处恢复都清）。
+                # 上面那段注释解释了为什么恢复**有意**绑当前进程模型而非盘上的 model：正因如此，
+                # "换模型恢复"是常态，不清就会在下一次 LLM 调用时被 provider 拒掉。
+                removed = purge_model_specific(messages)
+                if removed:
+                    _logger.info("会话 %s 恢复：清掉 %d 个模型专属推理字段", cid, removed)
                 conv.agent.messages = messages  # 镜像 agentao cli/commands/sessions.py 的 resume
                 # 只认构造已激活的 SKILL_NAME，**不**回放盘上任意 active_skills（扩大姿态，决策P4.2-4/6）
                 conv.turns = len([m for m in messages if m.get("role") == "user"])  # 还原轮次

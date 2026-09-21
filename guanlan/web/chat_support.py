@@ -15,6 +15,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from agentao.runtime.model import purge_thinking_artifacts as _purge_thinking_artifacts
 from agentao.tools.base import Tool
 
 from ..check import Violation
@@ -175,6 +176,29 @@ def make_guanlan_search_tool(search_cache: CorpusCache, *, wiki: Path) -> Tool:
         def is_read_only(self) -> bool:
             return True  # 硬要求：只读姿态不被 DENY（镜像 tool_planning._decide）
 
+        @property
+        def copies_to_subagents(self) -> bool:
+            """让**前台**子 Agent 也拿到这把召回工具（P4.23 §2.1/§3.4）。
+
+            0.4.24 起 agentao 反转了默认：宿主工具不声明就**不进**子 Agent（0.4.17 是把父
+            Agent 的实例直接共享给子 Agent）。不声明的后果不是"少个工具"这么轻——skill 与
+            `query.py` 的指令都写着"先用可用的 search 入口召回"，子 Agent 读得到指令却没有
+            工具，那就成了死指令，正是 P5.1 要治的那个病。
+
+            **必须是 `@property`**：上游把"可调用"专门判为**未声明**并告警——绑定方法恒真，
+            `def copies_to_subagents(self): return False` 会被读成"是"，这是该机制唯一会
+            fail-open 的误写法，故上游宁可不认。
+
+            声明为真的三个前提本工具都满足：
+            ① 可被 `copy.copy` 浅拷贝（无 `__copy__`，默认浅拷贝即新实例）；
+            ② 副本名字不变（`name` 返回常量 `_GUANLAN_SEARCH_NAME`）——否则会顶掉子 Agent
+               正留着的同名内建；
+            ③ 副本与父实例**共享同一个 `CorpusCache`**（浅拷贝的必然结果）且这是安全的：
+               `CorpusCache` 自带 `threading.Lock`，锁只护纯字典短临界区，glob + stat 在锁外。
+               共享正是我们要的——子 Agent 不该重建一遍全库索引。
+            """
+            return True
+
         def execute(self, *, query: str = "", limit: int = 10, **_kw) -> str:
             # 工具路径自校验 limit（决策P5.0-15）：HTTP 有 Query(ge=1) 兜底，工具是 LLM 填参、无此门。
             # `score` 对 limit<1 raise ValueError，故先 clamp 到 ≥1（坏类型也回落 10），不让它冒泡成
@@ -298,6 +322,27 @@ def _lean_messages(messages: list[dict]) -> list[dict]:
             m = {**m, "content": text}
         out.append(m)
     return out
+
+
+def purge_model_specific(messages: list[dict]) -> int:
+    """恢复历史时清掉**模型/协议专属**的推理数据，返回清掉的字段数（P4.23 §3.2）。
+
+    为什么必须清：这些字段由**某一个具体模型**铸出、也只对它有意义——Anthropic 的签名
+    thinking 块换个模型会被直接拒绝，Gemini 的 `thought_signature` 要按签发它的模型校验。
+    agentao 会把它们序列化进历史并**原样发回**（OpenAI SDK 不会剥掉未知键）。观澜的恢复
+    路径**有意不回放盘上的 model**、一律绑当前进程模型（见 `ConversationStore.restore`），
+    所以"换模型恢复"是常态而非边角，不清就会在下一次 LLM 调用时炸。
+
+    **只在恢复/切换边界调**，绝不每轮去删活跃会话的推理数据——那是模型本轮要用的上下文。
+
+    直接 import 上游私有的 `runtime.model.purge_thinking_artifacts`，而**不是**自己抄一份
+    字段清单，这是有意的取舍：上游新增一种 wire 时只需往 `WIRE_CARRIER_KEYS` 加一项，抄来
+    的副本会**静默漏掉**它，而漏清理是沉默的——正向用例全绿、只有真换模型时才炸。直接引则
+    上游一改名就立刻 ImportError（在 Web 启动时炸，不是恢复到一半才炸），`tests/test_web.py`
+    另有一条契约用例逐项断言 `WIRE_CARRIER_KEYS` 都被清掉。私有依赖在本仓已有先例：
+    `runtime.drop_poisoned_api_keys` 用的 `agentao._env.safe_load_dotenv` 同此姿态。
+    """
+    return _purge_thinking_artifacts(messages)
 
 
 # ── 轮次结论（P4.23 §3.1，见 docs/P4.23-Agentao0.5.3接入调研.md）─────────────────
