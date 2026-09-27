@@ -3,6 +3,23 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [未发布]
+
+### 变更
+
+- **底座 agentao 下限 0.5.3 → 0.5.6**（仍 `<0.6`）。逐条核对 0.5.4–0.5.6 的上游变更，对观澜接缝
+  无破坏：Web 姿态本就两点置位（engine + `tool_runner`）；`bg_store=None` 照旧关掉后台子 Agent，
+  而 0.5.6 起 `agentao run` 自身也不再提供后台子 Agent，子进程路（ingest/query/heal/audit）少了
+  "子任务活过写门禁"的隐患。用户可感知的上游变化：模型请求重试退避拉长到约 7.5→15→30→60 s
+  （按次数封顶、可被取消打断），连接中途断开与流被截断现在会重试而不是把半截回答当成功。
+
+### 修复
+
+- **Web `/tools` 的只读静态兜底表与上游对齐**：0.5.4 起 agentao 只读放行 `todo_write` /
+  `activate_skill`（只改本会话内存态），兜底表却仍把 `todo_write` 标为被拦。真 agent 有
+  `is_read_only` 元数据、兜底不触发，故此前测不出；新增一条真 agent 契约用例逐个核对兜底表与
+  真工具元数据同口径。
+
 ## [0.1.26] - 2026-09-21
 
 ### 新增
