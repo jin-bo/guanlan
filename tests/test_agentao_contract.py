@@ -132,6 +132,21 @@ def test_unknown_mode_is_rejected(real_conv) -> None:
         real_conv._apply_mode("full-access")
 
 
+def test_static_fallback_agrees_with_real_is_read_only(real_conv) -> None:
+    """`/tools` 的静态兜底表（无 `is_read_only` 元数据时才用）必须与真工具元数据同口径。
+
+    0.5.4 起上游只读放行 `todo_write` / `activate_skill`，而兜底表曾把 `todo_write` 列为写工具——
+    真 agent 下兜底不触发、测不出漂移，故逐个拿真工具核对。
+    """
+    from guanlan.web.chat_support import _READ_TOOL_NAMES, _WRITE_TOOL_NAMES
+
+    for tool in real_conv.agent.tools.list_tools():
+        if tool.name in _WRITE_TOOL_NAMES:
+            assert tool.is_read_only is False, tool.name
+        elif tool.name in _READ_TOOL_NAMES:
+            assert tool.is_read_only is True, tool.name
+
+
 # ── 工具注册面（goal 循环依赖它）──────────────────────────────────────────────
 
 

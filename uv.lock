@@ -12,7 +12,7 @@ resolution-markers = [
 
 [[package]]
 name = "agentao"
-version = "0.5.3"
+version = "0.5.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -27,9 +27,9 @@ dependencies = [
     { name = "tree-sitter", marker = "sys_platform == 'win32'" },
     { name = "tree-sitter-powershell", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5f/69/80c97d2081fd036bae91646c1a30b8b05e5deeca0a074dc16ac9d37de52d/agentao-0.5.3.tar.gz", hash = "sha256:c24b540be9b58d88ac8f22eaf661b177251cd1495d0ddfc03f249e17ad1392bd", size = 1287464, upload-time = "2026-09-19T16:16:12.918Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/03/60ee88dd9f69afbf7e0db8c7fdef438f1c2ce653a001c5d573b800d6684c/agentao-0.5.6.tar.gz", hash = "sha256:00128590de03601eae7c496b93b0eae3c6ce46fd8fd701cc0b905c04dae584bf", size = 1333625, upload-time = "2026-09-27T06:34:23.778Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/98/8c028c25fb4a5e398e56328761049dab0becd1883c0acd19820c2248f4e7/agentao-0.5.3-py3-none-any.whl", hash = "sha256:257eb1bc22a2f91ebcaa64e8a0af97ebc08a901f9ac97a1219dc530556f14bb8", size = 1166464, upload-time = "2026-09-19T16:16:11.18Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/58/25024894e0b5498ec93d721e771a0df27a412f94c58596ce05aeece2871f/agentao-0.5.6-py3-none-any.whl", hash = "sha256:30ce4cfc07a818c22064800f84832d6c8223cffc614b6d734877a09820253413", size = 1203271, upload-time = "2026-09-27T06:34:22.137Z" },
 ]
 
 [package.optional-dependencies]
@@ -644,7 +644,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentao", extras = ["cli"], specifier = ">=0.5.3,<0.6" },
+    { name = "agentao", extras = ["cli"], specifier = ">=0.5.6,<0.6" },
     { name = "anyio", marker = "extra == 'im'", specifier = ">=4.1" },
     { name = "anyio", marker = "extra == 'im-feishu'", specifier = ">=4.1" },
     { name = "anyio", marker = "extra == 'im-weixin'", specifier = ">=4.1" },

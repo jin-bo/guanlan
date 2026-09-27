@@ -68,13 +68,15 @@ _WRITE_TOOL_NAMES = frozenset(
     {
         "write_file", "replace", "edit_file",
         "run_shell_command", "shell", "bash",
-        "save_memory", "todo_write", "plan_save", "plan_finalize",
+        "save_memory", "plan_save", "plan_finalize",
     }
 )
 _READ_TOOL_NAMES = frozenset(
     {
         "read_file", "list_directory", "list_files", "ls",
         "glob", "search_file_content", "grep",
+        # agentao 0.5.4 起只读放行这两个（只改本会话内存态：激活 skill 集、清单）。
+        "activate_skill", "todo_write",
     }
 )
 
