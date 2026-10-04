@@ -94,6 +94,50 @@ guanlan -C my-wiki mcp --transport http \
 
 > **stdio 暴露全部七个**;**HTTP 默认只六个零-LLM 工具**,`ask` 需 `--allow-ask` 才出现。六个零-LLM 工具复用与 Web 读端点相同的内核;`ask` 走只读子进程(故 P4-8 嵌入坑不适用)。
 
+## Skills(远端技能)
+
+除工具外,`guanlan mcp` 还经 MCP Skills 扩展(`io.modelcontextprotocol/skills`)发布一个只读 skill:`guanlan-query`。它把「先 `search`、再 `read_page`、顺 `[[链接]]` 用 `read_page(name=…)`、据所读页面作答并引用来源、库里没有就明说」这套查询流程交给客户端的技能发现,由用户同意后激活。stdio 与 HTTP 都发布,沿用同一道 token 闸;不支持该扩展的客户端只看到工具,不受影响。skill 内容是静态的,随 guanlan 版本走;它只含查询流程,**不含** ingest/heal 等写工作流。
+
+下面用 agentao 0.5.10 当客户端走一遍。客户端独立安装,与知识库所在环境无关:
+
+```bash
+uv tool install 'agentao[cli]==0.5.10' --with 'mcp>=2,<3'
+```
+
+`mcp>=2` 必须显式要求:agentao 自身允许 mcp 1.x,而 Skills 需要客户端 mcp 2.x,装成 1.x 时 skills 会被静默关掉、只剩工具。
+
+在 `~/.agentao/mcp.json` 里登记,打开 `"skills": true`(只认字面量 `true`):
+
+```jsonc
+// stdio
+{ "mcpServers": {
+    "guanlan": { "command": "guanlan", "args": ["-C", "/path/to/kb", "mcp"],
+                 "trust": true, "skills": true }
+} }
+```
+
+```jsonc
+// HTTP(先 export GUANLAN_MCP_TOKEN=... 并以 --auth-token-env GUANLAN_MCP_TOKEN 起服)
+{ "mcpServers": {
+    "guanlan": { "url": "http://127.0.0.1:8766/mcp",
+                 "headers": { "Authorization": "Bearer ${GUANLAN_MCP_TOKEN}" },
+                 "trust": true, "skills": true }
+} }
+```
+
+环回且不设 token 时去掉 `headers`、加 `"oauth": false`(agentao 0.5.10 对没有 `Authorization` 头的 URL 型 server 默认走 OAuth)。
+
+然后在一个**与知识库无关的空目录**里起**交互式** agentao,问一个本库领域的问题:
+
+```bash
+mkdir -p /tmp/elsewhere && cd /tmp/elsewhere && agentao
+```
+
+模型调 `activate_skill` 时终端会弹出同意提示(server、名字、描述、文件数、大小、清单指纹),同意后它按 skill 的流程调 `mcp_guanlan_search` / `mcp_guanlan_read_page` 作答并标注来源页。两点限制:
+
+- **必须用交互式 `agentao`,不能用 `agentao run`**:无人值守的 `agentao run` 会拒绝激活远端 skill 的确认。
+- **`"trust": true`**:agentao 对未标信任的 server 忽略工具的只读标注——只读模式下工具全被拒、默认模式下每次调用都要确认。观澜的工具都标了 `readOnlyHint`,标信任后只读模式可用且免确认。
+
 ## 设计要点
 
 - **零写契约**:镜像 `--reader` 的零字节 KB 写入姿态——MCP **不做 convert**(写 `raw/` 与只读姿态冲突)。
@@ -102,4 +146,4 @@ guanlan -C my-wiki mcp --transport http \
 - **HTTP 的网络信任边界 ≠ 注入信任边界**:`--auth-token-env`/`--allowed-host` 管"谁能连、绑哪个地址",与 P4.11 的提示词注入防御是两条正交的信任线,不互相顶替。
 - 是 **E2「远程 / scoped MCP」的前哨**;完整 OAuth / 多租户 source 级作用域留给 E2。
 
-参见:仓库 [`docs/P4.10-MCP宿主.md`](../../P4.10-MCP宿主.md)、[`docs/P4.17-MCP远程传输.md`](../../P4.17-MCP远程传输.md)。
+参见:仓库 [`docs/P4.10-MCP宿主.md`](../../P4.10-MCP宿主.md)、[`docs/P4.17-MCP远程传输.md`](../../P4.17-MCP远程传输.md)、[`docs/P4.24-MCP技能发布.md`](../../P4.24-MCP技能发布.md)。
