@@ -56,6 +56,7 @@ from ..paths import require_kb_root
 from ..runtime import AgentRunner
 from ..search import CorpusCache
 from .defaults import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_TRANSPORT
+from .skills import GuanlanSkills, load_query_skill
 from .tools import (
     AskEnvelope,
     GraphEnvelope,
@@ -81,6 +82,7 @@ _INSTRUCTIONS = (
     "建议工作流：先用 `search`+`read_page` 召回并读取候选页自行综合（正文里的 `[[链接]]` 可直接 "
     "`read_page(name=…)` 顺链）；仅当需要观澜式带 `[[引用]]` 的"
     "服务端综合时才用较慢、较贵的 `ask`。`list_pages`/`graph` 无分页，大库上先 `search` 收窄。"
+    "支持 MCP Skills 扩展的客户端可发现并激活 `guanlan-query` skill，内含上述查询工作流。"
 )
 
 # 只读契约（决策P4.10-3）经 MCP `ToolAnnotations` 显式告知客户端：带只读门的客户端（如 agentao
@@ -152,8 +154,15 @@ def build_mcp(
     # version=__version__（决策P4.18-12）：SDK v1 在 `initialize.serverInfo.version` 回的是**所装 mcp SDK
     # 的版本**（实测 1.29 回 '1.29.0'）、v2 默认回空串——两者都不是 guanlan 的版本，故显式传自己的，
     # 单一来源 `guanlan/__init__.py`。这是本半阶段唯一主动引入的 wire 变化。
+    # P4.24：经 Skills 扩展发布只读 `guanlan-query`（两种传输都挂、无旗标，决策P4.24-1）。skill 文件若坏只
+    # 可能是打包错误——`load_query_skill` 记 WARNING 返回 None，此处就不挂扩展、工具照常（决策P4.24-10）。
+    bundle = load_query_skill()
     mcp = MCPServer(
-        "guanlan", version=__version__, instructions=_INSTRUCTIONS, log_level="WARNING"
+        "guanlan",
+        version=__version__,
+        instructions=_INSTRUCTIONS,
+        log_level="WARNING",
+        extensions=[GuanlanSkills(bundle)] if bundle is not None else [],
     )
 
     # 七个工具一律 async：阻塞核逻辑卸 to_thread（决策P4.10-15/决策P4.18-5——v2 会把同步 handler 自动卸

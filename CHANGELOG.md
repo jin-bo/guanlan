@@ -7,6 +7,20 @@
 
 ### 新增
 
+- **经 MCP Skills 扩展发布只读 skill `guanlan-query`**（P4.24，issue #81，见
+  [`docs/P4.24-MCP技能发布.md`](docs/P4.24-MCP技能发布.md)）。`guanlan mcp` 现在除工具外，还经
+  `io.modelcontextprotocol/skills` 扩展发布一份静态 skill，把「先 `search`、再 `read_page`、顺链用 `read_page(name=…)`、
+  只据所读页面作答并引用来源、库里没有就明说」这套查询流程交给客户端的技能发现，用户同意后激活。stdio 与 HTTP 都发布，
+  沿用同一道 token 闸；不支持该扩展的客户端只看到工具，工具集不变。
+  - **线上面**：能力里声明扩展（不声明 `directoryRead`）；`skills/list` / `skills/get` 只在现代协议修订上应答，握手时代的
+    客户端照旧只看到工具；唯一的资源是 `skill://guanlan-query/SKILL.md`，任何其他 URI（含 `..`、`file://`、wiki 页）一律 -32602。
+  - **清单与所发内容是同一份字节**：起服时读一次原始字节，大小、sha256、资源文本、frontmatter 全由它派生；不用 SDK 的
+    `FileResource`（它会剥 BOM、把 CRLF 转成 LF，摘要就对不上）。
+  - **skill 文件放在包内** `guanlan/mcp/published_skills/`，而不是仓库根 `skills/`：后者是 Agentao 的发现路径，开发态下会被
+    当成本地 skill 列出，而它引用的是 MCP 服务端的工具。也不进 `install-skill`。
+  - skill 文件坏了（只可能是打包错误）时降级：不挂扩展、工具照常、WARNING 走 stderr。
+  - 测试 40 条，包括用 agentao 0.5.10 自己的条目校验、读后摘要校验与 frontmatter 比对检查我们的输出，以及在真 stdio 子进程
+    和真 HTTP（带 token）上用 SDK 现代客户端走一遍。客户端用法写进 MCP 指南新增的「Skills」一节。
 - **MCP `read_page` 可按页名读页**（P4.24 第一步，见 [`docs/P4.24-MCP技能发布.md`](docs/P4.24-MCP技能发布.md) §4）。
   新增可选入参 `name`：传页名、别名或正文里 `[[链接]]` 的文字，按 `check` / IM `/page` 同一套解析（精确名 → 别名 →
   安全变体）读到对应页，顺链不必再 `search` 一次、也不会被 BM25 的头名带偏。`path` 与 `name` 恰好给一个；只传 `path`

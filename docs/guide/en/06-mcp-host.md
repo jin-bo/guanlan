@@ -94,6 +94,50 @@ On the server side, put caddy/nginx in front to terminate TLS and forward to `12
 
 > **stdio exposes all seven**; **HTTP exposes only the six zero-LLM tools by default** — `ask` appears only with `--allow-ask`. The six zero-LLM tools reuse the same kernels as the Web read endpoints; `ask` runs the read-only subprocess (so the P4-8 embedding pitfalls don't apply).
 
+## Skills (remote skills)
+
+Besides the tools, `guanlan mcp` publishes one read-only skill through the MCP Skills extension (`io.modelcontextprotocol/skills`): `guanlan-query`. It hands the query workflow to the client's skill discovery: `search` first, then `read_page`, follow `[[links]]` with `read_page(name=…)`, answer only from the pages read and cite them, and say so when the knowledge base doesn't cover something. The user approves it before it activates. It is published over both stdio and HTTP, behind the same token gate; clients without the extension just see the tools. The skill is static and ships with each guanlan version. It covers querying only, **not** write workflows such as ingest or heal.
+
+Here is a walkthrough with agentao 0.5.10 as the client. Install the client on its own; it doesn't need to share an environment with the knowledge base:
+
+```bash
+uv tool install 'agentao[cli]==0.5.10' --with 'mcp>=2,<3'
+```
+
+Ask for `mcp>=2` explicitly: agentao itself allows mcp 1.x, but Skills need mcp 2.x on the client. With 1.x, skills are silently turned off and only the tools remain.
+
+Register the server in `~/.agentao/mcp.json` with `"skills": true` (only the literal `true` counts):
+
+```jsonc
+// stdio
+{ "mcpServers": {
+    "guanlan": { "command": "guanlan", "args": ["-C", "/path/to/kb", "mcp"],
+                 "trust": true, "skills": true }
+} }
+```
+
+```jsonc
+// HTTP (export GUANLAN_MCP_TOKEN=... first and start the server with --auth-token-env GUANLAN_MCP_TOKEN)
+{ "mcpServers": {
+    "guanlan": { "url": "http://127.0.0.1:8766/mcp",
+                 "headers": { "Authorization": "Bearer ${GUANLAN_MCP_TOKEN}" },
+                 "trust": true, "skills": true }
+} }
+```
+
+On loopback without a token, drop `headers` and add `"oauth": false` (agentao 0.5.10 defaults URL servers without an `Authorization` header to OAuth).
+
+Then start **interactive** agentao in an **empty directory unrelated to the knowledge base** and ask a question about the knowledge base's subject:
+
+```bash
+mkdir -p /tmp/elsewhere && cd /tmp/elsewhere && agentao
+```
+
+When the model calls `activate_skill`, the terminal asks for consent (server, name, description, file count, size, manifest fingerprint). After you approve, it follows the skill: it calls `mcp_guanlan_search` / `mcp_guanlan_read_page` and cites the source pages. Two limits:
+
+- **Use interactive `agentao`, not `agentao run`**: the unattended `agentao run` refuses the consent prompt for remote skills.
+- **`"trust": true`**: agentao ignores the read-only annotations of servers that aren't trusted. Without it, read-only mode denies every tool and the default mode asks before each call. All of guanlan's tools carry `readOnlyHint`, so once the server is trusted they work in read-only mode without prompts.
+
 ## Design notes
 
 - **Zero-write contract**: mirrors the `--reader` zero-byte KB-write posture — MCP **does not do convert** (writing `raw/` conflicts with the read-only posture).
@@ -102,4 +146,4 @@ On the server side, put caddy/nginx in front to terminate TLS and forward to `12
 - **HTTP's network trust boundary ≠ the injection trust boundary**: `--auth-token-env`/`--allowed-host` govern "who may connect, on which address" — an orthogonal trust line from P4.11's prompt-injection defense; neither substitutes for the other.
 - It is the **precursor to E2** ("remote / scoped MCP"); full OAuth / multi-tenant source-level scoping is left to E2.
 
-See: repo [`docs/P4.10-MCP宿主.md`](../../P4.10-MCP宿主.md), [`docs/P4.17-MCP远程传输.md`](../../P4.17-MCP远程传输.md).
+See: repo [`docs/P4.10-MCP宿主.md`](../../P4.10-MCP宿主.md), [`docs/P4.17-MCP远程传输.md`](../../P4.17-MCP远程传输.md), [`docs/P4.24-MCP技能发布.md`](../../P4.24-MCP技能发布.md).

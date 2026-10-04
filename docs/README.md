@@ -61,7 +61,7 @@
 - [P4.21-IM宿主](P4.21-IM宿主.md) —— `guanlan im`:第三种传输,让人在微信/飞书里问知识库(平台无关核心 + 薄适配器;默认 deny 的白名单是新的信任线)
 - [P4.22-IM可点引用](P4.22-IM可点引用.md) —— 答案里的 `[[引用]]` 在飞书里点一下就把那一页发回来(零 LLM 的 `/page` 平台无关 + 点击=一条**合成的入站消息**,五道闸原样复用)
 - [P4.23-Agentao0.5.3接入](P4.23-Agentao0.5.3接入.md) —— 底座 0.4.17 → 0.5.3(沿用现有子进程 + 嵌入架构,无需迁 ACP);补上「模型到底有没有答出来」这道判定(`arun` 正常返回 ≠ 答出来了)、失败轮契约与 goal 无进展护栏、恢复时清模型专属推理数据、关后台子 Agent + 前台子 Agent 的工具继承
-- [P4.24-MCP技能发布](P4.24-MCP技能发布.md) —— **(设计稿)** 经 MCP Skills 扩展发布只读 `guanlan-query` skill(issue #81):单个静态 SKILL.md + SDK `Extension` 接缝 + 现有传输与鉴权,清单与所发内容同一份字节;`read_page` 新增可选 `name` 按页名顺链;agentao 升级另案
+- [P4.24-MCP技能发布](P4.24-MCP技能发布.md) —— **(已实现,真机验收通过)** 经 MCP Skills 扩展发布只读 `guanlan-query` skill(issue #81):单个静态 SKILL.md + SDK `Extension` 接缝 + 现有传输与鉴权,清单与所发内容同一份字节;`read_page` 新增可选 `name` 按页名顺链;agentao 升级另案
 
 ### P5 —— 语料规模化(多格式 + 检索)
 
