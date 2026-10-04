@@ -310,6 +310,165 @@ def test_read_page_traversal_blocked(kb_mcp, bad):
     assert "路径越界（须在 wiki/ 内）" in r.content[0].text
 
 
+# ───────────────────────── P4.24：read_page 按名读页 ─────────────────────────
+
+
+def _read(mcp, args):
+    return _run(mcp, lambda c: c.call_tool("read_page", args))
+
+
+def test_read_page_schema_keeps_path_and_adds_optional_name(kb_mcp):
+    """入参 schema：`path` 仍在、由必填变可选，新增可选 `name`（只传 path 的旧客户端无感）。"""
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    tools = _run(mcp, lambda c: c.list_tools())
+    schema = next(t for t in tools.tools if t.name == "read_page").input_schema
+    assert {"path", "name"} <= set(schema["properties"])
+    assert not set(schema.get("required", [])) & {"path", "name"}
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["DeFi", "defi", "去中心化金融", "[[DeFi]]", "  [[去中心化金融]]  ", "DeFi|显示名", "DeFi#某节"],
+)
+def test_read_page_by_name_equals_path_route(kb_mcp, name):
+    """精确 stem / 大小写 / 别名 / `[[ ]]` / `|显示名` / `#锚点` → 与 path 路由的信封**完全相等**。"""
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    by_path = _read(mcp, {"path": "wiki/entities/DeFi.md"})
+    by_name = _read(mcp, {"name": name})
+    assert by_name.is_error is False, by_name.content[0].text
+    assert by_name.structured_content == by_path.structured_content
+
+
+def test_read_page_by_name_resolves_fold_variant(kb_mcp):
+    """安全 fold 变体（P3.8）：`multi_head_attention` 落到 `multi-head-attention.md`——与 check/graph 同口径。"""
+    _write(kb_mcp / "wiki", "concepts/multi-head-attention.md", title="多头注意力", type="concept")
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    r = _read(mcp, {"name": "multi_head_attention"})
+    assert r.is_error is False
+    assert r.structured_content["path"] == "wiki/concepts/multi-head-attention.md"
+
+
+def test_read_page_by_name_uses_the_shared_owner_index(kb_mcp):
+    """不另写解析逻辑：结果与 P3.8 单一 owner 归口 `resolve_owner(link_resolution_index)` 逐个一致。"""
+    from guanlan.pages import link_resolution_index, resolve_owner
+
+    idx = link_resolution_index(kb_mcp / "wiki")
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    for name in ["DeFi", "去中心化金融", "流动性", "Liquidity"]:
+        r = _read(mcp, {"name": name})
+        expected = resolve_owner(name, idx)
+        if expected is None:
+            assert r.is_error is True
+        else:
+            assert r.structured_content["path"] == expected
+
+
+@pytest.mark.parametrize(
+    "args",
+    [{}, {"path": "wiki/entities/DeFi.md", "name": "DeFi"}],
+    ids=["neither", "both"],
+)
+def test_read_page_requires_exactly_one_of_path_or_name(kb_mcp, args):
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    r = _read(mcp, args)
+    assert r.is_error is True and "恰好提供 path 或 name 之一" in r.content[0].text
+    assert _read(mcp, {"name": "DeFi"}).is_error is False  # server 存活
+
+
+@pytest.mark.parametrize("bad", ["   ", "[[]]", "[[  ]]", "x" * 201, "De\nFi", "De\x00Fi"])
+def test_read_page_rejects_invalid_names_without_echoing_them(kb_mcp, bad):
+    """空白 / 超长 / 控制字符 → in-band error（与 IM `/page` 同一把尺），且不回显原值。"""
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    r = _read(mcp, {"name": bad})
+    assert r.is_error is True and "页名不合法" in r.content[0].text
+    if bad.strip():
+        assert bad not in r.content[0].text
+
+
+def test_read_page_empty_string_counts_as_not_provided(kb_mcp):
+    """入参注解是纯 `str`、空串 = 未提供（见 server.read_page 注释）；`path=""` 不再报「越界」而是这条。"""
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    for args in ({"name": ""}, {"path": ""}, {"path": "", "name": ""}):
+        r = _read(mcp, args)
+        assert r.is_error is True and "恰好提供 path 或 name 之一" in r.content[0].text
+    assert _read(mcp, {"path": "", "name": "DeFi"}).is_error is False
+
+
+@pytest.mark.parametrize("name, stem", [("[[2024]]", "2024"), ("null", "null"), ("true", "true"),
+                                        ('["DeFi"]', None), ("[1, 2]", None)])
+def test_read_page_name_is_never_json_pre_parsed(kb_mcp, name, stem):
+    """回归：SDK 会对非纯 str 注解的入参先 `json.loads`——`[[2024]]` 成了列表、`null` 成了 None。
+    入参必须原样作为字符串到达解析器：能解析的命中、不能的报「未找到」，**绝不**是类型校验错误。"""
+    for s in ("2024", "null", "true"):
+        _write(kb_mcp / "wiki", f"entities/{s}.md", title=s)
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    r = _read(mcp, {"name": name})
+    if stem is None:
+        assert r.is_error is True and "未找到页面" in r.content[0].text
+    else:
+        assert r.is_error is False, r.content[0].text
+        assert r.structured_content["path"] == f"wiki/entities/{stem}.md"
+
+
+def test_read_page_unknown_name_is_not_found(kb_mcp):
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    r = _read(mcp, {"name": "根本不存在的页"})
+    assert r.is_error is True and "未找到页面：根本不存在的页" in r.content[0].text
+
+
+def test_read_page_name_can_only_land_on_kb_pages(kb_mcp):
+    """`name` 沿用既有页名语义（`link_stem` 取末段）——断言**落点**而非「未找到」（决策P4.24-12）：
+    库里没有 `passwd.md` 时未找到；有时命中**那一页**、与 `name="passwd"` 相等；任何命中都在 wiki/ 内。"""
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    assert "未找到页面" in _read(mcp, {"name": "../../etc/passwd"}).content[0].text
+
+    _write(kb_mcp / "wiki", "entities/passwd.md", title="passwd")
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    hit = _read(mcp, {"name": "../../etc/passwd"})
+    assert hit.structured_content["path"] == "wiki/entities/passwd.md"
+    assert hit.structured_content == _read(mcp, {"name": "passwd"}).structured_content
+
+    # 可达集 = wiki/ 下全部 .md（含 config 页 index/log/overview：它们是合法链接目标，`[[index]]` 在
+    # check/`/page` 里同样解析到 index.md，且 `path="wiki/index.md"` 本就可读）——与 path 路由可达集相同。
+    on_disk = {p.relative_to(kb_mcp).as_posix() for p in (kb_mcp / "wiki").rglob("*.md")}
+    for name in ["../../etc/passwd", "/etc/passwd", "..\\..\\passwd", "wiki/../../DeFi", "../index"]:
+        r = _read(mcp, {"name": name})
+        if not r.is_error:
+            assert r.structured_content["path"] in on_disk, name
+
+
+def test_read_page_path_stays_strict_even_when_a_same_named_page_exists(kb_mcp):
+    """反向守卫（决策P4.24-12）：`path` 路由**不**退回按名解析——库里有 `passwd.md` 时越界路径仍被拒，
+    文案不变。若有人图省事把两条路由合成一个参数，这条会红。"""
+    _write(kb_mcp / "wiki", "entities/passwd.md", title="passwd")
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    r = _read(mcp, {"path": "../../etc/passwd"})
+    assert r.is_error is True and "路径越界（须在 wiki/ 内）" in r.content[0].text
+
+
+def test_read_page_by_name_output_path_feeds_path_route(kb_mcp):
+    """按名读到的 `path` 可原样再喂 `read_page(path=…)`（口径同 search().page，决策P4.10-9）。"""
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    first = _read(mcp, {"name": "去中心化金融"})
+    again = _read(mcp, {"path": first.structured_content["path"]})
+    assert again.structured_content == first.structured_content
+
+
+def test_read_page_by_name_modern_and_legacy_agree(kb_mcp):
+    mcp = build_mcp(kb_mcp, runner=_ok_runner)
+    call = lambda c: c.call_tool("read_page", {"name": "[[去中心化金融]]"})  # noqa: E731
+    assert _run(mcp, call, mode="auto").structured_content == _run(mcp, call).structured_content
+
+
+def test_validate_page_arg_has_a_single_home():
+    """决策P4.24-15：校验器下沉到 `pages.py` 后，IM 侧取到的是**同一个对象**——防将来又各写一份。"""
+    from guanlan import pages
+    from guanlan.im import pageview
+
+    assert pageview.validate_page_arg is pages.validate_page_arg
+    assert pageview.MAX_PAGE_ARG is pages.MAX_PAGE_ARG
+
+
 def test_error_total_shell_server_survives(kb_mcp, monkeypatch):
     """核函数抛异常 → in-band tool error、server 不崩、stdio 帧不破（决策P4.10-16）。
 

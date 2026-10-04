@@ -61,6 +61,8 @@ __all__ = [
     "link_target_stems",
     "link_resolution_index",
     "resolve_owner",
+    "MAX_PAGE_ARG",
+    "validate_page_arg",
     "index_md_links",
     "index_sync_state",
     "FINDING_CAUSAL_ORDER",
@@ -737,6 +739,33 @@ def resolve_owner(raw: str, idx: Mapping[str, str]) -> str | None:
     if fk in idx:
         return idx[fk]  # fold variant 兜底
     return None
+
+
+# 按名开页的参数长度上限：页面名不可能更长。**这是全仓唯一的一份语义口径**（★ 决策P4.22-18）——
+# P4.22 时住在 `im/pageview.py`，P4.24 下沉到这里（决策P4.24-15），供 IM `/page` 与 MCP
+# `read_page(name=…)` 共用；`im/pageview` 原名转出。
+# 手打与点击共用同一次 `validate_page_arg` 调用，适配器那侧只留一个信封级的卫生上界
+# （见 `adapters/feishu.MAX_CALLBACK_COMMAND`），量的是整条命令串、与"参数多长算合法"无关。
+# 两处各量一次的下场是：页面名落在 194–200 字符时**手打能开、点按钮被丢**。
+MAX_PAGE_ARG = 200
+
+
+def validate_page_arg(arg: str) -> str | None:
+    """按名开页参数的**唯一**语义校验器（IM `/page` 与 MCP `read_page(name=…)` 共用）。
+
+    返回归一后的名字；不合法 → `None`。
+
+    **输入一律不可信**（决策P4.22-8，P4.11 信任边界的同款口径）：参数有两个来源——用户手打、
+    卡片回调回传——**两者走同一条校验**，绝不因为"回调是我们自己发出去的卡片回来的"就开后门。
+    回传串经飞书服务端往返，是**外部输入**。
+    """
+    name = arg.strip()
+    if not name or len(name) > MAX_PAGE_ARG:
+        return None
+    if any(ch < " " or ch == "\x7f" for ch in name):
+        # 控制字符与换行：页面名里出现它们只可能是构造出来的。
+        return None
+    return name
 
 
 # finding 因果排序（gbrain 反向评审 §3「doctor-cause-rank」借形状；纯展示层、零 LLM、确定性）。

@@ -20,36 +20,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..pages import (
+    MAX_PAGE_ARG,  # noqa: F401 — 原名转出（P4.24 下沉到 pages.py，既有导入点不变）
     link_resolution_index,
     link_stem,
     load_page,
     page_title,
     page_type,
     resolve_owner,
+    validate_page_arg,  # noqa: F401 — 同上，delivery.py 经本模块取
 )
 from .reply import extract_wikilinks
 
-# 参数长度上限：页面名不可能更长。**这是全仓唯一的一份语义口径**（★ 决策P4.22-18）——
-# 手打与点击共用同一次 `validate_page_arg` 调用，适配器那侧只留一个信封级的卫生上界
-# （见 `adapters/feishu.MAX_CALLBACK_COMMAND`），量的是整条命令串、与"参数多长算合法"无关。
-# 两处各量一次的下场是：页面名落在 194–200 字符时**手打能开、点按钮被丢**。
-MAX_PAGE_ARG = 200
-
-
-def validate_page_arg(arg: str) -> str | None:
-    """`/page` 参数的**唯一**语义校验器。返回归一后的名字；不合法 → `None`。
-
-    **输入一律不可信**（决策P4.22-8，P4.11 信任边界的同款口径）：参数有两个来源——用户手打、
-    卡片回调回传——**两者走同一条校验**，绝不因为"回调是我们自己发出去的卡片回来的"就开后门。
-    回传串经飞书服务端往返，是**外部输入**。
-    """
-    name = arg.strip()
-    if not name or len(name) > MAX_PAGE_ARG:
-        return None
-    if any(ch < " " or ch == "\x7f" for ch in name):
-        # 控制字符与换行：页面名里出现它们只可能是构造出来的。
-        return None
-    return name
+# `/page` 参数的长度上限与语义校验器**住在 `pages.py`**（P4.24 决策P4.24-15 下沉）：MCP `read_page(name=…)`
+# 也要用同一把尺，而只读工具不该 import 一个可选宿主子包。这里原名转出，口径仍只有一份（★ 决策P4.22-18）。
 
 
 @dataclass(frozen=True)

@@ -85,7 +85,7 @@ guanlan -C my-wiki mcp --transport http \
 | 工具 | LLM? | 说明 |
 |---|---|---|
 | `search` | 否 | 整页召回(复用 `guanlan search` 内核) |
-| `read_page` | 否 | 读一篇 wiki 页(带路径穿越防护) |
+| `read_page` | 否 | 读一篇 wiki 页:按 `path`(`search` 结果里的 `page` 字段,带路径穿越防护)或按 `name`(页名、别名或正文里 `[[链接]]` 的文字,与 `check` 同一套解析,顺链不必再 `search`),两者恰好给一个 |
 | `list_pages` | 否 | 列出内容页 |
 | `graph` | 否 | 图谱(节点/边/社区/拓扑统计) |
 | `health` | 否 | 体检报告 |
