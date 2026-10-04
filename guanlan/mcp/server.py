@@ -78,7 +78,8 @@ __all__ = ["build_mcp", "serve_mcp"]
 _INSTRUCTIONS = (
     "观澜（GuānLán）只读 MCP **服务端**：把一个本地 wiki 知识库的检索/读页/图谱/体检能力暴露为只读工具。"
     "本服务是 guanlan 作 MCP 服务端（与 Agentao 作 MCP 客户端的『Tool 注入』方向相反）。"
-    "建议工作流：先用 `search`+`read_page` 召回并读取候选页自行综合；仅当需要观澜式带 `[[引用]]` 的"
+    "建议工作流：先用 `search`+`read_page` 召回并读取候选页自行综合（正文里的 `[[链接]]` 可直接 "
+    "`read_page(name=…)` 顺链）；仅当需要观澜式带 `[[引用]]` 的"
     "服务端综合时才用较慢、较贵的 `ask`。`list_pages`/`graph` 无分页，大库上先 `search` 收窄。"
 )
 
@@ -99,8 +100,10 @@ _SEARCH_DESC = (
     "page 字段带 `wiki/` 前缀、可直接喂 `read_page`。纯读、不写盘。"
 )
 _READ_PAGE_DESC = (
-    "读取单页正文：path 用 `search` 结果里的 page 字段（相对库根、带 `wiki/` 前缀，如 "
-    "`wiki/entities/DeFi.md`）。坏/缺 frontmatter 不报错。纯读、不写盘。"
+    "读取单页正文。`path` 与 `name` 恰好给一个：`path` 用 `search` 结果里的 page 字段（相对库根、"
+    "带 `wiki/` 前缀，如 `wiki/entities/DeFi.md`）；`name` 传页名、别名或正文里 `[[链接]]` 的文字，"
+    "按页名/别名解析到库内页——用于顺着正文内链读页，省一次 `search`。返回的 path 是实际读到的页。"
+    "坏/缺 frontmatter 不报错。纯读、不写盘。"
 )
 _LIST_PAGES_DESC = (
     "枚举库内全部非 config 内容页（path/title/type）。**无分页**——大库上请先用 `search` 收窄。"
@@ -164,9 +167,13 @@ def build_mcp(
         )
 
     @mcp.tool(name="read_page", description=_READ_PAGE_DESC, annotations=_READ_ONLY)
-    async def read_page(path: str) -> PageEnvelope:
+    async def read_page(path: str = "", name: str = "") -> PageEnvelope:
+        # P4.24：`name` 是新增的可选入参（按页名顺链）；只传 `path` 的旧调用字节等价（决策P4.24-12）。
+        # 注解**必须是纯 `str`**、不能写 `str | None`：SDK 对非纯 str 注解的入参会先 `json.loads`，解析出
+        # 列表/对象/布尔/null 就替换原值——`name="[[2024]]"` 会变成列表、`name="null"` 会变成 None。
+        # 故用空串表「未提供」（代价：`path=""` 从「越界」改报「须恰好提供一个」，两者都是错误返回）。
         return await anyio.to_thread.run_sync(
-            functools.partial(tool_read_page, path, root=root)
+            functools.partial(tool_read_page, path or None, name or None, root=root)
         )
 
     @mcp.tool(name="list_pages", description=_LIST_PAGES_DESC, annotations=_READ_ONLY)

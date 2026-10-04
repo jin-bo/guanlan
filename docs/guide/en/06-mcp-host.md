@@ -85,7 +85,7 @@ On the server side, put caddy/nginx in front to terminate TLS and forward to `12
 | Tool | LLM? | Meaning |
 |---|---|---|
 | `search` | no | Full-page recall (reuses the `guanlan search` kernel) |
-| `read_page` | no | Read a wiki page (with path-traversal protection) |
+| `read_page` | no | Read a wiki page: by `path` (the `page` field from `search`, with path-traversal protection) or by `name` (page name, alias, or the text of a `[[link]]`, resolved like `check` does, so you can follow links without another `search`). Pass exactly one |
 | `list_pages` | no | List content pages |
 | `graph` | no | Graph (nodes/edges/communities/topology stats) |
 | `health` | no | Health report |

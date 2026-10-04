@@ -34,7 +34,16 @@ from mcp.server.mcpserver.exceptions import ToolError
 from ..graph import build_graph, graph_to_dict
 from ..health import run_health
 from ..lint import run_lint
-from ..pages import iter_pages, load_page, page_title, page_type, report_dict
+from ..pages import (
+    iter_pages,
+    link_resolution_index,
+    load_page,
+    page_title,
+    page_type,
+    report_dict,
+    resolve_owner,
+    validate_page_arg,
+)
 from ..query import QUERY_PROMPT
 from ..runtime import AgentRunner, run_agent_task
 from ..search import CorpusCache, search_result_dict
@@ -196,14 +205,51 @@ def _safe_wiki_file(root: Path, rel: str) -> Path:
     return candidate
 
 
+def _resolve_page_name(root: Path, name: object) -> str:
+    """页名 → 拥有页相对库根路径（P4.24 §4.2）；不合法 / 未命中 → `ToolError`。
+
+    **直接沿用既有页名语义，不另加过滤**（决策P4.24-12）：剥一层外围 `[[ ]]` 后过
+    `validate_page_arg`（与 IM `/page` 同一把尺），再走 P3.8 单一 owner 归口 `resolve_owner`
+    （精确 stem → 别名 → 安全 fold 变体）。`link_stem` 取**末段**，故 `../../etc/passwd` 与 `passwd`
+    同义——库里有 `passwd.md` 就命中那一页，与 `[[../../etc/passwd]]` 在 check/graph/`/page` 里的解析一致。
+    安全性来自候选集本身：owner 是索引表里的值（由 `wiki.rglob` 生成），**只可能**是库内页。
+    """
+    text = name if isinstance(name, str) else str(name)
+    stripped = text.strip()
+    if stripped.startswith("[[") and stripped.endswith("]]"):
+        stripped = stripped[2:-2]  # 只剥一层：模型常把正文里的链接原样抄过来
+    valid = validate_page_arg(stripped)
+    if valid is None:
+        # 不回显原值：可能超长或带控制字符（正是被拒的原因）。
+        raise ToolError("页名不合法：须非空、不超过 200 字符、不含控制字符。")
+    rel = resolve_owner(valid, link_resolution_index(root / "wiki"))
+    if rel is None:
+        raise ToolError(f"未找到页面：{valid}（已按页名 / 别名 / 变体解析）；可先用 search 检索。")
+    return rel
+
+
 @_guard("read_page")
-def tool_read_page(path: str, *, root: Path) -> PageEnvelope:
+def tool_read_page(
+    path: str | None = None, name: str | None = None, *, root: Path
+) -> PageEnvelope:
     """读单页正文（容错档：坏/缺 frontmatter 不崩，`page_title` 回退 stem）。
 
-    `path` = 相对库根带 `wiki/` 前缀（即 `search().results[i].page`），经 `_safe_wiki_file` 防越界
-    到 `wiki/` 外（决策P4.10-9）。`content` = 正文 body（剥 frontmatter）。
+    **`path` 与 `name` 恰好给一个**（P4.24 §4.2）：
+
+    - `path` = 相对库根带 `wiki/` 前缀（即 `search().results[i].page`），经 `_safe_wiki_file` 防越界
+      到 `wiki/` 外（决策P4.10-9）。这条路由与 P4.24 之前**字节等价**，越界照旧拒绝。
+    - `name` = 页名 / 别名 / `[[链接]]` 文字（顺着正文内链读页），见 `_resolve_page_name`。
+
+    为什么是两个参数而不是让 `path` 在「不是文件」时退回按名解析（决策P4.24-12）：那样
+    `path="../../etc/passwd"` 会从「越界拒绝」变成「也许读到 `passwd.md`」——越界请求的语义被悄悄改写。
+
+    `content` = 正文 body（剥 frontmatter）；信封里的 `path` 恒为实际读到的那页（按名命中时客户端据此
+    引用，也看得出别名落到了哪页）。
     """
-    page_file = _safe_wiki_file(root, path)
+    if (path is None) == (name is None):
+        raise ToolError("read_page 须恰好提供 path 或 name 之一。")
+    rel = path if path is not None else _resolve_page_name(root, name)
+    page_file = _safe_wiki_file(root, rel)  # 按名命中的 owner 也过这一道：读页只有一个出口
     meta, body = load_page(page_file)
     return {
         "path": page_file.relative_to(root).as_posix(),
