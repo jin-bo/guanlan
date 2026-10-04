@@ -1920,10 +1920,12 @@ def test_raw_write_serial_does_not_collide_with_ingest(kb) -> None:
     """端点级：投喂排在在飞 ingest 之后落盘，该 ingest **不被冤判** EXIT_RAW_MUTATED。"""
     _put_raw(kb, "src.md")
     gate = threading.Event()
+    started = threading.Event()
     order: list[str] = []
 
     def runner(prompt, **kwargs):
         order.append("ingest")
+        started.set()
         gate.wait(timeout=3)  # 卡住，模拟在飞 ingest（其 raw/ 快照窗口张开）
         write_page(kwargs["working_directory"], "wiki/concepts/N.md")
         return AgentRunResult(ok=True, final_text="done")
@@ -1935,9 +1937,18 @@ def test_raw_write_serial_does_not_collide_with_ingest(kb) -> None:
         def feed() -> None:
             result["resp"] = client.post("/api/raw", json={"name": "投喂源", "content": "新源\n"})
 
+        # 等两个**真实事件**而不是固定墙钟窗口（原 `sleep(0.1)` 在慢 CI 上偶发 `order == []`，同 #79）：
+        # ① ingest 真的跑起来了；② 投喂作业真的登记进作业表、排在它后面（作业 id 递增，404 = 尚未登记）。
+        # 若投喂哪天不再经串行队列，②等满超时照样报红，不会因此漏报。
+        assert started.wait(timeout=3), "ingest 未在 3s 内开跑"
         t = threading.Thread(target=feed)
         t.start()
-        time.sleep(0.1)
+        feed_job_id = str(int(ing_id) + 1)
+        deadline = time.monotonic() + 3
+        while client.get(f"/api/jobs/{feed_job_id}").status_code == 404:
+            assert time.monotonic() < deadline, "投喂作业未在 3s 内入队"
+            time.sleep(0.01)
+        assert client.get(f"/api/jobs/{feed_job_id}").json()["state"] == "queued"  # 排在在飞 ingest 之后
         assert not (kb / "raw" / "投喂源.md").exists()  # 投喂尚未落盘（被 ingest 挡住）
         assert order == ["ingest"]
         gate.set()  # 放行 ingest
