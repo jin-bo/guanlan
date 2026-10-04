@@ -503,3 +503,122 @@ def test_python_floor_unchanged() -> None:
     assert sys.version_info >= (3, 10)
     root = Path(__file__).resolve().parent.parent
     assert 'requires-python = ">=3.10"' in (root / "pyproject.toml").read_text("utf-8")
+
+
+# ── 远端技能的受闸确认（P4.24 附录 B，agentao 0.5.10）──────────────────────────────
+#
+# 上游约定：runner 在 `gated(note)` 里**同一线程同步**调 `transport.confirm_tool`，宿主据
+# `gate_note()` 认出这是一次「只能现在问人、不得由常设授权代答、答复不授予本次之外任何东西」的确认。
+# 以下用例走真 compat transport（`real_conv.agent.transport`），只模拟 runner 那层 `gated()`。
+
+
+def _confirm_in_thread(transport, note):
+    """在**新线程**里模拟 runner：`gated(note)` 内调 `confirm_tool`。gate_note 是线程局部的，
+    故 gated 必须与 confirm_tool 在同一线程——与 tool_runner 的真实调用形状一致。"""
+    import threading
+
+    from agentao.transport.confirmation import gated
+
+    out: dict = {}
+
+    def run():
+        with gated(note):
+            out["result"] = transport.confirm_tool("activate_skill", "desc", {"name": "x"})
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    return th, out
+
+
+def test_gate_note_primitive_is_thread_local() -> None:
+    from agentao.transport import gate_note
+    from agentao.transport.confirmation import gated
+
+    assert gate_note() is None
+    with gated("note-1"):
+        assert gate_note() == "note-1"
+    assert gate_note() is None
+
+
+def test_auto_mode_still_waives_ungated_confirmations(real_conv) -> None:
+    """对照组：非受闸确认在 auto 下照旧静默放行（P4.15 行为不变）。"""
+    real_conv._confirm_mode = "auto"
+    th, out = _confirm_in_thread(real_conv.agent.transport, None)
+    th.join(5)
+    assert out["result"] is True
+
+
+def test_gated_confirmation_is_denied_at_once_without_a_confirm_ui(real_conv) -> None:
+    """IM（confirm_ui=False）：受闸确认无人可答——即便会话在 auto 也**立即**拒，不等超时。"""
+    real_conv._confirm_mode = "auto"
+    real_conv._confirm_ui = False
+    th, out = _confirm_in_thread(real_conv.agent.transport, "consent to remote skill")
+    th.join(5)
+    assert not th.is_alive() and out["result"] is False
+
+
+def _capture_request(real_conv):
+    import threading
+
+    seen: dict = {}
+    got = threading.Event()
+
+    def emit(kind, data):
+        if kind == "confirm_request":
+            seen.update(data)
+            got.set()
+
+    real_conv._emit = emit
+    real_conv._confirm_timeout = 5
+    return seen, got
+
+
+def test_gated_confirmation_asks_even_in_auto_mode(real_conv) -> None:
+    """auto 捷径对受闸确认不生效：必弹，且帧里带 gated + 说明（前端据它不出「本会话起自动放行」）。"""
+    real_conv._confirm_mode = "auto"
+    seen, got = _capture_request(real_conv)
+    th, out = _confirm_in_thread(real_conv.agent.transport, "consent to remote skill")
+    assert got.wait(5), "受闸确认在 auto 模式下被静默放行了"
+    assert seen["gated"] is True and seen["gate_note"] == "consent to remote skill"
+    assert real_conv.resolve_confirm(seen["interaction_id"], "deny")
+    th.join(5)
+    assert out["result"] is False
+
+
+@pytest.mark.parametrize("gated_note, mode_after", [("consent", "ask"), (None, "auto")])
+def test_allow_session_only_flips_mode_for_ungated_confirmations(
+    real_conv, gated_note, mode_after
+) -> None:
+    """受闸确认上的 allow_session 只放行**这一次**、confirm_mode 不变（后端闸，不靠前端藏按钮）；
+    非受闸确认上照旧翻 auto（对照组）。"""
+    real_conv._confirm_mode = "ask"
+    seen, got = _capture_request(real_conv)
+    th, out = _confirm_in_thread(real_conv.agent.transport, gated_note)
+    assert got.wait(5)
+    assert real_conv.resolve_confirm(seen["interaction_id"], "allow_session")
+    th.join(5)
+    assert out["result"] is True
+    assert real_conv.confirm_mode == mode_after
+
+
+def test_new_mcp_resource_and_skill_tools_are_read_only() -> None:
+    """0.5.10 新增的四个工具只在某个 server 声明 resources/skills 时才注册，`real_conv` 里没有它们，
+    故 `test_static_fallback_agrees_with_real_is_read_only` 覆盖不到——这里直接按类核对。"""
+    from agentao.mcp.resource_tools import (
+        ListMcpResourcesTool,
+        ListMcpResourceTemplatesTool,
+        ReadMcpResourceTool,
+    )
+    from agentao.mcp.skill_tools import ReadSkillFileTool
+
+    from guanlan.web.chat_support import _READ_TOOL_NAMES
+
+    tools = [
+        ListMcpResourcesTool(None),
+        ListMcpResourceTemplatesTool(None),
+        ReadMcpResourceTool(None),
+        ReadSkillFileTool(None),
+    ]
+    for tool in tools:
+        assert tool.is_read_only is True, tool.name
+        assert tool.name in _READ_TOOL_NAMES, tool.name

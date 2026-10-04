@@ -77,6 +77,8 @@ _READ_TOOL_NAMES = frozenset(
         "glob", "search_file_content", "grep",
         # agentao 0.5.4 起只读放行这两个（只改本会话内存态：激活 skill 集、清单）。
         "activate_skill", "todo_write",
+        # agentao 0.5.10 新增（仅在某个 MCP server 声明 resources / skills 时注册），均声明只读。
+        "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource", "read_skill_file",
     }
 )
 

@@ -124,6 +124,7 @@ body {
 }
 .msg.note .interaction-cmd-toggle:hover { color: var(--lan-deep); border-color: var(--lan-ripple); }
 .msg.note .interaction-cd { color: var(--lan-ink-soft); font-size: .70rem; }
+.msg.note .interaction-gate { margin-top: .4rem; font-size: .74rem; color: #6b4e00; white-space: pre-wrap; } /* 受闸确认说明（P4.24 附录 B） */
 .msg.note .interaction-opt { display: flex; align-items: center; gap: .4rem; font-size: .76rem; cursor: pointer; }
 .msg.note .interaction-free {
   margin-top: .35rem; width: 100%; box-sizing: border-box; padding: .3rem .5rem;

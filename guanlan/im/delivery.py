@@ -199,8 +199,9 @@ class Delivery:
         for act in list(self._acts.values()):
             conv = act.conv
             if conv is not None:
-                # **绝不 `task.cancel()`**：`arun` 收到 `CancelledError` 时是置令牌后**立刻
-                # re-raise**、**不等线程**——那不是"没效果"，是**把"还没停"伪装成"已经停了"**。
+                # **绝不 `task.cancel()`**：`arun` 收到 `CancelledError` 时是置令牌后**至多等 5s**
+                # （agentao 0.5.7 起，此前是立刻）便 re-raise、**不保证线程已结束**——那不是"没效果"，
+                # 是**把"还没停"伪装成"已经停了"**。
                 # 只有 `request_stop()` 走令牌路径，`await arun` 经 future 返回时线程确已结束。
                 with contextlib.suppress(Exception):
                     conv.request_stop()

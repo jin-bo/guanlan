@@ -494,6 +494,7 @@ def serve_im(
                 persist=False,  # P4.9 reader 姿态：IM 会话不落盘（KB 零字节写）
                 default_mode="read-only",
                 write_gate=None,  # **不存在可写分支可切**（决策P4.21-8）
+                confirm_ui=False,  # IM 无确认界面：受闸确认立即拒、不白等超时（P4.24 附录 B）
                 max_conversations=max_conversations,
                 idle_ttl=None,  # ← TTL 归 registry 独占（决策P4.21-46），理由见 session.py
                 clock=clock,  # ← 与 registry **同一只**时钟（测试里两边时间轴一致）

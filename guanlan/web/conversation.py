@@ -24,6 +24,7 @@ from .defaults import CONFIRM_MODES, DEFAULT_CONFIRM_TIMEOUT
 from agentao.cli.goal_state import GoalState, GoalStatus, budget_summary
 from agentao.embedding.compat import build_compat_transport
 from agentao.permissions import PermissionMode
+from agentao.transport import gate_note
 from agentao.tools.goal import UpdateGoalTool
 
 from ..gate import REPAIR_PROMPT, _render_violations
@@ -185,6 +186,7 @@ class Conversation:
         search_cache: CorpusCache | None = None,
         confirm_mode: str = "ask",
         confirm_timeout: float = DEFAULT_CONFIRM_TIMEOUT,
+        confirm_ui: bool = True,
         clock: Callable[[], float] = time.monotonic,
         mcp_registry: object = _UNSET,
     ) -> None:
@@ -235,6 +237,9 @@ class Conversation:
         # turn 死锁，§5.2）。这些须在构造 transport（下方）**之前**置位：确认回调被冻进 transport。
         self._confirm_mode = confirm_mode
         self._confirm_timeout = confirm_timeout
+        # P4.24 附录 B：宿主有没有人能回答确认。IM 没有确认 UI（`confirm_ui=False`）——受闸确认在那里
+        # 无人可问，只能立即拒绝，而不是白等 `confirm_timeout` 再拒（见 `_confirm_tool_cb`）。
+        self._confirm_ui = confirm_ui
         self._pending: dict[str, dict] = {}
         self._pending_lock = threading.Lock()
 
@@ -416,10 +421,20 @@ class Conversation:
         `auto` 模式直接放行（不弹、不建 pending，§3 步0）——即气泡②/`--confirm auto`，仍
         workspace-write + 层①②③、`raw/` 仍硬只读（§6）。否则经 SSE 推 `confirm_request`、阻塞等
         用户经 `/confirm` 应答；超时/停止/断线默认拒绝（返回 False → 工具 CANCELLED，§4.2）。
+
+        **受闸确认例外**（P4.24 附录 B，agentao 0.5.10）：远端 MCP 技能的激活、以及加载了远端技能后的
+        shell 等，上游要求「现在就问人、不得由常设授权代答、答复也不授予本次之外的任何东西」。runner
+        在调本回调期间把说明放进**线程局部**的 `gate_note()`——故必须在**本线程**读、读完记进 pending
+        条目（`resolve_confirm` 在 loop 线程，读不到它）。受闸时：`auto` 捷径不生效、必弹；无确认 UI 的
+        宿主（IM）立即拒绝；`allow_session` 应答只放行这一次、不翻 `confirm_mode`。
         """
+        note = gate_note()  # 线程局部：只在 runner 调本回调的这个线程上有值
         with self._pending_lock:
-            if self._confirm_mode == "auto":
+            if self._confirm_mode == "auto" and note is None:
                 return True  # 静默放行（粒度=问/不问，**非** full-access，§6）
+        if note is not None and not self._confirm_ui:
+            _logger.warning("受闸确认（%s）在无确认界面的宿主上无人可答，已拒绝：%s", tool_name, note)
+            return False
         interaction_id = str(uuid.uuid4())
         envelope = {
             "interaction_id": interaction_id,
@@ -429,6 +444,10 @@ class Conversation:
             "description": description,
             "mode": self._mode,
             "deadline_epoch": time.time() + self._confirm_timeout,  # 墙钟，供前端倒计时
+            # 受闸确认（P4.24 附录 B）：前端据它不出「本会话起自动放行」并展示说明；`resolve_confirm`
+            # 据它不翻 confirm_mode——后端这一层才是闸，前端隐藏按钮只是展示。
+            "gated": note is not None,
+            "gate_note": note,
         }
         outcome, payload = self._run_interaction("confirm", "confirm_request", envelope)
         if outcome == "answered":
@@ -494,7 +513,9 @@ class Conversation:
             entry = self._pending.get(interaction_id)
             if entry is None or entry["kind"] != "confirm":
                 return False
-            if decision == "allow_session":
+            # 受闸确认的 allow_session 只放行当前这一次、不翻模式（P4.24 附录 B：答复不得授予本次之外的
+            # 任何东西）。判据取 pending 里登记的 envelope，不信前端——前端隐藏按钮只是展示层。
+            if decision == "allow_session" and not entry["envelope"].get("gated"):
                 self._confirm_mode = "auto"  # 翻未来模式（§6：松的是「问不问」、非「写到哪」）
             q = entry["queue"]
         try:
