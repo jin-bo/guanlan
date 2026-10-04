@@ -71,10 +71,13 @@ function mcpToolHtml(tool) {
 
 function mcpResultHtml(r) {
   const ok = r.status === "connected";
-  // 状态词双语固定两档（connected / error），其余上游状态原样显示（t() 首参恒字面量，决策P4.7-8）。
+  // 状态词双语固定三档（connected / error / needs_auth），其余上游状态原样显示（t() 首参恒字面量，
+  // 决策P4.7-8）。needs_auth：agentao 0.5.10 起 URL 型 server 无 Authorization 头即走 OAuth，401 后
+  // 落此态——不是连接坏了，是该登录了（检查不会替用户发起登录）。
   let label = r.status;
   if (ok) label = t("mcp.statusConnected");
   else if (r.status === "error") label = t("mcp.statusError");
+  else if (r.status === "needs_auth") label = t("mcp.statusNeedsAuth", r.name);
   const head = `<div class="${ok ? "report-ok" : "report-bad"}">`
     + `${escapeHtml(r.name)} · ${escapeHtml(label)} · ${escapeHtml(r.transport)}`
     + (ok ? ` · ${escapeHtml(t("mcp.toolCount", r.tools.length))}` : "") + `</div>`;

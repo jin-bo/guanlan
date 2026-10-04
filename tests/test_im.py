@@ -750,6 +750,8 @@ def test_store_is_constructed_with_idle_ttl_none(kb_im, monkeypatch):
     assert captured["idle_ttl"] is None
     assert captured["persist"] is False and captured["default_mode"] == "read-only"
     assert captured["write_gate"] is None
+    # P4.24 附录 B：IM 没有确认界面——受闸确认（远端 MCP 技能）须立即拒，而不是白等超时。
+    assert captured["confirm_ui"] is False
 
 
 def test_tombstones_are_bounded_and_never_evict_live(kb_im):

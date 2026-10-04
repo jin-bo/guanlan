@@ -1012,6 +1012,13 @@ function renderConfirmRequest(p) {
   pre.textContent = typeof cmd === "string" ? cmd : JSON.stringify(cmd, null, 2);
   div.appendChild(pre);
   clampCmd(div, pre); // 超过 3 行则默认收起前三行，给「展开全文」钮（全文始终留在 DOM）
+  // 受闸确认（P4.24 附录 B：远端 MCP 技能的激活等）：展示 agentao 给的说明。服务端文本，textContent 字面显示。
+  if (p.gated) {
+    const gate = document.createElement("div");
+    gate.className = "interaction-gate";
+    gate.textContent = t("interaction.gated") + (p.gate_note ? "\n" + p.gate_note : "");
+    div.appendChild(gate);
+  }
   const cd = document.createElement("div");
   cd.className = "interaction-cd";
   div.appendChild(cd);
@@ -1028,9 +1035,11 @@ function renderConfirmRequest(p) {
     });
     return b;
   };
+  // 受闸确认不出「本会话起自动放行」：答复只管这一次（后端 resolve_confirm 也不会据它翻模式——那才是闸，
+  // 这里隐藏只是不给出一个不会兑现的选项）。
   actions.append(
     mk(t("interaction.allow"), "allow", "allow"),
-    mk(t("interaction.allowSession"), "allow-session", "allow_session"),
+    ...(p.gated ? [] : [mk(t("interaction.allowSession"), "allow-session", "allow_session")]),
     mk(t("interaction.deny"), "deny", "deny"),
   );
   div.appendChild(actions);

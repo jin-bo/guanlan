@@ -1179,8 +1179,9 @@ def create_app(
             # read-only turn 保持空，done/error 帧不带这些字段。
             meta: dict = {}
             # 显式 Task（而非裸 coro）+ shield：客户端断开会取消本协程，但**不可**靠 asyncio 取消
-            # 打断 arun——那只转发 token.cancel() 便立刻 re-raise、不等线程收尾，于是 lock 会在后台
-            # executor 线程仍在跑时被释放，下一轮就可能与残线程并发改 agent.messages / 串错 token。
+            # 打断 arun——那只转发 token.cancel()，至多等 5s（agentao 0.5.7 起）便 re-raise、**不保证**线程
+            # 已收尾，于是 lock 可能在后台 executor 线程仍在跑时被释放，下一轮就可能与残线程并发改
+            # agent.messages / 串错 token。
             # shield 让 turn 跑到自然结束（lock 全程持有），杜绝该竞态；代价是断开后该轮仍跑完（本地
             # 单用户、轮次有界，可接受）。**主动停止**走另一条干净路径：停止端点经 conv 上的取消令牌
             # 打断，arun 持锁等线程真正收尾才抛 AgentCancelledError（见下 except）。持显式 task 句柄

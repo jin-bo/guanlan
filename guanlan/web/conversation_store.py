@@ -53,6 +53,7 @@ class ConversationStore:
         search_cache: CorpusCache | None = None,
         confirm_mode: str = "ask",
         confirm_timeout: float = DEFAULT_CONFIRM_TIMEOUT,
+        confirm_ui: bool = True,
         clock: Callable[[], float] = time.monotonic,
         mcp_registry: object = _UNSET,
     ) -> None:
@@ -72,6 +73,8 @@ class ConversationStore:
         # （--confirm-timeout）；透传每个会话（新建与懒恢复两路，决策P4.15-7）。
         self._confirm_mode = confirm_mode
         self._confirm_timeout = confirm_timeout
+        # P4.24 附录 B：宿主有无确认界面（IM 传 False → 受闸确认立即拒，不白等超时）。
+        self._confirm_ui = confirm_ui
         self._write_gate = write_gate  # 进程级单写者协调，注入每个会话
         # 内存会话硬上限（决策P4.9-18）：取代直读模块常量 MAX_CONVERSATIONS，供多用户部署可配。
         # 存原值（可能 None=未指定）；**在 create/restore 取上限时**经 `_cap()` 解析——None 则读模块
@@ -148,6 +151,7 @@ class ConversationStore:
                     search_cache=self._search_cache,
                     confirm_mode=self._confirm_mode,
                     confirm_timeout=self._confirm_timeout,
+                    confirm_ui=self._confirm_ui,
                     clock=self._clock,
                     mcp_registry=self._mcp_registry,  # P4.21：哨兵即"不传"，Web 零影响
                 )
@@ -337,6 +341,7 @@ class ConversationStore:
                     search_cache=self._search_cache,  # 懒恢复同样带召回工具（§3.1，两路零漂移）
                     confirm_mode=self._confirm_mode,
                     confirm_timeout=self._confirm_timeout,
+                    confirm_ui=self._confirm_ui,
                     clock=self._clock,
                     mcp_registry=self._mcp_registry,  # P4.21：新建/恢复两路零漂移
                 )

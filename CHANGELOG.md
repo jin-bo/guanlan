@@ -7,6 +7,25 @@
 
 ### 变更
 
+- **底座 agentao 下限 0.5.6 → 0.5.10**（仍 `<0.6`；影响面见
+  [`docs/P4.24-MCP技能发布.md`](docs/P4.24-MCP技能发布.md) 附录 B）。0.5.7–0.5.10 对观澜接缝无破坏，
+  锁文件只升了 agentao 一项。0.5.10 起 agentao 作 MCP 客户端原生支持 Skills 扩展（`mcp.json` 里
+  `"skills": true`）与 MCP Resources。用户可感知的上游变化：
+  - **默认不再发送 `temperature`**（0.5.7 起，原为 0.2）：ingest / query / heal / audit 与 Web、IM 问答
+    都改用模型提供方的默认值。要恢复旧行为，设 `LLM_TEMPERATURE=0.2`。
+  - **shell 白名单收紧**（0.5.7）：带通配、引号等的命令在 workspace-write 下改为询问。headless 的 ingest
+    不受影响（本就禁 shell）；Web 可写会话里模型自发的 `ls wiki/*.md` 之类会多一次确认。
+  - URL 型 MCP server 未配 `Authorization` 头时默认走 OAuth，收到 401 后进入 `needs_auth`（0.5.10）。
+
+### 安全
+
+- **远端技能的受闸确认不再被自动放行**。只在 KB 的 `.agentao/mcp.json` 给某个外部 server 开了
+  `"skills": true` 时才会出现；上游要求这类确认（远端技能激活、加载远端技能后的 shell 等）必须当场问人，
+  不得由常设授权代答，答复也不授予本次之外的任何东西。Web：`auto` 模式对它不生效、照样弹确认，
+  「本会话起自动放行」不出现，后端收到 `allow_session` 也只放行这一次、不切会话模式（闸在后端，前端隐藏
+  按钮只是展示）。IM：没有确认界面，立即拒绝并记 WARNING，不再白等超时。依据 agentao 的
+  `gate_note()`，新增真 Agentao 契约用例钉住，并做过变异检验。
+
 - **底座 agentao 下限 0.5.3 → 0.5.6**（仍 `<0.6`）。逐条核对 0.5.4–0.5.6 的上游变更，对观澜接缝
   无破坏：Web 姿态本就两点置位（engine + `tool_runner`）；`bg_store=None` 照旧关掉后台子 Agent，
   而 0.5.6 起 `agentao run` 自身也不再提供后台子 Agent，子进程路（ingest/query/heal/audit）少了
@@ -15,6 +34,11 @@
 
 ### 修复
 
+- **Web MCP 诊断面板认得 `needs_auth`**：此前只翻译「已连接 / 连接失败」两档，其余状态原样以错误样式显示；
+  现在显示「需要授权（先运行 `agentao mcp login <名字>`）」。
+- **`/tools` 静态兜底表补上 0.5.10 新增的四个只读工具**（`list_mcp_resources`、
+  `list_mcp_resource_templates`、`read_mcp_resource`、`read_skill_file`）。它们只在某个 server 声明
+  resources / skills 时才注册，现有的真 agent 核对用例碰不到，故另加一条按类核对的契约用例。
 - **Web `/tools` 的只读静态兜底表与上游对齐**：0.5.4 起 agentao 只读放行 `todo_write` /
   `activate_skill`（只改本会话内存态），兜底表却仍把 `todo_write` 标为被拦。真 agent 有
   `is_read_only` 元数据、兜底不触发，故此前测不出；新增一条真 agent 契约用例逐个核对兜底表与

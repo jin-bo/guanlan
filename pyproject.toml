@@ -55,7 +55,13 @@ dependencies = [
     # 照旧关后台子 Agent，而 0.5.6 起 `agentao run` 本身也不再提供后台子 Agent（子进程路更干净）。
     # 需跟改的一处：0.5.4 起只读放行 `todo_write`（见 web/chat_support.py 的静态兜底表）。
     # 另 0.5.4 起模型请求重试退避拉长到 7.5→15→30→60 s（按次数封顶、可被取消打断）。
-    "agentao[cli]>=0.5.6,<0.6",
+    #
+    # >=0.5.10（见 docs/P4.24-MCP技能发布.md 附录 B）：0.5.10 起 agentao 作 MCP 客户端原生支持
+    # Skills 扩展（mcp.json 里 `"skills": true`）与 MCP Resources。0.5.7–0.5.10 对观澜接口无破坏，
+    # 但有两处**行为**变化：① 0.5.7 起默认不再发送 `temperature`（原 0.2，改用模型提供方默认；
+    # `LLM_TEMPERATURE=0.2` 恢复）；② 远端技能的受闸确认要求宿主「不得由常设授权代答、也不得被记住」
+    # ——Web/IM 的确认回调据 `agentao.transport.gate_note()` 守住它（web/conversation.py）。
+    "agentao[cli]>=0.5.10,<0.6",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
 ]
 
