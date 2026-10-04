@@ -1271,32 +1271,59 @@ def test_http_serves_modern_protocol_client(kb_mcp):
     （含显式传 `mode="2026-07-28"`）都落到 `DirectDispatcher`——无流、无 JSON-RPC 帧。于是若只有内存用例，
     SDK v2 两条 era 服务循环里「升级后的新客户端将走的那条」在真帧路径上一个断言都没有。本例补上：工具集、
     `structuredContent` 信封、in-band 越界文案、http 的 ask 门控，在现代 era 上逐条与握手 era 同形。
+
+    ⚠️ **完整的现代请求缺一不可**（P4.24 实现期实测；本例此前只在 `_meta` 里放了协议版本、缺
+    `Mcp-Protocol-Version` 头，于是**每个请求都落在握手时代**（`2025-03-26`），只因 `tools/*` 两个 era 都可用才
+    一直是绿的）：① `Mcp-Protocol-Version` 头——没有它服务端按握手时代处理；② `Mcp-Method` 头（`tools/call`
+    再加 `Mcp-Name`）——带了版本头后服务端**强制**它们与 body 一致，否则 400 / `-32020`；③ `_meta` 里的协议
+    版本与客户端能力（缺则 `-32602`）。故本例不再「以为」在测现代 era，而是**断言**落点：现代 era 的响应是
+    纯 JSON（非 SSE）、带 `resultType: "complete"` 与 `serverInfo` 戳；并留一个只带 `_meta` 的反例确认它确实
+    落在握手时代。
     """
     import httpx2
-    from mcp.types import LATEST_PROTOCOL_VERSION, PROTOCOL_VERSION_META_KEY
+    from mcp.types import (
+        CLIENT_CAPABILITIES_META_KEY,
+        LATEST_PROTOCOL_VERSION,
+        PROTOCOL_VERSION_META_KEY,
+    )
 
     mcp = build_mcp(kb_mcp, runner=_ok_runner, allow_ask=False)
     app = mcp_server._build_http_app(mcp, host="127.0.0.1", allowed_hosts=None, token=None)
-    meta = {"_meta": {PROTOCOL_VERSION_META_KEY: LATEST_PROTOCOL_VERSION}}
+    envelope = {PROTOCOL_VERSION_META_KEY: LATEST_PROTOCOL_VERSION, CLIENT_CAPABILITIES_META_KEY: {}}
+    base_headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+
+    def raw(base, method, params, headers):
+        return httpx2.post(
+            f"{base}/mcp",
+            headers={**base_headers, **headers},
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+        )
 
     def post(base, method, params):
-        resp = httpx2.post(
-            f"{base}/mcp",
-            headers={"content-type": "application/json", "accept": "application/json, text/event-stream"},
-            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": {**params, **meta}},
-        )
-        assert resp.status_code == 200
-        return next(
-            json.loads(ln[len("data:") :].strip())
-            for ln in resp.text.splitlines()
-            if ln.startswith("data:")
-        )
+        """一个**完整**的现代请求；断言它真的落在现代 era 后返回 result。"""
+        headers = {"mcp-protocol-version": LATEST_PROTOCOL_VERSION, "mcp-method": method}
+        if method == "tools/call":
+            headers["mcp-name"] = params["name"]
+        resp = raw(base, method, {**params, "_meta": envelope}, headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["content-type"].startswith("application/json")  # 现代 era：非 SSE
+        result = resp.json()["result"]
+        assert result["resultType"] == "complete"
+        assert result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "guanlan"
+        return result
 
     with _running_http(app) as base:
-        tools = post(base, "tools/list", {})["result"]
-        ok = post(base, "tools/call", {"name": "search", "arguments": {"query": "去中心化金融"}})["result"]
-        bad = post(base, "tools/call", {"name": "read_page", "arguments": {"path": "../bad.md"}})["result"]
-        gated = post(base, "tools/call", {"name": "ask", "arguments": {"question": "q"}})["result"]
+        tools = post(base, "tools/list", {})
+        ok = post(base, "tools/call", {"name": "search", "arguments": {"query": "去中心化金融"}})
+        bad = post(base, "tools/call", {"name": "read_page", "arguments": {"path": "../bad.md"}})
+        gated = post(base, "tools/call", {"name": "ask", "arguments": {"question": "q"}})
+        # 反例：本例旧写法（只在 `_meta` 里放协议版本、无头）→ 握手时代：SSE、无 resultType。
+        legacy = raw(base, "tools/list", {"_meta": {PROTOCOL_VERSION_META_KEY: LATEST_PROTOCOL_VERSION}}, {})
+        # 带了版本头，路由头就被强制：缺 `Mcp-Name` 或与 body 不符 → 400 / -32020。
+        modern_hdr = {"mcp-protocol-version": LATEST_PROTOCOL_VERSION, "mcp-method": "tools/call"}
+        call = {"name": "search", "arguments": {"query": "x"}, "_meta": envelope}
+        no_name = raw(base, "tools/call", call, modern_hdr)
+        wrong_name = raw(base, "tools/call", call, {**modern_hdr, "mcp-name": "ask"})
 
     # 现代 era 上工具集与门控同形（http 默认无 ask，决策P4.17-3）。
     assert {t["name"] for t in tools["tools"]} == {
@@ -1307,6 +1334,15 @@ def test_http_serves_modern_protocol_client(kb_mcp):
     assert ok["isError"] is False and ok["structuredContent"]["results"]
     # in-band 越界仍是**我们的**受控中文文案（不是 SDK 接管，见 test_read_page_traversal_blocked）。
     assert bad["isError"] is True and "路径越界（须在 wiki/ 内）" in bad["content"][0]["text"]
+
+    assert legacy.status_code == 200 and legacy.headers["content-type"].startswith("text/event-stream")
+    legacy_result = next(
+        json.loads(ln[len("data:") :].strip()) for ln in legacy.text.splitlines() if ln.startswith("data:")
+    )["result"]
+    assert "resultType" not in legacy_result
+
+    for resp in (no_name, wrong_name):
+        assert resp.status_code == 400 and resp.json()["error"]["code"] == -32020
 
 
 @pytest.mark.parametrize(
