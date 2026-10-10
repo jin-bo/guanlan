@@ -665,10 +665,63 @@ function appendCopyButton(botEl, raw) {
 // `botEl.textContent +=` 会把它的文本一并吞进答案、done 的 innerHTML 重渲也会冲突。
 // 一来 token / 收尾即清；下一段静默间隙再触发会重建。
 function clearHeartbeat(botEl) {
-  if (botEl && botEl._hb) {
+  if (!botEl) return;
+  // 连带收掉压缩走表（见 handleCompaction）：每条退出路径都经这里，计时器不会泄漏。
+  if (botEl._compactTimer) {
+    clearInterval(botEl._compactTimer);
+    botEl._compactTimer = null;
+  }
+  botEl._compactT0 = null;
+  if (botEl._hb) {
     botEl._hb.remove();
     botEl._hb = null;
   }
+}
+
+// 心跳行（静默间隙的存活提示），对话流与 goal 续跑流共用。压缩进行中（_compactT0 有值）改说
+// 「正在压缩上下文」，计时从压缩起点算，而非从流起点算。
+function showHeartbeat(botEl, elapsed) {
+  if (!botEl._hb) {
+    botEl._hb = document.createElement("div");
+    botEl._hb.className = "chat-hb";
+    botEl.after(botEl._hb);
+  }
+  botEl._hb.textContent = botEl._compactT0
+    ? t("chat.compacting", Math.floor((Date.now() - botEl._compactT0) / 1000))
+    : t("chat.working", elapsed);
+}
+
+// 上下文压缩（`compaction` 帧，agentao 0.5.12 起）：摘要调用可长达一分钟、期间没有 token，
+// 服务端心跳又 15s 才一拍，故 started → 心跳行改说「正在压缩上下文」并本地逐秒走表；
+// settled → 收起，在气泡上方留一行结果。cancelled 不留行：本轮正在停止，stopped 帧自会交代。
+function handleCompaction(botEl, payload) {
+  if (!botEl) return;
+  if (payload.phase === "started") {
+    clearHeartbeat(botEl);
+    botEl._compactT0 = Date.now();
+    showHeartbeat(botEl, 0);
+    botEl._compactTimer = setInterval(() => showHeartbeat(botEl, 0), 1000);
+  } else if (payload.phase === "settled") {
+    clearHeartbeat(botEl);
+    const secs = Math.round((payload.duration_ms || 0) / 1000);
+    let text = "";
+    const counted = Number.isInteger(payload.pre_msgs) && Number.isInteger(payload.post_msgs);
+    if (payload.status === "success" && counted) {
+      text = t("chat.compacted", payload.pre_msgs, payload.post_msgs, secs);
+    } else if (payload.status === "success") {
+      text = t("chat.compactedNoCount", secs);
+    } else if (payload.status === "failed") {
+      text = t("chat.compactFailed", secs);
+    }
+    if (text) {
+      const div = document.createElement("div");
+      div.className = "chat-compact";
+      div.textContent = text;
+      botEl.before(div);
+    }
+  }
+  const log = $("#chat-log");
+  log.scrollTop = log.scrollHeight;
 }
 
 // 对话气泡里的 [[wikilink]] / raw 源链（来自渲染后的答案）点了切到右栏：wiki 单页 / 只读 raw 源。
@@ -735,13 +788,10 @@ function handleSSE(frame, botEl) {
     log.scrollTop = log.scrollHeight;
   } else if (event === "heartbeat") {
     // 静默间隙（长工具调用 / 首 token 前思考）的存活提示，随 elapsed 刷新；token 一来即清。
-    if (!botEl._hb) {
-      botEl._hb = document.createElement("div");
-      botEl._hb.className = "chat-hb";
-      botEl.after(botEl._hb);
-    }
-    botEl._hb.textContent = t("chat.working", payload.elapsed || 0);
+    showHeartbeat(botEl, payload.elapsed || 0);
     log.scrollTop = log.scrollHeight;
+  } else if (event === "compaction") {
+    handleCompaction(botEl, payload);
   } else if (event === "stopped") {
     clearHeartbeat(botEl);
     // 用户主动停止：保留已流出的纯文本（不再渲染 markdown），加一行轻提示。
@@ -1588,14 +1638,11 @@ function handleGoalSSE(frame, ctx) {
     }
   } else if (event === "heartbeat") {
     if (ctx.botEl) {
-      if (!ctx.botEl._hb) {
-        ctx.botEl._hb = document.createElement("div");
-        ctx.botEl._hb.className = "chat-hb";
-        ctx.botEl.after(ctx.botEl._hb);
-      }
-      ctx.botEl._hb.textContent = t("chat.working", payload.elapsed || 0);
+      showHeartbeat(ctx.botEl, payload.elapsed || 0);
       log.scrollTop = log.scrollHeight;
     }
+  } else if (event === "compaction") {
+    handleCompaction(ctx.botEl, payload);
   } else if (event === "turn_done") {
     const el = ctx.botEl;
     if (el) {

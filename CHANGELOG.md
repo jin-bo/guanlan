@@ -3,6 +3,40 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [未发布]
+
+### 新增
+
+- **Web 问答显示上下文压缩进度**（用 agentao 0.5.12 的 `COMPACTION_STARTED` / `COMPACTION_SETTLED`）。长对话或 `/goal`
+  续跑触发自动压缩时，摘要调用可长达一分钟、期间没有 token，界面原先只有每 15 秒一拍的泛泛「处理中」。现在心跳行改说
+  「🗜 正在压缩上下文…（12s）」并逐秒走表，结束后在气泡上方留一行「上下文已压缩 · 54 → 19 条消息 · 14s」；压缩未成功时
+  如实说出，被停止时不留行。普通问答与 goal 续跑两条流都覆盖。
+  - 服务端经 `SdkTransport.subscribe` 旁听，与 token 流的回调并行、不替换；新 SSE 帧 `compaction` 只带白名单字段
+    （`phase` / `status` / `pre_msgs` / `post_msgs` / `duration_ms`），上游的 `detail` 可能是错误原文，不上线。
+    只转要调摘要模型的 `full` 压缩：毫秒级的 `microcompact` / `minimal_history` 不出帧，与 agentao CLI 同口径。
+
+### 变更
+
+- **Web 姿态改由 agentao 一处置位**。开局姿态经 `build_from_environment(permission_mode=)` 在构造期交给 factory：它落在
+  从权限文件加载的 engine 上（用户规则保留），两点一次做齐、不发切换事件；`/mode` 运行期切换改调
+  `agent.set_permission_mode()`，取代原先手工翻 engine 预设与 `tool_runner` 只读标志两步，并多发一条
+  `PERMISSION_MODE_CHANGED`（开了 replay 时姿态切换有据可查）。Web 仍只收 read-only / workspace-write，非法姿态照旧在
+  观澜这层拦下、转 422。`CancellationToken` 改从稳定面 `agentao.host` 导入。
+
+- **底座 agentao 下限 0.5.10 → 0.5.12**（仍 `<0.6`）。0.5.11–0.5.12 对观澜接缝无破坏：锁文件只升了 agentao
+  一项，全量测试（含 `tests/test_agentao_contract.py` 的真 Agentao 契约）原样通过。抬下限而不只升锁，是因为
+  几处上游修复正落在观澜路径上：
+  - **Fable 5.1 / Opus 5.5 / Sonnet 5.5 会话不再中途 400 断掉**（0.5.11）：这些模型把思考块绑定到产生它时的
+    system 与工具表，二者一变就拒收。Web 的 `/goal` 正会中途追加 `update_goal` 工具。
+  - **提供方拒收的图片不再让此后每轮都失败**（0.5.12）：该图会从历史里换成一段说明，本轮以错误结束并提示重新附图
+    或换模型。Web 上传图片走的就是这条路。
+  - **停止一轮会杀掉正在跑的 shell 命令、放弃正在等的 MCP 调用**（0.5.11），不再等它们自己结束或超时。
+  - **断线的 MCP 工具调用不再被重发**（0.5.11）：改为报「结果未知」，下一次调用再重连。
+  - **`close()` 关掉 `agentao.log` 句柄**（0.5.12）；它也只释放 agent 自建的 MCP / memory manager，观澜只传
+    `mcp_registry`、不注入 manager，故行为不变。
+  - 用户可感知的另一处：0.5.11 起 workspace-write 下写 `.env` / `*.pem` / `*.key` 改为询问。headless 的 ingest
+    本就不写这些文件。
+
 ## [0.1.27] - 2026-10-04
 
 ### 新增

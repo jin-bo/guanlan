@@ -18,13 +18,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 import anyio
-from agentao.cancellation import AgentCancelledError, CancellationToken
+from agentao.cancellation import AgentCancelledError
+from agentao.host import CancellationToken
 
-from .defaults import CONFIRM_MODES, DEFAULT_CONFIRM_TIMEOUT
+from .defaults import CONFIRM_MODES, DEFAULT_CONFIRM_TIMEOUT, WEB_MODES
 from agentao.cli.goal_state import GoalState, GoalStatus, budget_summary
 from agentao.embedding.compat import build_compat_transport
-from agentao.permissions import PermissionMode
-from agentao.transport import gate_note
+from agentao.transport import AgentEvent, EventType, gate_note
 from agentao.tools.goal import UpdateGoalTool
 
 from ..gate import REPAIR_PROMPT, _render_violations
@@ -166,6 +166,13 @@ class _GoalProxy:
             return self._g.status_label()
 
 
+def _check_web_mode(mode: str) -> None:
+    """Web 只收 read-only / workspace-write（决策P4.5-1）；agentao 收得下 full-access/plan，
+    故必须拦在本层、先于任何 agentao 调用。非法 → ValueError（端点转 422）。"""
+    if mode not in WEB_MODES:
+        raise ValueError(f"未知姿态：{mode}")
+
+
 class Conversation:
     """一会话一 `Agentao` 对象 + 一把 `asyncio.Lock`，按需把只读会话落 `.agentao/sessions/`。
 
@@ -190,6 +197,8 @@ class Conversation:
         clock: Callable[[], float] = time.monotonic,
         mcp_registry: object = _UNSET,
     ) -> None:
+        # 先于一切副作用（skill 安装 / transport / policy_fs）拦非法姿态（决策P4.5-1）。
+        _check_web_mode(mode)
         self.id = cid
         self._kb = kb
         # P4.21（决策P4.21-60）：外部 MCP registry 的**可选**透传口。默认哨兵 `_UNSET` = 不进
@@ -277,6 +286,9 @@ class Conversation:
         # allow_custom）。直接把 `SdkTransport._ask_user` 换成我们的富回调——`invoke_ask_user_callback`
         # 会反射回调签名、把它能收的结构化字段按关键字转发（agentao 文档化的 ask_user 结构化面，§9）。
         transport._ask_user = self._ask_user_cb
+        # 上下文压缩进度（agentao 0.5.12 起）：`subscribe` 是 SdkTransport 的公开旁听口，与上面
+        # compat 冻进去的 on_event（token 流）并行、互不替换。transport 与 agent 同寿，不必退订。
+        transport.subscribe(self._on_agent_event)
         opts: dict = dict(
             working_directory=kb,
             logger=_logger,
@@ -323,27 +335,25 @@ class Conversation:
         # `build_from_environment` 在**调用期**才 `safe_load_dotenv()`，先摘空串，`.env` 里的真 key
         # 才 setdefault 得进来。只删空值、绝不读写真 key（守「wrapper 不持 API key」）。
         drop_poisoned_api_keys()
+        # 开局姿态在构造期交给 factory（agentao 0.5.12 起）：它把姿态落到**从权限文件加载的**
+        # engine 上（用户规则保留），两点置位一次做齐、且不发 PERMISSION_MODE_CHANGED——开局是状态、
+        # 不是切换。非法姿态已在 __init__ 开头拦下（factory 收得下 full-access，Web 不收，决策P4.5-1）。
+        opts["permission_mode"] = mode
         self.agent = chat.build_from_environment(**opts)
-        # 姿态两点同步置位（缺第二步 = 没真正切换，照搬 cli/run.py）：开局用构造姿态。
-        self._apply_mode(mode)
         self.agent.skill_manager.activate_skill(
             SKILL_NAME, task_description="观澜 Web 工作会话"
         )
 
     def _apply_mode(self, mode: str) -> None:
-        """把姿态落到 agent 的两点置位（engine Mode + tool_runner.readonly）——镜像 cli/run.py。
+        """运行期切姿态：经 `agent.set_permission_mode` 一次翻齐两点（engine 预设 +
+        tool_runner.readonly），并发 PERMISSION_MODE_CHANGED（开了 replay 时有据可查）。
 
         只翻「能不能写」，**不动层① wrapper**（wrapper 姿态无关、守「写到哪」，决策P4.5-2/5）。
-        绝不接受 full-access/plan（决策P4.5-1）：非 _WEB_MODES → ValueError，端点转 422。
+        绝不接受 full-access/plan（决策P4.5-1）：非 WEB_MODES → ValueError，端点转 422——
+        agentao 收得下它们，故必须拦在本层、先于调用。
         """
-        if mode == "read-only":
-            self.agent.permission_engine.set_mode(PermissionMode.READ_ONLY)
-            self.agent.tool_runner.set_readonly_mode(True)
-        elif mode == "workspace-write":
-            self.agent.permission_engine.set_mode(PermissionMode.WORKSPACE_WRITE)
-            self.agent.tool_runner.set_readonly_mode(False)
-        else:
-            raise ValueError(f"未知姿态：{mode}")  # 端点转 422；绝不接受 full-access/plan
+        _check_web_mode(mode)  # 端点转 422；绝不接受 full-access/plan
+        self.agent.set_permission_mode(mode)
         self._mode = mode
 
     @property
@@ -363,6 +373,36 @@ class Conversation:
         """transport 固定回调，**在 arun 的 executor 线程里跑**；lock 串行化同会话各 turn，单槽无竞态。"""
         if self._emit is not None:
             self._emit("token", chunk)
+
+    def _on_agent_event(self, event: AgentEvent) -> None:
+        """transport 旁听回调（executor 线程）：只把上下文压缩的起止转成 `compaction` 帧。
+
+        压缩（一次 LLM 摘要）可长达一分钟，期间无 token，前端只能显示泛泛的「处理中」。
+        `started` 只在要调摘要模型的 `full` 压缩时才发；`settled` 报结局（success / failed /
+        cancelled；skipped 上游不发）。只转白名单字段：`detail` 可能是错误原文，不上线。
+        """
+        emit = self._emit
+        if emit is None:
+            return
+        if event.type == EventType.COMPACTION_STARTED:
+            emit("compaction", {"phase": "started"})
+        elif event.type == EventType.COMPACTION_SETTLED:
+            d = event.data
+            # 只报 `full`（唯一会调摘要模型、也唯一先发 started 的一类）：microcompact /
+            # minimal_history 毫秒级完成、可能逐轮触发，转成结果行只会刷屏「N → N 条消息」，
+            # 还会顺手撤掉前端的「处理中」心跳（与 agentao CLI 只在有 started 时才报同一口径）。
+            if not isinstance(d, dict) or d.get("kind") != "full":
+                return
+            emit(
+                "compaction",
+                {
+                    "phase": "settled",
+                    "status": d.get("status"),
+                    "pre_msgs": d.get("pre_msgs"),
+                    "post_msgs": d.get("post_msgs"),
+                    "duration_ms": d.get("duration_ms"),
+                },
+            )
 
     # ── P4.15 工具确认 / ask_user 人在环（docs/P4.15-Web工具确认.md §3/§4/§9） ──
     #

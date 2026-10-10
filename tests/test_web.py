@@ -25,7 +25,6 @@ from conftest import make_runner, write_page
 pytest.importorskip("fastapi")
 
 from agentao.cancellation import AgentCancelledError  # noqa: E402
-from agentao.permissions import PermissionMode  # noqa: E402
 from agentao.transport.events import AgentEvent, EventType  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -2118,6 +2117,12 @@ class _FakeAgent:
         # ask_user 时，把回传布尔/答案串收进这里供断言（人在浏览器点 允许/拒绝/填答案 → 经端点解阻塞）。
         self.confirm_results: list = []
         self.ask_results: list = []
+        # 运行期姿态切换（`agent.set_permission_mode`，agentao 0.5.12 起收字符串）；开局姿态走构造
+        # kwargs["permission_mode"]，不经这里。
+        self.mode_calls: list[str] = []
+
+    def set_permission_mode(self, mode, *, cause: str = "host"):
+        self.mode_calls.append(mode)
 
     def get_current_model(self) -> str:
         return self._model or "fake-model"
@@ -2393,13 +2398,13 @@ def test_chat_construction_contract(chat_client, kb) -> None:
     assert kwargs["working_directory"] == kb
     assert "transport" in kwargs  # token 靠构造期 transport，非事后赋 llm_text_callback
     assert "logger" in kwargs  # 自带 logger（不落 <wd>/agentao.log）
-    assert "permission_mode" not in kwargs  # 不传该形参（否则 TypeError）
+    # 开局姿态在构造期交给 factory（0.5.12 起，两点一次做齐、不发切换事件）；构造后不再补翻。
+    assert kwargs["permission_mode"] == "read-only"
     assert "model" not in kwargs  # 省略 --model → 无 model 键（绝非 model=None）
 
     agent = captured["agents"][0]
-    # 只读姿态两点同步置位。
-    assert any(c[0] == "set_mode" and c[1] == (PermissionMode.READ_ONLY,) for c in agent.permission_engine.calls)
-    assert any(c[0] == "set_readonly_mode" and c[1] == (True,) for c in agent.tool_runner.calls)
+    assert agent.mode_calls == []
+    assert agent.permission_engine.calls == [] and agent.tool_runner.calls == []
     # guanlan-wiki 被激活。
     assert any(c[0] == "activate_skill" and c[1][0] == "guanlan-wiki" for c in agent.skill_manager.calls)
 
@@ -2642,6 +2647,52 @@ def test_same_conversation_turns_serialized(kb, monkeypatch) -> None:
     # 串行 → 一轮的 end 必在下一轮 start 之前。
     assert events[0].startswith("start") and events[1].startswith("end")
     assert events[2].startswith("start") and events[3].startswith("end")
+
+
+# ───────────────────────── 上下文压缩进度帧（agentao 0.5.12） ─────────────────────────
+
+
+def test_compaction_events_become_whitelisted_frames(chat_client) -> None:
+    """turn 内 agentao 发 COMPACTION_STARTED / SETTLED → SSE `compaction` 帧，按序到达、
+    夹在 token 之间；settled 只带白名单字段（`detail` 可能是错误原文，不上线）。"""
+    client, captured = chat_client
+    _, done, _ = _chat(client, "建会话")
+    cid = done["conversation_id"]
+    agent = captured["agents"][0]
+
+    def compact(a):  # executor 线程里发，镜像真压缩发生在 arun 的工作线程
+        a.transport.emit(AgentEvent(EventType.COMPACTION_STARTED, {
+            "trigger": "auto", "kind": "full", "reason": "compression_threshold",
+        }))
+        a.transport.emit(AgentEvent(EventType.COMPACTION_SETTLED, {
+            "trigger": "auto", "kind": "full", "reason": "compression_threshold",
+            "status": "success", "pre_msgs": 54, "post_msgs": 19,
+            "pre_tokens_history": 90000, "post_tokens_history": 12000,
+            "duration_ms": 14200, "detail": "Traceback: secret-ish text",
+        }))
+
+    agent.action = compact
+    frames = _chat_interactive(client, "长对话", conversation_id=cid)
+    comp = [p for e, p in frames if e == "compaction"]
+    assert comp == [
+        {"phase": "started"},
+        {"phase": "settled", "status": "success", "pre_msgs": 54, "post_msgs": 19, "duration_ms": 14200},
+    ]
+    kinds = _frame_kinds(frames)
+    assert kinds.index("compaction") > kinds.index("token")  # 同一 emit 通道，顺序不乱
+    assert kinds[-1] == "done"
+
+
+def test_unrelated_agent_events_emit_no_frames(chat_client) -> None:
+    """旁听口只转压缩两类事件：其它事件（如姿态切换）不得变成前端没见过的帧。"""
+    client, captured = chat_client
+    _, done, _ = _chat(client, "建会话")
+    agent = captured["agents"][0]
+    agent.action = lambda a: a.transport.emit(AgentEvent(EventType.PERMISSION_MODE_CHANGED, {
+        "previous": "read-only", "current": "workspace-write", "cause": "host",
+    }))
+    frames = _chat_interactive(client, "问", conversation_id=done["conversation_id"])
+    assert set(_frame_kinds(frames)) <= {"start", "token", "heartbeat", "done"}
 
 
 # ───────────────────────── 停止按钮（中断在飞轮） ─────────────────────────
@@ -3045,8 +3096,7 @@ def test_restore_preserves_readonly_posture(chat_env, kb) -> None:
     conv = store2.restore(cid)
     assert conv is not None
     agent = conv.agent
-    assert any(call[0] == "set_mode" and call[1] == (PermissionMode.READ_ONLY,) for call in agent.permission_engine.calls)
-    assert any(call[0] == "set_readonly_mode" and call[1] == (True,) for call in agent.tool_runner.calls)
+    assert agent.kwargs["permission_mode"] == "read-only"
     assert any(call[0] == "activate_skill" and call[1][0] == SKILL_NAME for call in agent.skill_manager.calls)
 
 
@@ -4233,13 +4283,7 @@ def test_mode_switch_flips_two_points_no_rebuild(chat_client) -> None:
     agent = captured["agents"][0]
     r = client.post(f"/api/chat/{cid}/mode", json={"mode": "workspace-write"})
     assert r.status_code == 200 and r.json()["mode"] == "workspace-write"
-    assert any(
-        c[0] == "set_mode" and c[1] == (PermissionMode.WORKSPACE_WRITE,)
-        for c in agent.permission_engine.calls
-    )
-    assert any(
-        c[0] == "set_readonly_mode" and c[1] == (False,) for c in agent.tool_runner.calls
-    )
+    assert agent.mode_calls == ["workspace-write"]  # 经 set_permission_mode 一次翻齐两点
     assert client.get(f"/api/chat/{cid}/info").json()["mode"] == "workspace-write"
     assert len(captured["agents"]) == 1  # 同一 agent 对象、未重建
     assert client.post(f"/api/chat/{cid}/mode", json={"mode": "read-only"}).json()["mode"] == "read-only"
@@ -4252,10 +4296,7 @@ def test_mode_illegal_rejected_422(chat_client, bad) -> None:
     cid = done["conversation_id"]
     assert client.post(f"/api/chat/{cid}/mode", json={"mode": bad}).status_code == 422
     agent = captured["agents"][0]
-    assert not any(
-        c[0] == "set_mode" and c[1] and c[1][0] in (PermissionMode.FULL_ACCESS, PermissionMode.PLAN)
-        for c in agent.permission_engine.calls
-    )
+    assert agent.mode_calls == []  # 拦在观澜这层：非法姿态根本到不了 agentao
 
 
 def test_mode_unknown_404(chat_client) -> None:
@@ -6226,8 +6267,8 @@ def test_allow_session_flips_to_auto_not_full_access(chat_env, kb) -> None:
         # ③ confirm_mode 翻 auto；④ 姿态仍 workspace-write
         info = client.get(f"/api/chat/{cid}/info").json()
         assert info["confirm_mode"] == "auto" and info["mode"] == "workspace-write"
-        # ④ permission_engine 绝未被翻 FULL_ACCESS（②≠full-access）
-        assert all("FULL_ACCESS" not in str(c) for c in agent.permission_engine.calls)
+        # ④ 姿态绝未被翻（②≠full-access）
+        assert agent.mode_calls == []
 
         # ② 下一条 ASK 静默放行（无 confirm_request 帧）；⑤ 层① 仍拦 raw/
         def next_turn(a):
