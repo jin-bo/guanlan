@@ -113,13 +113,61 @@ def test_turn_outcome_fields_we_rely_on_still_exist() -> None:
 # ── 姿态（只读 / 可写）───────────────────────────────────────────────────────
 
 
-def test_both_posture_points_still_flip(real_conv) -> None:
-    """姿态是**两点**设置（`set_mode` + `tool_runner.set_readonly_mode`）——少一点就没真切换。"""
+def test_starts_in_constructed_posture(real_conv) -> None:
+    """开局姿态经 `build_from_environment(permission_mode=)` 交给 factory（0.5.12 起）——
+    构造完两点都已落位，观澜不再补翻。少一点就是「看着只读、其实能写」。"""
     agent = real_conv.agent
-    real_conv._apply_mode("read-only")
+    assert agent.permission_engine.active_mode.value == "read-only"
     assert agent.tool_runner.readonly_mode is True
-    real_conv._apply_mode("workspace-write")
-    assert agent.tool_runner.readonly_mode is False
+
+
+def test_both_posture_points_still_flip(real_conv) -> None:
+    """姿态是**两点**设置（engine 预设 + `tool_runner.readonly_mode`）——少一点就没真切换。
+    运行期经 `set_permission_mode` 一次翻齐，并发 PERMISSION_MODE_CHANGED。"""
+    from agentao.transport import EventType
+
+    agent = real_conv.agent
+    seen: list = []
+    unsubscribe = agent.transport.subscribe(seen.append)
+    try:
+        real_conv._apply_mode("workspace-write")
+        assert agent.permission_engine.active_mode.value == "workspace-write"
+        assert agent.tool_runner.readonly_mode is False
+        real_conv._apply_mode("read-only")
+        assert agent.permission_engine.active_mode.value == "read-only"
+        assert agent.tool_runner.readonly_mode is True
+    finally:
+        unsubscribe()
+    changes = [e.data for e in seen if e.type == EventType.PERMISSION_MODE_CHANGED]
+    assert [(c["previous"], c["current"]) for c in changes] == [
+        ("read-only", "workspace-write"), ("workspace-write", "read-only"),
+    ]
+
+
+def test_compaction_events_reach_host_listener(real_conv) -> None:
+    """Web 的压缩进度帧靠 `transport.subscribe` 旁听：真 agent 的 `agent.transport` 必须就是
+    观澜构造的那只（没被换、没被包成不转发的东西），且事件名与载荷键仍是我们读的那几个。"""
+    from agentao.transport import AgentEvent, EventType
+
+    got: list = []
+    real_conv._emit = lambda kind, data: got.append((kind, data))
+    try:
+        real_conv.agent.transport.emit(AgentEvent(EventType.COMPACTION_STARTED, {
+            "trigger": "auto", "kind": "full", "reason": "compression_threshold",
+        }))
+        real_conv.agent.transport.emit(AgentEvent(EventType.COMPACTION_SETTLED, {
+            "kind": "full", "status": "failed", "pre_msgs": 3, "post_msgs": 3, "duration_ms": 10,
+        }))
+        # 毫秒级的 microcompact 不发 started，也不上线结果行（只报 full）。
+        real_conv.agent.transport.emit(AgentEvent(EventType.COMPACTION_SETTLED, {
+            "kind": "microcompact", "status": "success", "pre_msgs": 3, "post_msgs": 3, "duration_ms": 1,
+        }))
+    finally:
+        real_conv._emit = None
+    assert got == [
+        ("compaction", {"phase": "started"}),
+        ("compaction", {"phase": "settled", "status": "failed", "pre_msgs": 3, "post_msgs": 3, "duration_ms": 10}),
+    ]
 
 
 def test_unknown_mode_is_rejected(real_conv) -> None:

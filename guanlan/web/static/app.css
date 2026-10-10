@@ -196,6 +196,8 @@ body.col-resizing { user-select: none; cursor: col-resize; }
    淡墨小字、轻微呼吸；token 一来或本轮收尾即被移除。 */
 .chat-hb { align-self: flex-start; color: var(--lan-ink-soft); font-size: .82rem; padding: .1rem .25rem; animation: chat-hb-pulse 1.4s ease-in-out infinite; }
 @keyframes chat-hb-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+/* 上下文压缩结果行（handleCompaction）：与心跳同档次的旁注，不抢答案的注意力。 */
+.chat-compact { align-self: flex-start; color: var(--lan-ink-soft); font-size: .82rem; padding: .1rem .25rem; }
 /* 作业进度模态的瞬时心跳行（jobs.js pollJob running 态，如入库）：同款呼吸提示。 */
 .job-hb { animation: chat-hb-pulse 1.4s ease-in-out infinite; }
 

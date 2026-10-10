@@ -61,7 +61,15 @@ dependencies = [
     # 但有两处**行为**变化：① 0.5.7 起默认不再发送 `temperature`（原 0.2，改用模型提供方默认；
     # `LLM_TEMPERATURE=0.2` 恢复）；② 远端技能的受闸确认要求宿主「不得由常设授权代答、也不得被记住」
     # ——Web/IM 的确认回调据 `agentao.transport.gate_note()` 守住它（web/conversation.py）。
-    "agentao[cli]>=0.5.10,<0.6",
+    #
+    # >=0.5.12：0.5.11–0.5.12 对观澜接缝无破坏（全量测试原样通过，私有接缝 `SdkTransport._ask_user`
+    # / `purge_thinking_artifacts` / `_env.safe_load_dotenv` / `FileBackedMCPRegistry` 均在）。抬下限
+    # 是因为几处上游修复正落在观澜路径上：① Fable 5.1 / Opus 5.5 / Sonnet 5.5 会话在 system prompt
+    # 或工具表中途变化时 400 断掉（0.5.11）——Web `/goal` 正会追加 `update_goal`；② 提供方拒收的图片
+    # 留在历史里、此后每轮都失败（0.5.12）——Web 上传图片即此路；③ 停止一轮终于能杀掉正在跑的 shell
+    # 与 MCP 调用（0.5.11）；④ `close()` 关掉 `agentao.log` 句柄（0.5.12）。0.5.12 的 `close()` 只释放
+    # agent 自建的 MCP / memory manager——观澜只传 `mcp_registry`、不注入 manager，故不受影响。
+    "agentao[cli]>=0.5.12,<0.6",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
 ]
 
