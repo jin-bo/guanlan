@@ -398,17 +398,54 @@ def test_run_stats_absent_without_usage(tmp_path, capsys):
     assert format_run_stats(result) is None
 
 
-def test_run_stats_tolerates_malformed_usage_fields(tmp_path):
-    """上游字段缺失/类型不对（含 bool）一律按 0 计，不抛。"""
+def _stats_for(tmp_path, raws):
+    """按顺序让各轮返回给定信封，首轮写坏 type 逼出 len(raws)-1 轮自愈，返回度量行。"""
     from guanlan.gate import format_run_stats
 
     _kb_writable(tmp_path)
-    raw = {"usage": {"prompt_tokens": "12", "completion_tokens": True}, "tool_calls": None}
-    runner = lambda prompt, **kw: AgentRunResult(ok=True, final_text="", raw=raw)  # noqa: E731
-    result = run_guarded_write_result(tmp_path, "PROMPT", runner=runner)
-    line = format_run_stats(result)
+    page = tmp_path / "wiki" / "concepts" / "Foo.md"
+    queue = list(raws)
+
+    def runner(prompt, **kwargs):
+        page.parent.mkdir(parents=True, exist_ok=True)
+        last = len(queue) == 1
+        page.write_text(
+            FM.format(type="concept" if last else "bogus", sources="[]", body="正文"),
+            encoding="utf-8",
+        )
+        return AgentRunResult(ok=True, final_text="", raw=queue.pop(0))
+
+    result = run_guarded_write_result(tmp_path, "PROMPT", runner=runner, max_repair=len(raws) - 1)
+    assert len(result.runs) == len(raws)
+    return format_run_stats(result)
+
+
+def test_run_stats_absent_when_usage_all_zero(tmp_path):
+    """agentao 在首个 token 前失败时信封仍带全零 usage → 不报（review：不得打一行全零）。"""
+    zero = {"status": "error", "usage": {"prompt_tokens": 0, "completion_tokens": 0}, "tool_calls": 0}
+    assert _stats_for(tmp_path, [zero]) is None
+
+
+def test_run_stats_tolerates_malformed_usage_fields(tmp_path):
+    """上游字段缺失/类型不对（字符串、bool、None、负数）一律按 0 计，不抛；全零即不报。"""
+    raw = {"usage": {"prompt_tokens": "12", "completion_tokens": True}, "tool_calls": -1}
+    assert _stats_for(tmp_path, [raw]) is None
+
+
+def test_run_stats_flags_rounds_without_usage(tmp_path):
+    """首轮有用量、自愈轮无信封：轮数照实计 2，并注明 1 轮无数据，免得读成零成本。"""
+    line = _stats_for(tmp_path, [_envelope(800, 50, tool_calls=-3), None])
     assert line is not None
-    assert "Agent 1 轮 ·" in line and "输入 0 tokens · 输出 0 tokens · 工具调用 0" in line
+    assert "Agent 2 轮（含自愈 1，1 轮无用量数据）" in line
+    assert "输入 800 tokens · 输出 50 tokens · 工具调用 0" in line
+
+
+def test_run_stats_shows_cache_write(tmp_path):
+    """冷启动写缓存的溢价要看得见：cache_creation_tokens 单列。"""
+    raw = _envelope(1000, 10, cache_read=0)
+    raw["usage"]["cache_creation_tokens"] = 600
+    line = _stats_for(tmp_path, [raw])
+    assert "输入 1,000 tokens，缓存写入 600 · 输出" in line
 
 
 # ====================================================================

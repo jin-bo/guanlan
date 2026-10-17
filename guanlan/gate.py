@@ -553,8 +553,13 @@ def run_guarded_write(
     return result.exit_code
 
 
-def _usage_int(usage: dict, key: str) -> int:
-    value = usage.get(key)
+def _usage_int(mapping: dict, key: str) -> int:
+    """信封计数字段归一：正 int 照取，缺失/负数/bool/字符串等一律记 0。
+
+    与 agentao 的 `llm._usage.positive_int` 同口径，但**有意不 import**：观澜经子进程 JSON 信封与
+    agentao 对话（P2 §4），不依赖其私有模块；信封字段本身就是这条契约的边界。
+    """
+    value = mapping.get(key)
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
@@ -563,37 +568,40 @@ def format_run_stats(result: GuardedWriteResult) -> str | None:
 
     数据取自 `agentao run --format json` 信封现成的 `usage` / `tool_calls`（`AgentRunResult.raw`），
     累加首轮与全部自愈轮——自愈轮是独立子进程、各付一次冷启动，单列轮数便于看自愈拖了多少。
-    **只有至少一轮带 `usage` 才输出**：fake runner / 子进程起不来（`raw=None`）时没有可信数字，
-    宁可不报也不报一行全零。`tool_calls` 是工具调用次数，**不等于**模型请求次数。
+    **只有 token 合计 > 0 才输出**：fake runner / 子进程起不来（`raw=None`）没有信封；而 agentao 在
+    出首个 token 前就失败（鉴权错、取消等）时信封里的 `usage` 照样在、只是全零——两种都不报，
+    绝不打一行全零。某几轮没有可用用量时如实注明，免得把缺数据的那轮读成「零成本」。
+    `tool_calls` 是工具调用次数，**不等于**模型请求次数。
     不记 prompt、原文或模型密钥，只有计数与耗时（见 docs/backlog/notes/ingest-performance-research.md）。
     """
-    usages = [
-        r.raw["usage"]
-        for r in result.runs
-        if isinstance(r.raw, dict) and isinstance(r.raw.get("usage"), dict)
+    envelopes = [r.raw if isinstance(r.raw, dict) else {} for r in result.runs]
+    usages = [e["usage"] if isinstance(e.get("usage"), dict) else {} for e in envelopes]
+    per_run = [
+        (_usage_int(u, "prompt_tokens"), _usage_int(u, "completion_tokens")) for u in usages
     ]
-    if not usages:
+    prompt = sum(p for p, _ in per_run)
+    completion = sum(c for _, c in per_run)
+    if prompt + completion == 0:
         return None
-    prompt = sum(_usage_int(u, "prompt_tokens") for u in usages)
-    completion = sum(_usage_int(u, "completion_tokens") for u in usages)
     cache_read = sum(_usage_int(u, "cache_read_tokens") for u in usages)
-    tool_calls = sum(
-        r.raw["tool_calls"]
-        for r in result.runs
-        if isinstance(r.raw, dict)
-        and isinstance(r.raw.get("tool_calls"), int)
-        and not isinstance(r.raw.get("tool_calls"), bool)
-    )
+    cache_write = sum(_usage_int(u, "cache_creation_tokens") for u in usages)
+    tool_calls = sum(_usage_int(e, "tool_calls") for e in envelopes)
+    missing = sum(1 for p, c in per_run if p + c == 0)
     minutes, seconds = divmod(int(round(result.elapsed_s)), 60)
     elapsed = f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
     repairs = len(result.runs) - 1
-    rounds = f"Agent {len(result.runs)} 轮" + (f"（含自愈 {repairs}）" if repairs else "")
-    cache = f"，缓存命中 {cache_read:,}" if cache_read else ""
+    notes = [f"含自愈 {repairs}"] if repairs else []
+    if missing:
+        notes.append(f"{missing} 轮无用量数据")
+    rounds = f"Agent {len(result.runs)} 轮" + (f"（{'，'.join(notes)}）" if notes else "")
+    cache = "".join(
+        [f"，缓存命中 {cache_read:,}" if cache_read else "",
+         f"，缓存写入 {cache_write:,}" if cache_write else ""]
+    )
     return (
         f"ℹ 用量：耗时 {elapsed} · {rounds} · 输入 {prompt:,} tokens{cache}"
         f" · 输出 {completion:,} tokens · 工具调用 {tool_calls}"
     )
-
 
 def report_agent_error(
     run_result: AgentRunResult, error_type: str | None = None, *, err: IO[str] | None = None
