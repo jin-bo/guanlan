@@ -167,7 +167,7 @@ def test_ingest_prompt_carries_catalog_and_outline(kb: Path):
     prompt = runner.calls[0]["prompt"]
     assert "不要整读 `wiki/index.md`" in prompt
     assert "`wiki/sources/` 下另有 0 页未逐页列出" in prompt
-    assert "wrapper 未找到本篇 source 页" in prompt
+    assert "wrapper 未定位到本篇 source 页" in prompt
     assert '〈页面名录〉共 1 页：\n{"dir":"wiki/entities"}\n["Alpha",null,["甲"]]\n〈页面名录完〉' in prompt
     assert "L1 # 综述\nL5 ## 角度一\n〈overview 结构完〉" in prompt
     assert "不是标题" not in prompt  # 围栏里的 # 不算标题
