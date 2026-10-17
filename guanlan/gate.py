@@ -407,7 +407,7 @@ class GuardedWriteResult:
 
     gate: GateResult
     run_result: AgentRunResult
-    # 度量（只读旁路，不参与裁决）：本次**所有** Agent 轮（首轮 + 自愈轮）与编排总墙钟。
+    # 度量（只读旁路，不参与裁决）：本次**所有** Agent 执行（首次 + 自愈）与编排总墙钟。
     runs: tuple[AgentRunResult, ...] = ()
     elapsed_s: float = 0.0
 
@@ -590,10 +590,12 @@ def format_run_stats(result: GuardedWriteResult) -> str | None:
     minutes, seconds = divmod(int(round(result.elapsed_s)), 60)
     elapsed = f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
     repairs = len(result.runs) - 1
-    notes = [f"含自愈 {repairs}"] if repairs else []
+    # 计的是 Agent **执行**（每次一个 `agentao run` 子进程，总数含自愈），不是执行内部的模型迭代——
+    # 一次执行内部可能有几十次迭代，信封不带迭代数，故不列，免得把「1 次」读成「1 轮对话」。
+    notes = [f"其中自愈 {repairs} 次"] if repairs else []
     if missing:
-        notes.append(f"{missing} 轮无用量数据")
-    rounds = f"Agent {len(result.runs)} 轮" + (f"（{'，'.join(notes)}）" if notes else "")
+        notes.append(f"{missing} 次无用量数据")
+    rounds = f"Agent 执行 {len(result.runs)} 次" + (f"（{'，'.join(notes)}）" if notes else "")
     cache = "".join(
         [f"，缓存命中 {cache_read:,}" if cache_read else "",
          f"，缓存写入 {cache_write:,}" if cache_write else ""]
