@@ -380,7 +380,7 @@ def test_run_stats_sums_first_and_repair_rounds(tmp_path, capsys):
     stats = [line for line in captured.err.splitlines() if line.startswith("ℹ 用量")]
     assert len(stats) == 1
     line = stats[0]
-    assert "Agent 2 轮（含自愈 1）" in line
+    assert "Agent 执行 2 次（其中自愈 1 次）" in line
     assert "输入 1,500 tokens，缓存命中 400" in line
     assert "输出 120 tokens" in line
     assert "工具调用 9" in line
@@ -433,10 +433,10 @@ def test_run_stats_tolerates_malformed_usage_fields(tmp_path):
 
 
 def test_run_stats_flags_rounds_without_usage(tmp_path):
-    """首轮有用量、自愈轮无信封：轮数照实计 2，并注明 1 轮无数据，免得读成零成本。"""
+    """首次有用量、自愈那次无信封：执行次数照实计 2，并注明 1 次无数据，免得读成零成本。"""
     line = _stats_for(tmp_path, [_envelope(800, 50, tool_calls=-3), None])
     assert line is not None
-    assert "Agent 2 轮（含自愈 1，1 轮无用量数据）" in line
+    assert "Agent 执行 2 次（其中自愈 1 次，1 次无用量数据）" in line
     assert "输入 800 tokens · 输出 50 tokens · 工具调用 0" in line
 
 
@@ -446,6 +446,7 @@ def test_run_stats_shows_cache_write(tmp_path):
     raw["usage"]["cache_creation_tokens"] = 600
     line = _stats_for(tmp_path, [raw])
     assert "输入 1,000 tokens，缓存写入 600 · 输出" in line
+    assert "· Agent 执行 1 次 ·" in line  # 无自愈不加括注；计执行次数，不是内部迭代数
 
 
 # ====================================================================

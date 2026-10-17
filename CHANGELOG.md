@@ -8,11 +8,11 @@
 ### 新增
 
 - **写入口收尾多一行用量度量**（`ingest` / `query --backfill`，含 Web 作业输出）。门禁报告之后在 **stderr** 打一行
-  「ℹ 用量：耗时 3m12s · Agent 2 轮（含自愈 1）· 输入 120,345 tokens，缓存命中 80,000，缓存写入 6,000 · 输出 5,432 tokens · 工具调用 37」，
+  「ℹ 用量：耗时 3m12s · Agent 执行 2 次（其中自愈 1 次）· 输入 120,345 tokens，缓存命中 80,000，缓存写入 6,000 · 输出 5,432 tokens · 工具调用 37」，
   数字取自 `agentao run --format json` 信封现成的 `usage` / `tool_calls`，首轮与自愈轮累加。此前这些数据一直躺在
   `AgentRunResult.raw` 里没人读，入库为何慢只能猜。stdout 逐字节不变（`--json` 消费者不受影响）；没有任何一轮带
-  可用 `usage`（fake runner、子进程起不来、首个 token 前就失败）时不输出，绝不报一行全零，个别轮缺数据时注明「N 轮无用量数据」；只记计数与耗时，不记 prompt 或原文。`tool_calls` 是工具
-  调用次数，不等于模型请求次数。`GuardedWriteResult` 相应多两个只读字段 `runs` / `elapsed_s`，不参与裁决。动机与后续
+  可用 `usage`（fake runner、子进程起不来、首个 token 前就失败）时不输出，绝不报一行全零，个别执行缺数据时注明「N 次无用量数据」；只记计数与耗时，不记 prompt 或原文。`tool_calls` 是工具
+  调用次数，不等于模型请求次数；「Agent 执行」计的是 `agentao run` 子进程次数（含自愈），不是执行内部的模型迭代数（信封不带，故不列）。`GuardedWriteResult` 相应多两个只读字段 `runs` / `elapsed_s`，不参与裁决。动机与后续
   优化排序见 [`docs/backlog/notes/ingest-performance-research.md`](docs/backlog/notes/ingest-performance-research.md)。
 
 - **Web 问答显示上下文压缩进度**（用 agentao 0.5.12 的 `COMPACTION_STARTED` / `COMPACTION_SETTLED`）。长对话或 `/goal`
