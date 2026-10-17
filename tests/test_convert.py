@@ -58,6 +58,23 @@ def test_find_source_page_exact_and_dot_dash_tolerant(tmp_path: Path):
     assert find_source_page(sources, "1.示例报告-20240531") == sources / "1-示例报告-20240531.md"
 
 
+def test_find_source_page_falls_back_to_verbatim_raw_name(tmp_path: Path):
+    """批量导入的桩页直接用原文件名（保留弯引号、空格）：slug 形与横杠形都不中时，逐字认出。
+
+    slug 形同时存在时仍优先 slug 形（`raw_digest` stamp 一直写在那张）；`.` 开头的逐字形不认。
+    """
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    (sources / "某“示例”提议 第1期.md").touch()
+    assert find_source_page(sources, "某“示例”提议 第1期") == sources / "某“示例”提议 第1期.md"
+
+    (sources / "某-示例-提议-第1期.md").touch()  # slug 形也在 → 优先它
+    assert find_source_page(sources, "某“示例”提议 第1期") == sources / "某-示例-提议-第1期.md"
+
+    (sources / ".隐 藏.md").touch()
+    assert find_source_page(sources, ".隐 藏") is None
+
+
 def test_find_source_page_misses_when_absent(tmp_path: Path):
     """既无精确也无横杠形 → None（不凭空认；空 slug 同样 None，不误配）。"""
     sources = tmp_path / "sources"

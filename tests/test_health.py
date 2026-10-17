@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from guanlan.health import STUB_MIN_CHARS, health_entrypoint, run_health
+from guanlan.health import (
+    OVERVIEW_ADVISORY_CHARS,
+    STUB_MIN_CHARS,
+    health_entrypoint,
+    run_health,
+)
 
 FM = "---\ntitle: '{title}'\ntype: {type}\ntags: []\nsources: []\nlast_updated: 2026-06-03\n---\n\n{body}\n"
 
@@ -367,3 +372,30 @@ def test_commented_out_registration_counts_as_unregistered(tmp_path: Path):
     report = run_health(wiki)
     assert "health.index_missing_page" in _kinds(report)
     assert "health.index_dangling" not in _kinds(report)  # 注释行不产生悬空误报
+
+
+# ---------- overview 体积 ----------
+
+
+def test_overview_over_advisory_line_is_reported_without_rewrite(tmp_path: Path):
+    """超线 → 一条 advisory（记在 overview.md 上）；文件字节不动——只提示，绝不压缩改写。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    big = "# 综述\n" + "字" * OVERVIEW_ADVISORY_CHARS
+    (wiki / "overview.md").write_text(big, encoding="utf-8")
+
+    report = run_health(wiki)
+    hits = [f for f in report.findings if f.kind == "health.overview_large"]
+    assert [f.page for f in hits] == ["wiki/overview.md"]
+    assert f"{len(big):,} 字" in hits[0].detail
+    assert (wiki / "overview.md").read_text(encoding="utf-8") == big
+
+
+def test_overview_at_advisory_line_is_quiet(tmp_path: Path):
+    """恰在线上不报（`>` 而非 `>=`）；缺 overview 也不报（不归本检查管）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    (wiki / "overview.md").write_text("字" * OVERVIEW_ADVISORY_CHARS, encoding="utf-8")
+    assert "health.overview_large" not in _kinds(run_health(wiki))
+    (wiki / "overview.md").unlink()
+    assert "health.overview_large" not in _kinds(run_health(wiki))

@@ -91,8 +91,11 @@ def find_source_page(sources_dir: Path, raw_stem: str) -> Path | None:
     命名摘要页时，常把开头枚举序号的点写成横杠（落成 `1-示例报告`）。两边对这个点处理不一致，会让
     「同名 source 页存在 = 已收录」的纯读判定（`web._list_raw`）与 `raw_digest` stamp 定位
     （`ingest._stamp_source_digest`）都认不出**其实已建好**的页——表现为长期「未收录」+ 无指纹。
-    故：① 先按确定性 `raw_slug` 精确命中（保点形）；② 未命中再把点折成横杠退一步认 kebab 形。
-    回退**单向**（仅点→横杠，因 raw_slug 只会多出点）且仍按文件名精确 stat、不扫目录，把误配面压到最小。
+    故：① 先按确定性 `raw_slug` 精确命中（保点形）；② 未命中再把点折成横杠退一步认 kebab 形；
+    ③ 再未命中就按 **raw 文件名逐字**认——批量导入建的桩页常直接用原文件名（保留 `“”`、空格等
+    `raw_slug` 会折掉的字符），前两步都认不出，实测一个千页级库有 145 篇因此被误判「未收录」、摄入后
+    `raw_digest` 也 stamp 不上。回退都仍按文件名精确 stat、不扫目录，把误配面压到最小；逐字形以 `.`
+    开头时不认（不把隐藏文件当页）。
     """
     slug = raw_slug(raw_stem)
     if not slug:
@@ -105,6 +108,10 @@ def find_source_page(sources_dir: Path, raw_stem: str) -> Path | None:
         kebab = sources_dir / f"{dashed}.md"
         if kebab.is_file():
             return kebab
+    if raw_stem not in (slug, dashed) and not raw_stem.startswith("."):
+        verbatim = sources_dir / f"{raw_stem}.md"
+        if verbatim.is_file():
+            return verbatim
     return None
 
 

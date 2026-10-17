@@ -789,6 +789,7 @@ FINDING_CAUSAL_ORDER: tuple[str, ...] = (
     "health.stub_page",
     "health.type_dir_mismatch",
     "health.uncharted_page",
+    "health.overview_large",
     # 第三档 · 拓扑优化建议（结构 nice-to-have，非坏数据）
     "lint.hub_node",
     "lint.thin_intercommunity_link",

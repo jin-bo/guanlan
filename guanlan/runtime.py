@@ -3,12 +3,12 @@
 P2 经 `agentao run` 子进程驱动（不在进程内嵌入 `Agentao(...)`，那留待 P4）。
 wrapper 以工作目录 = 知识库根调用：
 
-    agentao run --prompt "<task>" --format json \
-                --skill guanlan-wiki \
+    agentao run --format json --skill guanlan-wiki \
                 --permission-mode <read-only|workspace-write> \
                 --interaction-policy reject \
                 [--model M] [--max-iterations N]
 
+prompt 不走命令行，经 **stdin 的 run spec**（`{"prompt": …}`）交给子进程，见 `run_spec_text`。
 stdout 是 `RunResult` JSON 信封；字段名是 `error.type`（非 `error.kind`）。信封的编码是
 **协议的一部分、固定 UTF-8**，父子两端都显式钉死、不随 locale 变（issue #50，见 `envelope_child_env`）。
 `runner` 可注入以便测试——fake runner 模拟"写 wiki + 返回摘要"，不起子进程、不打真实 LLM。
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -150,7 +151,7 @@ def scrubbed_environ() -> dict[str, str]:
     ——**修复靠的是让 agentao 恢复正常发现，不是我们去读 key**。
 
     **硬约束**：只删空串、**绝不注入或读取任何真 key**（守「脚本零 LLM、wrapper 不持 API key」不变量
-    ——删一个毒空值 ≠ 持钥）。与本接缝已有的 `stdin=DEVNULL` 同类：都是「喂给子进程前的环境清洗」。
+    ——删一个毒空值 ≠ 持钥）。与本接缝不继承父进程 stdin（prompt 经 `input=` 自管管道）同类：都是「喂给子进程前的环境清洗」。
     """
     return {k: v for k, v in os.environ.items() if not _is_poisoned_key(k, v)}
 
@@ -217,6 +218,27 @@ def drop_poisoned_api_keys() -> list[str]:
     return dropped
 
 
+# PyYAML（agentao 用 `yaml.safe_load` 解析 spec）不收、或会改写的字符：C0/C1 控制符（json 已转义 C0）、
+# YAML 1.1 视作换行而在双引号标量里折成空格的 NEL/LS/PS、BOM、非字符 U+FFFE/FFFF、孤立代理。
+_YAML_UNSAFE_RE = re.compile("[\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff\ud800-\udfff]")
+
+
+def run_spec_text(prompt: str) -> str:
+    r"""把 prompt 编成喂给 `agentao run` stdin 的 run spec 文本（JSON，可被 `yaml.safe_load` 原样读回）。
+
+    **为什么不用 `--prompt`**：prompt 会带上整库名录（ingest），千页级库达数十万字节；Linux 单个
+    argv 串上限 128 KiB（`MAX_ARG_STRLEN`），超了 `exec` 直接 E2BIG。stdin 无此上限，也不进 `ps`。
+
+    **为什么手工转义**：agentao 用 PyYAML 解析 spec。`ensure_ascii=True` 会把 BMP 外字符（emoji 等）
+    写成代理对 `\ud83d\ude00`，PyYAML 不会合并、读回成两个孤立代理；`ensure_ascii=False` 则原样写出
+    C1 控制符（PyYAML 拒收）与 NEL/LS/PS（PyYAML 在双引号标量里折成空格）。故按 UTF-8 原样写，只把
+    `_YAML_UNSAFE_RE` 命中的字符转成 `\uXXXX`——这些都在 BMP 内、PyYAML 读回不走样；孤立代理无法
+    编码进 UTF-8 管道，同样转义。spec 不声明 `parameters`，agentao 不做 Jinja 渲染，`{{ }}` 原样保留。
+    """
+    text = json.dumps({"prompt": prompt}, ensure_ascii=False)
+    return _YAML_UNSAFE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
+
+
 def _subprocess_runner(
     prompt: str,
     *,
@@ -236,8 +258,6 @@ def _subprocess_runner(
     cmd = [
         "agentao",
         "run",
-        "--prompt",
-        prompt,
         "--format",
         "json",
         "--permission-mode",
@@ -266,9 +286,10 @@ def _subprocess_runner(
                 # 完整理由（含只钉一端为何会回归 POSIX matched-locale）见 `envelope_child_env`。
                 encoding=ENVELOPE_ENCODING,
                 errors=ENVELOPE_ERRORS,
-                # 我们总是显式传 --prompt；切断继承的 stdin，否则父进程被管道/重定向喂 stdin 时，
-                # agentao 会把管道 stdin 当成 run spec，与 --prompt 冲突而拒绝执行（破坏自动化场景）。
-                stdin=subprocess.DEVNULL,
+                # prompt 经 stdin 的 run spec 传入（见 `run_spec_text`）：`input=` 让子进程 stdin 是
+                # 我们自己的管道、不继承父进程 stdin——父进程被管道/重定向喂 stdin 时也不会串进来。
+                # 编码随上面的 encoding 走 UTF-8，子端 stdin 由 envelope_child_env 的 PYTHONIOENCODING 钉死。
+                input=run_spec_text(prompt),
                 # 显式传 env（不再裸继承）：剔除毒空 `*_API_KEY`（见 scrubbed_environ）+ 钉死子端
                 # std 流编码（见 envelope_child_env），其余逐项照传。
                 env=envelope_child_env(),

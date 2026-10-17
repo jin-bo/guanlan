@@ -3654,7 +3654,7 @@ def test_heal_serial_behind_ingest(kb) -> None:
 
     def runner(prompt, **kwargs):
         # 第一个作业（ingest）卡住，张开 raw/ 快照窗口；heal 在其后才跑。
-        if "大模型" in prompt:  # heal prompt 含目标名
+        if "ingest 工作流" not in prompt:  # 按工作流标记分辨（ingest prompt 带全库名录，别按页名猜）
             order.append("heal")
             write_page(kwargs["working_directory"], "wiki/entities/大模型.md", type="entity")
         else:
@@ -3820,7 +3820,7 @@ def test_audit_serial_behind_ingest(kb) -> None:
 
     def runner(prompt, **kwargs):
         wd = kwargs["working_directory"]
-        if "rep" in prompt:  # audit prompt 含 target 行（page/slug 均含 "rep"）
+        if "ingest 工作流" not in prompt:  # 按工作流标记分辨（ingest prompt 带全库名录，别按页名猜）
             order.append("audit")
             log_action(_REP_REVIEWS)(wd)
         else:
@@ -3966,7 +3966,7 @@ def test_backfill_serial_behind_ingest(kb) -> None:
 
     def runner(prompt, **kwargs):
         # 第一个作业（ingest）卡住，张开 raw/ 快照窗口；backfill 在其后才跑。
-        if "syntheses" in prompt or "沉淀" in prompt or "回填" in prompt:  # backfill prompt 含回填指令
+        if "ingest 工作流" not in prompt:  # 按工作流标记分辨（ingest prompt 带全库名录，别按目录名猜）
             order.append("backfill")
             write_page(kwargs["working_directory"], "wiki/syntheses/q.md", type="synthesis")
         else:

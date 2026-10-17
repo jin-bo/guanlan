@@ -16,6 +16,7 @@ from guanlan.runtime import (
     envelope_child_env,
     poisoned_api_key_names,
     run_agent_task,
+    run_spec_text,
     scrubbed_environ,
 )
 
@@ -123,7 +124,7 @@ def test_subprocess_runner_passes_scrubbed_env(tmp_path: Path, monkeypatch):
     captured: dict = {}
 
     def fake_run(cmd, **kwargs):
-        captured.update(kwargs)
+        captured.update(kwargs, cmd=cmd)
         return subprocess.CompletedProcess(cmd, 0, '{"status":"ok","final_text":"x"}', "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -134,7 +135,10 @@ def test_subprocess_runner_passes_scrubbed_env(tmp_path: Path, monkeypatch):
     assert "ANTHROPIC_API_KEY" not in env  # 毒值没进子进程
     assert env["DEEPSEEK_API_KEY"] == "sk-real"  # 真值照传
     assert env.get("PATH")  # 其余环境完整继承（否则 agentao 都找不到）
-    assert captured["stdin"] is subprocess.DEVNULL  # 既有姿态不受影响
+    # prompt 经 stdin 的 run spec 传入、不上命令行；子进程 stdin 是我们自己的管道，不继承父进程的。
+    assert "--prompt" not in captured["cmd"] and "q" not in captured["cmd"]
+    assert captured["input"] == run_spec_text("q")
+    assert "stdin" not in captured
 
 
 def test_drop_poisoned_api_keys_is_in_place_and_idempotent(monkeypatch):
@@ -264,3 +268,31 @@ def test_envelope_round_trips_under_non_utf8_parent_locale(tmp_path: Path):
         pytest.skip(f"本环境的父端 locale 仍是 {got['locale_encoding']}，无法复现该缺陷")
     assert got["ok"]
     assert got["final_text"] == expected
+
+
+# ───────── prompt 经 stdin run spec 传入（ingest 名录可达数十万字节，超 Linux 单个 argv 128 KiB 上限）─────────
+
+# PyYAML 的几处坑各放一个：BMP 外字符（ensure_ascii 会拆成代理对）、C1 控制符（PyYAML 拒收）、
+# NEL/LS/PS（双引号标量里被折成空格）、BOM、非字符、孤立代理；再加 Jinja 语法（spec 无参数时不渲染）。
+_TRICKY = (
+    "中文 😀 𠀀 tab\t 换行\n 回车\r 引号\" 反斜杠\\ {{ x }} {% if %} "
+    "\x7f \x85 \x9f \u2028 \u2029 \ufeff \ufffe \uffff \x00 \ud800"
+)
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        _TRICKY,
+        "".join(chr(c) for c in range(0xD800)),  # BMP 代理区之前全部字符
+        "".join(chr(c) for c in range(0xE000, 0x10000)),  # 代理区之后到 BMP 末
+        "名录行" * 60_000,  # 18 万字、约 54 万字节：远超 argv 单串上限
+    ],
+)
+def test_run_spec_text_round_trips_through_pyyaml(prompt: str):
+    """agentao 用 `yaml.safe_load` 读 spec：任何 prompt 都必须逐字读回，且文本可编码进 UTF-8 管道。"""
+    import yaml
+
+    text = run_spec_text(prompt)
+    text.encode("utf-8")  # 不抛：孤立代理已转义
+    assert yaml.safe_load(text) == {"prompt": prompt}
