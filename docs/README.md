@@ -73,6 +73,7 @@
 
 ## 其他
 
+- [入库性能调研](backlog/notes/ingest-performance-research.md) —— 合成基准、评审修订与优化优先级（2026-10-17）
 - [发布到-PyPI](发布到-PyPI.md) —— 发版操作记录
 - [agentao-shell权限与permissions.json](agentao-shell权限与permissions.json.md) —— Agentao shell 权限参考
 
