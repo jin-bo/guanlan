@@ -339,6 +339,116 @@ def test_guarded_write_thin_shell_still_prints(tmp_path, capsys):
 
 
 # ====================================================================
+# 用量度量行（docs/backlog/notes/ingest-performance-research.md）：
+# 汇总信封现成的 usage/tool_calls，走 stderr；无 usage 时不报。
+# ====================================================================
+
+
+def _envelope(prompt: int, completion: int, *, cache_read: int = 0, tool_calls: int = 0) -> dict:
+    return {
+        "status": "ok",
+        "usage": {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "cache_read_tokens": cache_read,
+        },
+        "tool_calls": tool_calls,
+    }
+
+
+def test_run_stats_sums_first_and_repair_rounds(tmp_path, capsys):
+    """首轮写坏 type → 自愈一轮修好；用量按两轮累加，轮数注明含自愈，且只进 stderr。"""
+    _kb_writable(tmp_path)
+    page = tmp_path / "wiki" / "concepts" / "Foo.md"
+    envelopes = [
+        _envelope(1000, 100, cache_read=400, tool_calls=7),
+        _envelope(500, 20, tool_calls=2),
+    ]
+
+    def runner(prompt, **kwargs):
+        if not page.exists():
+            page.parent.mkdir(parents=True, exist_ok=True)
+            page.write_text(FM.format(type="bogus", sources="[]", body="正文"), encoding="utf-8")
+        else:
+            page.write_text(FM.format(type="concept", sources="[]", body="正文"), encoding="utf-8")
+        return AgentRunResult(ok=True, final_text="ok", raw=envelopes.pop(0))
+
+    rc = run_guarded_write(tmp_path, "PROMPT", runner=runner)
+    assert rc == EXIT_OK
+    captured = capsys.readouterr()
+    assert "用量" not in captured.out  # stdout 逐字节不变
+    stats = [line for line in captured.err.splitlines() if line.startswith("ℹ 用量")]
+    assert len(stats) == 1
+    line = stats[0]
+    assert "Agent 2 轮（含自愈 1）" in line
+    assert "输入 1,500 tokens，缓存命中 400" in line
+    assert "输出 120 tokens" in line
+    assert "工具调用 9" in line
+
+
+def test_run_stats_absent_without_usage(tmp_path, capsys):
+    """fake runner / 子进程起不来（raw=None）没有可信数字 → 不报一行全零。"""
+    from guanlan.gate import format_run_stats
+
+    _kb_writable(tmp_path)
+    run_guarded_write(tmp_path, "PROMPT", runner=make_runner(_good_page))
+    assert "用量" not in capsys.readouterr().err
+    result = run_guarded_write_result(tmp_path, "PROMPT", runner=make_runner(_good_page))
+    assert len(result.runs) == 1 and result.elapsed_s >= 0
+    assert format_run_stats(result) is None
+
+
+def _stats_for(tmp_path, raws):
+    """按顺序让各轮返回给定信封，首轮写坏 type 逼出 len(raws)-1 轮自愈，返回度量行。"""
+    from guanlan.gate import format_run_stats
+
+    _kb_writable(tmp_path)
+    page = tmp_path / "wiki" / "concepts" / "Foo.md"
+    queue = list(raws)
+
+    def runner(prompt, **kwargs):
+        page.parent.mkdir(parents=True, exist_ok=True)
+        last = len(queue) == 1
+        page.write_text(
+            FM.format(type="concept" if last else "bogus", sources="[]", body="正文"),
+            encoding="utf-8",
+        )
+        return AgentRunResult(ok=True, final_text="", raw=queue.pop(0))
+
+    result = run_guarded_write_result(tmp_path, "PROMPT", runner=runner, max_repair=len(raws) - 1)
+    assert len(result.runs) == len(raws)
+    return format_run_stats(result)
+
+
+def test_run_stats_absent_when_usage_all_zero(tmp_path):
+    """agentao 在首个 token 前失败时信封仍带全零 usage → 不报（review：不得打一行全零）。"""
+    zero = {"status": "error", "usage": {"prompt_tokens": 0, "completion_tokens": 0}, "tool_calls": 0}
+    assert _stats_for(tmp_path, [zero]) is None
+
+
+def test_run_stats_tolerates_malformed_usage_fields(tmp_path):
+    """上游字段缺失/类型不对（字符串、bool、None、负数）一律按 0 计，不抛；全零即不报。"""
+    raw = {"usage": {"prompt_tokens": "12", "completion_tokens": True}, "tool_calls": -1}
+    assert _stats_for(tmp_path, [raw]) is None
+
+
+def test_run_stats_flags_rounds_without_usage(tmp_path):
+    """首轮有用量、自愈轮无信封：轮数照实计 2，并注明 1 轮无数据，免得读成零成本。"""
+    line = _stats_for(tmp_path, [_envelope(800, 50, tool_calls=-3), None])
+    assert line is not None
+    assert "Agent 2 轮（含自愈 1，1 轮无用量数据）" in line
+    assert "输入 800 tokens · 输出 50 tokens · 工具调用 0" in line
+
+
+def test_run_stats_shows_cache_write(tmp_path):
+    """冷启动写缓存的溢价要看得见：cache_creation_tokens 单列。"""
+    raw = _envelope(1000, 10, cache_read=0)
+    raw["usage"]["cache_creation_tokens"] = 600
+    line = _stats_for(tmp_path, [raw])
+    assert "输入 1,000 tokens，缓存写入 600 · 输出" in line
+
+
+# ====================================================================
 # P2.1 摄入写入纪律：源不回退（阻断+自愈）+ 正文骤缩（警告非阻断）
 # docs/P2.1-摄入写入纪律.md §8。零 LLM，全程 mock runner 制造写后末态。
 # ====================================================================

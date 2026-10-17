@@ -29,7 +29,7 @@ INGEST_PROMPT = (
     "该路径已由 wrapper 校验存在，必须按原样读取，不要替换其中的引号、空格或 CJK 字符；"
     "读该 `.md` 源与 `wiki/index.md`、`wiki/overview.md` 建上下文；"
     "写/更新 source·entity·concept 页（frontmatter 齐全、术语转 `[[wikilink]]`）；"
-    "更新 `index.md` 与 `overview.md`；发现矛盾就地标 `## ⚠️ 矛盾与存疑`；"
+    "更新 `index.md`；`overview.md` 仅当本次引入新角度、新论断或新矛盾时才改（纯增量细节由 entity/concept 页吸收）；发现矛盾就地标 `## ⚠️ 矛盾与存疑`；"
     "向 `log.md` 追加一条 `## [<日期>] ingest | <标题>`。"
     "遵循 `AGENTAO.md` 硬约束与 conventions 默认。**永不修改 `raw/`。** "
     "**不要运行 shell 命令；读写文件必须使用内置文件工具。不要自行执行 `guanlan check`，wrapper 会在你返回后强制校验。** "

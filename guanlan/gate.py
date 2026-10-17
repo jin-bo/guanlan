@@ -16,6 +16,7 @@ import hashlib
 import os
 import stat
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
@@ -33,7 +34,8 @@ from .rawio import atomic_write_bytes  # 门禁回滚原字节：原子换名，
 from .runtime import AgentRunner, AgentRunResult, run_agent_task
 
 # 写入口门禁失败后的有界自愈轮数（决策7，见 docs/P2-最小闭环.md §10）。
-# 仅对**新引入的阻断性**违规（frontmatter/sources）自愈——把违规回喂同一 agent 就地修；
+# 仅对**新引入的阻断性**违规（frontmatter/sources）自愈——把违规回喂**新一轮** agent 就地修
+# （每轮是独立的 `agentao run` 子进程、不续接首轮会话，故自愈轮也付冷启动成本）；
 # `raw_mutated`（完整性破坏）与 `agent_error`（运行时失败）不自愈，直接判死。
 MAX_REPAIR_ATTEMPTS = 2
 
@@ -405,6 +407,9 @@ class GuardedWriteResult:
 
     gate: GateResult
     run_result: AgentRunResult
+    # 度量（只读旁路，不参与裁决）：本次**所有** Agent 轮（首轮 + 自愈轮）与编排总墙钟。
+    runs: tuple[AgentRunResult, ...] = ()
+    elapsed_s: float = 0.0
 
     @property
     def exit_code(self) -> int:
@@ -439,7 +444,7 @@ def run_guarded_write_result(
     **本次新引入**的阻断性违规（frontmatter/sources），历史断链/欠债不连累本次。断链全程作警告。
 
     **有界自愈（决策7）**：首轮门禁若 `check_failed`（即出现**新的阻断性**违规），把这些违规
-    回喂同一 agent 就地修，最多 `max_repair` 轮。`raw_mutated`/`agent_error` 不自愈（完整性/运行时
+    回喂新一轮 agent（独立子进程、不续接会话）就地修，最多 `max_repair` 轮。`raw_mutated`/`agent_error` 不自愈（完整性/运行时
     问题该硬失败）。成功后展示**首轮**的实质摘要（自愈轮只动元数据）；失败/报错展示最后一轮的结果。
 
     **`page_guard`（P2.1，默认 False，决策P2.1-10）**：核心**默认关** → heal（直调本核心）逐字节
@@ -447,6 +452,7 @@ def run_guarded_write_result(
     `page_before`，**写前取一次、贯穿所有自愈轮**（自愈本身不该再丢源），透传给 `enforce` 比对
     既有页源不回退（阻断→自愈）与正文骤缩（警告非阻断）。
     """
+    started = time.monotonic()
     before = snapshot_raw(root)
     page_before = snapshot_page_meta(root) if page_guard else None  # P2.1：仅守护时取写前每页指纹
     baseline = check_baseline(root)  # 写前已存在的阻断性违规：增量门禁的基线
@@ -458,6 +464,7 @@ def run_guarded_write_result(
         runner=runner,
     )
     last_result = first_result
+    runs = [first_result]
     gate = enforce_write_result(
         root, before, first_result, page_before=page_before, baseline=baseline
     )
@@ -506,12 +513,18 @@ def run_guarded_write_result(
             model=model,
             runner=runner,
         )
+        runs.append(last_result)
         gate = enforce_write_result(
             root, before, last_result, page_before=page_before, baseline=baseline
         )
 
     # 成功时优先展示首轮摘要（实质内容）；失败/报错时展示最后一轮（错误来源）。
-    return GuardedWriteResult(gate=gate, run_result=first_result if gate.ok else last_result)
+    return GuardedWriteResult(
+        gate=gate,
+        run_result=first_result if gate.ok else last_result,
+        runs=tuple(runs),
+        elapsed_s=time.monotonic() - started,
+    )
 
 
 def run_guarded_write(
@@ -534,8 +547,61 @@ def run_guarded_write(
         root, prompt, model=model, runner=runner, max_repair=max_repair, page_guard=page_guard
     )
     report_outcome(result.gate, result.run_result)
+    stats = format_run_stats(result)
+    if stats:
+        print(stats, file=sys.stderr)
     return result.exit_code
 
+
+def _usage_int(mapping: dict, key: str) -> int:
+    """信封计数字段归一：正 int 照取，缺失/负数/bool/字符串等一律记 0。
+
+    与 agentao 的 `llm._usage.positive_int` 同口径，但**有意不 import**：观澜经子进程 JSON 信封与
+    agentao 对话（P2 §4），不依赖其私有模块；信封字段本身就是这条契约的边界。
+    """
+    value = mapping.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def format_run_stats(result: GuardedWriteResult) -> str | None:
+    """把本次写入的 Agent 用量汇成一行人读度量（走 stderr，不污染 stdout），无数据时返回 None。
+
+    数据取自 `agentao run --format json` 信封现成的 `usage` / `tool_calls`（`AgentRunResult.raw`），
+    累加首轮与全部自愈轮——自愈轮是独立子进程、各付一次冷启动，单列轮数便于看自愈拖了多少。
+    **只有 token 合计 > 0 才输出**：fake runner / 子进程起不来（`raw=None`）没有信封；而 agentao 在
+    出首个 token 前就失败（鉴权错、取消等）时信封里的 `usage` 照样在、只是全零——两种都不报，
+    绝不打一行全零。某几轮没有可用用量时如实注明，免得把缺数据的那轮读成「零成本」。
+    `tool_calls` 是工具调用次数，**不等于**模型请求次数。
+    不记 prompt、原文或模型密钥，只有计数与耗时（见 docs/backlog/notes/ingest-performance-research.md）。
+    """
+    envelopes = [r.raw if isinstance(r.raw, dict) else {} for r in result.runs]
+    usages = [e["usage"] if isinstance(e.get("usage"), dict) else {} for e in envelopes]
+    per_run = [
+        (_usage_int(u, "prompt_tokens"), _usage_int(u, "completion_tokens")) for u in usages
+    ]
+    prompt = sum(p for p, _ in per_run)
+    completion = sum(c for _, c in per_run)
+    if prompt + completion == 0:
+        return None
+    cache_read = sum(_usage_int(u, "cache_read_tokens") for u in usages)
+    cache_write = sum(_usage_int(u, "cache_creation_tokens") for u in usages)
+    tool_calls = sum(_usage_int(e, "tool_calls") for e in envelopes)
+    missing = sum(1 for p, c in per_run if p + c == 0)
+    minutes, seconds = divmod(int(round(result.elapsed_s)), 60)
+    elapsed = f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
+    repairs = len(result.runs) - 1
+    notes = [f"含自愈 {repairs}"] if repairs else []
+    if missing:
+        notes.append(f"{missing} 轮无用量数据")
+    rounds = f"Agent {len(result.runs)} 轮" + (f"（{'，'.join(notes)}）" if notes else "")
+    cache = "".join(
+        [f"，缓存命中 {cache_read:,}" if cache_read else "",
+         f"，缓存写入 {cache_write:,}" if cache_write else ""]
+    )
+    return (
+        f"ℹ 用量：耗时 {elapsed} · {rounds} · 输入 {prompt:,} tokens{cache}"
+        f" · 输出 {completion:,} tokens · 工具调用 {tool_calls}"
+    )
 
 def report_agent_error(
     run_result: AgentRunResult, error_type: str | None = None, *, err: IO[str] | None = None
