@@ -27,6 +27,7 @@ from .provenance import (
 )
 from .rawio import find_source_page, raw_slug
 from .runtime import AgentRunner
+from .sourcepage import locate_source_page, source_slug
 
 # 薄 prompt：真正步骤在 skill。{rel} = 相对 raw/ 的 posix 路径；{source} = 本篇 source 页定位（wrapper
 # 现查）；{context} = 下面两种查重上下文之一。
@@ -49,12 +50,43 @@ INGEST_PROMPT = (
     "完成后用一两句说明触及了哪些页面。"
 )
 
-# 本篇 source 页：wrapper 用 `find_source_page`（与 raw_digest stamp 同一定位归口）现查。
+# 本篇 source 页：wrapper 用 `locate_source_page`（与 raw_digest stamp 同一定位归口）现查，三种结论。
 _SOURCE_FOUND = (
-    "本篇 source 页**已存在**：`{path}`——先读它再合并更新；桩页也是既有页，补全正文、保留既有 "
+    "本篇 source 页**已存在**：`{path}`{basis}——先读它再合并更新；桩页也是既有页，补全正文、保留既有 "
     "frontmatter 与来源，不整页覆盖，也不另建一张；"
 )
-_SOURCE_MISSING = "wrapper 未找到本篇 source 页，按 skill 约定在 `wiki/sources/` 新建；"
+# 文件名对不上、按页内证据认定时补一句，免得 Agent 以为该改名或另建「规范名」页。
+_SOURCE_FOUND_BY_EVIDENCE = "（文件名与本篇不同，按其{basis}认定为本篇的 source 页；沿用该页，不改名）"
+_SOURCE_CANDIDATES = (
+    "wrapper 未能确定本篇 source 页，以下既有页可能同源：{listing}——逐一读后判断：是本篇的同源页就更新它，"
+    "只是引用了本篇就不动它；确认都不是才新建{new}；不要自行合并、改名或删除这些页；"
+)
+_SOURCE_MISSING = (
+    "wrapper 未定位到本篇 source 页；检索中若发现同源既有页，优先读取并更新它，确认不存在后才新建{new}；"
+)
+# 来源名传递：告诉 Agent 本篇在 `sources` 里该写什么，并要求其他来源名先确认存在（防凭空写来源名）。
+_SOURCE_SLUG = "本篇在各页 `sources` 里写作 `{slug}`；"
+_SOURCE_SLUG_UNDECIDED = "本篇在各页 `sources` 里写所更新或新建的那张 source 页的文件名（不含 `.md`）；"
+_SOURCE_OTHERS = "`sources` 里列其他来源前，先确认 `wiki/sources/<该名>.md` 确实存在；"
+
+
+def _source_clause(kb: Path, rel: str) -> str:
+    """prompt 的「本篇 source 页」一段：定位结论 + 本篇 slug + 其他来源须确认存在。"""
+    loc = locate_source_page(kb, rel)
+    slug = source_slug(rel)
+    new = f" `wiki/sources/{slug}.md`" if slug else "（按 skill 约定命名）"
+    if loc.page is not None:
+        basis = "" if loc.basis == "文件名" else _SOURCE_FOUND_BY_EVIDENCE.format(basis=loc.basis)
+        found = _SOURCE_FOUND.format(path=loc.page.relative_to(kb).as_posix(), basis=basis)
+        return found + _SOURCE_SLUG.format(slug=loc.page.stem) + _SOURCE_OTHERS
+    if loc.candidates:
+        listing = "；".join(
+            f"`{p.relative_to(kb).as_posix()}`（{why}）" for p, why in loc.candidates
+        )
+        clause = _SOURCE_CANDIDATES.format(listing=listing, new=new)
+        return clause + _SOURCE_SLUG_UNDECIDED + _SOURCE_OTHERS
+    slug_clause = _SOURCE_SLUG.format(slug=slug) if slug else _SOURCE_SLUG_UNDECIDED
+    return _SOURCE_MISSING.format(new=new) + slug_clause + _SOURCE_OTHERS
 
 # 有名录：查重以名录为准，index 只按分区读写。
 _CONTEXT_WITH_CATALOG = (
@@ -78,12 +110,7 @@ def build_ingest_prompt(kb: Path, rel: str) -> str:
     **超预算不截断**（见 `catalog` 模块 docstring）：只给一部分或只给页名，恰好丢掉查重最需要的别名，
     比不给更糟——模型会以为名录是全集。stderr 报告一行，stdout 不受影响。
     """
-    source_page = find_source_page(kb / "wiki" / "sources", Path(rel).stem)
-    source = (
-        _SOURCE_FOUND.format(path=source_page.relative_to(kb).as_posix())
-        if source_page is not None
-        else _SOURCE_MISSING
-    )
+    source = _source_clause(kb, rel)
     outline = overview_outline(kb / "wiki" / "overview.md")
     tail = [f"〈overview 结构〉{outline or 'overview.md 不存在或读不出'}\n〈overview 结构完〉"]
     catalog = build_catalog(kb / "wiki")
@@ -236,14 +263,15 @@ def run_ingest(
 def _stamp_source_digest(kb: Path, raw_file: Path, rel: str) -> None:
     """门禁后由 wrapper 把本次摄入 raw 的内容指纹 stamp 进对应 source 摘要页（P3.7 §4.2，决策P3.7-3a）。
 
-    **只 stamp 本次那一张** source 摘要页（经 `find_source_page` 按 slug 定位、容忍 `.`/`-` 归一
-    分歧，绝不顺手刷别页——否则抹平别处真实漂移，是致命 bug）。定位不到 / 该页 frontmatter 本就坏 /
+    **只 stamp 本次那一张** source 摘要页（经 `locate_source_page`：先按 slug 定位、容忍 `.`/`-` 归一
+    分歧，未命中再认页内归属依据；只有候选、未认定时不 stamp，绝不顺手刷别页——否则抹平别处真实漂移，
+    是致命 bug）。摄入后**重新定位**：Agent 可能刚按 slug 新建了这张页。定位不到 / 该页 frontmatter 本就坏 /
     写后 check 不过 → `stamp_raw_digest` 跳过并回滚、记一句降级到 stderr，**绝不阻断 ingest**（决策P3.7-9）。
     指纹计算与写入是 wrapper 确定性代码、不持 LLM client（红线）。
     """
-    source_page = find_source_page(kb / "wiki" / "sources", Path(rel).stem)
+    source_page = locate_source_page(kb, rel).page
     if source_page is None:
-        return  # 无对应 source 页（slug 不符约定）→ 无声跳过（决策P3.7-5 安全退化、下次自然补）
+        return  # 无对应 source 页 / 只有候选 → 无声跳过（决策P3.7-5 安全退化、下次自然补）
     try:
         # raw 字节读取也可能抛 OSError（极小窗口：门禁后被删/权限变）；与 audit `_refresh_one` 同口径
         # 兜底——**绝不让 stamp 在门禁已过后崩掉 ingest**（决策P3.7-9）。

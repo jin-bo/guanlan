@@ -56,7 +56,8 @@ description: >
 
 1. **读源 + 建上下文 + 查路由**：
    - 读 `raw/` 的 `.md` 源；路径按 wrapper 给出的原样使用，不替换其中的引号/空格/CJK 字符。
-   - **本篇 source 页**：wrapper 在 prompt 里写明它是否已存在、路径是什么。已存在（含批量导入留下的桩页）就先读再合并更新，不整页覆盖、不另建。
+   - **本篇 source 页**：wrapper 在 prompt 里写明它是否已存在、路径是什么。已存在（含批量导入留下的桩页、文件名与本篇不同但被 wrapper 按页内证据认定的旧页）就先读再合并更新，不整页覆盖、不改名、不另建。wrapper 只列出候选时，逐一读后判断是否同源，不自行合并或删除；未定位时，检索中发现同源既有页仍优先更新它，确认不存在才新建。
+   - **来源名**：本篇在各页 `sources` 里写 prompt 给出的 slug；列其他来源前先确认 `wiki/sources/<该名>.md` 存在，不凭记忆或推测写来源名（写错即 `sources.unresolved` 阻断）。
    - **查重上下文**：wrapper 在 prompt 末尾附〈页面名录〉（除 `wiki/sources/` 外全部现有页的路径、标题、`aliases`，格式见 prompt）时，以名录为查重依据，**不整读 `wiki/index.md`**；某个名称可能指向 source 页时，用 `search_file_content`/`glob` 在 `wiki/sources/` 定向查——登记时用 `search_file_content` 定位 index 对应分区、只读该分区再改。prompt 未附名录（名录超预算，wrapper 会明说）时读 `wiki/index.md`，`read_file` 报截断就按提示用 `offset` 读完——查重需要完整的页名与别名。
    - **overview 按需读**：prompt 末尾的〈overview 结构〉给出 `wiki/overview.md` 的标题行与行号。按本篇主题用 `read_file` 的 `offset`/`limit` 读相关章节，需跨章节综合时再扩展；全文较短可直接整读。决定改 overview 前，先读全待改范围。
    - **先查根级 `SCHEMA.md`**：读本库的领域边界、口径、标签词表与命名偏好，据此判断该建哪几页、算实体还是概念。**但页型与目录只有内置那四种**（`sources/ entities/ concepts/ syntheses/`），`SCHEMA.md` **改不了**：合法 `type` 集硬编码在 `guanlan check` 里，自造 `type`（如 `论文` `模型` `数据集`）会被判 `frontmatter.bad_type` 并**阻断本次写入**，落在四目录之外的页 `reindex` 也不会登记进 `index.md`。领域细分走 `tags` 或正文小节——详见 `references/conventions.md` §目录结构。
