@@ -7,13 +7,13 @@
 
 ### 新增
 
-- **Web 问答显示上下文压缩进度**（用 agentao 0.5.12 的 `COMPACTION_STARTED` / `COMPACTION_SETTLED`）。长对话或 `/goal`
-  续跑触发自动压缩时，摘要调用可长达一分钟、期间没有 token，界面原先只有每 15 秒一拍的泛泛「处理中」。现在心跳行改说
-  「🗜 正在压缩上下文…（12s）」并逐秒走表，结束后在气泡上方留一行「上下文已压缩 · 54 → 19 条消息 · 14s」；压缩未成功时
-  如实说出，被停止时不留行。普通问答与 goal 续跑两条流都覆盖。
-  - 服务端经 `SdkTransport.subscribe` 旁听，与 token 流的回调并行、不替换；新 SSE 帧 `compaction` 只带白名单字段
-    （`phase` / `status` / `pre_msgs` / `post_msgs` / `duration_ms`），上游的 `detail` 可能是错误原文，不上线。
-    只转要调摘要模型的 `full` 压缩：毫秒级的 `microcompact` / `minimal_history` 不出帧，与 agentao CLI 同口径。
+- **写入口收尾多一行用量度量**（`ingest` / `query --backfill`，含 Web 作业输出）。门禁报告之后在 **stderr** 打一行
+  「ℹ 用量：耗时 3m12s · Agent 2 轮（含自愈 1）· 输入 120,345 tokens，缓存命中 80,000 · 输出 5,432 tokens · 工具调用 37」，
+  数字取自 `agentao run --format json` 信封现成的 `usage` / `tool_calls`，首轮与自愈轮累加。此前这些数据一直躺在
+  `AgentRunResult.raw` 里没人读，入库为何慢只能猜。stdout 逐字节不变（`--json` 消费者不受影响）；没有任何一轮带
+  `usage`（fake runner、子进程起不来）时不输出，不报一行全零；只记计数与耗时，不记 prompt 或原文。`tool_calls` 是工具
+  调用次数，不等于模型请求次数。`GuardedWriteResult` 相应多两个只读字段 `runs` / `elapsed_s`，不参与裁决。动机与后续
+  优化排序见 [`docs/backlog/notes/ingest-performance-research.md`](docs/backlog/notes/ingest-performance-research.md)。
 
 ### 变更
 
@@ -36,6 +36,21 @@
     `mcp_registry`、不注入 manager，故行为不变。
   - 用户可感知的另一处：0.5.11 起 workspace-write 下写 `.env` / `*.pem` / `*.key` 改为询问。headless 的 ingest
     本就不写这些文件。
+
+### 修复
+
+- **ingest prompt 不再无条件要求更新 `overview.md`**。`INGEST_PROMPT` 原写「更新 `index.md` 与 `overview.md`」，与
+  `SKILL.md` ingest 第 4 步「overview 仅当本次引入新角度、新论断或新矛盾时才改」口径相反；prompt 是每次必达的直接指令，
+  实际压过了 skill 的条件，让每篇入库都去读写一遍 overview，并使其只增不减地膨胀。现改为与 skill 同一条件。顺带更正
+  `gate.py` 两处注释：自愈是「回喂**新一轮** agent」（独立 `agentao run` 子进程、不续接首轮会话），不是「同一 agent」。
+
+- **Web 问答显示上下文压缩进度**（用 agentao 0.5.12 的 `COMPACTION_STARTED` / `COMPACTION_SETTLED`）。长对话或 `/goal`
+  续跑触发自动压缩时，摘要调用可长达一分钟、期间没有 token，界面原先只有每 15 秒一拍的泛泛「处理中」。现在心跳行改说
+  「🗜 正在压缩上下文…（12s）」并逐秒走表，结束后在气泡上方留一行「上下文已压缩 · 54 → 19 条消息 · 14s」；压缩未成功时
+  如实说出，被停止时不留行。普通问答与 goal 续跑两条流都覆盖。
+  - 服务端经 `SdkTransport.subscribe` 旁听，与 token 流的回调并行、不替换；新 SSE 帧 `compaction` 只带白名单字段
+    （`phase` / `status` / `pre_msgs` / `post_msgs` / `duration_ms`），上游的 `detail` 可能是错误原文，不上线。
+    只转要调摘要模型的 `full` 压缩：毫秒级的 `microcompact` / `minimal_history` 不出帧，与 agentao CLI 同口径。
 
 ## [0.1.27] - 2026-10-04
 
