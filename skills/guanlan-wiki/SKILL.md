@@ -56,7 +56,9 @@ description: >
 
 1. **读源 + 建上下文 + 查路由**：
    - 读 `raw/` 的 `.md` 源；路径按 wrapper 给出的原样使用，不替换其中的引号/空格/CJK 字符。
-   - 读 `wiki/index.md` 与 `wiki/overview.md`。
+   - **本篇 source 页**：wrapper 在 prompt 里写明它是否已存在、路径是什么。已存在（含批量导入留下的桩页）就先读再合并更新，不整页覆盖、不另建。
+   - **查重上下文**：wrapper 在 prompt 末尾附〈页面名录〉（除 `wiki/sources/` 外全部现有页的路径、标题、`aliases`，格式见 prompt）时，以名录为查重依据，**不整读 `wiki/index.md`**；某个名称可能指向 source 页时，用 `search_file_content`/`glob` 在 `wiki/sources/` 定向查——登记时用 `search_file_content` 定位 index 对应分区、只读该分区再改。prompt 未附名录（名录超预算，wrapper 会明说）时读 `wiki/index.md`，`read_file` 报截断就按提示用 `offset` 读完——查重需要完整的页名与别名。
+   - **overview 按需读**：prompt 末尾的〈overview 结构〉给出 `wiki/overview.md` 的标题行与行号。按本篇主题用 `read_file` 的 `offset`/`limit` 读相关章节，需跨章节综合时再扩展；全文较短可直接整读。决定改 overview 前，先读全待改范围。
    - **先查根级 `SCHEMA.md`**：读本库的领域边界、口径、标签词表与命名偏好，据此判断该建哪几页、算实体还是概念。**但页型与目录只有内置那四种**（`sources/ entities/ concepts/ syntheses/`），`SCHEMA.md` **改不了**：合法 `type` 集硬编码在 `guanlan check` 里，自造 `type`（如 `论文` `模型` `数据集`）会被判 `frontmatter.bad_type` 并**阻断本次写入**，落在四目录之外的页 `reindex` 也不会登记进 `index.md`。领域细分走 `tags` 或正文小节——详见 `references/conventions.md` §目录结构。
 2. 在 `wiki/sources/<slug>.md` 写**摘要页**（slug = 同源文件名 kebab-case；`type: source`）。
    - **选择性保留承载知识的嵌图**（流程图/架构图/数据流图、关键表格或图表截图等），丢弃装饰图（logo/分隔线/版式件）——编译而非全量搬运。**只引不拷**、`../../raw/images/<slug>/<文件名>` 路径口径、`alt` 写法（vision 看图 / 无 vision 据上下文推断）详见 conventions §图片引用。实体/概念页同理。
@@ -64,7 +66,7 @@ description: >
 3. **抽取实体/概念，建或更新页**（正文术语一律转 `[[wikilink]]`）。建页前按决定树走：
 
    ```
-   扫 index.md + 现有页 aliases，是否已有该实体的变体页？
+   查名录（无名录时扫 index.md）+ 现有页 aliases，是否已有该实体的变体页？
      是 → 更新既有页（把新变体追加进它的 aliases），绝不新建重复页
      否 → 该术语被多篇资料反复提及 / 是核心术语？
             是 → 建 entities/<Name>.md 或 concepts/<Name>.md

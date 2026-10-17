@@ -18,7 +18,7 @@ Tool run_shell_command execution cancelled by user
 由 `gate.py:run_guarded_write_result` 编排）：
 
 ```
-agentao run --prompt "<task>" --format json \
+agentao run --format json \          # prompt 经 stdin 的 run spec 传入
             --skill guanlan-wiki \
             --permission-mode workspace-write \
             --interaction-policy reject \

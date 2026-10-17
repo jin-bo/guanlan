@@ -9,6 +9,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from .catalog import (
+    CATALOG_FORMAT,
+    build_catalog,
+    overview_outline,
+)
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .gate import run_guarded_write
 from .pages import load_page
@@ -23,11 +28,19 @@ from .provenance import (
 from .rawio import find_source_page, raw_slug
 from .runtime import AgentRunner
 
-# 薄 prompt：真正步骤在 skill。{rel} = 相对 raw/ 的 posix 路径。
+# 薄 prompt：真正步骤在 skill。{rel} = 相对 raw/ 的 posix 路径；{source} = 本篇 source 页定位（wrapper
+# 现查）；{context} = 下面两种查重上下文之一。
+# overview 结构与页面名录拼在 prompt **末尾**（见 `build_ingest_prompt`），让任务指令先于大块参考数据。
+# 注意这**不**带来跨 ingest 的前缀缓存收益：`{rel}` 在开头第一句、`{source}` 也逐篇不同，提示词从那里
+# 起就已分叉；名录本身也随每次入库变化。
 INGEST_PROMPT = (
     "请按 `guanlan-wiki` skill 的 ingest 工作流摄入资料 `raw/{rel}`："
     "该路径已由 wrapper 校验存在，必须按原样读取，不要替换其中的引号、空格或 CJK 字符；"
-    "读该 `.md` 源与 `wiki/index.md`、`wiki/overview.md` 建上下文；"
+    "{source}"
+    "{context}"
+    "`wiki/overview.md` 不必整读：文末〈overview 结构〉给出它的标题行与行号，"
+    "按本篇主题用 `read_file` 的 `offset`/`limit` 读相关章节，需要跨章节综合时再扩展（全文较短时可直接整读）；"
+    "决定修改时先读全待改范围再改，`read_file` 回报截断时按提示用 `offset` 续读；"
     "写/更新 source·entity·concept 页（frontmatter 齐全、术语转 `[[wikilink]]`）；"
     "更新 `index.md`；`overview.md` 仅当本次引入新角度、新论断或新矛盾时才改（纯增量细节由 entity/concept 页吸收）；发现矛盾就地标 `## ⚠️ 矛盾与存疑`；"
     "向 `log.md` 追加一条 `## [<日期>] ingest | <标题>`。"
@@ -35,6 +48,61 @@ INGEST_PROMPT = (
     "**不要运行 shell 命令；读写文件必须使用内置文件工具。不要自行执行 `guanlan check`，wrapper 会在你返回后强制校验。** "
     "完成后用一两句说明触及了哪些页面。"
 )
+
+# 本篇 source 页：wrapper 用 `find_source_page`（与 raw_digest stamp 同一定位归口）现查。
+_SOURCE_FOUND = (
+    "本篇 source 页**已存在**：`{path}`——先读它再合并更新；桩页也是既有页，补全正文、保留既有 "
+    "frontmatter 与来源，不整页覆盖，也不另建一张；"
+)
+_SOURCE_MISSING = "wrapper 未找到本篇 source 页，按 skill 约定在 `wiki/sources/` 新建；"
+
+# 有名录：查重以名录为准，index 只按分区读写。
+_CONTEXT_WITH_CATALOG = (
+    "读该 `.md` 源建上下文；**查重用文末〈页面名录〉**，它列出本库除 `wiki/sources/` 外的全部现有页"
+    "（{fmt}）——建页前必须对照其中的文件名、标题与别名，已有同名或别名的页就合并更新、不另建；"
+    "`wiki/sources/` 下另有 {sources} 页未逐页列出，某个名称可能指向 source 页时，"
+    "用 `search_file_content` 或 `glob` 在 `wiki/sources/` 定向查；"
+    "**不要整读 `wiki/index.md`**：登记新页时用 `search_file_content` 在 index 里定位对应分区，只读该分区再改；"
+)
+# 无名录（超预算）：沿用整读 index。
+_CONTEXT_WITHOUT_CATALOG = (
+    "读该 `.md` 源与 `wiki/index.md` 建上下文（`read_file` 回报截断时按提示用 `offset` 读完全文，"
+    "查重需要完整的页名与别名）；"
+)
+
+
+def build_ingest_prompt(kb: Path, rel: str) -> str:
+    """组装 ingest prompt：告知本篇 source 页位置；末尾附 overview 结构；名录不超预算就整份附上，
+    超了就明确报告并退回整读 index。
+
+    **超预算不截断**（见 `catalog` 模块 docstring）：只给一部分或只给页名，恰好丢掉查重最需要的别名，
+    比不给更糟——模型会以为名录是全集。stderr 报告一行，stdout 不受影响。
+    """
+    source_page = find_source_page(kb / "wiki" / "sources", Path(rel).stem)
+    source = (
+        _SOURCE_FOUND.format(path=source_page.relative_to(kb).as_posix())
+        if source_page is not None
+        else _SOURCE_MISSING
+    )
+    outline = overview_outline(kb / "wiki" / "overview.md")
+    tail = [f"〈overview 结构〉{outline or 'overview.md 不存在或读不出'}\n〈overview 结构完〉"]
+    catalog = build_catalog(kb / "wiki")
+    if catalog.over_budget:
+        print(
+            f"ℹ 页面名录 {catalog.chars:,} 字（{catalog.pages} 页）超出预算 {catalog.budget:,} 字，"
+            "本次不注入名录、退回整读 index.md（不截断名录）。",
+            file=sys.stderr,
+        )
+        context = _CONTEXT_WITHOUT_CATALOG
+    else:
+        context = _CONTEXT_WITH_CATALOG.format(
+            fmt=CATALOG_FORMAT, sources=catalog.omitted_sources
+        )
+        body = catalog.text or "（本库尚无页面）"
+        tail.append(f"〈页面名录〉共 {catalog.pages} 页：\n{body}\n〈页面名录完〉")
+    return "\n\n".join(
+        [INGEST_PROMPT.format(rel=rel, source=source, context=context), *tail]
+    )
 
 
 def _resolve_raw_target(root: Path, target: str) -> Path:
@@ -90,13 +158,13 @@ def _target_page_owned_by(sources_dir: Path, tpath: Path, raw_dir: Path) -> bool
 def _reject_source_slug_collision(raw_dir: Path, tpath: Path, sources_dir: Path) -> None:
     """摄入前挡「`raw/` 里多篇 `.md` 会落到同一张 wiki/sources 摘要页」（见 docs/backlog/notes/llm_wiki-反向评审-v0.6.md §1-C/§2.2）。
 
-    source 摘要页由 `find_source_page` 按 **`raw_slug(stem)`**（=页身份归口）定位，故凡此键相同的两篇
+    source 摘要页由 `find_source_page` 首选按 **`raw_slug(stem)`**（=页身份归口）定位，故凡此键相同的两篇
     raw `.md`——`a/report.md` 与 `b/report.md`、`annual report.md` 与 `annual-report.md`、
     `.report.md` 与 `report.md` ——都会误关联到**同一张**页：一张压另一张、`raw_digest` 只认得一个
     版本（review §1「按 basename 判太窄」）。**只堵不重构**：不新增 slug 方案/哈希/迁移，直接复用既有
     `raw_slug` 算键。**只比 `.md`**（唯一会被 ingest 建 source 页者），故不误伤 convert 的
     `report.pdf`+`report.md` 同源对。残留：`find_source_page` 的 `.`→`-` 回退（`1.报告`↔`1-报告`）
-    键不同、不在此拦，属窄边角，留文档不追（不复刻 rawio 折叠逻辑以免漂移）。
+    与逐字文件名回退（桩页）键不同、不在此拦，属窄边角，留文档不追（不复刻 rawio 折叠逻辑以免漂移）。
 
     **合法重摄豁免（review §2）**：目标页已存在且 `raw_digest` 确证归属**本文件**时放行——重摄既有源页
     是常规操作，同 slug 旁支不是当前属主，不该挡它；真撞（拿一个**非属主**旁支去覆盖属主页）会在**摄入
@@ -158,7 +226,7 @@ def run_ingest(
             flush=True,
         )
     rc = run_guarded_write(
-        kb, INGEST_PROMPT.format(rel=rel), model=model, runner=runner
+        kb, build_ingest_prompt(kb, rel), model=model, runner=runner
     )
     if rc == EXIT_OK:
         _stamp_source_digest(kb, tpath, rel)

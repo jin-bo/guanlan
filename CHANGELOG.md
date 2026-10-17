@@ -7,6 +7,10 @@
 
 ### 新增
 
+- **`health` 加 overview 体积提示**（`health.overview_large`）。`overview.md` 超过 3 万字时报一条 advisory：
+  它没有任何体积约束、只随入库增长，实测有库已到十余万字。只提示、不阻断（`--strict` 下照常计入），
+  **绝不自动压缩或改写**——拆分、沉淀成 `syntheses/` 是内容判断。
+
 - **写入口收尾多一行用量度量**（`ingest` / `query --backfill`，含 Web 作业输出）。门禁报告之后在 **stderr** 打一行
   「ℹ 用量：耗时 3m12s · Agent 执行 2 次（其中自愈 1 次）· 输入 120,345 tokens，缓存命中 80,000，缓存写入 6,000 · 输出 5,432 tokens · 工具调用 37」，
   数字取自 `agentao run --format json` 信封现成的 `usage` / `tool_calls`，首轮与自愈轮累加。此前这些数据一直躺在
@@ -24,6 +28,30 @@
     只转要调摘要模型的 `full` 压缩：毫秒级的 `microcompact` / `minimal_history` 不出帧，与 agentao CLI 同口径。
 
 ### 变更
+
+- **ingest 不再整读 `index.md` 查重，改读 wrapper 现算的页面名录**。`index.md` 随库线性增长（实测 1,500 页级
+  的库达 18 万字、1,500 余行），且 agentao `read_file` 不带 `limit` 时只回 2,000 行——超出部分要模型自己续读，
+  查重最需要的信息反而可能看不全。现在 wrapper 每次 ingest 用与 `check`/`graph` 同一套页面枚举与别名口径，
+  现算「路径 + 标题 + 全部别名」的名录拼进 prompt：按目录分节的 JSON Lines，页名、别名里的分隔符、引号、
+  换行都由 JSON 转义；frontmatter 读不出的页照列并标明「别名未知」。名录只是派生物：不落盘、不新增状态，
+  `index.md` 本身不动（仍是 query 的召回面，登记照旧），模型只按分区读写它。
+  - **名录不列 `wiki/sources/`**，只写明页数、提示按需定向查。去重决定树管的是 entity/concept 页；实测千页级
+    库的完整名录 98% 是 source 页名（7.8 万字，每次请求重发，首次请求即 8.9 万 tokens），去掉后约 2 千字。
+    按实际路径省略、不按 `type`，type 写错的页不会因此被藏起来；source 页照样参与链接解析与撞名校验，
+    门禁范围不变。
+  - **wrapper 直接告诉模型本篇 source 页在哪**：已存在（含批量导入留下的桩页）就给出路径，要求先读再合并、
+    不整页覆盖、不另建；未找到就按约定新建。
+  - **超预算不截断**：名录超过 12 万字时 stderr 明确报告、整份不注入，退回整读 index（并提示按截断提示读完）。
+    不会静默只给页名或只给一部分——那恰好丢掉查重最需要的别名。分页或按名查询入口留待后续。
+  - **overview 按结构分章节读**：prompt 附 `overview.md` 的标题行与行号（行号与 `read_file` 一致，围栏里的
+    `#` 不算），模型按本篇主题用 `offset`/`limit` 读相关章节，跨章节综合时再扩展；决定修改前先读全待改范围。
+  - skill ingest 第 1 步与 conventions 的去重纪律随之改为「查名录（无名录时扫 index）」。
+  - 离线基准 `scripts/bench_context.py`：合成库上对比旧做法（整读 index + overview）与新做法（名录 + 结构）
+    的字符数与字节数——没有对应 tokenizer，不折算 token。
+- **`agentao run` 的 prompt 改经 stdin 传入**（经子进程跑 agentao 的命令：ingest / query / heal / audit 及 Web 作业；Web 问答是进程内嵌入，不受影响）。名录
+  让 ingest prompt 达十余万字节，Linux 单个命令行参数上限 128 KiB，超了 `exec` 直接失败；stdin 无此上限，
+  prompt 也不再出现在进程列表里。spec 编码专门处理了 agentao 用 PyYAML 解析时的几处坑（BMP 外字符、C1
+  控制符、NEL/LS/PS 换行符），并有契约测试钉住「经上游自己的解析器逐字读回」。
 
 - **`pdf-to-markdown` skill 支持 MinerU 4**（同步自上游最新版）。脚本读 `mineru --version` 选 CLI：4.x 走
   `mineru parse`（遇 `server_not_running` 自动 `mineru server start`；PDF 恒传 `--pages all`，否则 MinerU 4 只解析前
@@ -58,6 +86,11 @@
     本就不写这些文件。
 
 ### 修复
+
+- **`find_source_page` 认不出用原文件名命名的 source 页**。它先按 `raw_slug`、再按点改横杠找，而批量导入
+  建的桩页常直接用 raw 原文件名（保留弯引号、空格等 `raw_slug` 会折掉的字符）。实测一个千页级库有 145 篇
+  因此被判「未收录」，重新摄入后 `raw_digest` 也静默 stamp 不上。现在两步都不中时再按原文件名逐字认
+  （仍是精确 stat、不扫目录；`.` 开头的不认）。Web 资料列表的「已收录」与 ingest 的 source 页定位同受益。
 
 - **ingest prompt 不再无条件要求更新 `overview.md`**。`INGEST_PROMPT` 原写「更新 `index.md` 与 `overview.md`」，与
   `SKILL.md` ingest 第 4 步「overview 仅当本次引入新角度、新论断或新矛盾时才改」口径相反；prompt 是每次必达的直接指令，

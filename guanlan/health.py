@@ -6,6 +6,9 @@
 - **index 与磁盘双向同步**（`health.index_missing_page` / `health.index_dangling`）。
 - **页型↔目录一致性**（`health.type_dir_mismatch` / `health.uncharted_page`，docs/P3.10）：合法
   `type` 落错目录、或内容页游离于四规范目录之外——schema 漂移的零-LLM advisory。
+- **overview 体积**（`health.overview_large`）：`overview.md` 超过 `OVERVIEW_ADVISORY_CHARS`。它没有任何
+  体积约束、只随入库增长；ingest 已改为按标题结构分章节读，但综述本身越长越难维护。**只提示、绝不
+  自动压缩或改写**——拆分与沉淀是内容判断（docs/backlog/notes/ingest-performance-research.md）。
 
 findings 是**建议性**（决策P3-4）：默认退 0，`--strict` 下有 findings → `EXIT_LINT_FINDINGS(6)`。
 frontmatter 走容错档（`pages.load_page`），坏数据不中断体检——正确性归口 `check`（决策P3-8）。
@@ -41,6 +44,9 @@ __all__ = ["HealthReport", "run_health", "format_report", "health_entrypoint", "
 # 桩页阈值：实质正文（剥标题/空白后）字符数低于此值即疑为桩页。30 是"一两句完整中文"的下限——
 # 比它更短的多是建库残留空壳。按 CJK 字符计（Python len 对每个汉字计 1）。SCHEMA 覆盖列为 P3 之后。
 STUB_MIN_CHARS = 30
+
+# overview 体积提示线（字符数，CJK 一字计 1）：约一篇长文。超出只报 advisory，不阻断、不改写。
+OVERVIEW_ADVISORY_CHARS = 30_000
 
 # ATX 标题行：1–6 个 # 后接空白或行尾（CommonMark）。`#无空格` 这类不是标题、算正文。
 _ATX_HEADING_RE = re.compile(r"#{1,6}(\s|$)")
@@ -147,6 +153,22 @@ def _check_index_sync(wiki: Path, root: Path, content_pages: list[Path]) -> list
     return findings
 
 
+def _check_overview_size(wiki: Path, root: Path) -> Finding | None:
+    path = wiki / "overview.md"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None  # 缺 overview 不归本检查管
+    if len(text) <= OVERVIEW_ADVISORY_CHARS:
+        return None
+    return Finding(
+        path.relative_to(root).as_posix(),
+        "health.overview_large",
+        f"overview.md {len(text):,} 字，超过 {OVERVIEW_ADVISORY_CHARS:,} 字提示线："
+        "可考虑把成熟专题沉淀为 syntheses/ 页、overview 只留主线（不会自动改写）",
+    )
+
+
 def run_health(wiki: Path) -> HealthReport:
     """对 `wiki/` 下非 config 页跑文件级体检，返回 `HealthReport`。
 
@@ -175,6 +197,9 @@ def run_health(wiki: Path) -> HealthReport:
             if mismatch is not None:
                 findings.append(mismatch)
     findings.extend(_check_index_sync(wiki, root, content_pages))
+    overview = _check_overview_size(wiki, root)
+    if overview is not None:
+        findings.append(overview)
 
     # finding 因果排序（纯展示层、零 LLM）：数据完整性/结构同步类先于内容/组织建议。稳定排序保
     # 既有逐页/逐项确定性次序不变（gbrain §3，见 pages.order_findings）。

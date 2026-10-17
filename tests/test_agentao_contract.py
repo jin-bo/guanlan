@@ -517,6 +517,23 @@ def test_private_agentao_imports_we_depend_on_still_resolve() -> None:
     from agentao.embedding.compat import build_compat_transport  # noqa: F401
     from agentao.llm._stream_response import WIRE_CARRIER_KEYS  # noqa: F401
     from agentao.runtime.model import purge_thinking_artifacts  # noqa: F401
+    from agentao.cli.run import _parse_spec_text  # noqa: F401  runtime.run_spec_text 的契约用例
+
+
+def test_stdin_run_spec_reaches_agentao_verbatim() -> None:
+    """`runtime.run_spec_text` 喂给 `agentao run` 的 stdin spec，经**上游自己的**解析与模板渲染后逐字不变。
+
+    观澜不再走 `--prompt`（ingest 名录会超 Linux argv 单串上限）。上游若改了 spec 解析器（换 YAML 库、
+    对无参数 spec 也做 Jinja 渲染、收紧字段），这里第一个红。
+    """
+    from agentao.cli.run import _parse_spec_text
+    from agentao.cli.run_template import render_spec
+
+    from guanlan.runtime import run_spec_text
+
+    prompt = "中文 😀 {{ x }} {% if %} \x85 \u2028 \x9f \ufeff 引号\" 换行\n" + "名录" * 1000
+    spec = render_spec(_parse_spec_text(run_spec_text(prompt), source="<stdin>"), {})
+    assert spec.prompt == prompt
 
 
 def test_compat_transport_still_exposes_the_ask_user_seam(real_conv) -> None:

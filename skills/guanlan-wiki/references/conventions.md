@@ -97,7 +97,7 @@ aliases: ['LLM', '大模型', 'large language model']
 
 - **作用一：消假断链。** 声明后 `[[LLM]]`、`[[大模型]]` 都解析到该页，不再被 `check`/`lint`/`graph` 误报断链；Web 里也成站内链接。
 - **作用二：补 CJK 召回。** query 的 2-gram 粗召回把别名串也纳入匹配面——`index.md` 对应行可在句末附常用别名（如 `… — 一句话（别名：大模型/LLM）`），让别名词命中召回。
-- **去重纪律（ingest）**：建新 entity/concept 页**前**，先扫 `index.md` 与现有页 `aliases` 看是否已是某页的变体；命中就**更新既有页**（必要时把新变体追加进其 `aliases`），**绝不新建重复页**。这把过去「在正文补一行常用别名」升级为结构化、可被解析器消费的声明。
+- **去重纪律（ingest）**：建新 entity/concept 页**前**，先查 wrapper 附的页面名录（未附时扫 `index.md`）与现有页 `aliases` 看是否已是某页的变体；命中就**更新既有页**（必要时把新变体追加进其 `aliases`），**绝不新建重复页**。这把过去「在正文补一行常用别名」升级为结构化、可被解析器消费的声明。
 - **全局唯一（`check` 校验，阻断）**：归一别名不得与任何页面 stem 同名（`aliases.collides_stem`）、不得在库内重复声明（`aliases.duplicate`）、须为非空字符串列表（`frontmatter.bad_type`）。撞名/重复**阻断写门禁**（与断链「警告非阻断」相反——它是解析歧义、确定性危害，须即时修）。
 - 键名对齐 Obsidian `aliases`，便于用户直接用 Obsidian 打开同一目录。实现细化见 `docs/P3.1-别名解析.md`。
 
