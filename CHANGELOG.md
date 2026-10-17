@@ -25,6 +25,18 @@
 
 ### 变更
 
+- **`pdf-to-markdown` skill 支持 MinerU 4**（同步自上游最新版）。脚本读 `mineru --version` 选 CLI：4.x 走
+  `mineru parse`（遇 `server_not_running` 自动 `mineru server start`；PDF 恒传 `--pages all`，否则 MinerU 4 只解析前
+  10 页；`--wait` 默认 1800 s；无本地质量引擎时自动降到 `--tier flash` 纯文本），3.x 仍走旧 `mineru -p`。新增
+  `--tier` / `--wait` / `--force` / `--remote`（`--remote` 会把文件上传 mineru.net，勿用于保密资料），4.x 另支持
+  `.doc` / `.ppt` / `.xls` / `.rtf` / ODF / `.ofd` / `.csv` 等格式。观澜调用约定不变（位置参数 + `--backend`、
+  stdout 末行产物路径、stderr `[done] backend=`），`guanlan convert` 与 Web 暂存区解析无需改动；两处安装提示改为
+  `uv tool install -U mineru`。
+  - **已知限制**：MinerU 4 不导出图片文件，md 里的图片引用是 `doc:<id>/tier:…/page:N/block:M` 内部伪地址。观澜的
+    图片安全闸不收这类引用，`raw/images/` 里不会有图，引用原样保留在源里并在回执提示「N 处图片引用未准入」。本机
+    MinerU 4.0.12 未启用本地引擎（`flash` 档）实测如此；启用 `managed` 引擎后是否不同未验证。需要随源保留图片时，
+    暂用 `--backend marker`。
+
 - **Web 姿态改由 agentao 一处置位**。开局姿态经 `build_from_environment(permission_mode=)` 在构造期交给 factory：它落在
   从权限文件加载的 engine 上（用户规则保留），两点一次做齐、不发切换事件；`/mode` 运行期切换改调
   `agent.set_permission_mode()`，取代原先手工翻 engine 预设与 `tool_runner` 只读标志两步，并多发一条

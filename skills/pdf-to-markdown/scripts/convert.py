@@ -5,6 +5,8 @@ Tiered backend strategy (best quality first, degrade gracefully):
 
   1. MinerU      (`mineru`)        — primary. Highest-fidelity layout/table/formula
                                       extraction. Used whenever it is on PATH.
+                                      MinerU 4.x (`mineru parse`) is preferred; the
+                                      3.x CLI (`mineru -p`) is still supported.
   2. marker-pdf  (`marker_single`) — first fallback. Optional Google Gemini LLM
                                       enhancement when GEMINI_API_KEY is available.
   3. pure-python (`pypdf`)         — last resort. Plain text-layer extraction for
@@ -16,7 +18,9 @@ the result. Force a single backend with `--backend mineru|marker|python`.
 """
 
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,7 +34,16 @@ SUPPORTED_EXTENSIONS = {
     ".xlsx",
     ".epub",
     ".html", ".htm",
+    # MinerU 4.x only (marker/python tiers will report them unsupported)
+    ".doc", ".ppt", ".xls", ".rtf", ".odt", ".ods", ".odp", ".ofd", ".csv", ".tsv",
+    ".mhtml", ".mht",
     # images
+    ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".gif",
+}
+
+# marker-pdf handles the original document set, not the MinerU 4.x-only formats.
+MARKER_EXTENSIONS = {
+    ".pdf", ".docx", ".pptx", ".xlsx", ".epub", ".html", ".htm",
     ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".gif",
 }
 
@@ -130,10 +143,134 @@ def find_markdown(root: Path, stem: str) -> Path | None:
 # --------------------------------------------------------------------------- #
 # Tier 1 — MinerU
 # --------------------------------------------------------------------------- #
+# MinerU 4.x document types that accept a quality tier (basic/standard/advanced);
+# every other format (Office, HTML, EPUB, ...) is always parsed with "flash".
+MINERU_TIERED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
+                            ".tif", ".tiff"}
+
+# Error codes meaning "no local engine for a quality tier" — retry with flash.
+_MINERU_NO_QUALITY_ENGINE = {"quality_tier_unavailable", "no_engine", "engine_unavailable"}
+
+
+def mineru_major_version() -> int | None:
+    """Return the installed MinerU major version, or None if it can't be read."""
+    try:
+        out = subprocess.run(["mineru", "--version"], capture_output=True, text=True,
+                             timeout=60).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"(\d+)\.\d+", out)
+    return int(m.group(1)) if m else None
+
+
 def run_mineru(input_path: Path, output_dir: Path, args, env_vars: dict[str, str]) -> Path:
     if shutil.which("mineru") is None:
-        raise BackendUnavailable("'mineru' not found on PATH (pip install -U 'mineru[core]')")
+        raise BackendUnavailable("'mineru' not found on PATH (uv tool install -U mineru)")
 
+    major = mineru_major_version()
+    if major is not None and major >= 4:
+        return run_mineru_v4(input_path, output_dir, args)
+    log(f"[mineru] legacy CLI detected (major={major}); upgrade with: uv tool install -U mineru")
+    return run_mineru_legacy(input_path, output_dir, args)
+
+
+def mineru_v4_pages(args) -> str:
+    """Translate our 0-based inclusive --start/--end to MinerU 4 page syntax
+    (1-based inclusive, 'r1' = last page). Always explicit: MinerU 4 parses only
+    the first 10 pages when --pages is omitted."""
+    if args.start is None and args.end is None:
+        return "all"
+    start = (args.start or 0) + 1
+    end = str(args.end + 1) if args.end is not None else "r1"
+    return f"{start}-{end}"
+
+
+def parse_json_stdout(text: str) -> dict:
+    """Pick the result object out of `mineru --json` stdout (notices may precede it)."""
+    decoder = json.JSONDecoder()
+    found: dict = {}
+    i = text.find("{")
+    while i != -1:
+        try:
+            obj, end = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            i = text.find("{", i + 1)
+            continue
+        if isinstance(obj, dict) and ("parse" in obj or "error" in obj):
+            found = obj
+        i = text.find("{", end)
+    return found
+
+
+def run_mineru_v4(input_path: Path, output_dir: Path, args) -> Path:
+    """MinerU 4.x: `mineru parse` via the local document-library service."""
+    for flag, value in (("--method", args.method), ("--lang", args.lang),
+                        ("--mineru-backend", args.mineru_backend)):
+        if value:
+            log(f"[mineru] {flag} is a MinerU 3.x option; ignored by MinerU 4")
+
+    out_md = output_dir / input_path.stem / f"{input_path.stem}.md"
+    tiered = input_path.suffix.lower() in MINERU_TIERED_EXTENSIONS
+
+    def build(tier: str | None) -> list[str]:
+        cmd = ["mineru", "parse", str(input_path), "-o", str(out_md),
+               "--wait", str(args.wait), "--json"]
+        if input_path.suffix.lower() == ".pdf":
+            cmd += ["--pages", mineru_v4_pages(args)]
+        if tier and tiered:
+            cmd += ["--tier", tier]
+        if args.force:
+            cmd.append("--force")
+        if args.remote:
+            cmd.append("--remote")
+        return cmd
+
+    def attempt(tier: str | None) -> tuple[int, dict]:
+        cmd = build(tier)
+        log(f"[mineru] {redact_cmd(cmd)}")
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+        return proc.returncode, parse_json_stdout(proc.stdout)
+
+    if args.remote:
+        log("[mineru] --remote: the document is uploaded to the mineru.net parse service")
+
+    rc, payload = attempt(args.tier)
+    err = payload.get("error") or {}
+    if rc != 0 and err.get("code") == "server_not_running":
+        # `mineru parse` talks to a background doclib server; start it once.
+        log("[mineru] starting local server (stop later with: mineru server stop)")
+        if run_backend(["mineru", "server", "start"]) != 0:
+            raise BackendFailed("could not start the local mineru server")
+        rc, payload = attempt(args.tier)
+        err = payload.get("error") or {}
+    if rc != 0 and err.get("code") in _MINERU_NO_QUALITY_ENGINE and args.tier is None and tiered:
+        log(f"[mineru] {err.get('message')}")
+        log("[mineru] retrying with --tier flash (text-only). For layout/OCR quality, enable a "
+            "local engine: mineru config set parse_server.local.mode managed")
+        rc, payload = attempt("flash")
+        err = payload.get("error") or {}
+
+    if rc != 0:
+        status = (payload.get("parse") or {}).get("status")
+        if status in ("pending", "parsing"):
+            raise BackendFailed(
+                f"mineru still {status} after {args.wait}s; re-run the same command to "
+                "collect the cached result, or raise --wait")
+        detail = f"{err.get('code')}: {err.get('message')}" if err else f"exit {rc}"
+        raise BackendFailed(f"mineru parse failed ({detail})")
+
+    tier = (payload.get("parse") or {}).get("tier")
+    if tier:
+        log(f"[mineru] tier={tier}")
+    written = (payload.get("output") or {}).get("path")
+    out = Path(written) if written else out_md
+    if not out.is_file() or out.stat().st_size == 0:
+        raise BackendFailed("mineru produced no markdown output")
+    return out
+
+
+def run_mineru_legacy(input_path: Path, output_dir: Path, args) -> Path:
+    """MinerU <= 3.x: `mineru -p <in> -o <dir>`."""
     cmd = ["mineru", "-p", str(input_path), "-o", str(output_dir)]
     if args.method:
         cmd += ["-m", args.method]
@@ -162,6 +299,8 @@ def run_mineru(input_path: Path, output_dir: Path, args, env_vars: dict[str, str
 def run_marker(input_path: Path, output_dir: Path, args, env_vars: dict[str, str]) -> Path:
     if shutil.which("marker_single") is None:
         raise BackendUnavailable("'marker_single' not found on PATH (pip install marker-pdf)")
+    if input_path.suffix.lower() not in MARKER_EXTENSIONS:
+        raise BackendUnavailable(f"marker does not support '{input_path.suffix}'")
 
     cmd = [
         "marker_single",
@@ -292,12 +431,23 @@ def main() -> None:
     # Page range (backend-agnostic, 0-based inclusive).
     parser.add_argument("--start", type=int, default=None, help="First page (0-based)")
     parser.add_argument("--end", type=int, default=None, help="Last page (0-based, inclusive)")
-    # MinerU-specific
+    # MinerU 4.x
+    parser.add_argument("--tier", choices=["flash", "basic", "standard", "advanced"],
+                        default=None,
+                        help="MinerU 4 parse tier (default: best available local engine, "
+                        "falling back to flash)")
+    parser.add_argument("--wait", type=int, default=1800,
+                        help="MinerU 4: max seconds to wait for a parse (default: 1800)")
+    parser.add_argument("--force", action="store_true",
+                        help="MinerU 4: ignore the parse cache and re-parse")
+    parser.add_argument("--remote", action="store_true",
+                        help="MinerU 4: use the mineru.net remote service (uploads the file)")
+    # MinerU 3.x (legacy CLI)
     parser.add_argument("--method", choices=["auto", "txt", "ocr"], default=None,
-                        help="MinerU parsing method (default: auto)")
-    parser.add_argument("--lang", default=None, help="MinerU OCR language hint, e.g. 'ch', 'en'")
+                        help="MinerU 3.x parsing method (default: auto)")
+    parser.add_argument("--lang", default=None, help="MinerU 3.x OCR language hint, e.g. 'ch', 'en'")
     parser.add_argument("--mineru-backend", default=None,
-                        help="MinerU -b backend, e.g. 'pipeline', 'vlm-auto-engine'")
+                        help="MinerU 3.x -b backend, e.g. 'pipeline', 'hybrid-engine'")
     # marker-specific
     parser.add_argument("--page-range", help='marker page range, e.g. "0,5-10,20"')
     parser.add_argument("--disable-ocr", action="store_true",

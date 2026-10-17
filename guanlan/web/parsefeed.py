@@ -67,7 +67,7 @@ def parse_upload(
     except ConvertError as exc:
         print(f"解析失败：{exc}")  # 经 worker redirect → job.output（前端显错）
         print(
-            "提示：可 `pip install -U 'mineru[core]'` / `pip install marker-pdf`（高保真）"
+            "提示：可 `uv tool install -U mineru`（MinerU 4）/ `pip install marker-pdf`（高保真）"
             "或 `pip install pypdf`（纯文本，仅 PDF）；或在外部转换后再上传。"
         )
         return EXIT_USAGE
