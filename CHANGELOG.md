@@ -85,6 +85,18 @@
   - 用户可感知的另一处：0.5.11 起 workspace-write 下写 `.env` / `*.pem` / `*.key` 改为询问。headless 的 ingest
     本就不写这些文件。
 
+- **底座 agentao 下限 0.5.12 → 0.5.14**（仍 `<0.6`）。0.5.13–0.5.14 对观澜接缝无破坏：锁文件只升了 agentao 一项，
+  全量测试（含 `tests/test_agentao_contract.py` 的真 Agentao 契约）原样通过。抬下限是因为：
+  - **改后复读不再被判为 doom loop**（0.5.14，jin-bo/agentao#543）：identical-args 防护原先在整个 turn 内累计
+    「工具名 + 参数」、中间写入不清零，`read_file(X) → replace(X) → read_file(X) → …` 第三次读就终止整轮。ingest
+    收尾的「改后核对」正是这个形态，此前真实运行六次里有两次因此失败、留下半成品。现在有新的写入就清零，
+    中间无写入的真重复仍会被拦。
+  - **同一批工具调用只有全是只读工具时才并行**（0.5.14）：此前读写混在一批里会并行执行，读到的可能是写前内容。
+  - **`replace` 保持 CRLF 文件的行尾**（0.5.14），不再把 CRLF 页改成混合行尾。
+  - 0.5.14 起项目内 `.agentao/sandbox.json` 被忽略、只读 `~/.agentao/sandbox.json`（上游 BREAKING）。观澜不读写
+    `sandbox.json`；若有用户在知识库里放过这个文件，需挪到用户目录。0.5.13 移除的 `AgentManager` 旧回调参数
+    观澜未使用。
+
 ### 修复
 
 - **ingest 定位不到改过名的既有 source 页，会让同一篇资料落成两张 source 页**。旧页文件名与本篇对不上
