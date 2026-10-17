@@ -293,7 +293,7 @@ def run_convert(
     except ConvertError as exc:
         print(f"转换失败：{exc}", file=sys.stderr)
         print(
-            "提示：高保真后端可 `pip install -U 'mineru[core]'` 或 `pip install marker-pdf`；"
+            "提示：高保真后端可 `uv tool install -U mineru`（MinerU 4）或 `pip install marker-pdf`；"
             "纯文本兜底 `pip install pypdf`（仅 PDF）。",
             file=sys.stderr,
         )
