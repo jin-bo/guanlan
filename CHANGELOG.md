@@ -3,6 +3,21 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [未发布]
+
+### 变更
+
+- **`guanlan-wiki` 的 heal / audit 工作流移出 SKILL.md，改放 `references/heal.md` / `references/audit.md`**。
+  agentao 激活 skill 后，**每次请求**都把 SKILL.md 全文附在上下文末尾重发，一次入库约 40–60 次请求；
+  这两段只在 `guanlan heal` / `guanlan audit` 里用得到，却在每次 ingest 与问答请求里白白占位。
+  SKILL.md 由约 9,000 字降到约 6,500 字（−27%）；按入库日志的输入构成（SKILL.md 约占 7%），ingest
+  总输入约省 2%，Web 问答每次请求同样少发这些字。规则一字未改，只是挪位。
+  - SKILL.md 原处各留一句说明，并写明「运行时必须先读对应文件」；`HEAL_PROMPT` / `AUDIT_PROMPT` 也点名该文件。
+    agentao 的每轮提醒会列出 `references/` 下的文件，Agent 看得见。
+  - ingest 与 query 留在 SKILL.md：ingest 若移出，Agent 每次都得读一遍，读进来的内容照样每轮重发，省不下字数，
+    反而失去「每轮重发、不被压缩」的位置。
+  - 新增测试钉住三处：随包存在 `references/<wf>.md`、SKILL.md 链到它、对应 prompt 点名它。
+
 ## [0.1.28] - 2026-10-17
 
 ### 新增

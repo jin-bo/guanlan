@@ -63,7 +63,7 @@ DEFAULT_LIMIT = 10
 # P3.3：从「一律直接作文件名」补三态引导（A 用目标名 / B 规范标题+收编 / C 收编既有页）+ index 登记。
 # 概念分类：每目标先判实体/概念，A/B 落到对应目录 `entities/` 或 `concepts/`（算法等方法类是概念）。
 HEAL_PROMPT = (
-    "请按 `guanlan-wiki` skill 的 heal 工作流，为下列**缺失实体**收割断链（目标名已是归一键）：\n{targets}\n"
+    "请按 `guanlan-wiki` skill 的 heal 工作流（先读该 skill 的 `references/heal.md`），为下列**缺失实体**收割断链（目标名已是归一键）：\n{targets}\n"
     "**只读所列引用页**与 `wiki/index.md` 建上下文。每个目标先判**实体还是概念**"
     "（实体=人物/组织/模型/系统，落 `wiki/entities/`；概念=方法/理论/术语/算法等，落 `wiki/concepts/`；"
     "拿不准当实体），记其目录为 `<dir>`，再三选一（判据见 skill，**拿不准走 A**）："

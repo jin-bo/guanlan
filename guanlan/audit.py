@@ -65,10 +65,10 @@ DEFAULT_LIMIT = 10
 # 合法的逐页留痕 status 取值（决策P3.7-14）。
 _VALID_STATUS = frozenset({"confirmed", "flagged", "updated"})
 
-# 薄 prompt：真步骤在 skill 的 audit 工作流。{targets} 每行已由 wrapper 钉好
+# 薄 prompt：真步骤在 skill 的 `references/audit.md`。{targets} 每行已由 wrapper 钉好
 # `page | reason | drifted_slugs | raw_paths`（决策P3.7-11），Agent 不推断漂移源/raw 路径。
 AUDIT_PROMPT = (
-    "请按 `guanlan-wiki` skill 的 audit 工作流，逐一复核下列目标页。"
+    "请按 `guanlan-wiki` skill 的 audit 工作流（先读该 skill 的 `references/audit.md`），逐一复核下列目标页。"
     "**每行已由 wrapper 钉好 `page | reason | drifted_slugs | raw_paths`，"
     "你无需自己推断漂移源或 raw 路径**：\n{targets}\n"
     "对每页：读该页正文 + 该行 `raw_paths` 列出的 `raw/` 源**现版本**，判断页中论断是否仍被现源支持。\n"

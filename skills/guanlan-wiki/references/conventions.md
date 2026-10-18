@@ -111,7 +111,7 @@ aliases: ['LLM', '大模型', 'large language model']
 
 ## heal 建页（`guanlan heal`）
 
-heal 的实体与概念分类、A/B/C 三选一、写入范围，见 SKILL.md 的 heal 工作流。
+heal 的实体与概念分类、A/B/C 三选一、写入范围，见 [`heal.md`](heal.md)。
 
 ## index.md
 

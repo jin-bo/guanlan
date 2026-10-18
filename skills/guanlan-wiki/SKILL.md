@@ -117,69 +117,11 @@ wrapper 确定性生成最小模板（`AGENTAO.md`、`SCHEMA.md`、`raw/`、含 
 
 ### heal — `guanlan heal`
 
-把高频缺失实体物化成内容页。高频缺失实体是被至少 2 页引用、却没有页的断链（`lint.missing_entity`）。wrapper 已在 prompt 里给出本批目标名和每个目标的引用页清单，你不必自己查找引用。对每个目标：
-
-1. **读上下文**：只读所列引用页与 `wiki/index.md`，不要读全库。目标名已是归一键，可以直接用作文件名。
-2. **定目录 `<dir>`**：
-   - 实体（人物、组织、模型、系统）→ `entities/`。
-   - 概念（方法、理论、术语、算法、架构、训练技巧）→ `concepts/`。
-   - 拿不准时当实体。`SCHEMA.md` 只影响实体与概念的划分口径，不能增加第三个目录。
-3. **三选一**：上下文足以确认目标值得建页时，按决定树处理。新页一律建在第 2 步定的 `<dir>/`：
-
-   ```
-   目标是某既有 entities/∪concepts/ 页的变体？（读 index.md/引用页可认出）
-     是 → C：只向该页 aliases 末尾追加原目标名，并把 last_updated 改成当天
-            （不新建重复页、不改正文、不动其它 frontmatter）
-     否 → 目标名够规范、可直接当文件名？
-            是 → A：建 <dir>/<目标>.md（默认最稳，[[原引用]] 经同一归一天然解析）
-            否（口语/缩写，且引用上下文给出更规范全称）
-                → B：建 <dir>/<规范名>.md + frontmatter aliases 收编原目标名
-                     （如 aliases: ['大模型']；否则断链不消、回执 still_broken）
-   拿不准 → 一律走 A
-   ```
-
-4. **登记 index**：在 `wiki/index.md` 与目录匹配的分区登记一行。
-   - 新页：`- [<标题>](<dir>/<stem>.md) — <一句话>`。
-   - B 与 C：在句末注明别名，如 `…（别名：大模型/LLM）`。这样查重、2-gram 召回与 `health` 都能看见它。
-5. **写 log**：向 `wiki/log.md` 追加一条 `## [YYYY-MM-DD] heal | <目标>`。
-6. **只从引用上下文合成**：不得写引用页里没有的事实。引用页有出处时，`sources` 可以沿用。没有出处就留空（合法）。
-7. **跳过**：上下文不足、目标更像主题页、或无法判断时，跳过该目标，用一句话说明。不需要特定格式：wrapper 重新计算断链来判定成败，不解析你的说明。
-
-**heal 的写入范围**：只新建 `entities/`、`concepts/` 页，向既有页追加别名，编辑 `index.md`，追加 `log.md`。不得删除或重写已有页正文，不得修改 `raw/`。以下越界写会被 wrapper 的写集审计标为 `unexpected_write`：
-
-- 建页到 `entities/`、`concepts/` 之外。
-- 改已有页正文，或改 `aliases`、`last_updated` 以外的 frontmatter。
-- 删页，或把页换成符号链接。
-- 收编时夹带本批目标以外的别名。
-
-收尾见〈写工作流收尾（共用）〉。
+把高频缺失实体（被至少 2 页引用、却没有页的断链）物化成内容页。**运行 heal 时，必须先读 [`references/heal.md`](references/heal.md)，再动手。**
 
 ### audit — `guanlan audit`
 
-**语义审计**：复核「资料变了、wiki 页还没重新综合」的过期论断（source-drift）。audit 与 heal 一样经过写门禁。
-
-wrapper 已完成确定性粗筛：比对每张 source 页 frontmatter 的 `raw_digest`（资料内容指纹，见 conventions §frontmatter）与资料现在的字节，找出变化的资料，以及沿 `sources` 引用它们的页。prompt 里每行一个目标：`page | reason | drifted_slugs | raw_paths`。你只做语义判断，不必自己找变化的资料或解析指纹。
-
-对每个目标页：
-
-1. **对照现版本**：读该页正文，以及该行 `raw_paths` 列出的资料的**现版本**，判断页中论断是否仍被支持。
-   - `reason=source-drift`：该页就是 source 页本身（资料记在它的 `raw_digest` 里，不在 `sources` 里）。对照本页摘要与资料现版本。
-   - `reason=cites-drifted-source`：对照本页基于这些资料的综合是否仍成立。
-2. **处理正文**：
-   - 仍准确：不改正文。`raw_digest` 由 wrapper 在你返回后刷新。
-   - 已过期，或现版本与页面冲突：按 conventions §矛盾标记 就地标注，或最小化更新该论断。其余正文一字不动，不得整段重写。
-3. **逐页留痕（必须，这是唯一凭据）**：在**唯一一条** `## [YYYY-MM-DD] audit | <一句话批次说明>` 标题下，为每个目标页追加一行单行 JSON：
-
-   ```
-   - {"page":"<相对库根 posix>","drifted_slugs":["…"],"status":"confirmed|flagged|updated"}
-   ```
-
-   - `drifted_slugs` 照抄该目标行给出的值，不增不删。
-   - `status`：仍准确写 `confirmed`，标注存疑写 `flagged`，改了论断写 `updated`。
-   - wrapper 只凭这些行判定「整组复核完成，可以刷新指纹」。漏写某页、`drifted_slugs` 写错、写成多段 audit 标题、写成非法 JSON，都会让该页所在的整组不刷新，下次重审。
-   - 本次只新增这一段 audit 标题，不得修改历史 log。
-
-**audit 的写入范围**：只就地标注或最小更新 `wiki/` 内容页，并追加一段 `log.md`。不得修改 `raw/`，不得整段重写正文。既有 `sources` 只增不减（`sources.dropped` 阻断）。不得写或改 `raw_digest`。收尾见〈写工作流收尾（共用）〉。
+复核「资料变了、wiki 页还没重新综合」的过期论断（source-drift）。**运行 audit 时，必须先读 [`references/audit.md`](references/audit.md)，再动手。**
 
 ### 写工作流收尾（共用）
 
@@ -194,7 +136,7 @@ ingest、heal、audit、`query --backfill` 等写 `wiki/` 的工作流，收尾�
 
 - frontmatter 不是合法 YAML、`sources` 缺失或写错或丢掉旧来源名、`aliases` 与页名相撞或重复。
 - 修改 `raw/` 的任何字节。
-- heal 越界写（见〈heal 的写入范围〉）。
+- heal 越界写（见 `references/heal.md`〈heal 的写入范围〉）。
 
 **不阻断、但要自查的警告**：
 

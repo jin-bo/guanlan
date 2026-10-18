@@ -22,6 +22,23 @@ def test_bundled_skill_dir_resolves():
     assert (src / "SKILL.md").is_file()
 
 
+@pytest.mark.parametrize("workflow", ["heal", "audit"])
+def test_low_frequency_workflow_reference_is_bundled_and_pointed_to(workflow):
+    """heal/audit 正文在 `references/<wf>.md`：随包存在，且 SKILL.md 与该工作流的 prompt 都点名它。
+
+    agentao 激活 skill 后每次请求都重发 SKILL.md 全文，低频工作流因此移出；
+    改名或漏装都会让 Agent 读不到步骤，而门禁看不出来，故钉住这三处。
+    """
+    from guanlan import audit, heal
+
+    src = skill.bundled_skill_dir()
+    ref = f"references/{workflow}.md"
+    assert (src / ref).is_file()
+    assert f"]({ref})" in (src / "SKILL.md").read_text(encoding="utf-8")
+    prompt = {"heal": heal.HEAL_PROMPT, "audit": audit.AUDIT_PROMPT}[workflow]
+    assert f"`{ref}`" in prompt
+
+
 def test_install_skill_copies_to_global(fake_home):
     dest = skill.install_skill()
     assert dest == fake_home / ".agentao" / "skills" / "guanlan-wiki"
