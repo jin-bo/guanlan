@@ -11,7 +11,7 @@
 
 | 类型 | 用途 | 命名 |
 |------|------|------|
-| `source` | 单篇原始资料的摘要页 | `kebab-case`（同源文件名）|
+| `source` | 单篇原始资料的摘要页 | 来源名（wrapper 按资料文件名确定）|
 | `entity` | 人物/组织/模型/系统等实体 | `TitleCase.md` |
 | `concept` | 方法/理论/术语等概念 | `TitleCase.md` |
 | `synthesis` | query 回填的跨资料综述 | `kebab-case` |
