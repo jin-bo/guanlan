@@ -82,6 +82,8 @@
 
 另一个低成本实验是短资料首包提供 raw 与 SCHEMA，省去独立取文件的一轮；需有明确体积预算、原文数据边界、与 raw 快照一致的读取时点。已有名录初次注入过大的教训在前，不能对长源和巨大 SCHEMA 无条件内联。
 
+**同日后续**：从 23 次真实运行日志估算，开头只取 raw/SCHEMA 的轮每次 0–1 轮，可省输入中位数 0%、最大 1.3%；Agent 第 1 轮已并发读取 raw、SCHEMA 与 conventions。不做首包内联，详见调研笔记〈短资料首包附 raw 与 SCHEMA 的收益上限〉。
+
 ## 4. 检索工具：让 Agent 查询，而不是 wrapper 替它作语义判断
 
 当前 ingest CLI 子进程不能自动使用 Web 的 `guanlan_search`，但已有 search 核心和只读 MCP search/read_page 可复用。应比较三种接法的初始化成本：显式配置现有只读 MCP、Agentao 宿主注入、wrapper 给初始候选；不要为了一个工具立刻迁移整个 ingest 到嵌入式运行时。
