@@ -118,6 +118,10 @@ def snapshot_raw(root: Path) -> dict[str, str]:
     **空** `raw/` 被删除前后都 diff 为 `{}`，删 `raw/` 也能蒙混过门禁。`raw/` 不存在 → 无根标记
     （空 dict），故"空目录存在"(`{".": "<raw-dir>"}`) 与"已删除"(`{}`)可区分。
 
+    **唯一忽略项：名为 `.DS_Store` 的普通文件**（任意层级）。macOS Finder 浏览目录就会建/改它，
+    与 Agent 无关；记进快照会让「入库期间在 Finder 里看了一眼 `raw/`」被判成 `raw_mutated`。只认
+    **普通文件**——同名的符号链接、目录或其它条目照常记指纹，不能借这个名字藏写入。
+
     `raw/` 本身、或其下的**任一目录符号链接**指向目录时（`_resolve_raw_target` 支持的配置），
     既记链接指纹（捕获改指），又**跟随descend 进去递归内容**——否则经 `raw/link/...` 的写入会
     全程不可见、绕过门禁。`rglob` 不会下降进符号链接目录，故这里手写遍历并带环保护。
@@ -157,6 +161,8 @@ def _walk_raw(
         return
     for entry in entries:
         rel = entry.relative_to(base).as_posix()
+        if _is_finder_metadata(entry):
+            continue
         if entry.is_symlink():
             out[rel] = _special_fingerprint(entry)  # 记链接本身（捕获改指/换文件）
             if entry.is_dir():  # 指向目录 → 跟随，捕获经它的写入
@@ -168,6 +174,16 @@ def _walk_raw(
             _descend(entry, base, out, seen)
         else:
             out[rel] = _special_fingerprint(entry)
+
+
+def _is_finder_metadata(entry: Path) -> bool:
+    """macOS Finder 的 `.DS_Store`：仅当它是**普通文件**（非符号链接、非目录）时才算，见 `snapshot_raw`。"""
+    if entry.name != ".DS_Store":
+        return False
+    try:
+        return stat.S_ISREG(entry.lstat().st_mode)
+    except OSError:
+        return False
 
 
 def _descend(entry: Path, base: Path, out: dict[str, str], seen: set[Path]) -> None:
