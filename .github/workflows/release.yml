@@ -12,7 +12,9 @@ permissions: {}
 
 jobs:
   pypi-publish:
-    runs-on: ubuntu-latest
+    # 显式钉 Ubuntu 26.04（ubuntu-latest 2026-10-19 起分批切换）：CI 与发布跑在同一个已验证的镜像上，
+    # 不随 latest 漂移。Python 由 uv 装独立构建，不依赖镜像自带版本。
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     environment:
       name: pypi
@@ -41,7 +43,7 @@ jobs:
   # PyPI 发布成功后，用 CHANGELOG 对应段自动建 GitHub Release（免手工补；与 tag/PyPI 对齐）。
   github-release:
     needs: pypi-publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: write # 建 GitHub Release 必需

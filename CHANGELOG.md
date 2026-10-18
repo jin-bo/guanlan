@@ -18,6 +18,12 @@
     反而失去「每轮重发、不被压缩」的位置。
   - 新增测试钉住三处：随包存在 `references/<wf>.md`、SKILL.md 链到它、对应 prompt 点名它。
 
+- **CI 与发布流程显式钉到 `ubuntu-26.04`**（`ci.yml` 的 test / actionlint、`release.yml` 的 pypi-publish / github-release）。
+  GitHub 自 2026-10-19 起分批把 `ubuntu-latest` 切到 Ubuntu 26.04、11-19 前完成；显式钉版让 CI 与发布跑在
+  同一个已在 PR 上验证过的镜像上，不在某次推 tag 时随 latest 悄悄换系统。Python 由 `uv python install`
+  装独立构建，不受 26.04 上 `setup-python` 只提供各 minor 最新几个补丁版的影响。发布流程要到下次推 tag
+  才首次在 26.04 上实跑；其中 `uv build` 与抽 CHANGELOG 的 bash/awk 不依赖系统版本，actionlint 已校验。
+
 ## [0.1.28] - 2026-10-17
 
 ### 新增
