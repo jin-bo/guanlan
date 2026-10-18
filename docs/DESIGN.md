@@ -92,7 +92,7 @@ my-wiki/                       # 用户的知识库（普通工作目录；可�
 └── graph/                     # 确定性 wikilink graph 产物（graph.json + graph.html，P3）
 ```
 
-> 维护引擎在**观澜项目仓库**里（不复制进用户库）：`skills/guanlan-wiki/`（`SKILL.md` + `references/conventions.md`）；**确定性校验 `guanlan check` 在 `guanlan` 包内、不在 skill**（§4.6 / 决策1），P3 的 health/lint/graph **同样落包内**（`guanlan health/lint/graph`，见 [`P3-健康与图谱.md`](P3-健康与图谱.md) 决策P3-1）。两种运行方式，**各只对应一条路径，不混用**：
+> 维护引擎在**观澜项目仓库**里（不复制进用户库）：`skills/guanlan-wiki/`（`SKILL.md` + `references/{conventions,heal,audit}.md`）；**确定性校验 `guanlan check` 在 `guanlan` 包内、不在 skill**（§4.6 / 决策1），P3 的 health/lint/graph **同样落包内**（`guanlan health/lint/graph`，见 [`P3-健康与图谱.md`](P3-健康与图谱.md) 决策P3-1）。两种运行方式，**各只对应一条路径，不混用**：
 >
 > - **开发期 = 仓库根即 sample wiki**：`working_directory` 直接设为观澜仓库根，仓库根同时放一份 sample wiki（`raw/`、`wiki/`、`SCHEMA.md`、`AGENTAO.md`）。此时 `skills/guanlan-wiki/` 正好命中 Agentao 的 repo-root 发现路径（`<wd>/skills/`），wiki 数据也在同一目录——免安装、改完即生效。
 > - **外部真实 wiki = 全局安装**：把 skill 装入 `~/.agentao/skills/guanlan-wiki/`（cwd 无关），再以用户库为 `working_directory` 运行。用户库（`guanlan init` 生成）保持最小、只含数据与本库配置。
@@ -104,8 +104,8 @@ my-wiki/                       # 用户的知识库（普通工作目录；可�
 ```
 guanlan/                       # 观澜项目仓库（本仓库）；开发期 working_directory 即此
 ├── skills/guanlan-wiki/       # ← 维护引擎（repo-root 路径，开发期自动发现）
-│   ├── SKILL.md
-│   └── references/conventions.md
+│   ├── SKILL.md                # 共用规则 + ingest/query 工作流
+│   └── references/             # conventions.md（默认约定）、heal.md、audit.md（低频工作流，按需读）
 │                               # P2 无 scripts/：guanlan check 在包内（决策1）；P3 health/lint/graph 同落包内（决策P3-1）
 ├── guanlan/                   # ← 包：cli / init / runtime / gate / check / ingest / query（P2）
 ├── examples/                  # ← guanlan init 模板（入库，供参考）
@@ -122,7 +122,7 @@ Schema 是 Karpathy 三层之一，与 `raw/`、`wiki/` 平级，因此落为**�
 
 - **`SCHEMA.md`（仓库根）** —— **本库约定**：领域/主题、启用的页面类型、本库自定义规则、演进中的论点。每库不同、人与 Agent co-evolve、随 markdown 文件走、自描述。ingest/query 时读，且与 `index.md`/`log.md`/`overview.md` 一样**排除出 index/graph/lint 扫描**（config 非 content）。
 - **`AGENTAO.md`（仓库根）** —— **Agent 行为约束**：角色 + 硬约束（永不改 `raw/`、markdown 是事实来源、页面必带 frontmatter、术语转 `[[wikilink]]`、query 答案必引来源）+ 运行时偏好 + 指针（"遵循 `guanlan-wiki` skill；本库 schema 见 `SCHEMA.md`"）。只放精简硬规则（每 session 自动入上下文），大块可复用约定下沉 skill。
-- **`guanlan-wiki/` skill（观澜安装包提供，不在用户库内）** —— **维护引擎**：`SKILL.md`（工作流）+ `references/conventions.md`（通用默认约定：页面类型/frontmatter/命名/index·log 格式/模板，按需载入，`SCHEMA.md` 可覆盖）。wiki-无关、可复用、可独立升级。**P2 不含 `scripts/`**：确定性校验经包内 `guanlan check`（§4.6 / `P2-最小闭环.md` 决策1）；skill 只 shell 调它。
+- **`guanlan-wiki/` skill（观澜安装包提供，不在用户库内）** —— **维护引擎**：`SKILL.md`（共用规则与 ingest/query 工作流）+ `references/heal.md`、`references/audit.md`（低频工作流，运行时先读）+ `references/conventions.md`（通用默认约定：页面类型/frontmatter/命名/index·log 格式/模板，按需载入，`SCHEMA.md` 可覆盖）。wiki-无关、可复用、可独立升级。**P2 不含 `scripts/`**：确定性校验经包内 `guanlan check`（§4.6 / `P2-最小闭环.md` 决策1）；skill 只 shell 调它。
 
 一句话：**本库约定 → `SCHEMA.md`；行为约束 → `AGENTAO.md`；工作流 → skill；写操作门禁 → `guanlan` wrapper。** 知识库本体（`SCHEMA.md` + `wiki/`）agent-无关、可移植；MVP 宿主只承诺 Agentao + `guanlan` wrapper，未来可适配其他 Agent CLI（见 §1）。
 
