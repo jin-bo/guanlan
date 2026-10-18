@@ -585,6 +585,8 @@ def format_run_stats(result: GuardedWriteResult) -> str | None:
         return None
     cache_read = sum(_usage_int(u, "cache_read_tokens") for u in usages)
     cache_write = sum(_usage_int(u, "cache_creation_tokens") for u in usages)
+    # agentao 0.5.15 起 `usage.reasoning_tokens`：是 completion 的一部分（不是另加），旧版无此字段则不显示。
+    reasoning = sum(_usage_int(u, "reasoning_tokens") for u in usages)
     tool_calls = sum(_usage_int(e, "tool_calls") for e in envelopes)
     missing = sum(1 for p, c in per_run if p + c == 0)
     minutes, seconds = divmod(int(round(result.elapsed_s)), 60)
@@ -602,7 +604,8 @@ def format_run_stats(result: GuardedWriteResult) -> str | None:
     )
     return (
         f"ℹ 用量：耗时 {elapsed} · {rounds} · 输入 {prompt:,} tokens{cache}"
-        f" · 输出 {completion:,} tokens · 工具调用 {tool_calls}"
+        f" · 输出 {completion:,} tokens{f'（含推理 {reasoning:,}）' if reasoning else ''}"
+        f" · 工具调用 {tool_calls}"
     )
 
 def report_agent_error(

@@ -74,7 +74,12 @@ dependencies = [
     # jin-bo/agentao#543——doom-loop 防护把「改后复读」（read → replace → read）累计成同参数重复、终止整轮，
     # ingest 收尾的写后核对正是此形态（实测六次失败两次）；另修了读写混批并行与 `replace` 破坏 CRLF。
     # 0.5.14 起项目内 `.agentao/sandbox.json` 被忽略（上游 BREAKING），观澜不读写该文件。
-    "agentao[cli]>=0.5.14,<0.6",
+    #
+    # >=0.5.15：抬下限是因为两处上游修复落在 ingest 成本上——`agentao run` 不再把整段 prompt 当 skill
+    # 任务、每次请求在不进缓存的尾部重发一遍（jin-bo/agentao#549）；`usage` 新增 `reasoning_tokens`，
+    # `agentao.log` 每次响应带毫秒耗时与缓存计数（#550）。0.5.15 的行为变化：思考链不再截到 500 字、
+    # 整段留在历史里；日志时间戳改 `HH:MM:SS.mmm`；THINKING 事件分片下发——观澜不订阅 THINKING。
+    "agentao[cli]>=0.5.15,<0.6",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
 ]
 

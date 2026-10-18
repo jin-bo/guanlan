@@ -449,6 +449,18 @@ def test_run_stats_shows_cache_write(tmp_path):
     assert "· Agent 执行 1 次 ·" in line  # 无自愈不加括注；计执行次数，不是内部迭代数
 
 
+def test_run_stats_shows_reasoning_as_part_of_output(tmp_path):
+    """agentao 0.5.15 的 reasoning_tokens 是 completion 的一部分：括注「含推理」，跨自愈轮累加；无则不显示。"""
+    first, repair = _envelope(1000, 300), _envelope(500, 100)
+    first["usage"]["reasoning_tokens"] = 200
+    repair["usage"]["reasoning_tokens"] = 50
+    line = _stats_for(tmp_path, [first, repair])
+    assert "输出 400 tokens（含推理 250） · 工具调用" in line
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert "推理" not in _stats_for(plain, [_envelope(1000, 300)])
+
+
 # ====================================================================
 # P2.1 摄入写入纪律：源不回退（阻断+自愈）+ 正文骤缩（警告非阻断）
 # docs/P2.1-摄入写入纪律.md §8。零 LLM，全程 mock runner 制造写后末态。
