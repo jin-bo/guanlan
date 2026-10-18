@@ -102,6 +102,47 @@ def test_snapshot_catches_empty_dir_mutation(tmp_path: Path):
     assert [(c.kind, c.path) for c in changes] == [("added", "processed/")]
 
 
+def test_snapshot_ignores_finder_ds_store_files(tmp_path: Path):
+    """macOS Finder 在 raw/ 任意层级建、改、删 `.DS_Store`（普通文件）都不算 raw/ 变动。"""
+    _kb(tmp_path)
+    sub = tmp_path / "raw" / "sub"
+    sub.mkdir()
+    (tmp_path / "raw" / ".DS_Store").write_bytes(b"old")
+    before = snapshot_raw(tmp_path)
+    (tmp_path / "raw" / ".DS_Store").write_bytes(b"changed by Finder")
+    (sub / ".DS_Store").write_bytes(b"new")
+    assert diff_raw(before, snapshot_raw(tmp_path)) == []
+    (tmp_path / "raw" / ".DS_Store").unlink()
+    assert diff_raw(before, snapshot_raw(tmp_path)) == []
+
+
+def test_snapshot_still_catches_writes_disguised_as_ds_store(tmp_path: Path):
+    """只放过**普通文件**：同名目录（及其内容）、同名符号链接、近似名照常记——不能借名字藏写入。"""
+    _kb(tmp_path)
+    raw = tmp_path / "raw"
+    before = snapshot_raw(tmp_path)
+
+    (raw / "a").mkdir()
+    (raw / "a" / ".DS_Store").mkdir()
+    (raw / "a" / ".DS_Store" / "hidden.md").write_text("x", encoding="utf-8")
+    (raw / "x.DS_Store").write_text("x", encoding="utf-8")
+    (raw / ".DS_Store").symlink_to(raw / "x.DS_Store")
+
+    added = {c.path for c in diff_raw(before, snapshot_raw(tmp_path)) if c.kind == "added"}
+    assert {"a/.DS_Store/", "a/.DS_Store/hidden.md", ".DS_Store", "x.DS_Store"} <= added
+
+
+def test_guarded_write_ok_when_finder_touches_raw(tmp_path: Path):
+    """端到端：Agent 运行期间 raw/ 里冒出 `.DS_Store`，门禁照常通过、不判 raw_mutated。"""
+    _kb(tmp_path)
+
+    def act(root: Path) -> None:
+        (root / "raw" / ".DS_Store").write_bytes(b"finder")
+        _good_page(root)
+
+    assert run_guarded_write(tmp_path, "PROMPT", runner=make_runner(act)) == EXIT_OK
+
+
 def test_snapshot_catches_broken_symlink(tmp_path: Path):
     """raw/ 下新增坏符号链接（既非 file 也非 dir）也算违规，不被快照漏过。"""
     _kb(tmp_path)
