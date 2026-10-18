@@ -11,6 +11,7 @@ import pytest
 
 import guanlan
 from guanlan.runtime import (
+    AgentRunResult,
     _parse_envelope,
     drop_poisoned_api_keys,
     envelope_child_env,
@@ -296,3 +297,35 @@ def test_run_spec_text_round_trips_through_pyyaml(prompt: str):
     text = run_spec_text(prompt)
     text.encode("utf-8")  # 不抛：孤立代理已转义
     assert yaml.safe_load(text) == {"prompt": prompt}
+
+
+def test_subprocess_runner_passes_thinking_only_when_set(tmp_path: Path, monkeypatch):
+    """`--thinking` 原样透传给 agentao run；未指定时命令行逐字不变（不带该旗标）。"""
+    seen: list = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, '{"status":"ok","final_text":"x"}', "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    run_agent_task("q", working_directory=tmp_path, skills=(), thinking="low")
+    run_agent_task("q", working_directory=tmp_path, skills=())
+
+    with_level, without = seen
+    i = with_level.index("--thinking")
+    assert with_level[i + 1] == "low"
+    assert "--thinking" not in without
+
+
+def test_run_agent_task_omits_thinking_kwarg_when_unset(tmp_path: Path):
+    """未指定档位时不向注入 runner 传 `thinking` 关键字——既有 runner 入参逐字不变。"""
+    calls: list = []
+
+    def runner(prompt, **kwargs):
+        calls.append(kwargs)
+        return AgentRunResult(ok=True, final_text="")
+
+    run_agent_task("q", working_directory=tmp_path, runner=runner)
+    run_agent_task("q", working_directory=tmp_path, runner=runner, thinking="high")
+    assert "thinking" not in calls[0]
+    assert calls[1]["thinking"] == "high"

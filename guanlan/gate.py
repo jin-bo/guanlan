@@ -425,6 +425,7 @@ def run_guarded_write_result(
     prompt: str,
     *,
     model: str | None = None,
+    thinking: str | None = None,
     runner: AgentRunner | None = None,
     max_repair: int = MAX_REPAIR_ATTEMPTS,
     page_guard: bool = False,
@@ -461,6 +462,7 @@ def run_guarded_write_result(
         working_directory=root,
         permission_mode="workspace-write",
         model=model,
+        thinking=thinking,
         runner=runner,
     )
     last_result = first_result
@@ -511,6 +513,7 @@ def run_guarded_write_result(
             working_directory=root,
             permission_mode="workspace-write",
             model=model,
+            thinking=thinking,  # 自愈轮沿用同一档位：用户选的是这次写入的档位，不是首轮的
             runner=runner,
         )
         runs.append(last_result)
@@ -532,6 +535,7 @@ def run_guarded_write(
     prompt: str,
     *,
     model: str | None = None,
+    thinking: str | None = None,
     runner: AgentRunner | None = None,
     max_repair: int = MAX_REPAIR_ATTEMPTS,
     page_guard: bool = True,
@@ -544,7 +548,13 @@ def run_guarded_write(
     `ingest`/`query --backfill` 自动获得「既有页源不回退 + 正文骤缩」守护，**call site 不改**。
     """
     result = run_guarded_write_result(
-        root, prompt, model=model, runner=runner, max_repair=max_repair, page_guard=page_guard
+        root,
+        prompt,
+        model=model,
+        thinking=thinking,
+        runner=runner,
+        max_repair=max_repair,
+        page_guard=page_guard,
     )
     report_outcome(result.gate, result.run_result)
     stats = format_run_stats(result)

@@ -231,9 +231,10 @@ def run_ingest(
     *,
     root: str | Path = ".",
     model: str | None = None,
+    thinking: str | None = None,
     runner: AgentRunner | None = None,
 ) -> int:
-    """摄入一篇 `.md`，返回退出码（见 errors.py）。"""
+    """摄入一篇 `.md`，返回退出码（见 errors.py）。`thinking` 透传 `agentao run --thinking`，见 runtime。"""
     try:
         kb = require_kb_root(root, writable=True)
         tpath = _resolve_raw_target(kb, target)
@@ -253,7 +254,7 @@ def run_ingest(
             flush=True,
         )
     rc = run_guarded_write(
-        kb, build_ingest_prompt(kb, rel), model=model, runner=runner
+        kb, build_ingest_prompt(kb, rel), model=model, thinking=thinking, runner=runner
     )
     if rc == EXIT_OK:
         _stamp_source_digest(kb, tpath, rel)
