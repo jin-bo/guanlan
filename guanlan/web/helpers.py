@@ -244,8 +244,8 @@ def _list_raw(root: Path) -> list[dict]:
     """列 `raw/*.md`，并标记是否「已收录」（**只列、不经 Web 写 raw**，§1 / 决策P4-1）。
 
     `ingested` 是纯读派生信号、不落盘、可随时重算：raw 源经 ingest 会在
-    `wiki/sources/<slug>.md` 落一篇摘要页（slug = 同源文件名 kebab-case，见 SKILL.md
-    与 `raw_slug` 归口），故同名 source 页存在即视为该源已收录。定位交给
+    `wiki/sources/<slug>.md` 落一篇摘要页（slug 由 `raw_slug` 按文件名确定，ingest
+    prompt 直接给出路径），故同名 source 页存在即视为该源已收录。定位交给
     `find_source_page`——它在精确 slug 之外容忍 `.`/`-` 归一分歧（Agent 常把枚举序号
     `1.` 命成 `1-`），免得已建好的页被误判「未收录」。前端默认只显未收录、
     一键可切看已收录（非破坏：永不隐藏磁盘文件、已收录源仍可预览/重投 ingest）。

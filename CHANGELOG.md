@@ -93,6 +93,22 @@
     中间无写入的真重复仍会被拦。
   - **同一批工具调用只有全是只读工具时才并行**（0.5.14）：此前读写混在一批里会并行执行，读到的可能是写前内容。
   - **`replace` 保持 CRLF 文件的行尾**（0.5.14），不再把 CRLF 页改成混合行尾。
+
+- **`guanlan-wiki` 的 `SKILL.md` 与 `conventions.md` 按 ASD-STE100 的原则改写**（一词一义、一句一指令、不改原意）。
+  规则实质不变，以下几处除外：
+  - **source 页文件名不再写「kebab-case（同源文件名）」**：wrapper 的 `raw_slug` 保留大小写、点与下划线，
+    从来不是 kebab-case，Agent 照旧规则自行改写文件名，正是 `find_source_page` 要额外容忍点改横杠的原因。
+    现在两份文件与 init 模板 `examples/SCHEMA.md` 都改成「用 prompt 给出的路径与来源名」。
+  - **heal 的 C 方案（向既有页追加别名）统一为同时把 `last_updated` 改成当天**：此前 SKILL.md 一处说「实质修改
+    含追加 aliases 必须改」、另一处说「不动其它 frontmatter」，conventions 说「可改」；写集审计本就允许改它。
+    `HEAL_PROMPT` 同步改了这一句。
+  - SKILL.md 开头新增〈用词〉：资料、source 页、来源名、wrapper、写门禁各只有一种叫法，「必须 / 不得」为硬约束，
+    「应 / 不要」为默认做法；此前同一页面有四种叫法、禁止语有七种。
+  - 同一规则只在一处写全：heal 决定树只留在 SKILL.md，conventions 的 heal 节改为指引；`SCHEMA.md` 改不了
+    `type` 与目录、`raw_digest` 托管等条目各留一处。
+  - 移出只给维护者看的内容（阶段编号、Web 渲染现状、设计理由与 docs 链接），这些理由原本就在对应 `docs/P*.md`
+    与笔记里。`conventions.md` 从约 2.0 万字节降到 1.5 万字节；ingest 每次都整读它，并在之后的每次请求里携带。
+  - 中文分号从 36 处降到 1 处（决定树代码块内），超过 60 字的句子从 30 句降到 11 句。
   - 0.5.14 起项目内 `.agentao/sandbox.json` 被忽略、只读 `~/.agentao/sandbox.json`（上游 BREAKING）。观澜不读写
     `sandbox.json`；若有用户在知识库里放过这个文件，需挪到用户目录。0.5.13 移除的 `AgentManager` 旧回调参数
     观澜未使用。
