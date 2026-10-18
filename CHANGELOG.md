@@ -7,6 +7,12 @@
 
 ### 变更
 
+- **agentao 下限抬到 0.5.15**（`agentao[cli]>=0.5.15,<0.6`）。上游修了两处落在 ingest 成本上的问题：
+  `agentao run` 不再把整段 prompt 当 skill 任务、在每次请求末尾不进缓存的位置再发一遍（含页面名录，
+  库越大越长；jin-bo/agentao#549）；用量新增推理 token，`agentao.log` 每次响应带毫秒耗时与缓存计数（#550）。
+  入库结束的「ℹ 用量」行随之在输出后括注「含推理 N」（旧版 agentao 无此字段则不显示）。
+  0.5.15 起思考链整段留在历史里、不再截到 500 字，日志时间戳改为 `HH:MM:SS.mmm`；
+  `scripts/analyze_ingest_history.py` 已兼容新时间戳。
 - **`guanlan-wiki` 的 heal / audit 工作流移出 SKILL.md，改放 `references/heal.md` / `references/audit.md`**。
   agentao 激活 skill 后，**每次请求**都把 SKILL.md 全文附在上下文末尾重发，一次入库约 40–60 次请求；
   这两段只在 `guanlan heal` / `guanlan audit` 里用得到，却在每次 ingest 与问答请求里白白占位。

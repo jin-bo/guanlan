@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""离线估算 Agentao 0.5.14 入库日志中各类文本的历史携带成本。
+"""离线估算 Agentao 0.5.14+ 入库日志中各类文本的历史携带成本。
 
 用法：python scripts/analyze_ingest_history.py <agentao.log> [...]
 只读日志，只输出计数。字符×后续请求数不是 token、费用或可节省时延。
@@ -15,7 +15,13 @@ from pathlib import Path
 import re
 
 
-STAMP = r"\d{2}:\d{2}:\d{2} "
+STAMP = r"\d{2}:\d{2}:\d{2}(?:\.\d{3})? "  # 0.5.15 起带毫秒
+
+
+def _clock(line: str) -> float:
+    """行首时间戳 → 当日秒数；0.5.15 起为 HH:MM:SS.mmm，此前为 HH:MM:SS。"""
+    h, m, sec = line.split(" ", 1)[0].split(":")
+    return int(h) * 3600 + int(m) * 60 + float(sec)
 
 
 def analyze(path: Path) -> dict:
@@ -44,8 +50,7 @@ def analyze(path: Path) -> dict:
             i += 1
             continue
         if re.search(r"\[req_\d+\] LLM REQUEST$", line):
-            clock = list(map(int, line[:8].split(":")))
-            now = clock[0] * 3600 + clock[1] * 60 + clock[2]
+            now = _clock(line)
             if last_response is not None:
                 between_seconds += (now - last_response) % 86400
             request_start = now
@@ -53,8 +58,7 @@ def analyze(path: Path) -> dict:
             response = False
             role = tool = ""
         if re.search(r"\[req_\d+\] LLM RESPONSE$", line):
-            clock = list(map(int, line[:8].split(":")))
-            now = clock[0] * 3600 + clock[1] * 60 + clock[2]
+            now = _clock(line)
             if request_start is None:
                 raise ValueError("响应缺少对应请求")
             request_seconds += (now - request_start) % 86400
@@ -158,8 +162,8 @@ def analyze(path: Path) -> dict:
     total = sum(weighted.values())
     return {
         "requests": request,
-        "request_to_response_s": request_seconds,
-        "between_requests_s": between_seconds,
+        "request_to_response_s": round(request_seconds, 3),
+        "between_requests_s": round(between_seconds, 3),
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "generated_reasoning_chars": reasoning_chars,
