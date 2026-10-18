@@ -455,3 +455,15 @@ def test_p3_dispatch_end_to_end(tmp_path):
     assert main(["-C", str(tmp_path), "lint"]) == 0
     assert main(["-C", str(tmp_path), "graph", "--json-only"]) == 0
     assert (tmp_path / "graph" / "graph.json").is_file()
+
+
+def test_ingest_thinking_flag_parses_and_defaults_to_none():
+    assert _parse(["ingest", "raw/x.md"]).thinking is None
+    assert _parse(["ingest", "raw/x.md", "--thinking", " low "]).thinking == "low"
+
+
+@pytest.mark.parametrize("bad", ["", "low high", "1x", "低"])
+def test_ingest_thinking_rejects_non_word(bad, capsys):
+    with pytest.raises(SystemExit):
+        _parse(["ingest", "raw/x.md", "--thinking", bad])
+    assert "推理档位" in capsys.readouterr().err

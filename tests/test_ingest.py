@@ -270,3 +270,29 @@ def test_ingest_reingest_guards_sources_union(kb: Path):
     assert calls["n"] == 2  # 首轮覆盖丢 a → 门禁阻断 → 1 次自愈并回
     meta, _ = load_page(kb / "wiki" / "entities" / "X.md")
     assert set(meta["sources"]) == {"a", "b"}  # 末态守为并集
+
+
+def test_ingest_passes_thinking_to_first_and_repair_rounds(kb: Path):
+    """`--thinking` 作用于这次写入的每一轮：首轮与自愈轮拿到同一档位。"""
+    from guanlan.runtime import AgentRunResult
+
+    seen: list = []
+
+    def runner(prompt, **kwargs):
+        seen.append(kwargs.get("thinking"))
+        root = kwargs["working_directory"]
+        if len(seen) == 1:
+            _write_bad_fm(root, "wiki/concepts/Bad.md")
+        else:
+            write_page(root, "wiki/concepts/Bad.md")
+        return AgentRunResult(ok=True, final_text="done")
+
+    assert run_ingest(_put_raw(kb), root=kb, runner=runner, thinking="low") == EXIT_OK
+    assert seen == ["low", "low"]
+
+
+def test_ingest_without_thinking_keeps_runner_kwargs(kb: Path):
+    target = _put_raw(kb)
+    runner = make_runner(lambda root: write_page(root, "wiki/concepts/Foo.md"))
+    run_ingest(target, root=kb, runner=runner)
+    assert "thinking" not in runner.calls[0]

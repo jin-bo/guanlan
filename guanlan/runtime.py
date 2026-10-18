@@ -6,7 +6,7 @@ wrapper 以工作目录 = 知识库根调用：
     agentao run --format json --skill guanlan-wiki \
                 --permission-mode <read-only|workspace-write> \
                 --interaction-policy reject \
-                [--model M] [--max-iterations N]
+                [--model M] [--max-iterations N] [--thinking LEVEL]
 
 prompt 不走命令行，经 **stdin 的 run spec**（`{"prompt": …}`）交给子进程，见 `run_spec_text`。
 stdout 是 `RunResult` JSON 信封；字段名是 `error.type`（非 `error.kind`）。信封的编码是
@@ -59,10 +59,16 @@ def run_agent_task(
     skills: tuple[str, ...] = ("guanlan-wiki",),
     model: str | None = None,
     max_iterations: int = 200,
+    thinking: str | None = None,
     runner: AgentRunner | None = None,
 ) -> AgentRunResult:
-    """跑一段 prompt、拿结构化结果。`runner is None` 时用默认子进程 runner。"""
+    """跑一段 prompt、拿结构化结果。`runner is None` 时用默认子进程 runner。
+
+    `thinking`：推理档位，原样透传 `agentao run --thinking`（agentao ≥0.5.15）；可选值由模型端决定，
+    观澜不维护档位表。**未指定时不向 runner 传这个关键字**——既有调用的 runner 入参逐字不变。
+    """
     runner = runner or _subprocess_runner
+    extra = {"thinking": thinking} if thinking else {}
     return runner(
         prompt,
         working_directory=working_directory,
@@ -70,6 +76,7 @@ def run_agent_task(
         skills=skills,
         model=model,
         max_iterations=max_iterations,
+        **extra,
     )
 
 
@@ -247,6 +254,7 @@ def _subprocess_runner(
     skills: tuple[str, ...],
     model: str | None,
     max_iterations: int,
+    thinking: str | None = None,
 ) -> AgentRunResult:
     # 安装态下用户库的发现路径里没有 guanlan-wiki skill，首次需要时幂等装到全局
     # （best-effort；放在默认 runner 而非 run_agent_task，注入 runner 的测试不碰全局目录）。
@@ -271,6 +279,8 @@ def _subprocess_runner(
         cmd += ["--skill", skill]
     if model:
         cmd += ["--model", model]
+    if thinking:
+        cmd += ["--thinking", thinking]
 
     try:
         # capture_output 仍把子进程 stdout（JSON 信封）缓冲到结束；心跳是父进程旁路打到 stderr，

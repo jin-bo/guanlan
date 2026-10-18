@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 
 from . import __version__
@@ -50,8 +51,16 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _thinking_level(value: str) -> str:
+    """`--thinking` 只校验形状（单个词），不校验取值：档位表随模型端而异，归 agentao/提供方裁决。"""
+    level = value.strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", level):
+        raise argparse.ArgumentTypeError(f"推理档位须是单个词，如 low / high：{value!r}")
+    return level
+
+
 def _cmd_ingest(args: argparse.Namespace) -> int:
-    return run_ingest(args.target, root=args.dir, model=args.model)
+    return run_ingest(args.target, root=args.dir, model=args.model, thinking=args.thinking)
 
 
 def _cmd_query(args: argparse.Namespace) -> int:
@@ -279,6 +288,14 @@ def _add_ingest_parser(sub, dir_parent) -> None:
     p = sub.add_parser("ingest", parents=[dir_parent], help="摄入一篇 .md 资料")
     p.add_argument("target", help="raw/ 下的 .md 文件，如 raw/x.md")
     p.add_argument("--model", default=None, help="覆盖 Agentao 模型")
+    p.add_argument(
+        "--thinking",
+        type=_thinking_level,
+        default=None,
+        metavar="LEVEL",
+        help="推理档位，透传 agentao run --thinking（如 low / high；off 用模型端默认）。"
+        "可选值由模型端决定；不指定则不改变现有行为。low 通常更快、产出更简略",
+    )
     p.set_defaults(func=_cmd_ingest)
 
 
