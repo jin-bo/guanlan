@@ -8,7 +8,7 @@
   raw 现字节，圈出**漂移源**及沿 `sources:` slug 图传播到的**引用页**。同喂 `audit --dry-run`
   （advisory 预览）与 `audit`（worklist），单一口径不分叉。
 - **Layer-2**（§5，LLM via 门禁）：对疑点页交 Agentao + skill 做语义判断，确认则就地标
-  `## ⚠️ 矛盾与存疑` / 更新过期论断、记一行 JSON 留痕；走 `run_guarded_write_result(...,
+  `## ⚠️ 资料冲突与待核` / 更新过期论断、记一行 JSON 留痕；走 `run_guarded_write_result(...,
   page_guard=True)`（**显式开** P2.1 源不回退闸，决策P3.7-4——该核心默认 `page_guard=False`）。
 - **指纹刷新**（§4.2/§7，零 LLM，**wrapper 执行**）：仅当某漂移源**整组**（其 source 页 + 全部
   引它的页）都在本批留下**有效 JSON 留痕**时，才把该 source 页 `raw_digest` 刷成现值（决策P3.7-8
@@ -77,7 +77,7 @@ AUDIT_PROMPT = (
     "`sources:`）：对照本页摘要与其 raw 现版本。\n"
     " - 仍准：无需改正文（指纹刷新由 wrapper 在你返回后自动处理，**你不要碰 `raw_digest`**），"
     "status=`confirmed`。\n"
-    " - 已过期 / 现源与页冲突：就地按 conventions 标 `## ⚠️ 矛盾与存疑`(status=`flagged`)，"
+    " - 已过期 / 现源与页冲突：就地按 conventions 标 `## ⚠️ 资料冲突与待核`(status=`flagged`)，"
     "或最小化更新该论断(status=`updated`)，其余正文一字不动。\n"
     " - **逐页留痕（强制）**：在唯一一条 `## [<日期>] audit | <一句话批次说明>` 标题下，对**每个目标页**"
     "追加一行**单行 JSON** `- {{\"page\":\"<相对库根 posix>\",\"drifted_slugs\":[\"…\"],"
