@@ -537,6 +537,24 @@ def test_render_markdown_raw_ref_command_and_fenced_literal(client, kb) -> None:
     assert "rawlink" not in fenced
 
 
+def test_render_markdown_raw_ref_code_original_filename(client, kb) -> None:
+    """raw/ 保留原始文件名（空格/`——`/`、`）：整段行内 code 引用仍联链；缺失标灰；多路径串不误判。
+
+    回归：旧正则 `[\\w.\\-]` 让含这些字符的源页「原始资料」行既不联链、也不标灰，静默失效。
+    """
+    from guanlan.web.render import render_markdown
+
+    name = "示例讲话、第二部分 附录——终稿.md"
+    (kb / "raw" / name).write_text("x", encoding="utf-8")
+    wiki = kb / "wiki"
+    html = render_markdown(f"> 原始资料：`raw/{name}`", wiki)
+    assert 'class="rawlink"' in html and f'data-raw="{name}"' in html
+    miss = render_markdown("源：`raw/不存在、某篇 讲话.md`", wiki)
+    assert "rawlink broken" in miss and "data-raw" not in miss
+    multi = render_markdown(f"`raw/{name} raw/案卷.md`", wiki)
+    assert "rawlink" not in multi
+
+
 def test_render_markdown_raw_ref_no_clickable_inside_broken(client, kb) -> None:
     """评审修复：断链 span 内不得再联出可点 rawlink（`span` 已入 _RAW_SKIP_SUBTREE）。
 

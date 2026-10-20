@@ -186,12 +186,14 @@ _stem_to_path = link_resolution_index
 #   ③ `[[raw/<slug>]]`（wikilink 写法，可带/不带 .md）—— `_resolve_wikilink` 内 raw 前缀拦截
 #   ④ markdown 链接 `[文字](raw/<slug>.md)` —— `_RawPathTreeprocessor` ①路（改写 <a href>）
 # 裸路径串正则：`raw/` 须前邻非词/非斜杠（杜绝 `wiki/sources/raw/x.md`、`araw/x.md` 误命中）；
-# slug 字符集对齐 rawio.raw_slug 的 `[\w.\-]`（`\w` 含 CJK）；尾界 `(?![\w\-])` 只挡「`.md` 后接更多
+# 字符集取保守的 `[\w.\-]`（`\w` 含 CJK）——注意 raw/ 文件**保留原始文件名**（空格/`——`/`、` 照留，
+# `raw_slug` 只规整 source 页名），故含这些字符的裸路径不联链：正文无边界可定界，放进空格会吞下半句；尾界 `(?![\w\-])` 只挡「`.md` 后接更多
 # 词字/连字符」（防把 `notes.mdx`/`x.mdown` 误截成 `.md`），但**允许后随 `.`**——故句末紧跟 ASCII 句号
 # 的 `raw/x.md.` 仍联链、只把句号留在外面（评审修复：旧的 `(?![\w.\-])` 把句末句号也挡了）。
-# `_RAW_REF_FULL_RE` 供「整段 code / 整段路径」fullmatch（无需边界，靠整体消费定界）。
+# `_RAW_REF_FULL_RE` 供「整段 code」fullmatch：整体消费已定界，故放宽到「除斜杠外任意字符」，
+# 覆盖原始文件名里的空格/`——`/`、`（修复前 `[\w.\-]` 让这类源页的「原始资料」行点不动）。
 _RAW_PATH_RE = re.compile(r"(?<![\w/])raw/[\w.\-]+?\.md(?![\w\-])")
-_RAW_REF_FULL_RE = re.compile(r"raw/([\w.\-]+\.md)")
+_RAW_REF_FULL_RE = re.compile(r"raw/([^/]+\.md)")
 
 # rawlink 命中/缺失的样式归口（单点定义，杜绝多处 class/title 字面漂移，评审 reuse）。
 _RAWLINK_BROKEN_TITLE = "raw/ 源不存在"
@@ -266,8 +268,9 @@ def _is_raw_md_form(basename: str) -> bool:
 def _raw_ref_in_code(content: str) -> str | None:
     """行内 code 整段（规整后）恰好是 `raw/<slug>.md` → 返回 basename（保大小写），否则 None。
 
-    与裸路径串同口径但用 fullmatch（整段消费定界，无需前后边界）；命令/多 token 代码（`cat raw/x.md`）
-    整体不等于 `raw/<slug>.md` 形 → 不误判（同 `_code_ref_target` 末步整体相等的安全纪律）。
+    用 fullmatch（整段消费定界，无需前后边界），故文件名可含空格/全角标点（raw/ 保留原始文件名）；
+    命令/多 token 代码（`cat raw/x.md`）不以 `raw/` 开头、多路径串含第二个 `/` → 整体不匹配，不误判
+    （同 `_code_ref_target` 末步整体相等的安全纪律）。
     """
     m = _RAW_REF_FULL_RE.fullmatch(content.strip().replace("\\", "/"))
     return m.group(1) if m is not None else None
