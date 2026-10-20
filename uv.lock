@@ -655,7 +655,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'im-weixin'", specifier = ">=0.27" },
     { name = "lark-oapi", marker = "extra == 'im'", specifier = ">=1.6.8" },
     { name = "lark-oapi", marker = "extra == 'im-feishu'", specifier = ">=1.6.8" },
-    { name = "markdown", marker = "extra == 'web'", specifier = ">=3" },
+    { name = "markdown", marker = "extra == 'web'", specifier = ">=3,<3.11" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2,<3" },
     { name = "python-multipart", marker = "extra == 'web'", specifier = ">=0.0.9" },
     { name = "pyyaml", specifier = ">=6" },
