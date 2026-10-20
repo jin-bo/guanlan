@@ -3,6 +3,19 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [未发布]
+
+### 修复
+
+- **`guanlan-wiki` 写工作流禁用 `run_shell_command`，并给出内置工具替代**。`agentao run` 无交互运行时，
+  任何需确认的调用都会中止整轮、作废已做的工作；而 agentao 的只读 shell 白名单拒绝带引号、管道的命令和 `true`。
+  实测一批 23 篇里 11 轮因此中止（耗时约 26 分钟、输入约 1380 万 token），2 篇两次重试都失败被跳过；
+  被拒的多是 `grep -n "^## " … | tail` 与 `true` / `echo "noop"` 空操作。原「不要自行运行 shell」只写在收尾节，
+  中途定位时用不上。现升为核心硬约束第 7 条，新增〈写工作流的工具（共用）〉对照表：定位用
+  `search_file_content`（`regex: true`）+ `read_file` 的 `offset`/`limit`，追加 log 用 `write_file` 的
+  `append: true`，不发空操作。conventions §log.md 里引导用 shell `grep` 的说法一并改掉。
+  复跑那 2 篇各一次成功、shell 调用 0 次。上游另提 jin-bo/agentao#565（无交互下拒绝改为回给模型、不中止）。
+
 ## [0.1.29] - 2026-10-18
 
 ### 新增
