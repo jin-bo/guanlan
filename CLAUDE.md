@@ -83,7 +83,7 @@ These come up repeatedly in DESIGN and the skill; preserve them in any change:
 - **`raw/` is read-only and immutable.** In P2 this is enforced *deterministically by the wrapper* via a before/after snapshot (filename + size + mtime, SHA256 if needed) around the Agentao call — not by permission config, since a snapshot also catches shell `mv`/`rm`/`python` writes that bypass `write_file`.
 - **Zero-LLM scripts vs. LLM-only workflows.** Deterministic work (frontmatter/wikilink/structure checks, graph building) is plain Python scripts with no LLM. LLM is used *only* for `ingest` and `query`, and always via the Agentao runtime — scripts must never carry their own LLM client or API keys.
 - **`SCHEMA.md` / `AGENTAO.md` / `index.md` / `log.md` / `overview.md` are config, not content** — exclude them from index/graph/lint scans.
-- **Data conventions** (frontmatter fields, page naming — source pages take the slug the wrapper's `raw_slug` derives from the raw filename, not kebab-case — `[[wikilink]]` resolution, `index.md`/`log.md` formats, the `## ⚠️ 矛盾与存疑` contradiction-marking format) are specified in `skills/guanlan-wiki/references/conventions.md` and DESIGN §4.5. A base's `SCHEMA.md` may override defaults.
+- **Data conventions** (frontmatter fields, page naming — source pages take the slug the wrapper's `raw_slug` derives from the raw filename, not kebab-case — `[[wikilink]]` resolution, `index.md`/`log.md` formats, the `## ⚠️ 资料冲突与待核` conflict / pending-verification marking format) are specified in `skills/guanlan-wiki/references/conventions.md` and DESIGN §4.5. A base's `SCHEMA.md` may override defaults.
 
 ## Conventions
 

@@ -122,7 +122,7 @@ def _continuation_prompt(objective: str) -> str:
         "and explain what you need. Otherwise keep going — do not stop merely to ask "
         "whether to continue.\n\n"
         "观澜语境：优先用 guanlan_search 召回已有页面、维护 [[wikilink]] 交叉链接、"
-        "遵 `## ⚠️ 矛盾与存疑` 约定标注存疑；不要重复等价检索，证据足够即回答。"
+        "遵 `## ⚠️ 资料冲突与待核` 约定标注冲突与待核；不要重复等价检索，证据足够即回答。"
     )
 
 

@@ -165,9 +165,10 @@ last_updated: YYYY-MM-DD
 - **index.md**：按 Overview / Sources / Entities / Concepts / Syntheses 分区，每行 `- [标题](路径) — 一句话`（Overview 区仅链到 `overview.md`，不重复其正文）。
 - **log.md**：`## [YYYY-MM-DD] <op> | <title>`，可被 `grep "^## \[" wiki/log.md | tail` 解析。
 - **CJK**：query 对中文用 2-gram 滑窗匹配（参考 llm-wiki-agent 的 `examples/cjk-showcase`）；粗召回不足时走上述 query 的目录扫描/补词兜底，按需升级路径见 §8（**不优先上分词**）。
-- **矛盾标记（卖点核心，必须有确定格式）**：ingest 时若 LLM 发现新资料与既有页冲突，**就地**在相关 entity/concept 页维护一节 `## ⚠️ 矛盾与存疑`，每条一行：
-  `- <断言 A>（[[source-a]]）↔ <断言 B>（[[source-b]]）— <open|resolved> · <备注>`；
-  并向 `log.md` 追加一条（有无矛盾以 `## ⚠️ 矛盾与存疑` 标题为准，不另存 frontmatter 布尔）。**ingest 只做"发现即就地标记"**；系统性复检与状态流转（open→resolved、过期论断、跨页矛盾发现）属语义 lint，P3 之后再加（见 §4.4 注 / §8）——P3 的确定性 health/lint **不统计矛盾**。
+- **冲突与待核标记（卖点核心，必须有确定格式）**：ingest 时若 LLM 发现新资料与既有页冲突，或新资料有影响论断的具体缺口，**就地**在相关页维护一节 `## ⚠️ 资料冲突与待核`（v0.1.30 前称 `## ⚠️ 矛盾与存疑`），每条一行：
+  `- <断言 A>（[[source-a]]）↔ <断言 B>（[[source-b]]）— <open|resolved> · <备注>`（冲突，双边）或
+  `- <待核断言>（[[source]]）— <open|resolved> · 待核 · <证据缺口及需核对内容>`（待核，单边；只收影响论断可信度或引用的具体缺口）；
+  并向 `log.md` 追加一条（标题表示有冲突或待核记录，有无未决事项以 `open` 条目为准，不另存 frontmatter 布尔）。**ingest 只做"发现即就地标记"**；系统性复检与状态流转（open→resolved、过期论断、跨页矛盾发现）属语义 lint，P3 之后再加（见 §4.4 注 / §8）——P3 的确定性 health/lint **不统计矛盾**。
 
 ### 4.6 工具（确定性脚本，Python 3.12；P2 的 check 在 `guanlan` 包内）
 
