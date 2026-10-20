@@ -138,7 +138,7 @@ Overview 分区只链到 `overview.md`，不复制它的正文。每次 ingest �
 
 ## log.md
 
-只追加的时间线。每条一行标题，可以用 `grep "^## \[" wiki/log.md | tail` 解析：
+只追加的时间线。每条一行标题，按正则 `^## \[` 匹配即可解析（写工作流里用 `search_file_content` 并设 `regex: true`，不用 shell）：
 
 ```
 ## [YYYY-MM-DD] <op> | <title>
