@@ -7,6 +7,11 @@
 
 ### 变更
 
+- **agentao 下限抬到 0.5.16**（`agentao[cli]>=0.5.16,<0.6`）。上游修了 `search_file_content`（jin-bo/agentao#563）：
+  在 git 工作区里旧版只走 `git grep`，只搜已跟踪文件，被 gitignore 的目录一律答「No matches」。开发态的
+  `kbs/<库>/` 正落在本仓库被忽略的 `/kbs/` 下，Agent 在这些库里按内容搜索此前永远搜不到；新写入、尚未
+  `git add` 的文件同理。同版新增的 `--interaction-policy deny`（需审批的调用退回给模型、本轮继续）观澜暂不采用，
+  `guanlan/runtime.py` 仍显式传 `reject`；`NonInteractiveTransport` 改按 `TOOL_CONFIRMATION` 事件配对，观澜不使用该类。
 - **冲突标记节改名为 `## ⚠️ 资料冲突与待核`，并新增单边「待核」条目**（原名 `## ⚠️ 矛盾与存疑`）。这是一次**行为约定变更**：
   确定性代码不解析该标题，但 skill、conventions 与 ingest / audit / Web 问答 / MCP `guanlan-query` 的提示词都随之改写，
   Agent 新建和维护的节名、收录范围都会变。改名的起因：某实际库约三分之二的 concept 页带这一节，抽查发现大多不是
