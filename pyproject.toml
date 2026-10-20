@@ -79,7 +79,12 @@ dependencies = [
     # 任务、每次请求在不进缓存的尾部重发一遍（jin-bo/agentao#549）；`usage` 新增 `reasoning_tokens`，
     # `agentao.log` 每次响应带毫秒耗时与缓存计数（#550）。0.5.15 的行为变化：思考链不再截到 500 字、
     # 整段留在历史里；日志时间戳改 `HH:MM:SS.mmm`；THINKING 事件分片下发——观澜不订阅 THINKING。
-    "agentao[cli]>=0.5.15,<0.6",
+    #
+    # >=0.5.16：`search_file_content` 修复（jin-bo/agentao#563）——git 工作区里旧版只走 `git grep`，
+    # 只搜已跟踪文件，且对被 gitignore 的目录一律答「No matches」。开发态的 `kbs/<库>/` 正落在本仓库
+    # 被忽略的 `/kbs/` 下，Agent 在这些库里搜内容此前永远搜不到。同版新增的 `--interaction-policy deny`
+    # 观澜不采用：`runtime.py` 仍显式传 `reject`，`NonInteractiveTransport` 配对方式的变更也不涉及观澜。
+    "agentao[cli]>=0.5.16,<0.6",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
 ]
 
