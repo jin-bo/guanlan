@@ -7583,6 +7583,26 @@ def test_wikilink_scanner_matches_renderer(kb, name, src, expected) -> None:
     assert scanned == expected, f"{name}：扫描器与渲染器不一致"
 
 
+@pytest.mark.parametrize(
+    "src,kept",
+    [
+        ("a ``` b ````` c", "b"),
+        ("`甲`` 乙", "甲"),
+    ],
+)
+def test_render_markdown_unpaired_backticks_keep_text(kb, src, kept) -> None:
+    """开闭长度不配对的反引号串：正文一个字都不能丢。
+
+    护的是 pyproject `markdown<3.11` 上界：Python-Markdown 3.11.0 重写行内反引号处理后，
+    `a ``` b ````` c` 渲染成 `a <code></code> c`（3.11.2 仍如此）。放开上界重锁后此用例即报；
+    wikilink 形的同类输入见上面 `test_wikilink_scanner_matches_renderer[开3闭5不闭合]`。
+    """
+    from guanlan.web.render import render_markdown
+
+    text = re.sub(r"<[^>]+>", "", render_markdown(src, kb / "wiki"))
+    assert kept in text, f"渲染丢字：{src!r} → {text!r}"
+
+
 _KNOWN_DIVERGENCES = [
     # 缩进 1–3 的围栏：渲染器行为**随 info string 而变**（带 `yaml` 当代码、不带则不当），
     # 无法对齐，故扫描器一律不抹 → 多报。多报只是吵，抹错了是把真链接静默吞掉。

@@ -3,6 +3,16 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [未发布]
+
+### 修复
+
+- **`web` extra 的 markdown 加上界 `<3.11`**（`markdown>=3,<3.11`）。Python-Markdown 3.11.0 重写行内反引号处理
+  （上游 #1620）后，开闭长度不配对的反引号串会吞掉正文：``a ``` b ````` c`` 渲染成 `a <code></code> c`，`b` 不见了；
+  3.11.1 / 3.11.2 未修。Web 端渲染的就是 wiki 页正文，丢字会误导读者，也会让 Web 渲染与 `check` 的 wikilink 扫描
+  结论分叉。锁文件一直是 3.10.2，CI 测不到；但 3.11.1 于 2026-10-13 发布后，新装 `guanlan-wiki[web]`（含 0.1.29、0.1.30）
+  会解析到 3.11.x。已装的环境可执行 `pip install 'markdown<3.11'` 降级。新增回归用例：放开上界并重新锁定后会报错。
+
 ## [0.1.30] - 2026-10-20
 
 ### 变更
