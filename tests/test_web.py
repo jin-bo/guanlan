@@ -7593,7 +7593,7 @@ def test_wikilink_scanner_matches_renderer(kb, name, src, expected) -> None:
 def test_render_markdown_unpaired_backticks_keep_text(kb, src, kept) -> None:
     """开闭长度不配对的反引号串：正文一个字都不能丢。
 
-    护的是 pyproject `markdown<3.11` 上界：Python-Markdown 3.11.0 重写行内反引号处理后，
+    护的是 pyproject `markdown<3.11` 上界：Python-Markdown 3.11 起（上游 PR #1618）
     `a ``` b ````` c` 渲染成 `a <code></code> c`（3.11.2 仍如此）。放开上界重锁后此用例即报；
     wikilink 形的同类输入见上面 `test_wikilink_scanner_matches_renderer[开3闭5不闭合]`。
     """
