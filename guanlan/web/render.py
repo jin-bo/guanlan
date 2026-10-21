@@ -177,34 +177,39 @@ _stem_to_path = link_resolution_index
 
 
 # ── raw/ 源引用 → 只读 raw 查看链接 ──────────────────────────────────────────────
-# 正文里指向 `raw/<slug>.md` 的引用，联成前端 `a.rawlink[data-raw]`（点 → 右栏调 `/api/raw/file`
+# 正文里指向 `raw/[<子目录>/]<slug>.md` 的引用（raw/ 可分子目录，ingest/门禁本就 rglob 整树），联成前端 `a.rawlink[data-raw]`（点 → 右栏调 `/api/raw/file`
 # 只读内联渲染那篇 raw 源）。与 `[[wikilink]]` 同纪律：**仅真实存在**的 raw 文件联链、其余标灰
 # `span.rawlink.broken`（决策：raw/ 是只读不可变源，引用它的多是 `wiki/sources/` 摘要页 frontmatter/
 # 正文，点链即回看原始素材）。四种写法共用下面的解析归口：
-#   ① 裸路径串（plain text 行内，如「材料见 raw/某案例.md」）—— `_RawPathTreeprocessor` ②路
+#   ① 裸路径串（plain text 行内，如「材料见 raw/某案例.md」「raw/辅导/某篇.md」）—— `_RawPathTreeprocessor` ②路
 #   ② 行内 code（整段恰好是 `raw/<slug>.md`）—— `_CodePathLinkTreeprocessor` 内新分支
 #   ③ `[[raw/<slug>]]`（wikilink 写法，可带/不带 .md）—— `_resolve_wikilink` 内 raw 前缀拦截
 #   ④ markdown 链接 `[文字](raw/<slug>.md)` —— `_RawPathTreeprocessor` ①路（改写 <a href>）
 # 裸路径串正则：`raw/` 须前邻非词/非斜杠（杜绝 `wiki/sources/raw/x.md`、`araw/x.md` 误命中）；
-# 字符集取保守的 `[\w.\-]`（`\w` 含 CJK）——注意 raw/ 文件**保留原始文件名**（空格/`——`/`、` 照留，
+# 可带任意层子目录段；每段字符集取保守的 `[\w.\-]`（`\w` 含 CJK）——注意 raw/ 文件**保留原始文件名**（空格/`——`/`、` 照留，
 # `raw_slug` 只规整 source 页名），故含这些字符的裸路径不联链：正文无边界可定界，放进空格会吞下半句；尾界 `(?![\w\-])` 只挡「`.md` 后接更多
 # 词字/连字符」（防把 `notes.mdx`/`x.mdown` 误截成 `.md`），但**允许后随 `.`**——故句末紧跟 ASCII 句号
 # 的 `raw/x.md.` 仍联链、只把句号留在外面（评审修复：旧的 `(?![\w.\-])` 把句末句号也挡了）。
-# `_RAW_REF_FULL_RE` 供「整段 code」fullmatch：整体消费已定界，故放宽到「除斜杠外任意字符」，
-# 覆盖原始文件名里的空格/`——`/`、`（修复前 `[\w.\-]` 让这类源页的「原始资料」行点不动）。
-_RAW_PATH_RE = re.compile(r"(?<![\w/])raw/[\w.\-]+?\.md(?![\w\-])")
-_RAW_REF_FULL_RE = re.compile(r"raw/([^/]+\.md)")
+# `_RAW_REF_FULL_RE` 供「整段 code」fullmatch：整体消费已定界，故每段放宽到「除斜杠外任意字符」，
+# 覆盖原始文件名里的空格/`——`/`、`（修复前 `[\w.\-]` 让这类源页的「原始资料」行点不动）；多路径串
+# （段内再出现以空白开头的 `raw/`）由 `_raw_ref_in_code` 另行挡掉。
+_RAW_PATH_RE = re.compile(r"(?<![\w/])raw/(?:[\w.\-]+/)*[\w.\-]+?\.md(?![\w\-])")
+_RAW_REF_FULL_RE = re.compile(r"raw/((?:[^/]+/)*[^/]+\.md)")
+_RAW_SECOND_REF_RE = re.compile(r"\sraw/")
 
 # rawlink 命中/缺失的样式归口（单点定义，杜绝多处 class/title 字面漂移，评审 reuse）。
 _RAWLINK_BROKEN_TITLE = "raw/ 源不存在"
 
 
 def _raw_name_index(root: Path) -> dict[str, str]:
-    """`raw/*.md` 真实文件名解析表：**精确文件名键**（保大小写）→ 真实名，叠加**无冲突的小写兜底键**
+    """`raw/**/*.md` 真实路径解析表：**精确相对路径键**（`raw/` 下 POSIX 相对路径，保大小写）→ 真实路径，
+    叠加**无冲突的小写兜底键**
     （大小写不敏感匹配，但精确优先、撞则不折叠——镜像 `pages.link_resolution_index` 的 fold 纪律）。
 
     **每次渲染重建**（同 `_stem_to_path` 纪律，不缓存）：投喂/晋级随时增删 raw 源，重扫保新源即时可点、
-    删则标灰。只 `glob("*.md")` 取 raw/ **顶层**（`raw/images/` 等子树非源、天然不入），不读内容。
+    删则标灰。`rglob("*.md")` 取整棵 raw/ 树（与 ingest 撞名检查、门禁快照同口径；`raw/images/` 只放图、
+    天然无 `.md`），跳过隐藏目录/文件，不读内容。键是相对路径而非 basename：`raw/a/x.md` 与 `raw/b/x.md`
+    各自精确命中，不会因同名互相串台。
     精确优先使「`raw/Foo.md` 与 `raw/foo.md` 在大小写敏感盘上并存」时各按真实名解析、零串台（评审修复
     旧的纯小写键把二者撞成一个、`raw/foo.md` 误开 `Foo.md`）；小写兜底使「误写大小写」在大小写不敏感盘
     上仍命中（与 `_safe_raw_file` 行为一致）。
@@ -212,9 +217,10 @@ def _raw_name_index(root: Path) -> dict[str, str]:
     raw = root / "raw"
     exact: dict[str, str] = {}
     if raw.is_dir():
-        for path in sorted(raw.glob("*.md")):
-            if path.is_file():
-                exact.setdefault(path.name, path.name)
+        for path in sorted(raw.rglob("*.md")):
+            rel = path.relative_to(raw)
+            if path.is_file() and not any(part.startswith(".") for part in rel.parts):
+                exact.setdefault(rel.as_posix(), rel.as_posix())
     index = dict(exact)
     groups: dict[str, set[str]] = defaultdict(set)
     for name in exact:
@@ -227,11 +233,12 @@ def _raw_name_index(root: Path) -> dict[str, str]:
     return index
 
 
-def _raw_ref_basename(target: str) -> str | None:
-    """把引用串解析为 `raw/` 顶层文件名 basename（**保大小写、保原扩展名**），非 raw/ 前缀 → None。
+def _raw_ref_path(target: str) -> str | None:
+    """把引用串解析为 `raw/` 下的相对路径（**保大小写、保原扩展名**），非 raw/ 前缀 → None。
 
     剥 `|别名`/`#锚点`（兼容 `[[raw/x|看案例]]`）、归一斜杠；须 `raw/` 前缀（大小写不敏感）+ 非空尾段；
-    取 basename（raw/ 顶层平铺，`raw/a/b.md` 退化取 `b.md`）。**不**补 `.md`、**不**小写——补 `.md` 与
+    保留子目录段（`raw/a/b.md` → `a/b.md`，与 `_raw_name_index` 的键同形；含 `..` 的路径查不到键，
+    自然落断链，读端点 `_safe_raw_file` 另有越界防护）。**不**补 `.md`、**不**小写——补 `.md` 与
     大小写兜底都交给 `_lookup_raw`（按存在性试 `<名>` 与 `<名>.md`）。如此含内部点的 stem（`raw/1.示例报告`）
     与非 `.md` 资产（`raw/images/x.png`）能被正确区分：前者补 `.md` 命中、后者两试皆空 → 不认领（评审修复
     旧的「无条件补 `.md`」把 `raw/report.pdf` 之类合法资产链接毁成断链 span）。
@@ -240,11 +247,11 @@ def _raw_ref_basename(target: str) -> str | None:
     prefix, sep, rest = head.partition("/")
     if not sep or prefix.lower() != "raw" or not rest:
         return None
-    return rest.rsplit("/", 1)[-1] or None
+    return rest if rest.rsplit("/", 1)[-1] else None
 
 
 def _lookup_raw(basename: str, raw_index: dict[str, str]) -> str | None:
-    """basename（保大小写、可能带/不带 `.md`）→ 现存 raw 真实文件名 or None。
+    """raw 相对路径（保大小写、可能带/不带 `.md`）→ 现存 raw 真实相对路径 or None。
 
     依次试：精确 → 小写兜底；若不以 `.md` 结尾，再补 `.md` 试 精确 → 小写。覆盖「含内部点的 stem 省略
     `.md`」（`1.示例报告`→`1.示例报告.md`）与大小写不敏感匹配；非 `.md` 资产（`x.png`）两试皆空 → None。
@@ -262,18 +269,22 @@ def _is_raw_md_form(basename: str) -> bool:
     （`.png`/`.pdf` 等资产）→ False。markdown 链接据此决定缺失时「标灰」还是「原样保留 href」——
     避免把指向 `raw/images/x.png` 之类合法资产链接误毁成断链 span。
     """
-    return basename.lower().endswith(".md") or "." not in basename
+    name = basename.rsplit("/", 1)[-1]  # 只看末段：目录名带点（`v1.2/报告`）不算扩展名
+    return name.lower().endswith(".md") or "." not in name
 
 
 def _raw_ref_in_code(content: str) -> str | None:
-    """行内 code 整段（规整后）恰好是 `raw/<slug>.md` → 返回 basename（保大小写），否则 None。
+    """行内 code 整段（规整后）恰好是 `raw/[<子目录>/]<slug>.md` → 返回相对路径（保大小写），否则 None。
 
     用 fullmatch（整段消费定界，无需前后边界），故文件名可含空格/全角标点（raw/ 保留原始文件名）；
-    命令/多 token 代码（`cat raw/x.md`）不以 `raw/` 开头、多路径串含第二个 `/` → 整体不匹配，不误判
-    （同 `_code_ref_target` 末步整体相等的安全纪律）。
+    命令/多 token 代码（`cat raw/x.md`）不以 `raw/` 开头 → 不匹配；多路径串（`raw/x.md raw/y.md`）
+    段内再现以空白开头的 `raw/` → 不认（同 `_code_ref_target` 末步整体相等的安全纪律）。
     """
-    m = _RAW_REF_FULL_RE.fullmatch(content.strip().replace("\\", "/"))
-    return m.group(1) if m is not None else None
+    norm = content.strip().replace("\\", "/")
+    m = _RAW_REF_FULL_RE.fullmatch(norm)
+    if m is None or _RAW_SECOND_REF_RE.search(norm):
+        return None
+    return m.group(1)
 
 
 def _resolve_raw_link(
@@ -323,7 +334,7 @@ def _resolve_wikilink(
     """把 `[[…]]` 内部 raw 解析为 `(tag, attrib, display)`：命中现有页 → `a.wikilink[data-page]`，
     断链 → `span.wikilink.broken`。行内 `[[…]]` 与 code 兜底两路共用，杜绝两处样式/类名漂移。
 
-    **`raw/` 前缀优先拦截**：`[[raw/<slug>]]`（可带/不带 .md）指向 raw/ 顶层源——存在 →
+    **`raw/` 前缀优先拦截**：`[[raw/[<子目录>/]<slug>]]`（可带/不带 .md）指向 raw/ 源——存在 →
     `a.rawlink[data-raw]`、缺失 → `span.rawlink.broken`（决策：raw/ 只读源引用单列一档、不落到 wiki
     页解析；`raw/` 是不会与 wiki 页 stem 撞的明确前缀，故拦截无歧义）。非 raw/ 前缀才续走 wiki 解析。
 
@@ -332,7 +343,7 @@ def _resolve_wikilink(
     行内 code 引用（`_code_ref_target`）按精确路径/文件名判定、**不接 fold**（决策P3.8-7 边界）。
     """
     display = _wikilink_display(raw) or raw.strip()
-    raw_link = _resolve_raw_link(_raw_ref_basename(raw), raw_index, display)
+    raw_link = _resolve_raw_link(_raw_ref_path(raw), raw_index, display)
     if raw_link is not None:  # `[[raw/…]]`：raw 源引用单列一档（命中链 / 缺失标灰），不落 wiki 解析
         return raw_link
     target = resolve_owner(raw, stem_to_path)
@@ -550,7 +561,7 @@ if _HAS_MARKDOWN:
             for m in matches:
                 frags.append(text[last : m.start()])
                 tag, attrib, _ = _resolve_raw_link(
-                    _raw_ref_basename(m.group(0)), self._raw_index, m.group(0)
+                    _raw_ref_path(m.group(0)), self._raw_index, m.group(0)
                 )
                 node = _etree.Element(tag, attrib)
                 node.text = m.group(0)
@@ -605,7 +616,7 @@ if _HAS_MARKDOWN:
                 if not href:
                     continue
                 norm = href[2:] if href.startswith("./") else href  # 容 `./raw/x.md`
-                basename = _raw_ref_basename(norm)
+                basename = _raw_ref_path(norm)
                 if basename is None:
                     continue  # 外链 / 绝对 / 非 raw/ 前缀 → 不动
                 actual = _lookup_raw(basename, self._raw_index)
@@ -734,7 +745,7 @@ def render_markdown(
     ]
     if wiki is not None:
         stem_map = _stem_to_path(wiki)  # 单次扫库，wiki/code 两扩展共享（避免重复 rglob）。
-        raw_index = _raw_name_index(wiki.parent)  # raw/ 顶层 .md 真实文件名集（每渲染重扫，同 stem_map 纪律）。
+        raw_index = _raw_name_index(wiki.parent)  # raw/ 整树 .md 真实相对路径集（每渲染重扫，同 stem_map 纪律）。
         extensions.append(_WikiLinkExtension(stem_map, raw_index))
         extensions.append(_CodePathLinkExtension(stem_map, raw_index))
         extensions.append(_RawPathExtension(raw_index))  # 裸 raw/<slug>.md 路径串 + markdown 链接 href→rawlink。
