@@ -555,6 +555,51 @@ def test_render_markdown_raw_ref_code_original_filename(client, kb) -> None:
     assert "rawlink" not in multi
 
 
+def test_render_markdown_raw_ref_subdir(client, kb) -> None:
+    """raw/ 子目录里的源（ingest 本就 rglob 整树）：四种写法都按相对路径联链，data-raw 带子目录。
+
+    回归：旧解析只认 raw/ 顶层、`raw/a/b.md` 退化成 `b.md`，子目录源的引用一律标灰。
+    """
+    from guanlan.web.render import render_markdown
+
+    sub = kb / "raw" / "辅导材料"
+    sub.mkdir()
+    (sub / "示例倡议.md").write_text("x", encoding="utf-8")
+    (kb / "raw" / "另一组").mkdir()
+    (kb / "raw" / "另一组" / "示例倡议.md").write_text("y", encoding="utf-8")
+    wiki = kb / "wiki"
+
+    for text in (
+        "材料见 raw/辅导材料/示例倡议.md 一节。",  # 裸路径串
+        "（`raw/辅导材料/示例倡议.md`:3—:11）",  # 行内 code
+        "见 [[raw/辅导材料/示例倡议]]",  # wikilink
+        "见 [全文](raw/辅导材料/示例倡议.md)",  # markdown 链接
+    ):
+        html = render_markdown(text, wiki)
+        assert 'data-raw="辅导材料/示例倡议.md"' in html, text
+        assert "rawlink broken" not in html, text
+
+    # 同名文件分处两个子目录：各按相对路径命中，不串台
+    other = render_markdown("`raw/另一组/示例倡议.md`", wiki)
+    assert 'data-raw="另一组/示例倡议.md"' in other
+    # 顶层没有这个文件：只写文件名不退化去命中子目录里的同名源
+    top = render_markdown("`raw/示例倡议.md`", wiki)
+    assert "rawlink broken" in top and "data-raw" not in top
+    # 多路径串仍不联
+    multi = render_markdown("`raw/辅导材料/示例倡议.md raw/另一组/示例倡议.md`", wiki)
+    assert "rawlink" not in multi
+
+
+def test_raw_file_endpoint_serves_subdir_source(client, kb) -> None:
+    """rawlink 的 data-raw 带子目录时，/api/raw/file 能按同一相对路径取到源（前端点链即走这条）。"""
+    sub = kb / "raw" / "辅导材料"
+    sub.mkdir()
+    (sub / "示例倡议.md").write_text("# 示例倡议\n\n正文。", encoding="utf-8")
+    r = client.get("/api/raw/file", params={"name": "辅导材料/示例倡议.md"})
+    assert r.status_code == 200, r.text
+    assert "正文" in r.text
+
+
 def test_render_markdown_raw_ref_no_clickable_inside_broken(client, kb) -> None:
     """评审修复：断链 span 内不得再联出可点 rawlink（`span` 已入 _RAW_SKIP_SUBTREE）。
 
