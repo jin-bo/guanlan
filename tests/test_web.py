@@ -2758,6 +2758,60 @@ def test_unrelated_agent_events_emit_no_frames(chat_client) -> None:
     assert set(_frame_kinds(frames)) <= {"start", "token", "heartbeat", "done"}
 
 
+# ───────────────────────── 思考过程帧（P4.25） ─────────────────────────
+
+
+def _emit_thinking_around_text(a):
+    """fake action：在 fake 自己的 token **之后**发「推理 → 正文 → 推理」——一次覆盖两种顺序：
+    「token → 推理」（模型端不流式给推理、上游答完才整段补发）与「推理 → token」（流式）。"""
+    a.transport.emit(AgentEvent(EventType.THINKING, {"text": "先想"}))
+    a.transport.emit(AgentEvent(EventType.THINKING, {"text": ""}))  # 空串不上线
+    a.transport.emit(AgentEvent(EventType.LLM_TEXT, {"chunk": "补"}))
+    a.transport.emit(AgentEvent(EventType.THINKING, {"text": "后想"}))
+
+
+def test_thinking_events_become_text_only_frames_in_emit_order(chat_client) -> None:
+    """THINKING → `thinking{text}` 帧，载荷只此一键、空串不发；帧序与上游发射序逐一一致——
+    **不**断言推理在 token 之前（决策P4.25-3：整段回退时推理晚于正文）。"""
+    client, captured = chat_client
+    _, done, _ = _chat(client, "建会话")
+    agent = captured["agents"][0]
+    agent.action = _emit_thinking_around_text
+    frames = _chat_interactive(client, "问", conversation_id=done["conversation_id"])
+    think = [p for e, p in frames if e == "thinking"]
+    assert think == [{"text": "先想"}, {"text": "后想"}]
+    tail = [(e, p) for e, p in frames if e in ("thinking", "token")]
+    assert tail[-3:] == [("thinking", {"text": "先想"}), ("token", "补"), ("thinking", {"text": "后想"})]
+    kinds = _frame_kinds(frames)
+    assert kinds.index("token") < kinds.index("thinking")  # fake 的答案 token 先到：token → 推理也要保序
+    assert kinds[-1] == "done"
+
+
+def test_thinking_frames_also_flow_in_reader_mode(chat_env, kb) -> None:
+    """reader（P4.9）限制的是写不是看：思考过程照样上线。"""
+    _, captured = chat_env
+    with TestClient(create_app(kb, reader=True)) as client:
+        _, done, _ = _chat(client, "建会话")
+        captured["agents"][0].action = _emit_thinking_around_text
+        frames = _chat_interactive(client, "问", conversation_id=done["conversation_id"])
+    assert [p for e, p in frames if e == "thinking"] == [{"text": "先想"}, {"text": "后想"}]
+
+
+def test_replay_never_shows_reasoning_carriers(chat_client) -> None:
+    """回放不显示推理（决策P4.25-9）：盘上/内存 assistant 消息带 `reasoning_content` 时，回放项
+    只有 role/content/html——反向用例，防日后有人「顺手」把推理加进回放。"""
+    client, captured = chat_client
+    _, done, _ = _chat(client, "第一问")
+    cid = done["conversation_id"]
+    agent = captured["agents"][0]
+    for m in agent.messages:
+        if m.get("role") == "assistant":
+            m["reasoning_content"] = "不该出现的推理"
+    msgs = client.get(f"/api/conversations/{cid}/messages").json()["messages"]
+    assert msgs and all(set(m) <= {"role", "content", "html"} for m in msgs)
+    assert "不该出现的推理" not in json.dumps(msgs, ensure_ascii=False)
+
+
 # ───────────────────────── 停止按钮（中断在飞轮） ─────────────────────────
 
 
@@ -6622,6 +6676,23 @@ def test_goal_basic_continuation_hits_turn_budget(chat_client):
     assert sum(1 for p in starts if p.get("kind") == "wrap_up") == 1
     done = _first(frames, "goal_done")
     assert done is not None and done["status"] == "limit_reached"
+
+
+def test_goal_run_stream_carries_thinking_frames_inside_each_turn(chat_client):
+    """P4.25：续跑流同样转 `thinking` 帧，且落在所属内层轮的 turn_start 与 turn_done 之间。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+    captured["agents"][-1].action = lambda a: a.transport.emit(
+        AgentEvent(EventType.THINKING, {"text": "轮内推理"})
+    )
+    assert client.post(f"/api/chat/{cid}/goal", json={"objective": "do X", "turns": 1}).status_code == 200
+    kinds = [e for e, _ in _drive_goal(client, cid)]
+    starts = [i for i, k in enumerate(kinds) if k == "turn_start"]
+    dones = [i for i, k in enumerate(kinds) if k == "turn_done"]
+    thinks = [i for i, k in enumerate(kinds) if k == "thinking"]
+    assert len(thinks) == len(starts) >= 1
+    for s, t, d in zip(starts, thinks, dones):
+        assert s < t < d
 
 
 def test_goal_agent_marks_complete_stops_early(chat_client):

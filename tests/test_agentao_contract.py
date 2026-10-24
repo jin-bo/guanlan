@@ -170,6 +170,60 @@ def test_compaction_events_reach_host_listener(real_conv) -> None:
     ]
 
 
+def _drive_one_llm_call(real_conv, monkeypatch, *, stream_reasoning: bool) -> list:
+    """经**真实调用路径**（真 `agent.chat` → 真 `run_llm_call` → 真 transport → 观澜旁听口）跑一轮，
+    只把最底层的 `chat_stream` 换掉；返回观澜发出的 (kind, data) 帧。
+
+    fake 的签名**逐个写出**上游传入的关键字、不收 `**kw`：上游把 `on_reasoning_chunk` 改名时，
+    这里立刻 TypeError；写成 `**kw` 会把改名吞掉、用例假绿（同 `arun` 那条的教训）。
+    响应形状照 agentao 自己 `tests/test_reasoning_stream.py` 构造 `chat_stream` 返回值的方式。
+    """
+    from types import SimpleNamespace
+
+    def fake_chat_stream(
+        messages,
+        tools=None,
+        max_tokens=None,
+        on_text_chunk=None,
+        cancellation_token=None,
+        *,
+        cache_boundary=None,
+        on_retry=None,
+        on_reasoning_chunk=None,
+    ):
+        if stream_reasoning:
+            on_reasoning_chunk("先想")
+        on_text_chunk("答")
+        message = SimpleNamespace(
+            role="assistant", content="答", tool_calls=None, reasoning_content="先想"
+        )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(finish_reason="stop", message=message)], usage=None
+        )
+
+    monkeypatch.setattr(real_conv.agent.llm, "chat_stream", fake_chat_stream)
+    got: list = []
+    real_conv._emit = lambda kind, data: got.append((kind, data))
+    try:
+        real_conv.agent.chat("问")
+    finally:
+        real_conv._emit = None
+    return [(k, d) for k, d in got if k in ("thinking", "token")]
+
+
+def test_streamed_reasoning_reaches_host_as_thinking_frame(real_conv, monkeypatch) -> None:
+    """P4.25 流式路径：模型端经 `on_reasoning_chunk` 给推理 → 观澜 `thinking{text}` 帧，先于正文。"""
+    frames = _drive_one_llm_call(real_conv, monkeypatch, stream_reasoning=True)
+    assert frames == [("thinking", {"text": "先想"}), ("token", "答")]
+
+
+def test_whole_reasoning_fallback_arrives_after_the_text(real_conv, monkeypatch) -> None:
+    """P4.25 整段回退：模型端从不调 `on_reasoning_chunk` → 上游在 `chat_stream()` 返回后读
+    `reasoning_content` 补发一次，**晚于正文**。这正是前端不得以首 token 判「想完了」的依据（决策P4.25-3）。"""
+    frames = _drive_one_llm_call(real_conv, monkeypatch, stream_reasoning=False)
+    assert frames == [("token", "答"), ("thinking", {"text": "先想"})]
+
+
 def test_unknown_mode_is_rejected(real_conv) -> None:
     """Web **只**认 read-only / workspace-write：full-access / plan 也在 agentao 的枚举里，
     但绝不许出现在 Web（决策P4.5-1），故拦在观澜这一层、转 422。"""

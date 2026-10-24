@@ -724,6 +724,79 @@ function handleCompaction(botEl, payload) {
   log.scrollTop = log.scrollHeight;
 }
 
+// 思考过程（`thinking` 帧，P4.25）：模型推理随流追加进当轮气泡**之前**的一个折叠块。对话流与 goal
+// 续跑流共用本函数。四条规则（docs/P4.25 §3.2）：
+//   · 只用 textContent，绝不渲染——推理里的 [[页]] 是「考虑过」不是「引用了」，也不给它答案同等的渲染权；
+//   · 不计时：模型端不流式给推理时，上游在调用返回后才整段补发、可能晚于正文，没有可靠的「想完了」时刻；
+//   · 只留尾部 THINKING_MAX 字（离答案最近的最有用），摘要报总字数；
+//   · 偏好关掉时不建块，但调用方照样撤心跳（帧会重置服务端心跳等待，不撤则旧秒数冻屏）。
+const THINKING_MAX = 64 * 1024; // 同 P4.20 块源上限
+const THINKING_PREF_KEY = "guanlan.thinking"; // "off" = 不显示；其余（含读不到）= 显示
+
+function thinkingEnabled() {
+  try { return localStorage.getItem(THINKING_PREF_KEY) !== "off"; } catch { return true; }
+}
+
+function handleThinking(botEl, payload) {
+  const text = payload && typeof payload.text === "string" ? payload.text : "";
+  if (!botEl || !text || !thinkingEnabled()) return;
+  let st = botEl._think;
+  if (!st) {
+    const el = document.createElement("details");
+    el.className = "chat-think";
+    const summary = document.createElement("summary");
+    const elided = document.createElement("div");
+    elided.className = "chat-think-elided";
+    elided.hidden = true;
+    const body = document.createElement("div");
+    body.className = "chat-think-body";
+    el.append(summary, elided, body);
+    botEl.before(el);
+    st = botEl._think = { el, summary, elided, body, text: "", dropped: 0 };
+  }
+  st.text += text;
+  // 流式推理一字一帧：未超限时只追加文本节点（每帧整块重写是 O(n²)）；超限才裁尾、整块重写，
+  // 裁剪点避开 UTF-16 代理对的后半，免得头部出乱码。
+  if (st.text.length > THINKING_MAX) {
+    let cut = st.text.length - THINKING_MAX;
+    const c = st.text.charCodeAt(cut);
+    if (c >= 0xdc00 && c <= 0xdfff) cut += 1;
+    st.dropped += cut;
+    st.text = st.text.slice(cut);
+    st.elided.hidden = false;
+    st.elided.textContent = t("thinking.elided", st.dropped);
+    st.body.textContent = st.text;
+  } else {
+    st.body.append(text);
+  }
+  st.summary.textContent = t("thinking.title", st.dropped + st.text.length);
+  if (st.el.open) st.body.scrollTop = st.body.scrollHeight;
+  const log = $("#chat-log");
+  log.scrollTop = log.scrollHeight;
+}
+
+// 顶栏开关：翻转偏好，并经 body 类即时隐藏/显出已有的块（关掉后不再建新块，见 handleThinking）。
+function applyThinkingPref() {
+  const on = thinkingEnabled();
+  document.body.classList.toggle("hide-thinking", !on);
+  const btn = document.getElementById("thinking-btn");
+  if (btn) {
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+}
+
+{
+  const btn = document.getElementById("thinking-btn");
+  if (btn) {
+    btn.addEventListener("click", () => {
+      const next = thinkingEnabled() ? "off" : "on";
+      try { localStorage.setItem(THINKING_PREF_KEY, next); } catch { /* 隐私模式禁写：本页内不生效，忽略 */ }
+      applyThinkingPref();
+    });
+  }
+  applyThinkingPref();
+}
+
 // 对话气泡里的 [[wikilink]] / raw 源链（来自渲染后的答案）点了切到右栏：wiki 单页 / 只读 raw 源。
 // 左栏=对话、右栏=查看器（与既有 wikilink 行为一致，气泡滚动位置不丢；断链 span 无 data-* 不可点）。
 $("#chat-log").addEventListener("click", (e) => {
@@ -790,6 +863,9 @@ function handleSSE(frame, botEl) {
     // 静默间隙（长工具调用 / 首 token 前思考）的存活提示，随 elapsed 刷新；token 一来即清。
     showHeartbeat(botEl, payload.elapsed || 0);
     log.scrollTop = log.scrollHeight;
+  } else if (event === "thinking") {
+    clearHeartbeat(botEl); // 同 token：有内容在流，撤「处理中」（再静默满一拍心跳会重建）
+    handleThinking(botEl, payload);
   } else if (event === "compaction") {
     handleCompaction(botEl, payload);
   } else if (event === "stopped") {
@@ -868,6 +944,8 @@ function appendIncompleteNote(botEl, payload) {
   note.className = "stop-note";
   note.textContent = t("chat.incomplete", incompleteReasonText(inc.reason));
   botEl.appendChild(note);
+  // P4.25：只有推理、没有答案时，推理就是这轮唯一的产出——展开折叠块，让提示后面紧跟证据。
+  if (inc.reason === "reasoning_only" && botEl._think) botEl._think.el.open = true;
 }
 
 // 可写 turn 收尾的三类回执，**各看各的字段、相互独立**（P4.5 §8 评审 Medium）：
@@ -1640,6 +1718,11 @@ function handleGoalSSE(frame, ctx) {
     if (ctx.botEl) {
       showHeartbeat(ctx.botEl, payload.elapsed || 0);
       log.scrollTop = log.scrollHeight;
+    }
+  } else if (event === "thinking") {
+    if (ctx.botEl) {
+      clearHeartbeat(ctx.botEl);
+      handleThinking(ctx.botEl, payload);
     }
   } else if (event === "compaction") {
     handleCompaction(ctx.botEl, payload);
