@@ -198,6 +198,15 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 @keyframes chat-hb-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 /* 上下文压缩结果行（handleCompaction）：与心跳同档次的旁注，不抢答案的注意力。 */
 .chat-compact { align-self: flex-start; color: var(--lan-ink-soft); font-size: .82rem; padding: .1rem .25rem; }
+/* 思考过程块（P4.25，chat.js handleThinking）：气泡前的折叠旁注，默认收起；纯文本、限高可滚。
+   顶栏开关关掉时经 body.hide-thinking 整体隐藏。 */
+.chat-think { align-self: flex-start; max-width: 88%; color: var(--lan-ink-soft); font-size: .82rem; }
+.chat-think > summary { cursor: pointer; padding: .1rem .25rem; user-select: none; }
+.chat-think-body { white-space: pre-wrap; word-break: break-word; max-height: 18rem; overflow-y: auto;
+  margin: .2rem 0 0 .25rem; padding: .35rem .6rem; border-left: 2px solid var(--lan-mist); line-height: 1.55; }
+.chat-think-elided { margin: .2rem 0 0 .25rem; padding: 0 .6rem; font-style: italic; }
+body.hide-thinking .chat-think { display: none; }
+.actions .btn[aria-pressed="false"] { opacity: .55; }
 /* 作业进度模态的瞬时心跳行（jobs.js pollJob running 态，如入库）：同款呼吸提示。 */
 .job-hb { animation: chat-hb-pulse 1.4s ease-in-out infinite; }
 

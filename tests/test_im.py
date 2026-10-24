@@ -1044,6 +1044,37 @@ def test_emit_runs_on_event_loop_thread(kb_im):
     asyncio.run(scenario())
 
 
+def test_thinking_frames_never_reach_the_chat(kb_im):
+    """P4.25：Web 的 `thinking` 帧经同一个 `Conversation.turn` 也会到 IM 的 emit。IM 只认 token——
+    推理进群即公开、还会刷屏，故必须原样丢弃：不抛、不进中途快照、不进终稿。"""
+
+    async def scenario():
+        adapter, intake, delivery, _reg, store, _clk = make_stack(kb_im, caps=CAPS_EDIT)
+
+        def prep(c):
+            c.tokens = ["甲" * 300]
+            c.answer = "终稿"
+            orig = c.turn
+
+            async def turn(msg, emit, meta_out=None):
+                emit("thinking", {"text": "推理" * 500})
+                return await orig(msg, emit, meta_out)
+
+            c.turn = turn
+
+        store.on_create = prep
+        await intake.offer(msg("问题"))
+        await asyncio.sleep(0.05)
+        await drain_tasks(delivery)
+        texts = [str(x) for call in adapter.calls for x in call[1:]]
+        assert texts, "没有任何出站"
+        assert not any("推理" in t for t in texts)
+        finals = [c for c in adapter.calls if c[0] == "edit" and c[3] is True]
+        assert finals[-1][2] == "终稿"
+
+    asyncio.run(scenario())
+
+
 def test_edit_writer_is_strictly_ordered(kb_im):
     """edit **严格有序**：永不并发两个 edit，且 `finalize` 的文本最后落地。"""
 

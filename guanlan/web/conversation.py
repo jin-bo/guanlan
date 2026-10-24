@@ -375,16 +375,24 @@ class Conversation:
             self._emit("token", chunk)
 
     def _on_agent_event(self, event: AgentEvent) -> None:
-        """transport 旁听回调（executor 线程）：只把上下文压缩的起止转成 `compaction` 帧。
+        """transport 旁听回调（executor 线程）：只转两类事件——上下文压缩起止 → `compaction` 帧，
+        模型推理 → `thinking` 帧（P4.25）。
 
         压缩（一次 LLM 摘要）可长达一分钟，期间无 token，前端只能显示泛泛的「处理中」。
         `started` 只在要调摘要模型的 `full` 压缩时才发；`settled` 报结局（success / failed /
         cancelled；skipped 上游不发）。只转白名单字段：`detail` 可能是错误原文，不上线。
+
+        推理一对一转发、只带 `text`（决策P4.25-1/2）。**不得假定它先于正文**：模型端不流式给推理时，
+        上游在 `chat_stream()` 返回后才整段补发，此时本次调用的 token 可能已经发完（P4.25 §2.1）。
         """
         emit = self._emit
         if emit is None:
             return
-        if event.type == EventType.COMPACTION_STARTED:
+        if event.type == EventType.THINKING:
+            text = event.data.get("text") if isinstance(event.data, dict) else None
+            if isinstance(text, str) and text:
+                emit("thinking", {"text": text})
+        elif event.type == EventType.COMPACTION_STARTED:
             emit("compaction", {"phase": "started"})
         elif event.type == EventType.COMPACTION_SETTLED:
             d = event.data
