@@ -13,6 +13,19 @@
   只保留最后 64 K 字；本轮 `reasoning_only`（只推理没答案）时自动展开作证据。顶栏新增「思考」开关，只影响本浏览器。
   不落盘、不回放，IM / MCP 不跟进（IM 只认 `token` 帧，推理原样丢弃）。新增契约用例在真 Agentao 上走流式与整段回退两条路径；
   真浏览器冒烟 `scripts/smoke_p425.py` 9/9。
+- **Web 对话显示子 Agent 进展**（P4.26，`docs/P4.26-Web子Agent进展跟踪.md`）。子 Agent 运行时，答案气泡前多一行：
+  名称、运行中 · 第 n/max 轮 · 最近调用的工具；结束时改成已完成 / 失败 / 已取消，以及轮数、工具次数和耗时。此前整段只有
+  「处理中 Ns」心跳。服务端把 transport 上的 `AGENT_START` / 子 Agent 的 `TOOL_START` / `AGENT_END` 无状态投影成新 SSE 帧
+  `subagent`，前端按上游的 `child_task_id` 配对，同名子 Agent 多次运行各占一行。只转名称、轮次、工具名、终态与计数：
+  任务原文、参数、失败说明与 token 用量不上线。轮次是最近观测到的（没调工具的轮看不到），不显示进度百分比；每个气泡至多
+  20 行，超出只计数；一轮结束时仍没收到结束事件的行标「未收到结束」。不落盘、不回放，IM 不跟进。契约用例在真 Agentao 上
+  覆盖成功 / 抛异常 / 未完成 / 取消四种结局与父→子全链路；真浏览器冒烟 `scripts/smoke_p426.py` 8/8。
+
+### 变更
+
+- **agentao 下限抬到 0.5.17**（`agentao[cli]>=0.5.17,<0.6`）。0.5.17 起前台子 Agent 的 transport 事件带每次运行一个的
+  `child_task_id`（jin-bo/agentao#578，观澜提出），P4.26 靠它配对，不再依赖「同名子 Agent 串行」这一未承诺的实现细节。
+  同版新增的子会话 HostEvent 转播（`relay_subagent_events`）观澜不接。
 
 ### 修复
 

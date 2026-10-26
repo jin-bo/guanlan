@@ -460,6 +460,6 @@ def disable_agent_log() -> None:
     _agent_log_paths.clear()
 
 
-# 当前 turn 的事件发射器：emit(kind, data)。kind 如 "token" / "compaction" / "thinking"（P4.25）/
+# 当前 turn 的事件发射器：emit(kind, data)。kind 如 "token" / "compaction" / "thinking"（P4.25）/ "subagent"（P4.26）/
 # 交互帧（P4.15）；done/error 由端点补。消费方须忽略不认识的 kind（IM 只认 token）。
 Emit = Callable[[str, object], None]
