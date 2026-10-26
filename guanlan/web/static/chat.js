@@ -797,6 +797,73 @@ function applyThinkingPref() {
   applyThinkingPref();
 }
 
+// 子 Agent 进展（`subagent` 帧，P4.26）：每次子 Agent 运行在当轮气泡**之前**占一行，对话流与 goal 续跑流共用。
+// 规则（docs/P4.26 §3.2）：
+//   · 按帧里的 `id`（上游 child_task_id）配对，`botEl._subagents` 记「id → 运行中的那一行」；未登记的 id 一律忽略；
+//   · 「第 n/max 轮 · 工具」是最近观测到的，不声称工具仍在跑；不计时，终态用上游给的耗时；
+//   · 每气泡至多 SUBAGENT_MAX_ROWS 行，超限只计数；只用 textContent。
+const SUBAGENT_MAX_ROWS = 20;
+
+function handleSubagent(botEl, p) {
+  if (!botEl || !p || typeof p.id !== "string") return;
+  const map = botEl._subagents || (botEl._subagents = new Map());
+  const seen = botEl._subagentSeen || (botEl._subagentSeen = new Set()); // 含超限只计数的 id，重复 start 不重计
+  if (p.phase === "start") {
+    if (seen.has(p.id)) return;
+    seen.add(p.id);
+    botEl._subagentRows = (botEl._subagentRows || 0) + 1;
+    if (botEl._subagentRows > SUBAGENT_MAX_ROWS) {
+      if (!botEl._subagentElided) {
+        botEl._subagentElided = document.createElement("div");
+        botEl._subagentElided.className = "chat-subagent";
+        botEl.before(botEl._subagentElided);
+      }
+      botEl._subagentElided.textContent = t("subagent.elided", botEl._subagentRows - SUBAGENT_MAX_ROWS);
+      return;
+    }
+    const row = document.createElement("div");
+    row.className = "chat-subagent";
+    const name = document.createElement("span");
+    name.className = "chat-subagent-name";
+    name.textContent = "⚙ " + (p.agent || "?");
+    const info = document.createElement("span");
+    info.textContent = " · " + t("subagent.running");
+    row.append(name, info);
+    botEl.before(row);
+    map.set(p.id, info);
+  } else if (p.phase === "tool") {
+    const info = map.get(p.id);
+    if (!info) return;
+    info.textContent = " · " + t("subagent.running") + " · " + t("subagent.turn", p.turn, p.max_turns) + " · " + (p.tool || "");
+  } else if (p.phase === "end") {
+    const info = map.get(p.id);
+    if (!info) return;
+    map.delete(p.id);
+    // t() 首参须为字面量（决策P4.7-8，test_web_i18n 扫描），故逐个写出；未知终态显示原值、不当成功。
+    const parts = [
+      p.state === "completed" ? t("subagent.done")
+        : p.state === "failed" ? t("subagent.failed")
+        : p.state === "cancelled" ? t("subagent.cancelled")
+        : String(p.state || "?"),
+    ];
+    if (Number.isInteger(p.turns)) parts.push(t("subagent.turns", p.turns));
+    if (Number.isInteger(p.tool_calls)) parts.push(t("subagent.tools", p.tool_calls));
+    if (Number.isInteger(p.duration_ms)) parts.push(Math.round(p.duration_ms / 1000) + "s");
+    info.textContent = " · " + parts.join(" · ");
+  }
+  const log = $("#chat-log");
+  log.scrollTop = log.scrollHeight;
+}
+
+// 收尾（done / turn_done / stopped / error / 断流）：仍登记着的行标「未收到结束」，随即清空映射——
+// 清空使收尾幂等，正常 done 之后 finally 再跑一遍不会改动任何行。
+function finishSubagents(botEl) {
+  const map = botEl && botEl._subagents;
+  if (!map) return;
+  for (const info of map.values()) info.textContent = " · " + t("subagent.noEnd");
+  map.clear();
+}
+
 // 对话气泡里的 [[wikilink]] / raw 源链（来自渲染后的答案）点了切到右栏：wiki 单页 / 只读 raw 源。
 // 左栏=对话、右栏=查看器（与既有 wikilink 行为一致，气泡滚动位置不丢；断链 span 无 data-* 不可点）。
 $("#chat-log").addEventListener("click", (e) => {
@@ -841,6 +908,7 @@ async function sendChat(message, attachments) {
     botEl.textContent = t("chat.fail", e.message);
   } finally {
     clearHeartbeat(botEl); // 兜底：任何退出路径都不留下「处理中」残影
+    finishSubagents(botEl); // 断流也收：仍在跑的行标「未收到结束」
     setChatSending(false); // 复位：按钮切回「发送」、清 chatStreaming/禁用
   }
 }
@@ -866,10 +934,14 @@ function handleSSE(frame, botEl) {
   } else if (event === "thinking") {
     clearHeartbeat(botEl); // 同 token：有内容在流，撤「处理中」（再静默满一拍心跳会重建）
     handleThinking(botEl, payload);
+  } else if (event === "subagent") {
+    clearHeartbeat(botEl); // 同 thinking：帧会重置服务端心跳等待，不撤则旧秒数冻屏
+    handleSubagent(botEl, payload);
   } else if (event === "compaction") {
     handleCompaction(botEl, payload);
   } else if (event === "stopped") {
     clearHeartbeat(botEl);
+    finishSubagents(botEl);
     // 用户主动停止：保留已流出的纯文本（不再渲染 markdown），加一行轻提示。
     if (payload.conversation_id) setConversation(payload.conversation_id);
     const note = document.createElement("span");
@@ -882,6 +954,7 @@ function handleSSE(frame, botEl) {
     log.scrollTop = log.scrollHeight;
   } else if (event === "done") {
     clearHeartbeat(botEl);
+    finishSubagents(botEl);
     setConversation(payload.conversation_id);
     // 收尾：用服务端渲染的安全 markdown HTML 替换流式纯文本（含 [[页]]→站内链接）。
     if (payload.answer_html !== undefined) {
@@ -910,6 +983,7 @@ function handleSSE(frame, botEl) {
     resolveInteractionUI(payload);
   } else if (event === "error") {
     clearHeartbeat(botEl);
+    finishSubagents(botEl);
     // 记下服务端已建会话（即便本轮失败）：否则首轮失败时下次又以 null 另起新会话，堆到 503。
     if (payload.conversation_id) setConversation(payload.conversation_id);
     botEl.classList.replace("bot", "err");
@@ -1688,7 +1762,10 @@ async function sendGoalRun(attachments) {
     if (ctx.botEl) clearHeartbeat(ctx.botEl);
     setGoalBannerNote(banner, t("goal.fail", e.message));
   } finally {
-    if (ctx.botEl) clearHeartbeat(ctx.botEl);
+    if (ctx.botEl) {
+      clearHeartbeat(ctx.botEl);
+      finishSubagents(ctx.botEl);
+    }
     setChatSending(false);
   }
 }
@@ -1724,12 +1801,18 @@ function handleGoalSSE(frame, ctx) {
       clearHeartbeat(ctx.botEl);
       handleThinking(ctx.botEl, payload);
     }
+  } else if (event === "subagent") {
+    if (ctx.botEl) {
+      clearHeartbeat(ctx.botEl);
+      handleSubagent(ctx.botEl, payload);
+    }
   } else if (event === "compaction") {
     handleCompaction(ctx.botEl, payload);
   } else if (event === "turn_done") {
     const el = ctx.botEl;
     if (el) {
       clearHeartbeat(el);
+      finishSubagents(el);
       if (payload.answer_html !== undefined) {
         el.classList.add("rendered");
         el.innerHTML = payload.answer_html;
@@ -1769,6 +1852,7 @@ function handleGoalSSE(frame, ctx) {
   } else if (event === "error") {
     if (ctx.botEl) {
       clearHeartbeat(ctx.botEl);
+      finishSubagents(ctx.botEl);
       ctx.botEl.classList.replace("bot", "err");
       ctx.botEl.textContent = t("chat.error", payload.message);
     }

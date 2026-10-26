@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import queue
+import re
 import threading
 import time
 import uuid
@@ -164,6 +165,59 @@ class _GoalProxy:
     def status_label(self) -> str:
         with self._lock:
             return self._g.status_label()
+
+
+# ── P4.26 子 Agent 进展（docs/P4.26-Web子Agent进展跟踪.md §3.1）────────────────────
+#
+# 上游转发子工具时把名称写成 `[name n/max] tool`；正则与 agentao `cli/display.py::_SUBAGENT_LABEL_RE`
+# 同形（上游测试钉住格式）。只用来取轮次与工具名——是否子 Agent 的事件看带不带 `child_task_id`
+# （主 Agent 自己的事件从不带，agentao 0.5.17 起）。
+_SUBAGENT_LABEL_RE = re.compile(r"^\[[^\[\]]+ (\d+)/(\d+)\] (\S+)$")
+_SUBAGENT_TEXT_MAX = 120  # agent / tool 只作显示，截断
+_SUBAGENT_ID_MAX = 64  # UUID4 为 36
+
+
+def _int_or_none(v: object) -> int | None:
+    # bool 是 int 的子类，排除——计数不会是 True/False。
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _subagent_frame(event: AgentEvent) -> dict | None:
+    """把一个子 Agent transport 事件投影成 `subagent` 帧载荷；不相关或缺 ID → None（无状态，决策P4.26-2）。
+
+    只转白名单字段（决策P4.26-4）：`task`（任务原文）、`args`、`tokens`、`error`（一字段两义：
+    异常类名 / 未完成说明原文）一律不上线。计数缺失或非整数即省略，不补 0。
+    """
+    d = event.data
+    if not isinstance(d, dict):
+        return None
+    cid = d.get("child_task_id")
+    if not isinstance(cid, str) or not cid:
+        return None
+    frame: dict = {"id": cid[:_SUBAGENT_ID_MAX]}
+    if event.type == EventType.AGENT_START:
+        frame["phase"] = "start"
+        frame["agent"] = str(d.get("agent") or "")[:_SUBAGENT_TEXT_MAX]
+        max_turns = _int_or_none(d.get("max_turns"))
+        if max_turns is not None:
+            frame["max_turns"] = max_turns
+    elif event.type == EventType.TOOL_START:
+        tool = d.get("tool")
+        m = _SUBAGENT_LABEL_RE.match(tool) if isinstance(tool, str) else None
+        if m is None:
+            return None
+        frame.update(phase="tool", turn=int(m.group(1)), max_turns=int(m.group(2)),
+                     tool=m.group(3)[:_SUBAGENT_TEXT_MAX])
+    elif event.type == EventType.AGENT_END:
+        frame["phase"] = "end"
+        frame["state"] = str(d.get("state") or "")[:_SUBAGENT_TEXT_MAX]
+        for key in ("turns", "tool_calls", "duration_ms"):
+            v = _int_or_none(d.get(key))
+            if v is not None:
+                frame[key] = v
+    else:
+        return None
+    return frame
 
 
 def _check_web_mode(mode: str) -> None:
@@ -375,8 +429,8 @@ class Conversation:
             self._emit("token", chunk)
 
     def _on_agent_event(self, event: AgentEvent) -> None:
-        """transport 旁听回调（executor 线程）：只转两类事件——上下文压缩起止 → `compaction` 帧，
-        模型推理 → `thinking` 帧（P4.25）。
+        """transport 旁听回调（executor 线程）：只转三类事件——上下文压缩起止 → `compaction` 帧，
+        模型推理 → `thinking` 帧（P4.25），子 Agent 开始/工具/结束 → `subagent` 帧（P4.26）。
 
         压缩（一次 LLM 摘要）可长达一分钟，期间无 token，前端只能显示泛泛的「处理中」。
         `started` 只在要调摘要模型的 `full` 压缩时才发；`settled` 报结局（success / failed /
@@ -384,11 +438,17 @@ class Conversation:
 
         推理一对一转发、只带 `text`（决策P4.25-1/2）。**不得假定它先于正文**：模型端不流式给推理时，
         上游在 `chat_stream()` 返回后才整段补发，此时本次调用的 token 可能已经发完（P4.25 §2.1）。
+
+        子 Agent 帧按 `child_task_id` 配对、在前端做（`_subagent_frame`）；本处不留任何状态。
         """
         emit = self._emit
         if emit is None:
             return
-        if event.type == EventType.THINKING:
+        if event.type in (EventType.AGENT_START, EventType.TOOL_START, EventType.AGENT_END):
+            frame = _subagent_frame(event)
+            if frame is not None:
+                emit("subagent", frame)
+        elif event.type == EventType.THINKING:
             text = event.data.get("text") if isinstance(event.data, dict) else None
             if isinstance(text, str) and text:
                 emit("thinking", {"text": text})

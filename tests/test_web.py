@@ -2812,6 +2812,110 @@ def test_replay_never_shows_reasoning_carriers(chat_client) -> None:
     assert "不该出现的推理" not in json.dumps(msgs, ensure_ascii=False)
 
 
+# ───────────────────────── 子 Agent 进展帧（P4.26） ─────────────────────────
+
+_SA1 = "11111111-1111-4111-8111-111111111111"
+_SA2 = "22222222-2222-4222-8222-222222222222"
+
+
+def _sa_start(cid, name="investigator"):
+    return AgentEvent(EventType.AGENT_START, {
+        "agent": name, "task": "任务原文·敏感", "max_turns": 15, "child_task_id": cid,
+    })
+
+
+def _sa_tool(cid, label):
+    return AgentEvent(EventType.TOOL_START, {
+        "tool": label, "args": {"path": "secret.md"}, "call_id": "c1", "child_task_id": cid,
+    })
+
+
+def _sa_end(cid, **kw):
+    data = {"agent": "investigator", "state": "completed", "error": None, "child_task_id": cid}
+    data.update(kw)
+    return AgentEvent(EventType.AGENT_END, data)
+
+
+def test_subagent_events_become_whitelisted_frames(chat_client) -> None:
+    """AGENT_START / 带 ID 的子 TOOL_START / AGENT_END → `subagent` 帧（决策P4.26-2/4）：只有白名单键、带 `id`；
+    `task` / `args` / `tokens` / `error`（含未完成路径的说明原文）不上线；计数缺失或非整数即省略。"""
+    client, captured = chat_client
+    _, done, _ = _chat(client, "建会话")
+    agent = captured["agents"][0]
+
+    def act(a):
+        a.transport.emit(_sa_start(_SA1))
+        a.transport.emit(_sa_tool(_SA1, "[investigator 2/15] read_file"))
+        a.transport.emit(_sa_end(_SA1, state="failed", turns=3, tool_calls=5, tokens=999,
+                                 duration_ms=12000, error="预算耗尽的说明原文"))
+        a.transport.emit(_sa_start(_SA2))
+        a.transport.emit(_sa_end(_SA2, turns="3", duration_ms=True))
+
+    agent.action = act
+    frames = _chat_interactive(client, "问", conversation_id=done["conversation_id"])
+    sub = [p for e, p in frames if e == "subagent"]
+    assert sub == [
+        {"phase": "start", "id": _SA1, "agent": "investigator", "max_turns": 15},
+        {"phase": "tool", "id": _SA1, "turn": 2, "max_turns": 15, "tool": "read_file"},
+        {"phase": "end", "id": _SA1, "state": "failed", "turns": 3, "tool_calls": 5, "duration_ms": 12000},
+        {"phase": "start", "id": _SA2, "agent": "investigator", "max_turns": 15},
+        {"phase": "end", "id": _SA2, "state": "completed"},
+    ]
+    wire = json.dumps(sub, ensure_ascii=False)
+    for leaked in ("任务原文", "secret.md", "999", "说明原文"):
+        assert leaked not in wire
+    assert _frame_kinds(frames)[-1] == "done"
+
+
+def test_subagent_frames_need_child_task_id_and_label(chat_client) -> None:
+    """是否子 Agent 事件看带不带 `child_task_id`（主 Agent 自己的事件从不带）：无 ID 的 TOOL_START /
+    AGENT_START / AGENT_END 都不发帧；带 ID 但标签不匹配只丢 `tool` 帧，开始/结束照常。"""
+    client, captured = chat_client
+    _, done, _ = _chat(client, "建会话")
+    agent = captured["agents"][0]
+
+    def act(a):
+        a.transport.emit(AgentEvent(EventType.TOOL_START, {"tool": "read_file", "args": {}, "call_id": "p1"}))
+        a.transport.emit(AgentEvent(EventType.TOOL_START, {"tool": "[x 1/2] read_file", "call_id": "p2"}))
+        a.transport.emit(AgentEvent(EventType.AGENT_START, {"agent": "x", "max_turns": 3}))
+        a.transport.emit(AgentEvent(EventType.AGENT_END, {"agent": "x", "state": "completed", "child_task_id": ""}))
+        a.transport.emit(_sa_start(_SA1))
+        a.transport.emit(_sa_tool(_SA1, "read_file"))  # 无标签
+        a.transport.emit(_sa_tool(_SA1, "[investigator 1/15] two words"))  # 工具名含空格，不匹配
+        a.transport.emit(_sa_end(_SA1))
+
+    agent.action = act
+    frames = _chat_interactive(client, "问", conversation_id=done["conversation_id"])
+    assert [p["phase"] for e, p in frames if e == "subagent"] == ["start", "end"]
+
+
+def test_subagent_same_name_runs_interleaved_keep_their_ids(chat_client) -> None:
+    """两次同名运行交错（不同 ID）：帧序与发射序一致、各带自己的 `id`——配对不再依赖同名串行（P4.26 §2.2）。
+    `agent` / `tool` 只作显示，超长截到 120 字。"""
+    client, captured = chat_client
+    _, done, _ = _chat(client, "建会话")
+    agent = captured["agents"][0]
+    long_name = "n" * 300
+
+    def act(a):
+        a.transport.emit(_sa_start(_SA1, long_name))
+        a.transport.emit(_sa_start(_SA2, long_name))
+        a.transport.emit(_sa_tool(_SA2, f"[{long_name} 1/15] grep"))
+        a.transport.emit(_sa_tool(_SA1, f"[{long_name} 1/15] {'t' * 300}"))
+        a.transport.emit(_sa_end(_SA2))
+        a.transport.emit(_sa_end(_SA1, state="cancelled"))
+
+    agent.action = act
+    frames = _chat_interactive(client, "问", conversation_id=done["conversation_id"])
+    sub = [p for e, p in frames if e == "subagent"]
+    assert [(p["phase"], p["id"]) for p in sub] == [
+        ("start", _SA1), ("start", _SA2), ("tool", _SA2), ("tool", _SA1), ("end", _SA2), ("end", _SA1),
+    ]
+    assert sub[0]["agent"] == "n" * 120
+    assert sub[3]["tool"] == "t" * 120
+    assert sub[5]["state"] == "cancelled"
+
+
 # ───────────────────────── 停止按钮（中断在飞轮） ─────────────────────────
 
 
@@ -6693,6 +6797,26 @@ def test_goal_run_stream_carries_thinking_frames_inside_each_turn(chat_client):
     assert len(thinks) == len(starts) >= 1
     for s, t, d in zip(starts, thinks, dones):
         assert s < t < d
+
+
+def test_goal_run_stream_carries_subagent_frames_inside_each_turn(chat_client):
+    """P4.26：续跑流同样转 `subagent` 帧，且落在所属内层轮的 turn_start 与 turn_done 之间。"""
+    client, captured = chat_client
+    cid = _new_conv(client)
+
+    def act(a):
+        a.transport.emit(_sa_start(_SA1))
+        a.transport.emit(_sa_end(_SA1))
+
+    captured["agents"][-1].action = act
+    assert client.post(f"/api/chat/{cid}/goal", json={"objective": "do X", "turns": 1}).status_code == 200
+    kinds = [e for e, _ in _drive_goal(client, cid)]
+    starts = [i for i, k in enumerate(kinds) if k == "turn_start"]
+    dones = [i for i, k in enumerate(kinds) if k == "turn_done"]
+    subs = [i for i, k in enumerate(kinds) if k == "subagent"]
+    assert len(subs) == 2 * len(starts) and starts
+    for n, (s, d) in enumerate(zip(starts, dones)):
+        assert s < subs[2 * n] < subs[2 * n + 1] < d
 
 
 def test_goal_agent_marks_complete_stops_early(chat_client):

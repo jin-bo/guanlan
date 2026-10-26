@@ -63,6 +63,7 @@
 - [P4.23-Agentao0.5.3接入](P4.23-Agentao0.5.3接入.md) —— 底座 0.4.17 → 0.5.3(沿用现有子进程 + 嵌入架构,无需迁 ACP);补上「模型到底有没有答出来」这道判定(`arun` 正常返回 ≠ 答出来了)、失败轮契约与 goal 无进展护栏、恢复时清模型专属推理数据、关后台子 Agent + 前台子 Agent 的工具继承
 - [P4.24-MCP技能发布](P4.24-MCP技能发布.md) —— **(已实现,真机验收通过)** 经 MCP Skills 扩展发布只读 `guanlan-query` skill(issue #81):单个静态 SKILL.md + SDK `Extension` 接缝 + 现有传输与鉴权,清单与所发内容同一份字节;`read_page` 新增可选 `name` 按页名顺链;agentao 升级另案
 - [P4.25-Web思考过程](P4.25-Web思考过程.md) —— **(已实现)** 把 agentao 早已发出、Web 一直丢弃的 `THINKING` 推理流经新 SSE 帧 `thinking` 显示为答案上方默认折叠的纯文本块(只显字数,无计时、无调用分段);不落盘、不回放、IM/MCP 不跟进,`reasoning_only` 时自动展开作证据
+- [P4.26-Web子Agent进展跟踪](P4.26-Web子Agent进展跟踪.md) —— **(已实现)** 子 Agent 运行时在答案前显示一行:名称、最近观测轮次与工具、终态与耗时;transport 旁听口无状态投影,前端按上游 0.5.17 的 `child_task_id` 配对(依赖下限抬到 0.5.17),不接子会话转播通道
 
 ### P5 —— 语料规模化(多格式 + 检索)
 

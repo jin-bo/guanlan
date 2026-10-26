@@ -562,6 +562,166 @@ def test_an_undeclared_host_tool_is_still_left_out(real_kb: Path) -> None:
     assert _copy_declared_host_tool(undeclared, tool.name, "reviewer") is None
 
 
+# ── P4.26 子 Agent 进展帧（docs/P4.26-Web子Agent进展跟踪.md §5）────────────────────
+#
+# 这几条都走**观澜自己的构造路径**（真 Conversation、真 transport 旁听口、真 wrapper），只把子 Agent
+# 的 `chat()` 或最底层的 `chat_stream` 换掉。前提是 agentao 0.5.17 的 `child_task_id`（#578）。
+
+
+def _capture_subagent(conv) -> tuple[list, list]:
+    """装两路记录：观澜发出的 `subagent` 帧，与 transport 上的原始子 Agent 事件（看上游真给了什么）。"""
+    from agentao.transport import EventType
+
+    frames: list = []
+    raw: list = []
+    conv._emit = lambda kind, data: frames.append(data) if kind == "subagent" else None
+    watched = {EventType.AGENT_START, EventType.AGENT_END, EventType.TOOL_START}
+    conv.agent.transport.subscribe(
+        lambda e: raw.append((e.type.value, dict(e.data or {}))) if e.type in watched else None
+    )
+    return frames, raw
+
+
+def _patch_child_chat(monkeypatch, *, last_turn=None, raises: BaseException | None = None) -> None:
+    """子 Agent 的 `chat()`：经它自己的 transport 发一次工具开始（走上游真转发器），再按参数收尾。"""
+    from agentao.agent import Agentao
+    from agentao.transport import AgentEvent, EventType
+
+    def chat(self, *args, **kwargs):
+        self.transport.emit(AgentEvent(EventType.TURN_START))
+        self.transport.emit(AgentEvent(EventType.TOOL_START, {"tool": "read_file", "call_id": "c1", "args": {}}))
+        if raises is not None:
+            raise raises
+        self._last_turn_outcome = last_turn
+        return "子答"
+
+    monkeypatch.setattr(Agentao, "chat", chat)
+
+
+@pytest.fixture
+def conv_with_agent(kb_with_agent: Path):
+    from guanlan.web.conversation import Conversation
+
+    conv = Conversation("cid-p426", kb_with_agent, None, persist=False, search_cache=CorpusCache())
+    try:
+        yield conv
+    finally:
+        conv._emit = None
+        conv.close()
+
+
+@pytest.mark.parametrize("outcome, state", [
+    ("ok", "completed"), ("raise", "failed"), ("incomplete", "failed"), ("cancel", "cancelled"),
+])
+def test_subagent_run_projects_to_one_id_and_whitelisted_frames(
+    conv_with_agent, monkeypatch, outcome, state,
+) -> None:
+    """成功 / 抛异常 / 未完成 / 取消各一次：开始与结束恰好各一次、带同一个 `child_task_id`，子工具帧也带它；
+    `state` 落在三值词表；未完成路径上游 `error` 是说明原文（钉住「`error` 不可当类型用」，决策P4.26-4）。"""
+    from agentao.cancellation import AgentCancelledError
+    from agentao.outcome import TurnOutcome
+
+    kw: dict = {}
+    if outcome == "raise":
+        kw["raises"] = RuntimeError("boom")
+    elif outcome == "cancel":
+        kw["raises"] = AgentCancelledError("user-cancel")
+    elif outcome == "incomplete":
+        kw["last_turn"] = TurnOutcome(text="", status="ok", incomplete_reason="max_iterations", tool_count=1)
+    _patch_child_chat(monkeypatch, **kw)
+    frames, raw = _capture_subagent(conv_with_agent)
+    wrapper = conv_with_agent.agent.tools.get("agent_reviewer")
+
+    if "raises" in kw:
+        with pytest.raises(type(kw["raises"])):
+            wrapper.execute(task="复核")
+    else:
+        wrapper.execute(task="复核")
+
+    assert [f["phase"] for f in frames] == ["start", "tool", "end"]
+    assert len({f["id"] for f in frames}) == 1 and frames[0]["id"]
+    assert frames[0]["agent"] == "reviewer" and isinstance(frames[0]["max_turns"], int)
+    assert frames[1]["turn"] == 1 and frames[1]["max_turns"] == frames[0]["max_turns"]  # 标签 n/max 与 max_turns 一致
+    assert frames[1]["tool"] == "read_file"
+    assert frames[2]["state"] == state
+    # 上游真给的载荷：我们依赖的键都在；丢弃的 task / error 确实存在（不是因为上游没给才「没上线」）。
+    start = next(d for k, d in raw if k == "agent_start")
+    end = next(d for k, d in raw if k == "agent_end")
+    assert {"agent", "max_turns", "task", "child_task_id"} <= set(start)
+    assert {"agent", "state", "error", "child_task_id"} <= set(end)
+    assert sum(1 for k, _ in raw if k == "agent_end") == 1
+    if outcome == "incomplete":
+        assert isinstance(end["error"], str) and " " in end["error"]  # 说明原文，不是异常类名
+    if outcome == "raise":
+        assert end["error"] == "RuntimeError"
+
+
+def test_two_runs_of_one_subagent_get_different_ids(conv_with_agent, monkeypatch) -> None:
+    """连续两次运行同一子 Agent，ID 不同——前端按 ID 配对的前提（P4.26 §2.2）。"""
+    _patch_child_chat(monkeypatch)
+    frames, _ = _capture_subagent(conv_with_agent)
+    wrapper = conv_with_agent.agent.tools.get("agent_reviewer")
+    wrapper.execute(task="一")
+    wrapper.execute(task="二")
+    starts = [f["id"] for f in frames if f["phase"] == "start"]
+    assert len(starts) == 2 and starts[0] != starts[1]
+
+
+def test_parent_tool_start_carries_no_child_task_id(conv_with_agent, monkeypatch) -> None:
+    """全链路（真父 `chat` → 真执行器 → 真 wrapper → 真子 Agent → 真转发器，只换 `chat_stream`）：
+    父 Agent 自己调 `agent_reviewer` 的 TOOL_START **不带** `child_task_id`、不出帧；子 Agent 的工具带、出帧。
+    这是「看带不带 ID 判是否子 Agent 事件」的前提（P4.26 §2.1）。"""
+    from types import SimpleNamespace
+
+    from agentao.llm.client import LLMClient
+
+    def call(name, args):
+        return SimpleNamespace(id=f"call_{name}", type="function",
+                               function=SimpleNamespace(name=name, arguments=args))
+
+    script = [
+        [call("agent_reviewer", '{"task": "复核 index"}')],  # 父：派子 Agent
+        [call("read_file", '{"file_path": "wiki/index.md"}')],  # 子：读一页
+        None,  # 子：答
+        None,  # 父：答
+    ]
+
+    def fake_chat_stream(
+        self,
+        messages,
+        tools=None,
+        max_tokens=None,
+        on_text_chunk=None,
+        cancellation_token=None,
+        *,
+        cache_boundary=None,
+        on_retry=None,
+        on_reasoning_chunk=None,
+    ):
+        tool_calls = script.pop(0)
+        content = None if tool_calls else "答"
+        if content:
+            on_text_chunk(content)
+        message = SimpleNamespace(role="assistant", content=content, tool_calls=tool_calls,
+                                  reasoning_content=None)
+        finish = "tool_calls" if tool_calls else "stop"
+        return SimpleNamespace(choices=[SimpleNamespace(finish_reason=finish, message=message)], usage=None)
+
+    monkeypatch.setattr(LLMClient, "chat_stream", fake_chat_stream)
+    frames, raw = _capture_subagent(conv_with_agent)
+    conv_with_agent.agent.chat("问")
+
+    assert script == [], "脚本没走完：链路没按预期展开"
+    tool_starts = [d for k, d in raw if k == "tool_start"]
+    parent_own = [d for d in tool_starts if d.get("tool") == "agent_reviewer"]
+    assert parent_own and all("child_task_id" not in d for d in parent_own)
+    child = [d for d in tool_starts if "child_task_id" in d]
+    assert child and child[0]["tool"].endswith(" read_file")
+    assert [f["phase"] for f in frames] == ["start", "tool", "end"]
+    assert frames[1]["tool"] == "read_file" and frames[2]["state"] == "completed"
+    assert {f["id"] for f in frames} == {child[0]["child_task_id"]}
+
+
 # ── 内部依赖面（§3.3：收敛前先钉死现状）──────────────────────────────────────
 
 

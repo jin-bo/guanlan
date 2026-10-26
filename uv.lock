@@ -12,7 +12,7 @@ resolution-markers = [
 
 [[package]]
 name = "agentao"
-version = "0.5.16"
+version = "0.5.17"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -27,9 +27,9 @@ dependencies = [
     { name = "tree-sitter", marker = "sys_platform == 'win32'" },
     { name = "tree-sitter-powershell", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/27/43/29bf3696d2e0fd3bc9b5ff4af42329025b36f40dde2d60249b4b2bf1fe12/agentao-0.5.16.tar.gz", hash = "sha256:1de99da2d82dda327dac1c2547da55a5b72c144044600efbcd5911a58b950239", size = 1597137, upload-time = "2026-10-20T16:00:59.983Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/25/d6/6bd3792f4b81dce663afb4dc09eb9dd1a7e9efed5cabe3c2f6b948e78451/agentao-0.5.17.tar.gz", hash = "sha256:ad1d59d1370f112cdaa596e62edbeca13693f2ff4ebda10e41cbe4d8e1da961e", size = 1606942, upload-time = "2026-10-25T15:23:13.852Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/dd/2d/626d8a3b960fcfcd1d1803e883eadae158071e4f2dc8853752fc97c28b26/agentao-0.5.16-py3-none-any.whl", hash = "sha256:028909a3100a19937b0f5400a5f201ed0b5e71dcf15dff742d77c8beebb728d7", size = 1443155, upload-time = "2026-10-20T16:00:57.903Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/07/9e4a7eb87086910579bc8aeadffc44ee88073d0fe00b41804e6987826c4e/agentao-0.5.17-py3-none-any.whl", hash = "sha256:684d1e846741fedcf405a5b6c2022704672fe671347f2711281764377554f9a2", size = 1451775, upload-time = "2026-10-25T15:23:11.87Z" },
 ]
 
 [package.optional-dependencies]
@@ -644,7 +644,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentao", extras = ["cli"], specifier = ">=0.5.16,<0.6" },
+    { name = "agentao", extras = ["cli"], specifier = ">=0.5.17,<0.6" },
     { name = "anyio", marker = "extra == 'im'", specifier = ">=4.1" },
     { name = "anyio", marker = "extra == 'im-feishu'", specifier = ">=4.1" },
     { name = "anyio", marker = "extra == 'im-weixin'", specifier = ">=4.1" },

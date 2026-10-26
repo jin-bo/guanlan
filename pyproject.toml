@@ -84,7 +84,10 @@ dependencies = [
     # 只搜已跟踪文件，且对被 gitignore 的目录一律答「No matches」。开发态的 `kbs/<库>/` 正落在本仓库
     # 被忽略的 `/kbs/` 下，Agent 在这些库里搜内容此前永远搜不到。同版新增的 `--interaction-policy deny`
     # 观澜不采用：`runtime.py` 仍显式传 `reject`，`NonInteractiveTransport` 配对方式的变更也不涉及观澜。
-    "agentao[cli]>=0.5.16,<0.6",
+    # >=0.5.17（P4.26）：前台子 Agent 的 transport 事件带每次运行一个的 `child_task_id`（jin-bo/agentao#578），
+    # Web 的子 Agent 进展行按它配对——不再依赖「同名子 Agent 串行」这一未承诺的实现事实，也不为旧版留按名称
+    # 配对的退路（决策P4.26-8）。同版新增的子会话 HostEvent 转播（`relay_subagent_events`）观澜不接（P4.26 §6）。
+    "agentao[cli]>=0.5.17,<0.6",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
 ]
 
