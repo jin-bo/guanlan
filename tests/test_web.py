@@ -3608,6 +3608,41 @@ def test_conversation_messages_strips_system_reminder(chat_env, kb) -> None:
         assert "system-reminder" not in msgs[0]["content"]
 
 
+def test_restore_skips_skill_loaded_notes_in_turns_title_and_replay(chat_env, kb) -> None:
+    """agentao 0.5.18 起技能正文以整条 <system-reminder> 的 user 消息入史（上游 #552）。
+
+    形状取自真 Agentao 0.5.18 实测：首问前带日期提醒、首问后紧跟一条「Skill loaded」。
+    恢复时它不算一轮、不作标题，回放也不显示——否则每个 Web 会话恢复后轮次都多 1。
+    """
+    from agentao.embedding import save_session
+
+    import guanlan.web.chat as chat_mod
+
+    date = "<system-reminder>\nCurrent Date/Time: 2026-10-29 09:00:00 (Thursday)\n</system-reminder>\n"
+    note = f'<system-reminder>\nSkill loaded: "{SKILL_NAME}"\n技能正文\n</system-reminder>'
+    cid = str(uuid.uuid4())
+    save_session(
+        [
+            {"role": "user", "content": date + "第一问"},
+            {"role": "user", "content": note},
+            {"role": "assistant", "content": "答一"},
+            {"role": "user", "content": date + "第二问"},
+            {"role": "assistant", "content": "答二"},
+        ],
+        "m",
+        active_skills=[SKILL_NAME],
+        session_id=cid,
+        project_root=kb,
+    )
+    conv = chat_mod.ConversationStore(kb, None).restore(cid)
+    assert conv is not None
+    assert conv.turns == 2  # 不是 3
+    assert conv.title == "第一问"  # 不是日期提醒原文
+    with TestClient(create_app(kb)) as client:
+        msgs = client.get(f"/api/conversations/{cid}/messages").json()["messages"]
+    assert [m["content"] for m in msgs] == ["第一问", "答一", "第二问", "答二"]
+
+
 def test_conversation_messages_404_unknown_and_foreign(chat_env, kb) -> None:
     """未知 / 非规范 id / 非 Web 会话（无 SKILL_NAME）→ 404（同 chat/delete 的作用域+精确闸）。"""
     foreign = str(uuid.uuid4())

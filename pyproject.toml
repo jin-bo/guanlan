@@ -87,7 +87,10 @@ dependencies = [
     # >=0.5.17（P4.26）：前台子 Agent 的 transport 事件带每次运行一个的 `child_task_id`（jin-bo/agentao#578），
     # Web 的子 Agent 进展行按它配对——不再依赖「同名子 Agent 串行」这一未承诺的实现事实，也不为旧版留按名称
     # 配对的退路（决策P4.26-8）。同版新增的子会话 HostEvent 转播（`relay_subagent_events`）观澜不接（P4.26 §6）。
-    "agentao[cli]>=0.5.17,<0.6",
+    # >=0.5.18：openai 3.38（2026-10-26）把 API 错误的 str 缩成只剩 message，0.5.17 靠这段文本判错误类型
+    # （参数修复、上下文溢出），新装环境（agentao 对 openai 不设上界）会拿到 3.38+ 而失灵。同版技能正文改为
+    # 整条 <system-reminder> 的 user 消息入史（#552），Web 恢复会话的轮次 / 标题 / 回放据此跳过它。
+    "agentao[cli]>=0.5.18,<0.6",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
 ]
 
