@@ -23,12 +23,19 @@
 
 ### 变更
 
-- **agentao 下限抬到 0.5.17**（`agentao[cli]>=0.5.17,<0.6`）。0.5.17 起前台子 Agent 的 transport 事件带每次运行一个的
-  `child_task_id`（jin-bo/agentao#578，观澜提出），P4.26 靠它配对，不再依赖「同名子 Agent 串行」这一未承诺的实现细节。
-  同版新增的子会话 HostEvent 转播（`relay_subagent_events`）观澜不接。
+- **agentao 下限抬到 0.5.18**（`agentao[cli]>=0.5.18,<0.6`）。0.5.17 起前台子 Agent 的 transport 事件带每次运行一个的
+  `child_task_id`（jin-bo/agentao#578，观澜提出），P4.26 靠它配对，不再依赖「同名子 Agent 串行」这一未承诺的实现细节；
+  同版新增的子会话 HostEvent 转播（`relay_subagent_events`）观澜不接。再抬到 0.5.18 是因为 openai 3.38（2026-10-26）
+  把 API 错误的文本缩成只剩 message，0.5.17 靠那段文本判断错误类型（参数修复、上下文溢出），而 agentao 不给 openai
+  设上界，新装环境会拿到 3.38 以上。0.5.18 的行为变化：激活技能（Web 会话的 `guanlan-wiki`）的正文不再每次请求重发，
+  而是以一条 user 消息入史一次——改了 `SKILL.md` 要新开会话才生效。
 
 ### 修复
 
+- **Web 恢复会话时轮次多算、标题可能是提示原文**。恢复按 user 消息条数还原轮次、取首条 user 消息原文作标题；agentao 0.5.18
+  起激活技能会多一条整条包在 `<system-reminder>` 里的 user 消息，每个会话恢复后轮次多 1，而首条 user 消息前还带着日期提醒。
+  现在与历史回放同一口径：剥掉 `<system-reminder>` 后为空的 user 消息不算一轮、不作标题、回放不显示。契约用例在真 Agentao 上
+  钉住「技能入史消息整条是提醒」这一形状。
 - **Web 端指向 raw/ 子目录的引用点不动**（如 `` `raw/学习辅导材料/某篇.md` ``）。raw/ 可以分子目录（ingest 的撞名检查和门禁快照
   本就遍历整棵 raw/ 树，`raw_digest` 记的也是相对路径），但渲染器的 raw 索引只收 raw/ 顶层，`raw/a/b.md` 退化成 `b.md`
   去查，子目录里的源一律标灰。现在四种写法（裸路径、行内 code、`[[raw/…]]`、markdown 链接）都按 raw/ 下的相对路径解析，

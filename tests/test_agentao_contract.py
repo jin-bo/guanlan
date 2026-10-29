@@ -722,6 +722,46 @@ def test_parent_tool_start_carries_no_child_task_id(conv_with_agent, monkeypatch
     assert {f["id"] for f in frames} == {child[0]["child_task_id"]}
 
 
+def test_skill_loaded_note_is_a_whole_reminder_user_message(real_kb, monkeypatch) -> None:
+    """0.5.18（上游 #552）：激活技能的正文以一条 user 消息入史，**整条**包在 <system-reminder> 里。
+
+    Web 恢复会话时据「剥掉提醒后为空 ⇒ 不是用户说的话」不计轮次、不取标题、回放跳过
+    （`chat_support._message_text`）。上游若改成不整条包裹，这条先红，免得每个会话恢复后轮次悄悄多 1。
+    """
+    from types import SimpleNamespace
+
+    from agentao.llm.client import LLMClient
+
+    from guanlan.skill import SKILL_NAME
+    from guanlan.web.chat_support import _message_text
+    from guanlan.web.conversation import Conversation
+
+    def fake_chat_stream(self, messages, tools=None, max_tokens=None, on_text_chunk=None,
+                         cancellation_token=None, *, cache_boundary=None, on_retry=None,
+                         on_reasoning_chunk=None):
+        on_text_chunk("答")
+        message = SimpleNamespace(role="assistant", content="答", tool_calls=None, reasoning_content=None)
+        return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=message)], usage=None)
+
+    monkeypatch.setattr(LLMClient, "chat_stream", fake_chat_stream)
+    # 技能须真能被发现，激活才会入史：不靠本机 ~/.agentao 是否装过（CI 上没有），走库内 `<wd>/skills/`。
+    import shutil
+
+    shutil.copytree(Path(__file__).resolve().parent.parent / "skills" / SKILL_NAME,
+                    real_kb / "skills" / SKILL_NAME)
+    conv = Conversation("cid-note", real_kb, None, persist=False, search_cache=CorpusCache())
+    try:
+        conv.agent.chat("第一问")
+        conv.agent.chat("第二问")
+        users = [m.get("content") for m in conv.agent.messages if m.get("role") == "user"]
+    finally:
+        conv.close()
+    notes = [c for c in users if isinstance(c, str) and "Skill loaded:" in c]
+    assert notes, "0.5.18 起该有一条 Skill loaded 入史；没有说明上游又改了入史方式"
+    assert all(_message_text(c) == "" for c in notes)
+    assert [t for c in users if (t := _message_text(c))] == ["第一问", "第二问"]
+
+
 # ── 内部依赖面（§3.3：收敛前先钉死现状）──────────────────────────────────────
 
 

@@ -26,6 +26,7 @@ from .chat_support import (
     IDLE_TTL_SECONDS,
     _is_canonical_uuid,
     _logger,
+    _message_text,
     purge_model_specific,
 )
 from .goal_io import clear_goal_sidecar, goal_sidecar_path, read_goal
@@ -347,12 +348,15 @@ class ConversationStore:
                 )
                 conv.agent.messages = messages  # 已在锁外清过推理数据（P4.23 §3.2，见上）
                 # 只认构造已激活的 SKILL_NAME，**不**回放盘上任意 active_skills（扩大姿态，决策P4.2-4/6）
-                conv.turns = len([m for m in messages if m.get("role") == "user"])  # 还原轮次
-                first_user = next(
-                    (m.get("content") for m in messages if m.get("role") == "user"), ""
-                )
+                # 还原轮次与标题只认用户真说的话：剥掉 <system-reminder> 后为空的 user 消息（日期提醒
+                # 之外，0.5.18 起还有技能入史的「Skill loaded」整条提醒）不算一轮、不作标题。
+                said = [
+                    t for m in messages
+                    if m.get("role") == "user" and (t := _message_text(m.get("content")))
+                ]
+                conv.turns = len(said)  # 还原轮次
                 # 回填标题：否则 live 视图（内存优先合并）会把刚续聊的历史会话标题显示成空。
-                conv.title = (first_user if isinstance(first_user, str) else "")[:50] or "（空）"
+                conv.title = (said[0] if said else "")[:50] or "（空）"
                 self._convs[cid] = conv
                 return conv
         finally:

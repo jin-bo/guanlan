@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -21,6 +20,7 @@ from ..audit import audit_preview
 from ..heal import compute_worklist
 from ..pages import iter_pages, load_page, page_title, page_type
 from ..rawio import find_source_page
+from .chat_support import _message_text  # noqa: F401 — app.py 自此取用（定义见 chat_support）
 from .uploads import _IMAGE_EXT_TO_MIME
 
 
@@ -219,25 +219,6 @@ def _report_response(json_text: str) -> Response:
     默认 `JSONResponse`（那会变 compact + `ensure_ascii=True`，与 CLI `--json` 字节不等）。
     """
     return Response(content=json_text, media_type="application/json")
-
-
-# 历史会话回放时用于把一条 message 的 content 归一为可显示文本：
-# ① content 可能是多模态 block 列表（取其中 type=="text" 的片段）；② 剥掉首条 user 里的
-# <system-reminder>…</system-reminder> 噪声（与 list_sessions 取 title 的口径一致，避免气泡显示
-# 一大段注入提示）。自含小实现，不耦合 agentao 私有 _content_to_text（只用其文档化会话面）。
-_SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
-
-
-def _message_text(content: object) -> str:
-    if isinstance(content, list):
-        content = " ".join(
-            b.get("text", "")
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        )
-    if not isinstance(content, str):
-        return ""
-    return _SYSTEM_REMINDER_RE.sub("", content).strip()
 
 
 def _list_raw(root: Path) -> list[dict]:
