@@ -207,9 +207,11 @@ body.col-resizing { user-select: none; cursor: col-resize; }
 .chat-think-elided { margin: .2rem 0 0 .25rem; padding: 0 .6rem; font-style: italic; }
 body.hide-thinking .chat-think { display: none; }
 /* 子 Agent 进展行（P4.26，chat.js handleSubagent）：气泡前一行淡色旁注，不撑破行。窄时只省略名称，
-   状态与工具不缩（极窄时整行裁掉）；pre 保住状态段开头的空格（flex 项会吞首尾空白）。 */
+   状态与工具不缩（极窄时整行裁掉）；pre 保住状态段开头的空格（flex 项会吞首尾空白）。
+   flex-shrink: 0 必需：.chat-log 是定高纵向 flex，overflow: hidden 使本行的自动最小高度归 0，
+   对话一长溢出时它会被压成约 3px、等于不可见（短对话不溢出，故验收时没暴露）。 */
 .chat-subagent { align-self: flex-start; max-width: 88%; color: var(--lan-ink-soft); font-size: .82rem;
-  padding: .1rem .25rem; display: flex; min-width: 0; overflow: hidden; }
+  padding: .1rem .25rem; display: flex; min-width: 0; overflow: hidden; flex-shrink: 0; }
 .chat-subagent > span { white-space: pre; }
 .chat-subagent-name { flex: 0 1 auto; min-width: 4em; overflow: hidden; text-overflow: ellipsis; }
 .chat-subagent-name + span { flex: 0 0 auto; }
