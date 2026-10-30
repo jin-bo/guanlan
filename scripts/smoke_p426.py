@@ -169,6 +169,19 @@ class Smoke:
         assert st["open"] == 19
         return "20 行 + 省略计数、已显示行仍收终态"
 
+    def overflow_not_collapsed(self) -> str:
+        # 回归（#131）：.chat-log 是定高纵向 flex，行带 overflow: hidden 时自动最小高度归 0，对话一长溢出
+        # 就被压成约 3px——帧与 DOM 都对、只是看不见，上面几个只读 textContent 的场景测不出来。
+        self.page.evaluate("""() => { for (let i = 0; i < 40; i++) addMsg("bot", "填充\\n".repeat(8)); }""")
+        overflow = self.page.evaluate(
+            "() => { const l = document.getElementById('chat-log'); return l.scrollHeight > l.clientHeight; }"
+        )
+        assert overflow, "聊天区没溢出，本场景前提不成立"
+        self.feed(_start("a"))
+        h = self.page.evaluate("() => window.__bot.previousElementSibling.getBoundingClientRect().height")
+        assert h >= 12, f"溢出时子 Agent 行被压成 {h:.2f}px"
+        return f"溢出时行高 {h:.1f}px"
+
     # ── 收尾出口：拦截流、驱动真 sendChat / sendGoalRun（含 finally）──
 
     def _route(self, pattern: str, frames: list[str]) -> None:
@@ -216,8 +229,9 @@ SCENARIOS = [
     ("3. 名称字面显示 + 未知终态原值", "literal_and_unknown_state"),
     ("4. subagent 帧撤心跳", "heartbeat_cleared"),
     ("5. 每气泡 20 行上限 + 省略计数", "row_cap"),
-    ("6. 普通流四种收尾（含 finally 幂等）", "chat_exits"),
-    ("7. /goal 流四种收尾（含 finally 幂等）", "goal_exits"),
+    ("6. 长对话溢出时行不被压扁", "overflow_not_collapsed"),
+    ("7. 普通流四种收尾（含 finally 幂等）", "chat_exits"),
+    ("8. /goal 流四种收尾（含 finally 幂等）", "goal_exits"),
 ]
 
 
@@ -245,7 +259,7 @@ def main() -> int:
                         msg = str(exc).splitlines()[0][:200] if str(exc) else ""
                         results.append((label, False, f"{type(exc).__name__}: {msg}"))
                         print(f"  ✗ {label} — {type(exc).__name__}: {msg}")
-                label = "8. 全程无页面脚本异常"
+                label = "9. 全程无页面脚本异常"
                 results.append((label, not errors, "无" if not errors else str(errors[:2])))
                 print(("  ✓ " if not errors else "  ✗ ") + f"{label} — {results[-1][2]}")
                 browser.close()
