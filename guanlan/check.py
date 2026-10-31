@@ -219,14 +219,25 @@ def run_check(wiki: Path) -> CheckResult:
     # （libyaml CSafeLoader）对**「是否可解析」会分歧**——如 flow 序列里的字面 TAB（`aliases: [a\tb]`），
     # libyaml 收、纯 Python 抛。故**绝不把严格 meta 塞进解析表**（会让 check 的解析表与 graph 不一致、对这类
     # 页误报 wikilink.broken）。改为对**已读文本**走容错档 `load_page_text` 解析入 loaded：它与 `load_page`
-    # 逐字等价（文本已以 utf-8 成功解码——非 UTF-8 页严格 read_text 早抛，与原主循环同款），令 loaded **逐页
+    # 逐字等价（非 UTF-8 页报 `page.not_utf8` 后同样按 `errors="replace"` 解码，与 load_page 一致），令 loaded **逐页
     # 等同 load_page** → `link_resolution_index(wiki, loaded=loaded)` 与 `link_resolution_index(wiki)` 逐字节相同。
     # 省下的是二次**读盘+遍历**，容错档那次 libyaml 解析（廉价）仍保留以维持口径一致。
     parsed: list[tuple[str, str, dict | None, Violation | None]] = []
     loaded: list[tuple[Path, dict | None]] = []
     for path in iter_pages(wiki):
         page = path.relative_to(root).as_posix()
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # 一张非 UTF-8 页不该让整库校验（及其上的写门禁）崩在 traceback：报一条阻断违规、其余照扫。
+            # 文本按 load_page 同款 `errors="replace"` 解码，下面的容错 meta 与链接扫描仍与 graph 同口径。
+            text = raw.decode("utf-8", errors="replace")
+            block, body = split_frontmatter(text)
+            detail = f"页面不是 UTF-8 编码（第 {exc.start} 字节起无法解码），请转存为 UTF-8"
+            parsed.append((page, body, None, Violation(page, "page.not_utf8", detail)))
+            loaded.append((path, load_page_text(text)[0]))
+            continue
         block, body = split_frontmatter(text)
         meta, fatal = parse_frontmatter(block)  # 严格档：违规判定（坏块硬报，纯 Python loader）。
         parsed.append((page, body, meta, fatal))

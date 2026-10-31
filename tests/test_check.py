@@ -55,6 +55,23 @@ def test_config_pages_excluded_but_are_link_targets(tmp_path: Path):
     assert result.ok, result.violations
 
 
+def test_non_utf8_page_reported_not_raised(tmp_path: Path):
+    """一张 GBK 页不得让整库校验崩溃（gbrain v0.60.298 坏项隔离）：报 page.not_utf8，其余页照报。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    gbk = wiki / "entities" / "Gbk.md"
+    gbk.parent.mkdir(parents=True)
+    gbk.write_bytes("---\ntitle: 坏\ntype: entity\n---\n正文\n".encode("gbk"))
+    _page(wiki / "concepts" / "Other.md", body="见 [[不存在的页]]")
+
+    result = run_check(wiki)  # 不抛
+    assert not result.ok
+    assert result.pages_checked == 2
+    bad = [v for v in result.violations if v.kind == "page.not_utf8"]
+    assert [v.page for v in bad] == ["wiki/entities/Gbk.md"]
+    assert "wikilink.broken" in _kinds(result)  # 坏页之外的问题没被吞掉
+
+
 def test_missing_wiki_dir_fails(tmp_path: Path):
     """wiki/ 不存在时判失败（写门禁收尾不能把'空扫描'当干净）。"""
     result = run_check(tmp_path / "wiki")  # 不创建

@@ -9,11 +9,11 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
 import subprocess
 import sys
-import tokenize
 from dataclasses import replace
 from pathlib import Path
 
@@ -405,15 +405,28 @@ async def drain_tasks(delivery: Delivery, *, timeout: float = 5.0) -> None:
 # ───────────────────────── 架构验收 ─────────────────────────
 
 
-def _strip_comments_and_strings(path: Path) -> str:
-    """去掉注释与字符串字面量后的源码——中文说明里出现 `== "weixin"` 不该让下面那条断言变红。"""
-    out: list[str] = []
-    with path.open("rb") as fh:
-        for tok in tokenize.tokenize(fh.readline):
-            if tok.type in (tokenize.COMMENT, tokenize.STRING):
+_PLATFORMS = ("weixin", "feishu")
+
+
+def _platform_branches(source: str) -> list[str]:
+    """源码里拿平台名字面量做 `==` / `!=` 比较的位置（`行号: 平台`）。
+
+    走 AST 而非文本匹配：注释、docstring 里写 `== "weixin"` 不是比较节点，天然不误报；比较两侧哪边是
+    字面量、用单引号还是双引号也都认得出。早先的版本剥掉全部字符串 token 再找 `== "weixin"`，平台名
+    本身随之被剥掉，断言永远为真（gbrain v0.60 反向评审）。
+    """
+    hits: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Compare):
+            continue
+        operands = [node.left, *node.comparators]
+        for i, op in enumerate(node.ops):
+            if not isinstance(op, (ast.Eq, ast.NotEq)):
                 continue
-            out.append(tok.string)
-    return " ".join(out)
+            for side in (operands[i], operands[i + 1]):
+                if isinstance(side, ast.Constant) and side.value in _PLATFORMS:
+                    hits.append(f"{node.lineno}: {side.value}")
+    return hits
 
 
 def test_core_has_no_platform_branch():
@@ -423,13 +436,23 @@ def test_core_has_no_platform_branch():
     """
     core = sorted(Path("guanlan/im").glob("*.py"))
     assert core, "没找到核心模块，路径写错了？"
-    offenders = []
-    for path in core:
-        code = _strip_comments_and_strings(path)
-        for platform in ("weixin", "feishu"):
-            if f'== "{platform}"' in code or f'!= "{platform}"' in code:
-                offenders.append(f"{path}: {platform}")
+    offenders = [
+        f"{path}:{hit}" for path in core for hit in _platform_branches(path.read_text(encoding="utf-8"))
+    ]
     assert offenders == [], f"核心出现了平台分支：{offenders}"
+
+
+def test_platform_branch_detector_catches_planted_branch():
+    """守卫本身的反例：植入的平台分支必须被抓到，说明里的同样字样不得误报——否则上面那条永远绿。"""
+    planted = (
+        '"""说明里写 `platform == "weixin"` 不算分支。"""\n'
+        "# if platform == 'feishu': 注释也不算\n"
+        'if platform == "weixin":\n'
+        "    pass\n"
+        "if 'feishu' != kind:\n"
+        "    pass\n"
+    )
+    assert _platform_branches(planted) == ["3: weixin", "5: feishu"]
 
 
 def test_capability_tier_typing(kb_im):
