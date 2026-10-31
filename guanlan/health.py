@@ -8,6 +8,8 @@
   文件名（与 `rawio.find_source_page` 同一套容错）、`raw_digest`、`> 原始资料：` 声明行三路都没指向现存
   raw 文件。成因实测三类：原文改过名却没留声明、多篇聚合页放进了 sources/、摄入时模型给资料里**被引用的
   文献**另建了 source 页（llm_wiki v0.6.13 反向评审 §1.A）。三类都让 `audit` 追不到原文。
+  `raw/` 有读不到的位置（权限、断开的链接）时整批压下，改报一条 `health.raw_walk_incomplete`——判不了
+  就是未知，不当成没有（gbrain v0.60 反向评审 §2.1）。
 - **页型↔目录一致性**（`health.type_dir_mismatch` / `health.uncharted_page`，docs/P3.10）：合法
   `type` 落错目录、或内容页游离于四规范目录之外——schema 漂移的零-LLM advisory。
 - **overview 体积**（`health.overview_large`）：`overview.md` 超过 `OVERVIEW_ADVISORY_CHARS`。它没有任何
@@ -162,23 +164,34 @@ def _check_index_sync(wiki: Path, root: Path, content_pages: list[Path]) -> list
     return findings
 
 
-def _raw_anchor_stems(root: Path) -> frozenset[str]:
-    """全体 raw 文件可能对应的 source 页 stem（NFC 归一）。raw/ 缺失 → 空集。
+def _raw_anchor_stems(root: Path) -> tuple[frozenset[str], list[str]]:
+    """全体 raw 文件可能对应的 source 页 stem（NFC 归一），及遍历没走到的位置。raw/ 缺失 → 空集。
 
     递归、跳过任一段以 `.` 开头的路径（隐藏文件、Finder `._*`、`.assets` 之类的旁挂目录）。不按扩展名
     过滤：`raw/` 里放 PDF 原件、`convert` 产物放 `.md` 都是合法形态，多认一个 stem 只会少报、不会误报。
     NFC 归一两边一起做：macOS 上 Finder 落盘的文件名可能是 NFD，逐字比会把已收录的页误报成无原文。
     跟随指向目录的符号链接（与 `gate.snapshot_raw` 同口径：`raw/` 下的链接目录是支持的配置；`rglob`
     不下降进链接目录，会把其中原文的页全误报），按真实路径防环；隐藏目录就地剪枝、不白遍历。
+
+    第二个返回值是**没遍历到**的位置（相对库根）：读不了的目录（`os.walk` 的 `onerror`）与断开的符号
+    链接（指向未挂载的盘、被移走的目录）。二者背后可能就是某张 source 页的原文，故调用方据此改报
+    「raw 遍历不完整」、不再断言哪张页没有原文——判不了就是未知，不能当成没有（gbrain v0.60 反向评审 §2.1）。
     """
     raw = root / "raw"
     if not raw.is_dir():
-        return frozenset()
+        # `raw` 本身是断开的链接：原文都在一块没挂上的盘里，与「库里根本没有 raw/」是两回事。
+        return frozenset(), (["raw"] if raw.is_symlink() else [])
     stems: set[str] = set()
     seen: set[str] = set()
-    # 能力上限：读不了的子目录（权限、链接指向未挂载的盘）被 os.walk 静默跳过，其中原文对应的页会误报；
-    # 要提示须另立「raw 遍历不完整」一类 finding，未做（llm_wiki v0.6.13 反向评审 §5）。
-    for dirpath, dirnames, filenames in os.walk(raw, followlinks=True):
+    unreachable: list[str] = []
+
+    def _rel(path: str) -> str:
+        return Path(os.path.relpath(path, root)).as_posix()
+
+    def _on_error(exc: OSError) -> None:
+        unreachable.append(_rel(exc.filename) if exc.filename else "raw")
+
+    for dirpath, dirnames, filenames in os.walk(raw, onerror=_on_error, followlinks=True):
         real = os.path.realpath(dirpath)
         if real in seen:
             dirnames[:] = []
@@ -186,14 +199,33 @@ def _raw_anchor_stems(root: Path) -> frozenset[str]:
         seen.add(real)
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         for name in filenames:
-            if name.startswith(".") or not os.path.isfile(os.path.join(dirpath, name)):
+            if name.startswith("."):
+                continue
+            path = os.path.join(dirpath, name)
+            if not os.path.isfile(path):
+                # 断开的链接（无论原本指向文件还是目录，os.walk 都把它列在 filenames 里）。
+                if os.path.islink(path) and not os.path.exists(path):
+                    unreachable.append(_rel(path))
                 continue
             stem = Path(name).stem
             # 原名与其 NFC 形各推一遍：`raw_slug` 会把 NFD 的组合记号（`é` 拆出的 U+0301）当非词字符折成
             # `-`，故 NFD 原名推出的是 `Cafe-…`、NFC 原名推出的是 `Café-…`，两种页名都可能存在。
             for form in {stem, unicodedata.normalize("NFC", stem)}:
                 stems.update(unicodedata.normalize("NFC", s) for s in source_page_stems(form))
-    return frozenset(stems)
+    return frozenset(stems), sorted(unreachable)
+
+
+def _check_raw_walk(unreachable: list[str], suppressed: int) -> Finding:
+    """「raw 遍历不完整」全局 finding：列出没走到的位置，并说明本次压下了几条无原文判定。"""
+    shown = "、".join(f"`{p}`" for p in unreachable[:5])
+    more = f" 等 {len(unreachable)} 处" if len(unreachable) > 5 else ""
+    return Finding(
+        "",
+        "health.raw_walk_incomplete",
+        f"raw/ 有位置读不到（{shown}{more}：权限不足、或链接指向未挂载的盘/已移走的目录），"
+        f"无法判定 source 页有没有原文，本次不报 {suppressed} 条 health.source_without_raw；"
+        "挂上盘或修好链接后重跑",
+    )
 
 
 def _claim_hits_raw(root: Path, claimed: str) -> bool:
@@ -295,6 +327,8 @@ def run_health(wiki: Path) -> HealthReport:
     root = wiki.parent
     content_pages = list(iter_pages(wiki))
     anchors: frozenset[str] | None = None  # 惰性：库里没有 source 页就不遍历 raw/
+    unreachable: list[str] = []
+    orphan_sources: list[Finding] = []
 
     findings: list[Finding] = []
     for path in content_pages:
@@ -308,12 +342,12 @@ def run_health(wiki: Path) -> HealthReport:
             findings.append(stub)
         if dir_name == "sources":
             if anchors is None:
-                anchors = _raw_anchor_stems(root)
+                anchors, unreachable = _raw_anchor_stems(root)
             orphan_source = _check_source_without_raw(
                 root, page, path, meta, body, anchors, top_level=len(parts) == 2
             )
             if orphan_source is not None:
-                findings.append(orphan_source)
+                orphan_sources.append(orphan_source)
         # uncharted 与 type_dir_mismatch 互斥：前者只在非规范目录报、后者只在规范目录报。
         uncharted = _check_uncharted(page, dir_name)
         if uncharted is not None:
@@ -322,6 +356,12 @@ def run_health(wiki: Path) -> HealthReport:
             mismatch = _check_type_dir(page, dir_name, meta)
             if mismatch is not None:
                 findings.append(mismatch)
+    # raw 没遍历全时，「找不到原文」可能只是没走到：整批压下、改报一条遍历不完整，不让提示语里的
+    # 「删除」建议落到其实有原文的页上。没有判定被压下时读不到的位置不影响任何结论，不报（低噪）。
+    if unreachable and orphan_sources:
+        findings.append(_check_raw_walk(unreachable, len(orphan_sources)))
+    else:
+        findings.extend(orphan_sources)
     findings.extend(_check_index_sync(wiki, root, content_pages))
     overview = _check_overview_size(wiki, root)
     if overview is not None:
