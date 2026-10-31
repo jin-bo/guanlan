@@ -70,7 +70,7 @@ guanlan -C my-wiki query "你的问题"
 
 # 3. 维护(零 LLM、可离线)
 guanlan -C my-wiki check     # frontmatter / 断链 / 来源校验
-guanlan -C my-wiki health    # 桩页 + index↔磁盘同步
+guanlan -C my-wiki health    # 桩页 + index↔磁盘同步 + source 页原文
 guanlan -C my-wiki lint      # 孤儿页 / 断链 / 缺失实体
 guanlan -C my-wiki graph     # 写出 graph/graph.json + graph.html
 ```

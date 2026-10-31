@@ -399,3 +399,243 @@ def test_overview_at_advisory_line_is_quiet(tmp_path: Path):
     assert "health.overview_large" not in _kinds(run_health(wiki))
     (wiki / "overview.md").unlink()
     assert "health.overview_large" not in _kinds(run_health(wiki))
+
+
+# ---------- source 页无原文（llm_wiki v0.6.13 反向评审 §1.A） ----------
+
+LONG = "实质内容" * 10  # 过桩页线，免得断言被 stub_page 干扰
+
+
+def _raw(kb: Path, rel: str, text: str = "原文\n") -> None:
+    p = kb / "raw" / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+
+
+def _orphan_sources(wiki: Path) -> list[str]:
+    return sorted(f.page for f in run_health(wiki).findings if f.kind == "health.source_without_raw")
+
+
+def test_source_page_without_raw_is_reported(tmp_path: Path):
+    """被引文献误建的 source 页：raw/ 里没有它 → 报；有原文的同目录页不报。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _raw(tmp_path, "real-report.md")
+    _page(wiki, "sources/real-report.md", type="source", body=LONG)
+    _page(wiki, "sources/cited-paper.md", type="source", body=LONG)
+
+    assert _orphan_sources(wiki) == ["wiki/sources/cited-paper.md"]
+
+
+def test_missing_raw_dir_reports_every_source_page(tmp_path: Path):
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "sources/a.md", type="source", body=LONG)
+    assert _orphan_sources(wiki) == ["wiki/sources/a.md"]
+
+
+def test_only_sources_dir_is_checked(tmp_path: Path):
+    """entities/concepts/syntheses 本就没有 raw 对应，绝不能报。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "entities/A.md", type="entity", body=LONG)
+    _page(wiki, "syntheses/B.md", type="synthesis", body=LONG)
+    assert _orphan_sources(wiki) == []
+
+
+def test_filename_tolerance_matches_find_source_page(tmp_path: Path):
+    """文件名一路与 `find_source_page` 同口径：精确 slug、点折横杠的 kebab 形、逐字原名都算有原文。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _raw(tmp_path, "示例 报告.md")  # 空格 → slug `示例-报告`
+    _raw(tmp_path, "1.示例报告.md")  # Agent 常把序号点写成横杠
+    _raw(tmp_path, "“引号”标题.md")  # 批量导入桩页直接用原文件名
+    _page(wiki, "sources/示例-报告.md", type="source", body=LONG)
+    _page(wiki, "sources/1-示例报告.md", type="source", body=LONG)
+    _page(wiki, "sources/“引号”标题.md", type="source", body=LONG)
+    assert _orphan_sources(wiki) == []
+
+
+def test_never_reports_a_page_find_source_page_would_claim(tmp_path: Path):
+    """正反两向一致性：凡 ingest 认作「已收录」的页，health 都不得说它没原文。"""
+    from guanlan.rawio import find_source_page
+
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    names = ["a.b.c", "v1.2 笔记", "“X”-Y", "--dash--", "1.报告"]
+    for name in names:
+        _raw(tmp_path, f"{name}.md")
+        _page(wiki, f"sources/{name.replace('.', '-')}.md", type="source", body=LONG)
+    reported = set(_orphan_sources(wiki))
+    claimed = {find_source_page(wiki / "sources", name) for name in names} - {None}
+    claimed_rel = {p.relative_to(tmp_path).as_posix() for p in claimed}
+    every = {p.relative_to(tmp_path).as_posix() for p in (wiki / "sources").glob("*.md")}
+    # 双向一致：被认领的页一张不报，没被认领的（`v1-2 笔记` 三种形都对不上）照报——
+    # 只断言前半截时，认领失败的名字会让用例形同虚设。
+    assert claimed_rel and not (claimed_rel & reported)
+    assert reported == every - claimed_rel
+
+
+def test_raw_in_subdir_and_non_md_original_count(tmp_path: Path):
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _raw(tmp_path, "子目录/示例数据.md")
+    _raw(tmp_path, "示例报告.pdf")
+    _page(wiki, "sources/示例数据.md", type="source", body=LONG)
+    _page(wiki, "sources/示例报告.md", type="source", body=LONG)
+    assert _orphan_sources(wiki) == []
+
+
+def test_hidden_raw_files_do_not_anchor(tmp_path: Path):
+    """漏报向：`raw/.x.md` 经 raw_slug 剥首点会变成 `x`；隐藏文件/目录若算原文就会吞掉真孤儿。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _raw(tmp_path, ".x.md")
+    _raw(tmp_path, ".cache/y.md")
+    _page(wiki, "sources/x.md", type="source", body=LONG)
+    _page(wiki, "sources/y.md", type="source", body=LONG)
+    assert _orphan_sources(wiki) == ["wiki/sources/x.md", "wiki/sources/y.md"]
+
+
+def test_nfd_raw_name_matches_nfc_page(tmp_path: Path):
+    """Finder 落盘可能是 NFD；APFS 上 ingest 能认领，这里也不得误报。"""
+    import unicodedata
+
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _raw(tmp_path, unicodedata.normalize("NFD", "Café 研究") + ".md")
+    _page(wiki, "sources/" + unicodedata.normalize("NFC", "Café-研究") + ".md", type="source", body=LONG)
+    assert _orphan_sources(wiki) == []
+
+
+def _source_with(wiki: Path, rel: str, *, digest: str | None = None, body: str = LONG) -> None:
+    p = wiki / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    extra = f"raw_digest: '{digest}'\n" if digest else ""
+    p.write_text(
+        "---\ntitle: 'T'\ntype: source\ntags: []\nsources: []\n"
+        f"last_updated: 2026-10-30\n{extra}---\n\n{body}\n",
+        encoding="utf-8",
+    )
+
+
+def test_renamed_page_anchored_by_raw_digest_or_declaration(tmp_path: Path):
+    """改过名的页：`raw_digest` 或「原始资料」声明指向现存 raw 即算有原文。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _raw(tmp_path, "中文原名.md")
+    _source_with(wiki, "sources/english-slug.md", digest="raw/中文原名.md@sha256:" + "0" * 64)
+    _source_with(wiki, "sources/another.md", body="> 原始资料：`raw/中文原名.md`\n\n" + LONG)
+    assert _orphan_sources(wiki) == []
+
+
+def test_claims_pointing_nowhere_still_reported(tmp_path: Path):
+    """漏报向：声明了但原文不在、越界、或声明写在围栏代码里——都不算有原文。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _raw(tmp_path, "exists.md")
+    (tmp_path / "secret.md").write_text("x", encoding="utf-8")
+    _source_with(wiki, "sources/gone.md", digest="raw/gone.md@sha256:" + "0" * 64)
+    _source_with(wiki, "sources/escape.md", digest="raw/../secret.md@sha256:" + "0" * 64)
+    _source_with(
+        wiki,
+        "sources/fenced.md",
+        body="```markdown\n> 原始资料：`raw/exists.md`\n```\n\n" + LONG,
+    )
+    assert _orphan_sources(wiki) == [
+        "wiki/sources/escape.md",
+        "wiki/sources/fenced.md",
+        "wiki/sources/gone.md",
+    ]
+
+
+def test_source_without_raw_ordered_before_content_quality(tmp_path: Path):
+    """来源链断裂属数据完整性档，排在桩页之前；仍是建议，默认退 0、--strict 退 6。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki, index="# 索引\n\n## Sources\n- [c](sources/cited.md) — x\n")
+    _page(wiki, "sources/cited.md", type="source", body="短")
+
+    kinds = _kinds(run_health(wiki))
+    assert kinds.index("health.source_without_raw") < kinds.index("health.stub_page")
+    assert health_entrypoint(tmp_path, json_output=False, strict=False) == 0
+    assert health_entrypoint(tmp_path, json_output=False, strict=True) == 6
+
+
+def test_claim_to_hidden_raw_does_not_anchor(tmp_path: Path):
+    """漏报向：与文件名一路同口径——声明 / raw_digest 指向隐藏路径也不算原文。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _raw(tmp_path, ".cache/a.md")
+    _raw(tmp_path, ".b.md")
+    _source_with(wiki, "sources/x.md", body="> 原始资料：`raw/.cache/a.md`\n\n" + LONG)
+    _source_with(wiki, "sources/y.md", digest="raw/.b.md@sha256:" + "0" * 64)
+    assert _orphan_sources(wiki) == ["wiki/sources/x.md", "wiki/sources/y.md"]
+
+
+def test_nfc_claim_matches_nfd_raw_on_any_platform(tmp_path: Path):
+    """NFD 落盘的原文、NFC 写的声明：逐字不中时按目录实际文件名的 NFC 形逐段再比（Linux 上走这条退路）。"""
+    import unicodedata
+
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _raw(tmp_path, unicodedata.normalize("NFD", "Données/Café 研究") + ".md")
+    nfc = unicodedata.normalize("NFC", "raw/Données/Café 研究.md")
+    _source_with(wiki, "sources/renamed.md", body=f"> 原始资料：`{nfc}`\n\n" + LONG)
+    _source_with(wiki, "sources/digest.md", digest=f"{nfc}@sha256:" + "0" * 64)
+    assert _orphan_sources(wiki) == []
+
+
+def test_claim_through_symlinked_raw_dir_anchors(tmp_path: Path):
+    """声明经 `raw/` 下指向库外的链接目录也算原文——与文件名一路、gate 快照同口径。
+
+    链接名用 NFD、声明写 NFC：Linux 上逐字找不到，走 NFC 逐段退路后仍须跟进链接认出原文。
+    """
+    import unicodedata
+
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / unicodedata.normalize("NFD", "é.md")).write_text("x", encoding="utf-8")
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / unicodedata.normalize("NFD", "lïnk")).symlink_to(outside, target_is_directory=True)
+    claim = unicodedata.normalize("NFC", "raw/lïnk/é.md")
+    _source_with(wiki, "sources/z.md", body=f"> 原始资料：`{claim}`\n\n" + LONG)
+    _source_with(wiki, "sources/w.md", digest=f"{claim}@sha256:" + "0" * 64)
+    assert _orphan_sources(wiki) == []
+
+
+def test_claim_lexically_outside_raw_never_anchors(tmp_path: Path):
+    """漏报向：放开 realpath 准入后，字面越界（`..`、绝对路径、反斜杠、非 raw/ 前缀）仍一律不算。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "secret.md").write_text("x", encoding="utf-8")
+    claims = ["raw/../secret.md", str(tmp_path / "secret.md"), "raw\\..\\secret.md", "secret.md"]
+    for i, claim in enumerate(claims):
+        _source_with(wiki, f"sources/p{i}.md", body=f"> 原始资料：`{claim}`\n\n" + LONG)
+    assert _orphan_sources(wiki) == [f"wiki/sources/p{i}.md" for i in range(len(claims))]
+
+
+def test_raw_under_symlinked_dir_anchors(tmp_path: Path):
+    """`raw/` 下指向目录的符号链接是支持的配置（同 gate 快照口径）：其中原文的页不得误报。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "linked.md").write_text("x", encoding="utf-8")
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "ext").symlink_to(store, target_is_directory=True)
+    (tmp_path / "raw" / "loop").symlink_to(tmp_path / "raw", target_is_directory=True)  # 环保护
+    _page(wiki, "sources/linked.md", type="source", body=LONG)
+    assert _orphan_sources(wiki) == []
+
+
+def test_subdir_source_page_not_anchored_by_filename(tmp_path: Path):
+    """漏报向：`find_source_page` 只认 `sources/<stem>.md`；子目录同名页 ingest 判「未收录」，这里也不得按文件名认领。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _raw(tmp_path, "x.md")
+    _page(wiki, "sources/sub/x.md", type="source", body=LONG)
+    _source_with(wiki, "sources/sub/y.md", body="> 原始资料：`raw/x.md`\n\n" + LONG)
+    assert _orphan_sources(wiki) == ["wiki/sources/sub/x.md"]

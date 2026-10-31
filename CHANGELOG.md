@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`health` 报「source 页没有原文」**（`health.source_without_raw`，`docs/backlog/notes/llm_wiki-反向评审-v0.6.13.md` §2.1）。
+  `wiki/sources/` 下的页，若文件名、`raw_digest`、`> 原始资料：` 声明行三路都没指向现存 raw 文件，报一条 advisory。
+  此前这类页 `check` / `health` / `lint` / `audit` 全不报，别页 `sources:` 引它照样过门禁，`audit` 也追不到原文。
+  文件名一路与 `find_source_page` 共用新抽出的 `rawio.source_page_stems`（正反两向一个归口，ingest 认作已收录的页不会被报）；
+  隐藏 raw 文件三路都不算原文；文件名一路两边做 NFC 归一，声明路径逐字找不到时按目录实际文件名的 NFC 形逐段再比（规范化差异两平台一致）。文件名一路只认 `sources/` 第一层，与 ingest 同口径。三路都跟随 `raw/` 下的符号链接（与写门禁快照同口径），声明路径只做字面越界检查。不折大小写（大小写不敏感的 macOS 上结论可能与 Linux 不同）、不做模糊匹配。真实库实测：三个库 0 条，一个库 16 条
+  （原文改名未留声明 4 张、多篇聚合页放进 `sources/` 12 张），无误报。因果排序列第一档，排在桩页等内容建议之前。
+
 ### 修复
 
 - **Web 子 Agent 进展行在长对话里不可见**（P4.26）。聊天区是定高纵向 flex，该行带 `overflow: hidden`，自动最小高度归 0，

@@ -160,7 +160,7 @@ ingest、heal、audit、`query --backfill` 等写 `wiki/` 的工作流，收尾�
 写工作流里不要自己运行这些命令（见上），由 wrapper 或用户运行。其他会话可以经 shell 调用。
 
 - `guanlan check`：frontmatter 合规、wikilink 断链、`sources` 解析。ingest 与 `--backfill` 收尾时强制运行。
-- `guanlan health`：空页与桩页、index 与磁盘是否同步。
+- `guanlan health`：空页与桩页、index 与磁盘是否同步、source 页在 `raw/` 里有没有原文。
 - `guanlan reindex`：把磁盘上漏登记的内容页补进 `index.md`（`--dry-run` 预览，`--prune` 清理悬空行）。只写 `index.md`。
 - `guanlan lint`：孤儿页、断链、缺失实体页。
 - `guanlan graph`：把 `[[wikilink]]` 解析成边，输出 `graph.json` 与自包含的 `graph.html`。

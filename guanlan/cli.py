@@ -319,7 +319,7 @@ def _add_check_parser(sub, dir_parent) -> None:
 
 def _add_health_parser(sub, dir_parent) -> None:
     p = sub.add_parser(
-        "health", parents=[dir_parent], help="文件级结构体检：桩页 + index↔磁盘同步（零 LLM，建议非门禁）"
+        "health", parents=[dir_parent], help="文件级结构体检：桩页 + index↔磁盘同步 + source 页原文（零 LLM，建议非门禁）"
     )
     p.add_argument("--json", action="store_true", help="输出 JSON 契约")
     p.add_argument("--strict", action="store_true", help="有建议则以退出码 6 失败（供 CI/nightly）")

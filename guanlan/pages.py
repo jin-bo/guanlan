@@ -784,6 +784,7 @@ FINDING_CAUSAL_ORDER: tuple[str, ...] = (
     "lint.broken_link",  # 断链（missing_entity 之果 + 零散单引）
     "health.index_missing_page",  # 磁盘有页未入 index（结构未接好）
     "health.index_dangling",  # index 悬挂链接
+    "health.source_without_raw",  # source 页无原文（来源链断在 wiki 层）
     "lint.orphan",  # 无入链（待接入）
     # 第二档 · 内容 / 组织质量
     "health.stub_page",
