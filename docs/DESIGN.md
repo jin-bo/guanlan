@@ -138,7 +138,7 @@ Schema 是 Karpathy 三层之一，与 `raw/`、`wiki/` 平级，因此落为**�
 | **ingest** | `guanlan ingest raw/x.md` | wrapper 调用 Agentao + skill：读 `.md` 源→读 index/overview→写 source 页→更新 index/overview→建/更新实体&概念页→标记矛盾（格式见 §4.5）→追加 log→wrapper 强制跑门禁。**单轮优先，必要时分步**（不承诺固定调用次数；一篇资料可能触及多页） | P2 |
 | **query** | `guanlan query "…"` | wrapper 调用 Agentao + skill：读 index 定位→读相关页→综合带 `[[页]]` 引用的答案；`index.md` + 2-gram 粗召回不中时，Agent 可扫相关目录或请用户补关键词（graceful fallback）。默认只读；如要回填 `syntheses/`，走显式 `guanlan query --backfill "…"` 并同样跑门禁 | P2 |
 | **基础校验** | ingest / query backfill 收尾**强制**运行 / `guanlan check` | 独立 `guanlan check` 只做 frontmatter + 断链 + `sources` 解析；ingest / `--backfill` 的 wrapper 门禁在此之上**额外**做 `raw/` 调用前后快照比对（独立 check 无"调用前"基线，故不含此项）。**零 LLM**，见 §4.7 | P2 |
-| **health** | `health` | 结构检查：空页/桩页、index 与磁盘同步。**零 LLM** | P3 |
+| **health** | `health` | 结构检查：空页/桩页、index 与磁盘同步、source 页在 `raw/` 有无原文。**零 LLM** | P3 |
 | **lint** | `lint` | **只做结构 lint**：孤儿页、断链、缺失实体页。**零 LLM** | P3 |
 | **graph** | `build graph` | **只做确定性**：解析 `[[wikilink]]`→边，输出 `graph.json` + 自包含 `graph.html`。**零 LLM** | P3 |
 
@@ -172,7 +172,7 @@ last_updated: YYYY-MM-DD
 
 ### 4.6 工具（确定性脚本，Python 3.12；P2 的 check 在 `guanlan` 包内）
 
-- **确定性脚本（零 LLM）**：check（**P2 基础校验**：frontmatter + 断链 + `sources` 解析；`raw/` 不变性由 wrapper 快照比对兜底，见 §4.7，不在脚本里巡检）、health（**P3** 结构检查：空页/桩页、index 同步）、lint（**P3** 图感知结构 lint：孤儿/断链/缺失实体）、graph（**P3** 确定性 wikilink graph + 自包含 `graph.html`）。P2 只交付 check，避免把 P3 的 health/lint 提前塞进 P2；P3 三者落点与契约见 [`P3-健康与图谱.md`](P3-健康与图谱.md)。
+- **确定性脚本（零 LLM）**：check（**P2 基础校验**：frontmatter + 断链 + `sources` 解析；`raw/` 不变性由 wrapper 快照比对兜底，见 §4.7，不在脚本里巡检）、health（**P3** 结构检查：空页/桩页、index 同步、source 页原文）、lint（**P3** 图感知结构 lint：孤儿/断链/缺失实体）、graph（**P3** 确定性 wikilink graph + 自包含 `graph.html`）。P2 只交付 check，避免把 P3 的 health/lint 提前塞进 P2；P3 三者落点与契约见 [`P3-健康与图谱.md`](P3-健康与图谱.md)。
   - **check 的唯一实现落在 `guanlan` 包内（`guanlan/check.py`），暴露为 `guanlan check` 子命令与 `python -m guanlan.check`**；wrapper 门禁直接 import 同一函数，skill 指示 agent shell 调 `guanlan check`。不在 skill `scripts/` 下另写一份——否则开发期（repo `skills/`）与安装期（`~/.agentao/skills/`）skill 路径不同会逼 wrapper 解析该路径并引入双实现分叉。理由与契约见 [`P2-最小闭环.md`](P2-最小闭环.md) §10 决策1。
 - **ingest / query 的 LLM 部分不写成脚本** —— 由 `guanlan-wiki` skill + `agentao run` 子进程完成（P2 路线，见 §5.1 / `P2-最小闭环.md` §4）；in-process 嵌入（`Agentao.chat()` / `LLMClient`）留待 P4。脚本只做确定性工作。（结构 lint 为零 LLM 的结构检查，属 P3；语义 lint 以后再加，见 §8。）
 - **推到 P5（已实现）**：多格式转换 adapter（统一接口 `convert(file) -> md`）。**P5.2 `guanlan convert` 已落地**——改为复用既有 `pdf-to-markdown` skill（MinerU→marker→pypdf 分层兜底）当后端引擎（非 markitdown），把多格式转成 `raw/*.md` + `origin` provenance，复用 `.md` 单格式 ingest 不动；脚本零 LLM、无新依赖，见 [`P5.2-多格式摄入.md`](P5.2-多格式摄入.md)。MVP ingest 仍只吃 `.md`。

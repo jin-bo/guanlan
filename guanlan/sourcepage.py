@@ -63,8 +63,7 @@ def locate_source_page(kb: Path, rel: str) -> SourceLocation:
             continue  # 两档证据都要求页内出现本篇路径
         meta, body = load_page_text(text)
         parsed = parse_digest_value((meta or {}).get(RAW_DIGEST_KEY))
-        unfenced = "".join(_mask_fenced_blocks(_split_md_lines(body)))  # 围栏里的示例不算声明
-        declared = set(_DECLARATION_RE.findall(unfenced))
+        declared = _declared_raw_paths(body)
         if parsed is not None and parsed[0] == target:
             owners.append((page, "raw_digest"))
         elif parsed is not None:
@@ -80,6 +79,24 @@ def locate_source_page(kb: Path, rel: str) -> SourceLocation:
         page, basis = owners[0]
         return SourceLocation(page, basis)
     return SourceLocation(None, "", owners + candidates)
+
+
+def _declared_raw_paths(body: str) -> set[str]:
+    """围栏外的 `> 原始资料：` 声明行里的路径（围栏里的示例不算声明）。"""
+    return set(_DECLARATION_RE.findall("".join(_mask_fenced_blocks(_split_md_lines(body)))))
+
+
+def claimed_raw_paths(meta: dict | None, body: str) -> set[str]:
+    """页内声称的原始资料路径：`raw_digest` 里的路径 ∪ 围栏外的 `> 原始资料：` 声明行。**不校验存在性。**
+
+    与 `locate_source_page` 的两档「归属依据」同一组证据，但这里只收集、不判归属：
+    `health.source_without_raw` 只问「这张页有没有指向任何现存原文」，不问「它是不是那篇的唯一页」。
+    """
+    paths = _declared_raw_paths(body)
+    parsed = parse_digest_value((meta or {}).get(RAW_DIGEST_KEY))
+    if parsed is not None:
+        paths.add(parsed[0])
+    return paths
 
 
 def source_slug(rel: str) -> str:

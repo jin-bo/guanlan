@@ -289,7 +289,7 @@ def tool_graph(*, root: Path) -> GraphEnvelope:
 
 @_guard("health")
 def tool_health(*, root: Path) -> ReportEnvelope:
-    """文件级结构体检（桩页 + index↔磁盘同步），经 `pages.report_dict` 直接产 dict（决策P4.10-10）。"""
+    """文件级结构体检（桩页 + index↔磁盘同步 + source 页原文），经 `pages.report_dict` 直接产 dict（决策P4.10-10）。"""
     report = run_health(root / "wiki")
     return report_dict(  # type: ignore[return-value]
         ok=report.ok,

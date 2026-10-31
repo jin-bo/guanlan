@@ -23,7 +23,7 @@ Web 四处消费者同序**。
 
 | 档 | kind（rank 升序） | 含义 |
 |---|---|---|
-| ① 根因 / 数据完整性 | `lint.missing_entity` → `lint.broken_link` → `health.index_missing_page` → `health.index_dangling` → `lint.orphan` | 修之即消解下游症状 |
+| ① 根因 / 数据完整性 | `lint.missing_entity` → `lint.broken_link` → `health.index_missing_page` → `health.index_dangling` → `health.source_without_raw` → `lint.orphan` | 修之即消解下游症状 |
 | ② 内容 / 组织质量 | `health.stub_page` → `health.type_dir_mismatch` → `health.uncharted_page` → `health.overview_large` | 页内/归类建议 |
 | ③ 拓扑优化建议 | `lint.hub_node` → `lint.thin_intercommunity_link` → `lint.isolated_community` → `lint.bridge_edge` → `lint.cut_vertex` | 结构 nice-to-have、非坏数据 |
 

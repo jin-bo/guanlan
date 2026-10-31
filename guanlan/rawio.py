@@ -97,22 +97,30 @@ def find_source_page(sources_dir: Path, raw_stem: str) -> Path | None:
     `raw_digest` 也 stamp 不上。回退都仍按文件名精确 stat、不扫目录，把误配面压到最小；逐字形以 `.`
     开头时不认（不把隐藏文件当页）。
     """
+    for stem in source_page_stems(raw_stem):
+        page = sources_dir / f"{stem}.md"
+        if page.is_file():
+            return page
+    return None
+
+
+def source_page_stems(raw_stem: str) -> tuple[str, ...]:
+    """一篇 raw 的 source 页可能叫的 stem，按 `find_source_page` 的认领优先序：精确 slug → kebab 形 → 逐字。
+
+    正反两向的**单一归口**：`find_source_page`（raw → 页）按序 stat；`health.source_without_raw`
+    （页 → raw）拿全体 raw 的这组 stem 反查。两边若各写一套容错，就会出现「ingest 认它已收录、
+    health 却说它没原文」的口径漂移。slug 为空 → 空元组。
+    """
     slug = raw_slug(raw_stem)
     if not slug:
-        return None
-    exact = sources_dir / f"{slug}.md"
-    if exact.is_file():
-        return exact
+        return ()
+    stems = [slug]
     dashed = _RAW_SLUG_DASHES.sub("-", slug.replace(".", "-")).strip("-.")
     if dashed and dashed != slug:
-        kebab = sources_dir / f"{dashed}.md"
-        if kebab.is_file():
-            return kebab
+        stems.append(dashed)
     if raw_stem not in (slug, dashed) and not raw_stem.startswith("."):
-        verbatim = sources_dir / f"{raw_stem}.md"
-        if verbatim.is_file():
-            return verbatim
-    return None
+        stems.append(raw_stem)
+    return tuple(stems)
 
 
 def normalize_basename(name: str) -> str:
