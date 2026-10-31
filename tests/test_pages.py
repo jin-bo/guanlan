@@ -102,6 +102,41 @@ def test_load_page_non_mapping_returns_none_meta(tmp_path: Path):
     assert meta is None
 
 
+def _alias_bomb(levels: int) -> str:
+    """每层 9 个别名引用上一层：几百字节，序列化时展开成 9**levels 个叶子。"""
+    block = "a0: &a0 [x, x, x, x, x, x, x, x, x]\n"
+    for i in range(1, levels + 1):
+        block += f"a{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * 9) + "]\n"
+    return block + "title: T\n"
+
+
+def test_yaml_alias_bomb_rejected_in_both_tiers(tmp_path: Path):
+    """别名炸弹（gbrain v0.60.305 S-47）：两档都拒，容错档得 None——Web 序列化 meta 时不会膨胀。"""
+    block = _alias_bomb(6)
+    assert len(block) < 400
+    meta, fatal = parse_frontmatter(block)
+    assert meta is None
+    assert fatal is not None and fatal.kind == "frontmatter.unparsable"
+    assert "别名" in fatal.detail
+    p = tmp_path / "Bomb.md"
+    p.write_text(f"---\n{block}---\n\n正文\n", encoding="utf-8")
+    meta, body = load_page(p)
+    assert meta is None
+    assert "正文" in body
+
+
+def test_single_yaml_alias_also_rejected():
+    """不只拦大的：约定里用不到锚点/别名，一个也拒（阈值式判断会留下「刚好不到线」的口子）。"""
+    meta, fatal = parse_frontmatter("title: &t T\naliases: [*t]\n")
+    assert meta is None and fatal is not None and fatal.kind == "frontmatter.unparsable"
+
+
+def test_asterisk_in_plain_value_is_not_an_alias():
+    """快路径只看块里有没有 `*`：引号内或标量中段的星号不是别名，不得误拒。"""
+    meta, fatal = parse_frontmatter("title: '*重点* 摘要'\ntags: [a*b]\n")
+    assert fatal is None and meta == {"title": "*重点* 摘要", "tags": ["a*b"]}
+
+
 # ---------- link_stem ----------
 
 

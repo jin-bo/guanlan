@@ -474,6 +474,11 @@ def split_frontmatter(text: str) -> tuple[str | None, str]:
     return None, text
 
 
+def _has_yaml_alias(block: str, loader: type) -> bool:
+    """块的事件流里是否有别名节点（`*name`）。调用方已成功 load 过同一块，故这里不会抛新错。"""
+    return any(isinstance(event, yaml.AliasEvent) for event in yaml.parse(block, Loader=loader))
+
+
 def _load_yaml_mapping(
     block: str, *, loader: type = _SafeLoader
 ) -> tuple[dict | None, str | None]:
@@ -488,9 +493,17 @@ def _load_yaml_mapping(
     `str(exc)` 文本不同（C 不含源码片段+^ 标记、个别 problem 措辞亦异），而该文本会进 `check` 的
     `frontmatter.unparsable` detail；锁定纯 Python loader 使 `check` 报错文本与宿主是否装 libyaml 无关、
     跨环境字节一致（且与本次提速前的 `safe_load` 行为逐字相同）。
+
+    **拒 YAML 别名（`*name`）**：loader 解析别名只共享引用、当场不展开，但下游一序列化就逐层展开——
+    几百字节的嵌套别名（「别名炸弹」）经 Web `/api/page`、`/api/raw/file` 回传 `meta` 时会膨胀成几十 MB
+    JSON、撑爆进程内存；`raw/` 预览解析的还是第三方原文。约定里的 frontmatter 从不需要锚点/别名，故
+    一律按无法解析处理（严格档报 `frontmatter.unparsable`，容错档得 `None`）。只在块里出现 `*` 时才多走
+    一遍事件流，热路无额外开销。
     """
     try:
         meta = yaml.load(block, Loader=loader)
+        if "*" in block and _has_yaml_alias(block, loader):
+            return None, "frontmatter 无法解析：不支持 YAML 别名（*name），请把被引用的值直接写出"
     except yaml.YAMLError as exc:
         return None, f"frontmatter 无法解析：{exc}"
     if not isinstance(meta, dict):

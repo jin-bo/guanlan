@@ -19,6 +19,16 @@
 - **Web 子 Agent 进展行在长对话里不可见**（P4.26）。聊天区是定高纵向 flex，该行带 `overflow: hidden`，自动最小高度归 0，
   对话一长溢出时被压成约 3px，看起来像没显示（帧与 DOM 都正常；短对话不溢出，故 P4.26 验收未暴露）。给 `.chat-subagent`
   加 `flex-shrink: 0`；真浏览器复测行高由 3.19px 恢复为 21px。`scripts/smoke_p426.py` 新增「长对话溢出时行不被压扁」场景（9/9；去掉修复则该场景报 3.19px 失败）。
+- **frontmatter 里的 YAML 别名会撑爆 Web 宿主**。解析时别名只共享引用，但 Web 把 `meta` 序列化成 JSON 时逐层展开：
+  228 字节的嵌套别名展开成 3 MB，每多一层 ×9；`raw/` 预览解析的还是第三方原文。frontmatter 现在一律不接受别名（`*name`），
+  按无法解析处理：`check` 报 `frontmatter.unparsable`，其余命令当作无 frontmatter。约定里本就用不到锚点。
+- **一张非 UTF-8 页让 `check` 整体崩溃**。此前 `check` 抛 `UnicodeDecodeError` 退出，其余页的违规一条不报，ingest 的写门禁
+  也随之崩溃（health / lint / graph 早已容错）。现在报一条阻断违规 `page.not_utf8`，其余页照常校验；门禁按新增违规做差分，
+  库里原有的坏编码页不挡 ingest。
+- **IM 核心「不按平台分支」的守卫测试从未生效**。旧实现剥掉全部字符串字面量再找 `== "weixin"`，平台名随之被剥掉，断言恒真。
+  改为按 AST 检查比较节点，并补一条「植入分支必须被抓到」的反例用例。
+
+以上三条来自 gbrain v0.60 反向评审（`docs/backlog/notes/gbrain-v0.60-反向评审.md`）。
 
 ## [0.1.31] - 2026-10-29
 
