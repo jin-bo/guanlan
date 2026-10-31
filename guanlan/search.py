@@ -78,6 +78,8 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 _TITLE_RE = re.compile(r"^title\s*:\s*(.*)$")
 _TYPE_RE = re.compile(r"^type\s*:\s*(.*)$")
 _ALIASES_RE = re.compile(r"^aliases\s*:\s*(.*)$")
+# 块标量指示符：`|` / `>` 后可带保留/截断标记（`+`/`-`）与缩进数字，两者次序任意（注释已先剥掉）。
+_BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[+-]?[1-9]?|[1-9][+-])$")
 
 
 def positive_int(value: str) -> int:
@@ -143,12 +145,25 @@ def _strip_scalar(value: str) -> str:
 
 
 def _scan_scalar(block: str | None, pattern: re.Pattern[str], default: str) -> str:
-    """行扫一个顶层标量字段（`title:` / `type:`）；缺/坏/空 → default。"""
+    """行扫一个顶层标量字段（`title:` / `type:`）；缺/坏/空 → default。
+
+    值是块标量（`title: >-` / `|`，合法 YAML、`check` 照过）时收其后的缩进续行、以空格拼成一行——
+    否则指示符 `>-` 本身会被当成标题显示、标题加权也随之落空（gbrain v0.60 反向评审 §3）。
+    """
     if block:
-        for line in block.splitlines():
+        lines = block.splitlines()
+        for i, line in enumerate(lines):
             m = pattern.match(line)
             if m:
                 value = _strip_scalar(m.group(1))
+                if _BLOCK_SCALAR_RE.match(value):
+                    parts = []
+                    for cont in lines[i + 1 :]:
+                        if cont.strip() and not cont[:1].isspace():
+                            break  # 回到顶层键，块结束。
+                        if cont.strip():
+                            parts.append(cont.strip())
+                    value = " ".join(parts)
                 if value:
                     return value
     return default
