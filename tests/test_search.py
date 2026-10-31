@@ -505,6 +505,20 @@ def test_pages_searched_metadata(tmp_path: Path):
     assert r.pages_searched == 3
 
 
+def test_matched_counts_all_hits_beyond_limit(tmp_path: Path, capsys):
+    """`matched` 是截断前的命中页数：limit 截掉的页照样计入，没命中的页不计（gbrain v0.60 反向评审 §2.4）。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    for i in range(5):
+        _page(wiki, f"entities/P{i}.md", body=f"区块链 内容 {i}。")
+    _page(wiki, "entities/Other.md", body="毫不相干的一页。")
+    r = search_pages(wiki, "区块链", limit=2)
+    assert (len(r.hits), r.matched, r.pages_searched) == (2, 5, 6)
+    assert search_pages(wiki, "不存在的词组", limit=2).matched == 0
+    search_entrypoint(root, query="区块链", limit=2, json_output=False)
+    assert "命中 5 页 · top 2" in capsys.readouterr().out
+
+
 # ---------- 分数口径（CLI 补零 vs JSON number） ----------
 
 
@@ -537,7 +551,7 @@ def test_search_result_dict_matches_render_json(tmp_path: Path, capsys):
     result = search_pages(wiki, "区块链", limit=10)
     d = search_result_dict(result)
     # 字段齐备
-    assert set(d) == {"ok", "query", "pages_searched", "results"}
+    assert set(d) == {"ok", "query", "pages_searched", "matched", "results"}
     assert d["ok"] is True and d["query"] == "区块链"
     assert set(d["results"][0]) == {"page", "title", "type", "score", "snippet"}
     # 与 CLI --json 分支同源（_render 已改调 search_result_dict）

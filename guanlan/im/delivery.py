@@ -315,7 +315,9 @@ class Delivery:
         if not hits:
             await self._safe_send(ready.chat_id, f"没有找到与「{query}」相关的页面。")
             return
-        lines = [f"「{query}」的检索结果（共扫 {payload['pages_searched']} 页）："]
+        lines = [
+            f"「{query}」的检索结果（共扫 {payload['pages_searched']} 页，命中 {payload['matched']} 页）："
+        ]
         for i, hit in enumerate(hits, 1):
             lines.append(f"{i}. {hit['title']}　{hit['page']}")
             snippet = (hit.get("snippet") or "").strip().replace("\n", " ")
