@@ -1,6 +1,9 @@
 """P3 health 文件级体检测试（零 LLM，见 docs/P3-健康与图谱.md §11）。"""
 
+import os
 from pathlib import Path
+
+import pytest
 
 from guanlan.health import (
     OVERVIEW_ADVISORY_CHARS,
@@ -639,3 +642,76 @@ def test_subdir_source_page_not_anchored_by_filename(tmp_path: Path):
     _page(wiki, "sources/sub/x.md", type="source", body=LONG)
     _source_with(wiki, "sources/sub/y.md", body="> 原始资料：`raw/x.md`\n\n" + LONG)
     assert _orphan_sources(wiki) == ["wiki/sources/sub/x.md"]
+
+
+# ---------- raw 遍历不完整（gbrain v0.60 反向评审 §2.1：判不了就是未知） ----------
+
+
+def _walk_findings(wiki: Path) -> list:
+    return [f for f in run_health(wiki).findings if f.kind == "health.raw_walk_incomplete"]
+
+
+def test_dangling_link_in_raw_suppresses_source_without_raw(tmp_path: Path):
+    """指向未挂载盘的链接：其中原文的页不得被报「无原文」，改报一条遍历不完整，并说清压下了几条。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "ext").symlink_to(tmp_path / "unmounted", target_is_directory=True)
+    (tmp_path / "raw" / "gone.md").symlink_to(tmp_path / "moved.md")
+    _page(wiki, "sources/on-the-disk.md", type="source", body=LONG)
+
+    assert _orphan_sources(wiki) == []
+    [walk] = _walk_findings(wiki)
+    assert walk.page == ""
+    assert "`raw/ext`" in walk.detail and "`raw/gone.md`" in walk.detail
+    assert "本次不报 1 条" in walk.detail
+
+
+def test_unreadable_raw_subdir_suppresses_source_without_raw(tmp_path: Path):
+    if os.geteuid() == 0:
+        pytest.skip("root 无视目录权限")
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    locked = tmp_path / "raw" / "locked"
+    locked.mkdir(parents=True)
+    (locked / "secret.md").write_text("x", encoding="utf-8")
+    _page(wiki, "sources/secret.md", type="source", body=LONG)
+    locked.chmod(0)
+    try:
+        assert _orphan_sources(wiki) == []
+        [walk] = _walk_findings(wiki)
+        assert "`raw/locked`" in walk.detail
+    finally:
+        locked.chmod(0o755)
+
+
+def test_dangling_raw_root_is_incomplete_not_missing(tmp_path: Path):
+    """`raw` 本身是断开的链接（整块盘没挂上）≠ 库里没有 raw/：后者照常逐页报。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    (tmp_path / "raw").symlink_to(tmp_path / "unmounted", target_is_directory=True)
+    _page(wiki, "sources/a.md", type="source", body=LONG)
+    assert _orphan_sources(wiki) == []
+    assert len(_walk_findings(wiki)) == 1
+
+
+def test_incomplete_walk_without_suppressed_findings_is_silent(tmp_path: Path):
+    """读不到的位置没压下任何判定时不影响结论，不报（低噪）。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _raw(tmp_path, "real.md")
+    (tmp_path / "raw" / "gone.md").symlink_to(tmp_path / "moved.md")
+    _page(wiki, "sources/real.md", type="source", body=LONG)
+    assert _walk_findings(wiki) == []
+    assert _orphan_sources(wiki) == []
+
+
+def test_hidden_dangling_link_does_not_count(tmp_path: Path):
+    """隐藏项本就不算原文，断了也不该把整批判定压下——否则一个 `.DS_Store` 式残留就能让本检查失明。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / ".cache").symlink_to(tmp_path / "nowhere", target_is_directory=True)
+    _page(wiki, "sources/cited.md", type="source", body=LONG)
+    assert _orphan_sources(wiki) == ["wiki/sources/cited.md"]
+    assert _walk_findings(wiki) == []
