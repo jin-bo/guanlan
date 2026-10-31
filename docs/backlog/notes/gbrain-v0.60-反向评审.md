@@ -68,7 +68,7 @@ HTML 注释里的标记被当链接（v0.60.284，`link_scan_text` 先剥注释�
 
 - ✅ §1 三条已修（同分支）：`pages._load_yaml_mapping` 拒别名、`check` 报 `page.not_utf8`、IM 平台分支守卫改走 AST；每条都配了「旧代码上必红」的用例并实测确认。
 - ✅ §2.1 已做（PR #135）：判定确被压下时整批不报 `source_without_raw`，改报一条 `health.raw_walk_incomplete`；没压下任何判定时不报，隐藏项断了不算。
-- ⬜ §2.2 / §2.3 合并成一次 skill 文本改动。
+- ✅ §2.2 / §2.3 已合并成一次 skill 文本改动（分支 `docs/skill-temporal-rules`）。
 - ⬜ §2.4 / §2.5 小改，§2.5 先跑一次实测。
 
 **方法论记一笔**：三条命中有两条是「口径分叉」——同一份输入，严格档与容错档（1.2）、解析与序列化（1.1）行为不同。观澜已有「两档共用一个 loader 杜绝分叉」的纪律（`_load_yaml_mapping` docstring），但它只管住了**解析**这一步，读盘解码与下游序列化都在它的覆盖面之外。
