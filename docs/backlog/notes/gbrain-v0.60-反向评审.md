@@ -67,7 +67,7 @@ HTML 注释里的标记被当链接（v0.60.284，`link_scan_text` 先剥注释�
 ## 6. 收口
 
 - ✅ §1 三条已修（同分支）：`pages._load_yaml_mapping` 拒别名、`check` 报 `page.not_utf8`、IM 平台分支守卫改走 AST；每条都配了「旧代码上必红」的用例并实测确认。
-- ⬜ §2.1 补到已合并的 `health.source_without_raw`（PR #133）上，误报代价最高，排第一。
+- ✅ §2.1 已做（PR #135）：判定确被压下时整批不报 `source_without_raw`，改报一条 `health.raw_walk_incomplete`；没压下任何判定时不报，隐藏项断了不算。
 - ⬜ §2.2 / §2.3 合并成一次 skill 文本改动。
 - ⬜ §2.4 / §2.5 小改，§2.5 先跑一次实测。
 
