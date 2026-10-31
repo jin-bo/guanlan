@@ -967,3 +967,22 @@ def test_search_module_import_stays_graph_free():
     code = "import sys; import guanlan.search; assert 'guanlan.graph' not in sys.modules"
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("indicator", [">-", ">", "|", "|+", ">2", ">-  # 注释"])
+def test_block_scalar_title_is_folded_not_shown_as_indicator(tmp_path: Path, indicator: str):
+    """`title: >-` 是合法 YAML：行扫须收续行，不得把指示符当标题（gbrain v0.60 反向评审 §3）。"""
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    raw = f"---\ntitle: {indicator}\n  折叠标题\n  第二行\ntype: concept\n---\n\n正文 向量。\n"
+    _page(wiki, "concepts/Fold.md", raw=raw)
+    [hit] = search_pages(wiki, "第二行").hits  # 续行进了标题加权，只在标题里出现也能命中
+    assert hit.title == "折叠标题 第二行"
+    assert hit.type == "concept"  # 续行收到下一个顶层键为止
+
+
+def test_empty_block_scalar_title_falls_back_to_stem(tmp_path: Path):
+    root = _kb(tmp_path)
+    wiki = root / "wiki"
+    _page(wiki, "concepts/Empty.md", raw="---\ntitle: >-\ntype: concept\n---\n\n正文 向量。\n")
+    assert search_pages(wiki, "向量").hits[0].title == "Empty"

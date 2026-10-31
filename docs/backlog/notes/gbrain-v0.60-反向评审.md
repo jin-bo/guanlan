@@ -48,9 +48,9 @@
 
 ## 3. 🔵 仅记一笔
 
-- **`raw_digest` 取门禁后重读的字节**（gbrain #8071）：`ingest` / `audit` 在门禁后重新 `compute_raw_digest`，而门禁快照已有 Agent 读到那份的 sha256。窗口秒级、修法便宜（stamp 直接用快照哈希），等有人碰这块时顺手。
+- **`raw_digest` 取门禁后重读的字节**（gbrain #8071）：`ingest` / `audit` 在门禁后重新 `compute_raw_digest`，而门禁快照已有 Agent 读到那份的 sha256。窗口秒级。**复核后不做**：门禁快照在 `guarded_run` 内部，要用它得给 `GuardedWriteResult` 加字段并改 ingest / audit 两条 stamp 路径——为毫秒级窗口改门禁结果结构，不划算。
 - **长 raw 只读了一部分仍被 stamp**（gbrain v0.60.189 `partial`）：只有 prompt 层「截断续读」纪律；确定性检测要依赖 agentao 工具事件，成本不低。
-- **`search` 行扫遇 `title: >-` 把 `>-` 当标题**（gbrain v0.60.105 同类）：`_scan_scalar` 的最大努力豁免只写给了别名；遇 `>` / `|` 开头退回 slug 即可。
+- ✅ **`search` 行扫遇 `title: >-` 把 `>-` 当标题**（gbrain v0.60.105 同类）：已修——收缩进续行拼成一行，收不到退回文件名（分支 `fix/search-folded-title`）。
 - **预览与执行绑定**（gbrain `--apply --expect <hash>`，多处反复出现）：`remove --yes` 重算 plan；有 `.trash/` + manifest 兜底，等 P3.9 二期做 cascade / 批量时再借。
 - **冲突条目被改写丢失**（gbrain v0.60.253/254）：可在 `_check_source_regression` 加「`⚠️ 资料冲突与待核` 条目数减少」告警（open→resolved 不算减少）；新规则有维护成本，先抽样量误报。
 - **MCP `read_page` 无大小上限**（gbrain v0.60.231 10 MiB 帧）、**扫描中途文件消失**（v0.60.78，`load_page` 未接 `FileNotFoundError`）：观澜页小、并发窗口理论性，不排。
