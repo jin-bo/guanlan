@@ -109,6 +109,7 @@ class SearchEnvelope(TypedDict):
     ok: bool
     query: str
     pages_searched: int
+    matched: int  # 过收录门槛的页数；results 只是其中 top-limit。
     results: list[_SearchHit]
 
 

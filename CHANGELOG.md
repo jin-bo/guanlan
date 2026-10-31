@@ -15,6 +15,9 @@
   （原文改名未留声明 4 张、多篇聚合页放进 `sources/` 12 张），无误报。因果排序列第一档，排在桩页等内容建议之前。
   `raw/` 没遍历全（读不了的目录、指向未挂载盘或已移走目录的断链）而确有判定被压下时，不报这批 `source_without_raw`，
   改报一条 `health.raw_walk_incomplete` 列出读不到的位置——判不了就是未知，不能当成没有原文去提示删除（gbrain v0.60 反向评审）。
+- **`search` 报命中总页数**（`matched`）。此前只回 top-limit 条和检索页数，调用方——尤其 Agent——会把前 10 条当成全部命中。
+  `--json`、Web `/api/search`、MCP `search` 与 Web 对话的 `guanlan_search` 工具都多一个 `matched` 字段（截断前过收录门槛的页数），
+  CLI 文本与 IM 检索回复里显示「命中 N 页」。只加字段、不改已有字段（gbrain v0.60 反向评审 §2.4）。
 
 ### 变更
 

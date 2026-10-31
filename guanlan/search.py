@@ -207,6 +207,9 @@ class SearchResult:
     hits: list[SearchHit]
     pages_searched: int  # 参与打分的 content 页数（N=0 时为 0）。
     query: str
+    # 过了收录门槛的页数（截断到 limit 之前）。`hits` 只是其中 top-limit：没有它，调用方（尤其 Agent）
+    # 会把 top 10 当成「全部命中」（gbrain v0.60.174 `keyword_total`，gbrain v0.60 反向评审 §2.4）。
+    matched: int = 0
 
 
 @dataclass(frozen=True)
@@ -372,7 +375,7 @@ def score(
         )
         for d, s in scored[:limit]
     ]
-    return SearchResult(hits=hits, pages_searched=n, query=query)
+    return SearchResult(hits=hits, pages_searched=n, query=query, matched=len(scored))
 
 
 def search_pages(wiki: Path, query: str, *, limit: int = 10) -> SearchResult:
@@ -403,6 +406,7 @@ def search_result_dict(result: SearchResult) -> dict:
         "ok": True,
         "query": result.query,
         "pages_searched": result.pages_searched,
+        "matched": result.matched,
         "results": [
             {
                 "page": h.page,
@@ -669,7 +673,8 @@ def _render(result: SearchResult, *, json_output: bool) -> str:
     if not result.hits:
         return f"（无命中）query「{result.query}」· 检索 {result.pages_searched} 页。"
     lines = [
-        f"query「{result.query}」· 检索 {result.pages_searched} 页 · top {len(result.hits)}："
+        f"query「{result.query}」· 检索 {result.pages_searched} 页 · 命中 {result.matched} 页"
+        f" · top {len(result.hits)}："
     ]
     for h in result.hits:
         lines.append(f"  [{h.score:.6f}] {h.page}  «{h.title}»（{h.type}）")  # CLI 文本补零。

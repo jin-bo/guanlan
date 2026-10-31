@@ -119,8 +119,8 @@ _GUANLAN_SEARCH_NAME = "guanlan_search"
 _GUANLAN_SEARCH_DESC = (
     "对本知识库 wiki/ 下的内容页做确定性整页召回（BM25 + 中文 2-gram + 标题/别名加权），"
     "按相关度降序返回候选页路径 + 片段。**优先用它召回候选页**再读取综合，比裸 grep 更全"
-    "（命中正文、别名、跨义）。返回 JSON 字符串：{ok, query, pages_searched, results:["
-    "{page,title,type,score,snippet}]}。纯读、不写盘。"
+    "（命中正文、别名、跨义）。返回 JSON 字符串：{ok, query, pages_searched, matched, results:["
+    "{page,title,type,score,snippet}]}；matched 是命中总页数，results 只是其中前 limit 条。纯读、不写盘。"
 )
 _GUANLAN_SEARCH_PARAMS = {
     "type": "object",
