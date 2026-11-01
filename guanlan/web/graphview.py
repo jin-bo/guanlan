@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ..graph import Graph, Node, build_graph
 from ..graphstats import detect_communities, undirected_adjacency
-from ..pages import link_resolution_index, resolve_owner
+from ..pages import resolve_owner
 
 __all__ = [
     "GRAPH_VIEW_MAX_NODES",
@@ -50,18 +50,24 @@ class GraphSnapshot:
     nodes: dict[str, Node]
     path_to_id: dict[str, str]
     resolution: dict[str, str]
+    groups: dict[int, list[str]]  # 社区号 → 成员页 id（建一次，三个视图共用）
 
 
 def build_snapshot(wiki: Path) -> GraphSnapshot:
     g = build_graph(wiki)
     adj = undirected_adjacency(g)
+    community = detect_communities(g, adj=adj)
+    groups: dict[int, list[str]] = {}
+    for nid, c in community.items():
+        groups.setdefault(c, []).append(nid)
     return GraphSnapshot(
         graph=g,
         adj=adj,
-        community=detect_communities(g, adj=adj),
+        community=community,
         nodes={n.id: n for n in g.nodes},
         path_to_id={n.path: n.id for n in g.nodes},
-        resolution=link_resolution_index(wiki),
+        resolution=g.resolution,  # build_graph 已建好的同一张解析表，免整库 frontmatter 二次解析
+        groups=groups,
     )
 
 
@@ -120,13 +126,6 @@ def _rank_key(snap: GraphSnapshot, nid: str) -> tuple[int, str]:
     return (-_degree(snap, nid), nid)
 
 
-def _members(snap: GraphSnapshot) -> dict[int, list[str]]:
-    out: dict[int, list[str]] = {}
-    for nid, c in snap.community.items():
-        out.setdefault(c, []).append(nid)
-    return out
-
-
 def _anchor(snap: GraphSnapshot, members: list[str]) -> str:
     return min(members, key=lambda nid: _rank_key(snap, nid))
 
@@ -153,7 +152,13 @@ def _truncated(total: int, shown: int) -> dict | None:
 
 
 def _resolve(snap: GraphSnapshot, name: str) -> str:
-    """页名（stem / 别名 / fold 变体）→ 节点 id；经 P3.8 单一 owner 归口，不另写一套按名查找。"""
+    """页路径（相对库根，如 `wiki/entities/Foo.md`）或页名（stem / 别名 / fold 变体）→ 节点 id。
+
+    路径精确命中优先：Web「在图中查看」手里就是路径，按 stem 再解析会被 `link_stem` 剥掉 `#`/`|` 后段而错页；
+    页名经 P3.8 单一 owner 归口，不另写一套按名查找。
+    """
+    if name in snap.path_to_id:
+        return snap.path_to_id[name]
     owner = resolve_owner(name, snap.resolution) if name and name.strip() else None
     nid = snap.path_to_id.get(owner) if owner else None
     if nid is None:
@@ -172,7 +177,7 @@ def _community_summary(snap: GraphSnapshot, members: list[str]) -> dict:
 def overview_view(snap: GraphSnapshot) -> dict:
     """社区总览：页数 ≥2 的社区为节点（id = 锚页），单页社区只计数（决策P4.27-1/6）。"""
     limit = GRAPH_VIEW_MAX_NODES
-    groups = _members(snap)
+    groups = snap.groups
     formed = {c: m for c, m in groups.items() if len(m) >= 2}
     isolated = sum(len(m) for m in groups.values() if len(m) < 2)
 
@@ -215,7 +220,7 @@ def community_view(snap: GraphSnapshot, anchor: str) -> dict:
     limit = GRAPH_VIEW_MAX_NODES
     nid = _resolve(snap, anchor)
     c = snap.community[nid]
-    members = [m for m, cm in snap.community.items() if cm == c]
+    members = snap.groups[c]
     kept = sorted(members, key=lambda m: _rank_key(snap, m))[:limit]
     keep = set(kept)
 
@@ -240,7 +245,7 @@ def page_view(snap: GraphSnapshot, name: str) -> dict:
     neighbors = sorted(snap.adj.get(center, ()), key=lambda m: _rank_key(snap, m))
     kept = neighbors[: max(limit - 1, 0)]
     keep = {center, *kept}
-    members = [m for m, cm in snap.community.items() if cm == snap.community[center]]
+    members = snap.groups[snap.community[center]]
     return {
         "view": "page",
         "center": center,

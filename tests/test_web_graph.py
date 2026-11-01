@@ -153,6 +153,14 @@ def test_name_resolves_alias_and_fold_variant(kb, client):
     assert _get(client, view="page", name="Foo-Bar")["center"] == "foo_bar"  # P3.8 fold 变体
 
 
+def test_page_view_addresses_by_path(kb, client):
+    """「在图中查看」按路径寻址：stem 含 `#` 时按名解析会被 link_stem 剥成别的页（或 404）。"""
+    _page(kb, "C#", ["c"])
+    _page(kb, "c", ["C#"])
+    assert _get(client, view="page", name="wiki/concepts/C#.md")["center"] == "c#"
+    assert _get(client, view="page", name="wiki/concepts/c.md")["center"] == "c"
+
+
 # ───────────────────────── 边口径 / 确定性 ─────────────────────────
 
 

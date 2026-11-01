@@ -222,23 +222,31 @@ function drawGraph(echarts, d) {
 
 // ── 取数与入口 ────────────────────────────────────────────────────────────────
 
+// 面板仍在且可见：取数期间关掉浮层时 #graph-canvas 仍留在隐藏的 DOM 里，只查节点会往隐藏浮层里建实例。
+function graphPanelLive() {
+  return !!$("#graph-canvas") && !$("#overlay").classList.contains("hidden");
+}
+
 async function loadGraphView(params) {
   const tok = ++graphToken;
   graphNote = { kind: "loading" };
   paintGraphChrome();
   try {
     const [data, echarts] = await Promise.all([getJSON(graphUrl(params)), loadECharts()]);
-    if (tok !== graphToken || !$("#graph-canvas")) return; // 已切走 / 浮层已换主人
+    if (tok !== graphToken || !graphPanelLive()) return; // 已切走 / 浮层已换主人或已关
     graphState = { params, data };
     graphNote = null;
     paintGraphChrome();
     drawGraph(echarts, data);
   } catch (e) {
-    if (tok !== graphToken || !$("#graph-canvas")) return;
+    if (tok !== graphToken || !graphPanelLive()) return;
     // 锚页 / 页名已不在库里（入库改名、撤回）：社区号不作地址的代价就是这里——回总览重来（决策P4.27-6）。
     if (params.view !== "overview" && /→ 404$/.test(e.message)) {
       await loadGraphView({ view: "overview" });
-      if (tok + 1 === graphToken) { graphNote = { kind: "gone" }; paintGraphChrome(); }
+      // 只在总览真的载入成功时改报「已不在库」；总览自己也失败则保留它的失败提示。
+      if (tok + 1 === graphToken && !graphNote && graphState && graphState.params.view === "overview") {
+        graphNote = { kind: "gone" }; paintGraphChrome();
+      }
       return;
     }
     disposeGraphChart();
