@@ -159,6 +159,10 @@ def _resolve(snap: GraphSnapshot, name: str) -> str:
     """
     if name in snap.path_to_id:
         return snap.path_to_id[name]
+    # 节点 id 原样命中（社区锚页 / 面包屑回传的就是 id）：id = 小写 stem，可能含 `#`/`|` 或以 `.md` 结尾，
+    # 再过 `link_stem` 会被剥成别的键而错页 / 404。stem 本就优先于别名（P3.1），故与按名解析同口径。
+    if name in snap.nodes:
+        return name
     owner = resolve_owner(name, snap.resolution) if name and name.strip() else None
     nid = snap.path_to_id.get(owner) if owner else None
     if nid is None:

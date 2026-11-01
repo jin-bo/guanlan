@@ -161,6 +161,16 @@ def test_page_view_addresses_by_path(kb, client):
     assert _get(client, view="page", name="wiki/concepts/c.md")["center"] == "c"
 
 
+def test_community_anchor_with_hash_addresses_by_id(kb, client):
+    """总览 / 面包屑回传的锚页是节点 id：id 含 `#` 时不能再过 link_stem（会被剥成 `c` 而错社区 / 404）。"""
+    _page(kb, "C#", ["x1", "x2"])
+    _page(kb, "x1", ["x2"])
+    _page(kb, "x2", ["x1"])
+    d = _get(client, view="community", anchor="c#")
+    assert d["community"]["size"] == 3
+    assert "c#" in [n["id"] for n in d["nodes"]]
+
+
 # ───────────────────────── 边口径 / 确定性 ─────────────────────────
 
 
