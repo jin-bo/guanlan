@@ -195,7 +195,13 @@ function paintPage(data, path) {
   } else {
     meta = `<span>${escapeHtml(path)}</span> · <span class="muted">${escapeHtml(t("wiki.noFrontmatter"))}</span>`;
   }
+  // 「在图中查看」（P4.27）：进该页一跳邻域，按路径寻址（stem 里的 #/| 会被按名解析剥掉）。
+  // config 页（index/log/overview）不是图节点，不给入口。
+  const isConfig = /^wiki\/(index|log|overview)\.md$/.test(path);
+  if (!isConfig) meta += ` <button type="button" class="graph-here">${escapeHtml(t("graph.viewInGraph"))}</button>`;
   view.innerHTML = `<div class="page-meta">${meta}</div>` + data.html;
+  const here = view.querySelector(".page-meta .graph-here");
+  if (here) here.addEventListener("click", () => openGraph({ view: "page", name: path }));
   enhanceContent(view); // 富渲染正文：```mermaid→图 / ```X→高亮 / $…$→公式；挂在 paintPage 内 → 切语言重绘也重增强
                         // （决策P4.14-9，泛化 P4.13-8）。注：view 含 .page-meta chrome + 正文，KaTeX 经 ignoredClasses 跳 chrome
 }

@@ -27,7 +27,8 @@ guanlan -C my-wiki web --port 9000 --no-browser # different port / no browser
 ## What it does
 
 - **Browse the wiki**, click `[[wikilink]]` to navigate
-- Run **check·health·lint** reports, view the **graph**
+- Run **check·health·lint** reports
+- **Graph panel** (top bar "Graph"): browse the wiki's link structure by community — community overview → click a community to expand it → click a page to open it; "View in graph" on a wiki page jumps to that page's one-hop neighborhood. Each view shows at most the 300 most-connected pages and says so when it cuts; isolated pages are only counted (they are in the `lint` orphan list). Read-only, never writes `graph/`, also available under `--reader`; the panel's "Static list" link opens the zero-JS `graph.html` from `guanlan graph` (P4.27)
 - Pick a source from `raw/` and **trigger ingest** (single worker, serialized, polled)
 - **Read-only multi-turn chat** with the agent (token-streamed)
 - **Full-text search** (`/api/search`), debounced recall from the input box

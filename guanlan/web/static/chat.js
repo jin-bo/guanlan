@@ -48,7 +48,8 @@ function applyReaderMode() {
     "history-btn",                                          // 枚举他人会话 → 破隔离（决策P4.9-3）
     "feed-btn", "ingest-btn", "heal-btn", "backfill-btn", "audit-btn", "staging-btn", // 写端点（reader 下 404）
     "attach-btn",                                           // 上传是写（404）
-    "graph-btn",                                            // 重建是写者（404）；不给死链（决策P4.9-11）
+    // graph-btn 自 P4.27 起保留：图谱面板走只读 /api/graph（reader 下注册）；面板内「静态列表」链接
+    // 指向写者专属的 /graph，reader 下由 graph_view.js 不渲染（决策P4.27-2，原决策P4.9-11 的死链顾虑随之消解）。
     "mcp-btn",                                              // MCP 诊断：连接检查有外部副作用（404，决策P4.19-6）
     "mode-badge",                                           // 姿态恒只读、/mode 已禁可写 → 冻结隐藏（决策P4.9-4）
   ];

@@ -27,7 +27,8 @@ guanlan -C my-wiki web --port 9000 --no-browser # 换端口 / 不开浏览器
 ## 能做什么
 
 - **浏览 wiki**,跟随 `[[wikilink]]` 点击导航
-- 跑 **check·health·lint** 看报告、看 **graph**
+- 跑 **check·health·lint** 看报告
+- **图谱面板**(顶栏「图谱」):按社区浏览 wiki 的链接结构——社区总览 → 点社区展开 → 点页面打开;wiki 页上「在图中查看」直达该页的一跳邻域。每个视图最多显示连接最多的 300 页,超出会明说;孤立页只计数(在 `lint` 孤儿列表里)。只读、不写 `graph/`,`--reader` 下同样可用;面板角落「静态列表」打开 `guanlan graph` 的零 JS `graph.html`(P4.27)
 - 从 `raw/` 选一篇**触发 ingest**(单 worker 串行,轮询结果)
 - 与 agent **只读多轮对话**(token 流式)
 - **全文检索**(`/api/search`),输入框防抖召回

@@ -15,6 +15,7 @@ import functools
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 import anyio
@@ -79,7 +80,7 @@ from .jobs import JobQueue, WriteGate
 
 # 整模块导入（不 from-import 具体函数）：端点内经 `mcpdiag.<fn>` 取属性，测试可 monkeypatch
 # 单飞/慢检查而不必真起上游进程。模块本身零 mcp SDK 依赖（只导 agentao.mcp.config）。
-from . import mcpdiag
+from . import graphview, mcpdiag
 from .parsefeed import (
     _BACKENDS,
     image_lint,
@@ -481,6 +482,8 @@ def create_app(
     # 即空、首搜按需重建；删除页由 CorpusCache.corpus() 的 stale 剪枝处理。不改 P5.0「无盘上派生」承诺。
     search_cache = CorpusCache()
     app.state.search_cache = search_cache
+    graph_cache = graphview.GraphViewCache()  # P4.27 单槽 memo（决策P4.27-10）
+    app.state.graph_cache = graph_cache
     # 会话表（问答走嵌入会话）：persist 开时每轮落 .agentao/sessions/ + 懒恢复（P4.2 决策P4.2-1）；
     # default_mode/write_gate 透传到每个会话（P4.5）；search_cache 透传到每个会话（P5.1 §3.1：
     # 每会话用 make_guanlan_search_tool 新建工具实例、只共享这一个 cache）。
@@ -637,6 +640,33 @@ def create_app(
             return search_cache.search(root / "wiki", q, limit=limit)
 
         return search_result_dict(await anyio.to_thread.run_sync(_run))
+
+    # 图可视化（读，P4.27）：内存建图 + 服务端按视图裁剪聚合（graphview），**不写 graph/**——故与需要重建
+    # 文件、只在写者下注册的 `GET /graph` 不同，reader 下也注册（决策P4.27-2）。不取 write_lock，与
+    # /api/search 同口径接受读到半截 wiki/（决策P4.27-11）。单槽 memo 按页面 stat 签名失效（决策P4.27-10）。
+    @app.get("/api/graph")
+    async def api_graph(
+        view: Literal["overview", "community", "page"] = Query("overview", description="视图"),
+        anchor: str | None = Query(None, description="view=community：社区锚页名"),
+        name: str | None = Query(None, description="view=page：中心页名"),
+    ) -> dict:
+        if view == "community" and not anchor:
+            raise HTTPException(status_code=422, detail="view=community 需要 anchor（社区锚页名）。")
+        if view == "page" and not name:
+            raise HTTPException(status_code=422, detail="view=page 需要 name（页名）。")
+
+        def _run() -> dict:
+            snap = graph_cache.snapshot(root / "wiki")
+            if view == "community":
+                return graphview.community_view(snap, anchor)
+            if view == "page":
+                return graphview.page_view(snap, name)
+            return graphview.overview_view(snap)
+
+        try:
+            return await anyio.to_thread.run_sync(_run)
+        except graphview.GraphViewNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"找不到页面：{exc}") from exc
 
     # 投喂（P4.1）：把粘贴正文存为 raw/<安全名>.md。校验在端点（快 4xx）、写盘进单写者队列
     # 串行（杜绝与在飞 ingest 的 raw/ 快照窗口竞态，决策P4.1-2）。**同步等作业完成**再返回——

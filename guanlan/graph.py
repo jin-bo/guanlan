@@ -80,6 +80,8 @@ class Graph:
     edges: list[Edge] = field(default_factory=list)  # resolved + broken，按 (source,target) 排序。
     adjacency: dict[str, set[str]] = field(default_factory=dict)  # 仅 resolved 出边。
     broken: list[Edge] = field(default_factory=list)  # edges 中 resolved=False 的子集。
+    # 建图时用的 P3.8 解析表（键 → owner 路径），供 Web 图谱按名寻址复用、免整库 frontmatter 二次解析（P4.27）。
+    resolution: dict[str, str] = field(default_factory=dict)
 
 
 def build_graph(wiki: Path) -> Graph:
@@ -158,7 +160,7 @@ def build_graph(wiki: Path) -> Graph:
     broken = [e for e in edges if not e.resolved]
 
     nodes.sort(key=lambda n: n.id)
-    return Graph(nodes=nodes, edges=edges, adjacency=adjacency, broken=broken)
+    return Graph(nodes=nodes, edges=edges, adjacency=adjacency, broken=broken, resolution=idx)
 
 
 def _inlink_counts(g: Graph) -> dict[str, int]:

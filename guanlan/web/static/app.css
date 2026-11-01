@@ -624,3 +624,19 @@ body.hide-thinking .chat-think { display: none; }
   align-self: flex-start; color: var(--lan-ink-soft); font-size: .72rem;
   margin: .35rem 0 -.1rem; padding-left: .15rem; font-weight: 600;
 }
+
+/* —— 图谱面板（P4.27）—— */
+.overlay-card.overlay-graph { width: min(72rem, 94vw); max-height: 92vh; }
+.graph-bar { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
+.graph-crumbs { display: flex; align-items: baseline; flex-wrap: wrap; gap: .3rem; }
+.graph-crumb { background: none; border: none; padding: 0; font: inherit; color: var(--lan-ripple); cursor: pointer; }
+.graph-crumb:hover { text-decoration: underline; }
+.graph-crumb-current { color: var(--lan-deep); font-weight: 600; }
+.graph-sep { color: var(--lan-ink-soft); }
+.graph-static { margin-left: auto; font-size: .85rem; color: var(--lan-ripple); }
+.graph-note { margin: .35rem 0 .5rem; font-size: .85rem; }
+.graph-canvas { width: 100%; height: 66vh; border: 1px solid var(--lan-mist); border-radius: 8px; background: var(--lan-paper); }
+.graph-hint { margin: .4rem 0 0; font-size: .8rem; }
+.page-meta .graph-here { margin-left: .4rem; background: none; border: 1px solid var(--lan-mist); border-radius: 4px;
+  padding: 0 .4rem; font: inherit; font-size: .8em; color: var(--lan-ripple); cursor: pointer; }
+.page-meta .graph-here:hover { background: var(--lan-foam); }

@@ -189,22 +189,9 @@ function sweepFlintCharts() {
 }
 
 // —— 懒加载：两个运行时并发、各自单例、失败可重试（沿 P4.13/P4.14 范式）——
-// ECharts 走注入 <script> 读 window.echarts（同 mermaid 姿态）；flint dist 是**自包含单文件 ESM**
-// （不出 UMD），走动态 import()——**仍无 npm、无打包链**，决策P4-3 的「无构建」底线不破（决策P4.20-3）。
-let _echartsPromise = null;
-function loadECharts() {
-  if (_echartsPromise) return _echartsPromise;
-  _echartsPromise = new Promise((resolve, reject) => {
-    if (window.echarts) return resolve(window.echarts); // 容错：已被别处加载
-    const s = document.createElement("script");
-    s.src = "/static/vendor/echarts.min.js";
-    s.onload = () => (window.echarts ? resolve(window.echarts) : (s.remove(), reject(new Error("no echarts"))));
-    // 失败即移除本 <script>：配合失败不缓存 promise，让重试从干净状态重来、不在 <head> 堆死标签。
-    s.onerror = () => { s.remove(); reject(new Error("echarts 运行时加载失败")); };
-    document.head.appendChild(s);
-  }).catch((e) => { _echartsPromise = null; throw e; });
-  return _echartsPromise;
-}
+// ECharts 的懒加载 `loadECharts()` 已抽到 echarts_loader.js（P4.27，决策P4.27-4）：图谱面板与本文件共用
+// 一个单例 Promise，同页只注入一次 <script>。flint dist 是**自包含单文件 ESM**（不出 UMD），走动态
+// import()——**仍无 npm、无打包链**，决策P4-3 的「无构建」底线不破（决策P4.20-3）。
 
 // 重试计数（决策P4.20-26）：**光把 promise 置空不够**——按 HTML 的 module map 语义，一个失败的
 // 动态 import() 会把该 URL 的失败结果留在文档存活期内，重发同一个 URL 会**立刻**再 reject、根本不重取。

@@ -7689,7 +7689,13 @@ def test_flint_enhance_security_and_resource_gates() -> None:
     assert "https?:" not in code_only, "出口断言不得扫值域（合法数据里就有 URL 串，扫值域会把正常图整张否掉）"
     # 实例生命周期（决策P4.20-7）：ECharts 是前端第一个有状态渲染器。
     assert "sweepFlintCharts" in src and ".dispose()" in src
-    assert "/static/vendor/flint/echarts.js" in src and "/static/vendor/echarts.min.js" in src  # 懒加载 vendored
+    assert "/static/vendor/flint/echarts.js" in src and "loadECharts()" in src  # 懒加载 vendored
+    # ECharts 运行时的懒加载自 P4.27 抽到公共加载器（与图谱面板共用一个单例，决策P4.27-4），须先于本文件载入。
+    loader = (STATIC_DIR / "echarts_loader.js").read_text(encoding="utf-8")
+    assert "/static/vendor/echarts.min.js" in loader and "function loadECharts" in loader
+    assert "function loadECharts" not in src  # 不得在 flint 里再留一份：两份单例 = 同页注入两次
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert index.index('/static/echarts_loader.js"') < index.index('/static/flint_enhance.js"')
 
 
 def test_flint_exit_assertion_does_not_ban_legit_keys() -> None:

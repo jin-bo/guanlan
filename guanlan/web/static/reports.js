@@ -1,6 +1,6 @@
 "use strict";
 // 由原 app.js 按关注点拆分（经典脚本，共享全局作用域；非 ES module）。
-// 载入顺序见 index.html；boot.js 最后载入。 零-LLM 报告（check/health/lint）+ graph 入口。
+// 载入顺序见 index.html；boot.js 最后载入。 零-LLM 报告（check/health/lint）+ MCP 诊断。
 // ── 零 LLM 报告 / graph ─────────────────────────────────────────────────────
 
 function renderReport(name, data) {
@@ -30,7 +30,7 @@ document.querySelectorAll(".actions button[data-report]").forEach((btn) => {
   });
 });
 
-$("#graph-btn").addEventListener("click", () => window.open("/graph", "_blank"));
+// 图谱按钮自 P4.27 起打开 Web 内图谱面板，接线见 graph_view.js。
 
 // ── 外部 MCP 配置诊断（P4.19，见 docs/P4.19-Web-MCP诊断.md）────────────────────
 // 展示本库实际会被注入的外部 MCP server 配置 + 用户显式点一次连接检查，两件事。
