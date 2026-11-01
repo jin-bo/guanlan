@@ -80,7 +80,7 @@
       <svg class="ico"><use href="#i-health"/></svg><span class="btn-zh" data-i18n="btn.health">健康</span></button>
     <button data-report="lint" class="btn" data-i18n-title="tip.lint" title="lint：孤页 / 断链 / 缺失实体（建议性）">
       <svg class="ico"><use href="#i-lint"/></svg><span class="btn-zh" data-i18n="btn.lint">巡检</span></button>
-    <button id="graph-btn" class="btn" data-i18n-title="tip.graph" title="graph：构建并打开知识图谱视图">
+    <button id="graph-btn" class="btn" data-i18n-title="tip.graph" title="图谱：按社区浏览 wiki 的链接结构">
       <svg class="ico"><use href="#i-graph"/></svg><span class="btn-zh" data-i18n="btn.graph">图谱</span></button>
     <button id="mcp-btn" class="btn" data-i18n-title="tip.mcp" title="MCP：本库外部 MCP server 配置一览，可显式做一次连接检查">
       <svg class="ico"><use href="#i-mcp"/></svg><span class="btn-zh" data-i18n="btn.mcp">MCP</span></button>
@@ -155,10 +155,13 @@
 <script src="/static/mermaid_enhance.js"></script>
 <script src="/static/math_enhance.js"></script>
 <script src="/static/code_enhance.js"></script>
+<!-- echarts_loader.js（P4.27）：ECharts 公共懒加载，flint 与图谱面板共用，须先于二者。 -->
+<script src="/static/echarts_loader.js"></script>
 <script src="/static/flint_enhance.js"></script>
 <script src="/static/content_enhance.js"></script>
 <script src="/static/wiki.js"></script>
 <script src="/static/reports.js"></script>
+<script src="/static/graph_view.js"></script>
 <script src="/static/jobs.js"></script>
 <script src="/static/staging.js"></script>
 <script src="/static/attach.js"></script>

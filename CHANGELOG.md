@@ -7,6 +7,17 @@
 
 ### 新增
 
+- **Web 图谱面板**（P4.27，`docs/P4.27-Web图可视化.md`）。顶栏「图谱」此前只是重建并打开 P3 的零 JS 邻接列表
+  `graph.html`；现在打开 Web 内的交互式关系图，三个视图：社区总览（节点 = 社区，大小按页数，连线按社区间相连的
+  页对数）→ 点社区展开（社区内的页，按页型着色）→ 点页面打开；wiki 页上「在图中查看」进入该页的一跳邻域。
+  不画全图：本机真实库里，最大的库 1,450 张孤儿页、全图是散点，另一个库近 1.2 万对链接、全图是毛球。
+  新增只读端点 `GET /api/graph`，内存建图、服务端裁剪聚合，**不写 `graph/`**，故 `--reader` 下也可用
+  （原「图谱」按钮在 reader 下隐藏）；单槽 memo 按页面 stat 签名失效。社区按锚页寻址（社区内邻居数最多的页），
+  不把会随 wiki 改动重编号的社区号当地址。每视图最多 300 页，按连接数截取并显式告示。节点标题按纯文本渲染
+  （提示框 `richText`，沿用 P4.20 的姿态）。渲染复用 P4.20 已内置的 ECharts，不新增依赖；其懒加载抽成
+  `echarts_loader.js`，flint 图表与图谱共用一次注入。`graph.json` / `graph.html` / `guanlan graph` 不变，
+  面板角落保留「静态列表」入口（写者模式）。`tests/test_web_graph.py` 17 例；真浏览器冒烟
+  `scripts/smoke_p427.py` 13/13，`scripts/smoke_p420.py` 重构后 18/18。
 - **`health` 报「source 页没有原文」**（`health.source_without_raw`，`docs/backlog/notes/llm_wiki-反向评审-v0.6.13.md` §2.1）。
   `wiki/sources/` 下的页，若文件名、`raw_digest`、`> 原始资料：` 声明行三路都没指向现存 raw 文件，报一条 advisory。
   此前这类页 `check` / `health` / `lint` / `audit` 全不报，别页 `sources:` 引它照样过门禁，`audit` 也追不到原文。

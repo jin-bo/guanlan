@@ -54,6 +54,9 @@ let stagingPath = null;  // 当前浏览目录（相对根，如 workspace/uploa
 function showOverlay(titleKey, html) {
   stagingOpen = false; // 任何其它浮层（报告/投喂/ingest/heal/历史）打开即清——openStaging 之后再置回，
   // 防 done/stopped 误把 renderStaging 灌进别的浮层 body（暂存区 P4.6）。
+  // 图谱面板（P4.27）独占宽卡片与一个 ECharts 实例：任何浮层打开先复位卡片宽度、释放画布；openGraph 之后再加回。
+  $("#overlay .overlay-card").classList.remove("overlay-graph");
+  if (typeof disposeGraphChart === "function") disposeGraphChart();
   overlayRepaint = null; // 新浮层默认无重画闭包；opener 取数后再按需注册（语言切换纯重渲染，P4.7）
   $("#overlay-title").dataset.i18n = titleKey; // 标注 i18n key → 语言切换时 applyI18n 据此纯重解析标题（P4.7）
   $("#overlay-body").innerHTML = html;

@@ -202,8 +202,14 @@ shasum -a 256 guanlan/web/static/vendor/flint/echarts.js
 
 ## echarts.min.js（图表渲染后端，P4.20）
 
-flint 编译产物的渲染后端。前端经 `static/flint_enhance.js` 注入 `<script>` 加载、读 `window.echarts`，
-以 `init(dom, 昼澜主题, {renderer:'svg'})` + `setOption({… tooltip.renderMode:'richText'})` 渲染。
+flint 编译产物的渲染后端。前端经 `static/echarts_loader.js` 的 `loadECharts()` 注入 `<script>` 加载、读
+`window.echarts`（P4.27 起从 `flint_enhance.js` 抽成公共加载器，与图谱面板共用一个单例，同页只注入一次），
+flint 以 `init(dom, 昼澜主题, {renderer:'svg'})` + `setOption({… tooltip.renderMode:'richText'})` 渲染。
+
+**第二个用途：图谱面板（P4.27）**。`static/graph_view.js` 用同一份运行时的 `graph` 系列 + `layout:'force'`
+画 wiki 链接图，`renderer:'canvas'`（几百节点、几千条边，SVG DOM 太重）；提示框同样钉 `renderMode:'richText'`、
+formatter 只返回纯文本（节点标题来自 frontmatter，决策P4.27-9）。升级时同时复核 force 布局与
+`convertToPixel({seriesIndex}, …)` 在 graph 系列上仍可用（`scripts/smoke_p427.py` 靠它把节点点击落成真实鼠标点击）。
 
 | 项 | 值 |
 |----|----|
