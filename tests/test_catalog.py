@@ -15,7 +15,12 @@ import pytest
 from conftest import make_runner, write_page
 
 from guanlan import catalog as catalog_mod
-from guanlan.catalog import build_catalog, overview_outline
+from guanlan.catalog import (
+    READ_FILE_MAX_LINE_CHARS,
+    build_catalog,
+    overview_outline,
+    raw_outline,
+)
 from guanlan.errors import EXIT_OK
 from guanlan.ingest import build_ingest_prompt, run_ingest
 from guanlan.pages import alias_index, iter_pages, link_stem, load_page
@@ -246,3 +251,84 @@ def test_outline_skips_frontmatter_comments_but_keeps_line_numbers(tmp_path: Pat
     # 未闭合的 `---` 不算 frontmatter（与 split_frontmatter 同判）：其后标题照列。
     p.write_text("---\n# 甲\n", encoding="utf-8")
     assert overview_outline(p).splitlines()[1:] == ["L2 # 甲"]
+
+
+# ---- 〈资料结构〉（raw_outline + ingest prompt） ----
+
+
+def test_ingest_prompt_carries_raw_structure_before_overview(kb: Path):
+    (kb / "raw" / "doc.md").write_text(
+        "---\ntitle: 资料\n# 注释\n---\n\n# 资料\n\n## 一、甲\n\n```\n# 围栏\n```\n### 细目\n", encoding="utf-8"
+    )
+    prompt = build_ingest_prompt(kb, "doc.md")
+    assert "不要再用任何工具统计行数或字数" in prompt
+    block = prompt.split("\n\n〈资料结构〉", 1)[1].split("〈资料结构完〉", 1)[0]
+    assert block.splitlines() == ["全文 13 行、58 字，3 个标题", "L6 # 资料", "L8 ## 一、甲", "L13 ### 细目"]
+    assert prompt.index("〈资料结构完〉") < prompt.index("\n\n〈overview 结构〉")
+
+
+def test_raw_structure_missing_file_does_not_fail(kb: Path):
+    prompt = build_ingest_prompt(kb, "不存在.md")
+    assert "〈资料结构〉raw 文件读不出，规模未知" in prompt
+
+
+def test_raw_outline_reports_long_lines_at_exact_threshold(tmp_path: Path):
+    """超长行按 agentao read_file 的判法：去行尾后 **大于** 2000 字才截断。
+
+    漏报是沉默的（模型以为整行都读到了），所以边界两侧都要钉住：2000 字不报、2001 字必须报，
+    且 `\r\n` 行尾不算进长度。
+    """
+    p = tmp_path / "a.md"
+    n = READ_FILE_MAX_LINE_CHARS
+    p.write_bytes(("短\r\n" + "字" * n + "\r\n" + "长" * (n + 1) + "\r\n").encode("utf-8"))
+    ro = raw_outline(p)
+    assert ro.long_lines == ((3, n + 1),)
+    assert f"L3（{n + 1:,} 字）" in ro.text
+
+
+def test_raw_outline_long_flags(tmp_path: Path):
+    p = tmp_path / "a.md"
+    p.write_text("行\n" * 2001, encoding="utf-8")
+    assert raw_outline(p).is_long
+    p.write_text("行\n" * 2000, encoding="utf-8")
+    assert not raw_outline(p).is_long
+    p.write_text("字" * 40_001, encoding="utf-8")
+    assert raw_outline(p).is_long
+
+
+def test_raw_outline_over_budget_lists_top_levels_and_says_so(tmp_path: Path):
+    """目录超预算：只列高层标题，并写明省略数与「非全集」——不静默截断。"""
+    p = tmp_path / "a.md"
+    body = ["# 书名"]
+    for i in range(1, 6):
+        body.append(f"## 第{i}章")
+        body += [f"### 第{i}章第{j}节" for j in range(1, 30)]
+    p.write_text("\n".join(body) + "\n", encoding="utf-8")
+
+    full = raw_outline(p, budget=10**6)
+    assert full.listed_headings == full.headings == 151
+    ro = raw_outline(p, budget=200)
+    assert ro.headings == 151 and ro.listed_headings == 6
+    assert "仅列最高两级（另有 145 个下级标题未列，此目录非全集）" in ro.text
+    assert "L2 ## 第1章" in ro.text and "第1章第1节" not in ro.text
+
+    tiny = raw_outline(p, budget=20)
+    assert "此目录非全集" in tiny.text and tiny.listed_headings < 6
+
+
+def test_raw_outline_line_numbers_match_read_file(tmp_path: Path):
+    """与 overview 结构同一切行口径：`\x85` 不是换行，标题行号与按文本模式读出的行一致。"""
+    p = tmp_path / "a.md"
+    p.write_bytes("# 甲\r\n正文\x85续\r\n## 乙\r\n".encode("utf-8"))
+    with p.open(encoding="utf-8") as fh:
+        file_lines = [line.rstrip("\n") for line in fh]
+    for entry in raw_outline(p).text.splitlines()[1:]:
+        num, heading = entry.split(" ", 1)
+        assert file_lines[int(num[1:]) - 1] == heading
+
+
+def test_long_raw_reported_on_stderr(kb: Path, capsys):
+    (kb / "raw" / "big.md").write_text("# 甲\n" + ("长" * 2500 + "\n") + "行\n" * 2100, encoding="utf-8")
+    build_ingest_prompt(kb, "big.md")
+    err = capsys.readouterr().err
+    assert "资料较长" in err and "1 行超过 2,000 字" in err
