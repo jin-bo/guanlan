@@ -11,8 +11,11 @@ from pathlib import Path
 
 from .catalog import (
     CATALOG_FORMAT,
+    READ_FILE_MAX_LINE_CHARS,
+    READ_FILE_MAX_LINES,
     build_catalog,
     overview_outline,
+    raw_outline,
 )
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .gate import run_guarded_write
@@ -31,7 +34,7 @@ from .sourcepage import locate_source_page, source_slug
 
 # 薄 prompt：真正步骤在 skill。{rel} = 相对 raw/ 的 posix 路径；{source} = 本篇 source 页定位（wrapper
 # 现查）；{context} = 下面两种查重上下文之一。
-# overview 结构与页面名录拼在 prompt **末尾**（见 `build_ingest_prompt`），让任务指令先于大块参考数据。
+# 资料结构、overview 结构与页面名录拼在 prompt **末尾**（见 `build_ingest_prompt`），让任务指令先于大块参考数据。
 # 注意这**不**带来跨 ingest 的前缀缓存收益：`{rel}` 在开头第一句、`{source}` 也逐篇不同，提示词从那里
 # 起就已分叉；名录本身也随每次入库变化。
 INGEST_PROMPT = (
@@ -39,6 +42,9 @@ INGEST_PROMPT = (
     "该路径已由 wrapper 校验存在，必须按原样读取，不要替换其中的引号、空格或 CJK 字符；"
     "{source}"
     "{context}"
+    "本篇的行数、字数与标题行号见文末〈资料结构〉，**不要再用任何工具统计行数或字数**；"
+    "超过 2000 行或 4 万字的长资料按其中的标题区间用 `read_file` 的 `offset`/`limit` 分段读到末尾、逐段处理，不要只读开头；"
+    "〈资料结构〉列出的超长行会被 `read_file` 截断，引用其内容前留意这一点；"
     "`wiki/overview.md` 不必整读：文末〈overview 结构〉给出它的标题行与行号，"
     "按本篇主题用 `read_file` 的 `offset`/`limit` 读相关章节，需要跨章节综合时再扩展（全文较短时可直接整读）；"
     "决定修改时先读全待改范围再改，`read_file` 回报截断时按提示用 `offset` 续读；"
@@ -103,16 +109,37 @@ _CONTEXT_WITHOUT_CATALOG = (
 )
 
 
+def _raw_structure_block(kb: Path, rel: str) -> str:
+    """〈资料结构〉一段；长资料 / 有超长行时 stderr 各报一行（stdout 不受影响）。读不出不失败。"""
+    ro = raw_outline(kb / "raw" / rel)
+    if ro is None:
+        return "〈资料结构〉raw 文件读不出，规模未知；按需用 `read_file` 分段读\n〈资料结构完〉"
+    if ro.is_long:
+        print(
+            f"ℹ 资料较长（{ro.chars:,} 字 / {ro.lines:,} 行 / {ro.headings} 个标题；"
+            f"`read_file` 不带 limit 只回 {READ_FILE_MAX_LINES:,} 行），已附〈资料结构〉供分段读取。",
+            file=sys.stderr,
+        )
+    if ro.long_lines:
+        print(
+            f"ℹ 资料有 {len(ro.long_lines)} 行超过 {READ_FILE_MAX_LINE_CHARS:,} 字，"
+            "`read_file` 只回这些行的开头部分；已在〈资料结构〉中列出。",
+            file=sys.stderr,
+        )
+    return f"〈资料结构〉{ro.text}\n〈资料结构完〉"
+
+
 def build_ingest_prompt(kb: Path, rel: str) -> str:
-    """组装 ingest prompt：告知本篇 source 页位置；末尾附 overview 结构；名录不超预算就整份附上，
+    """组装 ingest prompt：告知本篇 source 页位置；末尾附资料结构与 overview 结构；名录不超预算就整份附上，
     超了就明确报告并退回整读 index。
 
     **超预算不截断**（见 `catalog` 模块 docstring）：只给一部分或只给页名，恰好丢掉查重最需要的别名，
     比不给更糟——模型会以为名录是全集。stderr 报告一行，stdout 不受影响。
     """
     source = _source_clause(kb, rel)
+    tail = [_raw_structure_block(kb, rel)]
     outline = overview_outline(kb / "wiki" / "overview.md")
-    tail = [f"〈overview 结构〉{outline or 'overview.md 不存在或读不出'}\n〈overview 结构完〉"]
+    tail.append(f"〈overview 结构〉{outline or 'overview.md 不存在或读不出'}\n〈overview 结构完〉")
     catalog = build_catalog(kb / "wiki")
     if catalog.over_budget:
         print(
