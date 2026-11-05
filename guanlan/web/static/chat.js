@@ -255,7 +255,7 @@ function slashHelpLines() {
     t("slash.help.context"),
     t("slash.help.skills"),
     t("slash.help.tools"),
-    ...(readerMode ? [] : [t("slash.help.mode")]),
+    ...(readerMode ? [] : [t("slash.help.mode"), t("slash.help.model")]),
     t("slash.help.goal"),
   ];
 }
@@ -294,7 +294,7 @@ async function handleSlash(raw) {
   // chatStreaming 守卫 + 服务端 is_busy 兜住）**不**撕毁在飞流、仍放行（决策P4.4-1 斜杠流式中可达的本意）。
   if (chatStreaming) {
     const modeArg = body.slice(1).split(/\s+/)[1] || "";
-    if (cmd === "new" || cmd === "clear" || (cmd === "mode" && modeArg && !readerMode)) { // reader 下 /mode 直接回「不可用」
+    if (cmd === "new" || cmd === "clear" || ((cmd === "mode" || cmd === "model") && modeArg && !readerMode)) { // reader 下 /mode 直接回「不可用」
       return noteLines([t("slash.busyLifecycle", cmd)]);
     }
   }
@@ -312,6 +312,15 @@ async function handleSlash(raw) {
       // 带参 → 切换姿态（POST /api/chat/{id}/mode）；不带参 → 报当前姿态（只读自省）。
       const arg = (body.slice(1).split(/\s+/)[1] || "").toLowerCase();
       if (arg) return slashSetMode(arg);
+      return slashInfo(cmd);
+    }
+    case "model": {
+      // P4.29：reader 整条禁用（端点不注册）。带参 → 切换（仅可写会话）；不带参 → 报当前 provider/model。
+      if (readerMode) return noteLines([t("slash.modelReaderDisabled")]);
+      // 取命令后的**全部**剩余文本（不只第一个词）：`/model alpha / m-1` 若只取首词会静默变成「仅 provider」。
+      // 中间的空白交给服务端按 `/` 切分后各自去空白。
+      const arg = body.slice(1).replace(/^\S+\s*/, "");
+      if (arg) return slashSetModel(arg);
       return slashInfo(cmd);
     }
     case "status":
@@ -373,6 +382,33 @@ async function slashSetMode(arg) {
   ]);
 }
 
+// /model <provider>[/<model>]：运行时切换模型（P4.29）；只给 provider 时服务端取该 provider 的 {P}_MODEL。只在 workspace-write 会话可切——前端先挡一道给出明确
+// 提示，服务端仍按会话真实姿态判（409）。只把**名字**发给服务端，凭据由服务端从环境解析。
+async function slashSetModel(arg) {
+  if (!conversationId) {
+    if (!(await ensureActiveConversation())) return;
+  }
+  if (currentMode !== "workspace-write") return noteLines([t("slash.modelNeedWrite")]);
+  let res;
+  try {
+    res = await fetch(`/api/chat/${encodeURIComponent(conversationId)}/model`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: arg }),
+    });
+  } catch (e) {
+    return noteLines([t("slash.modelFail", e.message)]);
+  }
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).detail || ""; } catch { /* 非 JSON 体 */ }
+    if (typeof detail !== "string") detail = ""; // 422 校验错误是数组 → 退回 HTTP 码
+    return noteLines([t("slash.modelFail", detail || `HTTP ${res.status}`)]);
+  }
+  const { provider, model } = await res.json();
+  return noteLines([t("slash.modelSwitched", `${provider}/${model}`)]);
+}
+
 let ensureSessionInflight = null; // 合并并发建会话调用：杜绝两条斜杠命令各 POST 一次、双建孤儿会话（评审）
 
 // 无活动会话时先开一个 warm 空会话并**采纳为当前会话**（决策P4.4-7 的 UX 反转）：使需活动 agent 的
@@ -428,7 +464,7 @@ async function ensureActiveConversation() {
 // app 级如实作答、不强开会话。冷会话（live:false）的 context/skills/tools 仍为 null → 维持「续聊一轮以
 // 恢复」（决策P4.4-7，冷会话不自动重恢复）。
 async function slashInfo(cmd) {
-  const needsAgent = cmd === "tools" || cmd === "skills" || cmd === "context";
+  const needsAgent = cmd === "tools" || cmd === "skills" || cmd === "context" || cmd === "model";
   if (!conversationId && needsAgent && !readerMode) {
     if (!(await ensureActiveConversation())) return; // 开失败：helper 已落提示
   }
@@ -467,7 +503,8 @@ function renderSlashInfo(cmd, info) {
       lines.push(t("slash.noSessionHint"));
     } else {
       if (info.mode) setModeBadge(info.mode);
-      lines.push(t("slash.model", info.model || t("slash.modelUnknown")));
+      const m = info.model || t("slash.modelUnknown");
+      lines.push(t("slash.model", info.provider ? `${info.provider}/${m}` : m));
       lines.push(t("slash.mode", info.mode));
       lines.push(t("slash.turnsMessages", info.turns ?? "—", info.messages ?? "—"));
       if (info.context) {
@@ -487,6 +524,12 @@ function renderSlashInfo(cmd, info) {
     return noteLines([t("slash.coldNeedResume", cmd)]);
   }
   if (cmd === "context") return renderSlashContext(info.context);
+  if (cmd === "model") {
+    const lines = [t("slash.modelCurrent", `${info.provider || "?"}/${info.model || t("slash.modelUnknown")}`)];
+    if (info.providers && info.providers.length) lines.push(t("slash.modelProviders", info.providers.join(", ")));
+    lines.push(info.mode === "workspace-write" ? t("slash.modelUsage") : t("slash.modelNeedWrite"));
+    return noteLines(lines);
+  }
   if (cmd === "skills") return renderSlashSkills(info.skills);
   if (cmd === "tools") return renderSlashTools(info.tools);
 }

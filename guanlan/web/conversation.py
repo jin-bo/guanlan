@@ -41,9 +41,14 @@ from .chat_support import (
     _logger,
     _prune_old_snapshots,
     _violation_key,
+    ModelSwitchError,
+    configured_providers,
+    current_provider,
     incomplete_message,
     make_guanlan_search_tool,
+    parse_model_spec,
     read_turn_outcome,
+    resolve_provider_llm,
 )
 from .goal_io import (
     clear_goal_sidecar,
@@ -394,6 +399,8 @@ class Conversation:
         # 不是切换。非法姿态已在 __init__ 开头拦下（factory 收得下 full-access，Web 不收，决策P4.5-1）。
         opts["permission_mode"] = mode
         self.agent = chat.build_from_environment(**opts)
+        # 当前 provider（P4.29 `/model`）：构造期 `.env` 已载入进程环境，此刻读到的就是本会话所用的那个。
+        self._provider = current_provider()
         self.agent.skill_manager.activate_skill(
             SKILL_NAME, task_description="观澜 Web 工作会话"
         )
@@ -422,6 +429,37 @@ class Conversation:
         """
         self._apply_mode(mode)
         return self._mode
+
+    def set_model(self, value: str) -> dict:
+        """`/model <provider>[/<model>]` 运行时切换模型（P4.29）。**仅 workspace-write 会话**可切。
+        只给 provider 时用该 provider 块的默认模型（`{P}_MODEL`，同会话构造期的环境发现口径）。
+
+        调用方须持 `self.lock`（与在飞 turn 串行，切换不会落在一轮中间）。只读会话 → `PermissionError`
+        （端点 409）；格式非法 / provider 未配置 → `ModelSwitchError`（端点 422），两者都在动 agent
+        **之前**判完，失败时会话保持原 provider/model。切换走 agentao 文档化的 `set_provider`：同时换
+        key / 端点 / wire 协议 / model，并由它清理随模型而变的状态（token 编码、观测上限、旧模型的推理
+        产物）。只改本会话；恢复冷会话时仍按进程默认模型（`conversation_store` 不回绑盘上 model 的既有口径）。
+        """
+        if self._mode != "workspace-write":
+            raise PermissionError("只有可写会话（workspace-write）可切换模型；先 /mode workspace-write。")
+        provider, model = parse_model_spec(value)
+        creds = resolve_provider_llm(provider)
+        if model is None:  # 仅给 provider → 该 provider 块的默认模型 `{P}_MODEL`
+            model = (creds["default_model"] or "").strip()
+            if not model:
+                raise ModelSwitchError(
+                    f"provider {provider} 未设默认模型（环境中缺 {provider}_MODEL）；请写成 {provider.lower()}/<model-name>。"
+                )
+        self.agent.set_provider(
+            api_key=creds["api_key"],
+            base_url=creds["base_url"],
+            model=model,
+            api_format=creds["api_format"],
+        )
+        self._provider = provider
+        # 不改 `self._model`（落盘的 model 元数据）：恢复冷会话一律回到进程默认模型（见上），若这里记成新模型，
+        # 重启后冷会话的 /status 会显示一个恢复后并不会用的模型。
+        return {"provider": provider.lower(), "model": self.agent.get_current_model()}
 
     def _on_token(self, chunk: str) -> None:
         """transport 固定回调，**在 arun 的 executor 线程里跑**；lock 串行化同会话各 turn，单槽无竞态。"""
@@ -1471,6 +1509,8 @@ class Conversation:
             "turns": self.turns,
             "live": True,
             "model": self.agent.get_current_model(),
+            "provider": self._provider.lower(),  # P4.29：`/model` 显示 provider/model
+            "providers": [p.lower() for p in configured_providers()],  # 只有名字，不含任何值
             "mode": self._mode,  # P4.5：报当前会话真实姿态（read-only / workspace-write）
             # P4.15：本会话 confirm 姿态（ask/auto）+ 当前待应答列表（带完整请求 envelope，供断线
             # 重连重渲染并让用户决策，§5.3）。confirm_mode 经气泡②或 /confirm-mode 翻、UI 据它显示

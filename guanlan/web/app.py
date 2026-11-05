@@ -59,6 +59,7 @@ from ..paths import count_files_modified_since
 from ..runtime import HEARTBEAT_INTERVAL_S, AgentRunner
 from ..search import CorpusCache, search_result_dict, tokenize
 from .chat import IDLE_TTL_SECONDS, MAX_CONVERSATIONS, ConversationStore
+from .chat_support import ModelSwitchError
 from .conversation import GoalActiveError
 from .defaults import CONFIRM_MODES, DEFAULT_CONFIRM_TIMEOUT
 from .helpers import (
@@ -290,6 +291,15 @@ class ModeBody(BaseModel):
     full-access / plan / full 等 → set_mode 抛 ValueError → 端点 422（决策P4.5-1）。"""
 
     mode: str
+
+
+class ModelBody(BaseModel):
+    """`POST /api/chat/{id}/model` 请求体（P4.29）。`model` = `<provider>/<model-name>`；只带**名字**，
+    凭据由服务端从进程环境解析（同 ACP「线上只传标识、不传密钥」）。多余字段（如 apiKey）一律拒。"""
+
+    model_config = {"extra": "forbid"}
+
+    model: str
 
 
 class UndoBody(BaseModel):
@@ -1295,7 +1305,10 @@ def create_app(
     async def chat_info(conversation_id: str) -> dict:
         conv = conversations.get(conversation_id)
         if conv is not None:
-            return await anyio.to_thread.run_sync(conv.info)  # 内存态全量自省（off-loop）
+            info = await anyio.to_thread.run_sync(conv.info)  # 内存态全量自省（off-loop）
+            if reader:  # P4.29：环境里配了哪些 provider 是部署情报，匿名 reader 不外泄（/model 本就不可用）
+                info.pop("providers", None)
+            return info
         info = await anyio.to_thread.run_sync(conversations.cold_info, conversation_id)
         if info is None:  # 非规范 / 盘上无此 Web 会话 / 持久化关 → 404（同 chat / messages 口径）
             raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
@@ -1632,6 +1645,32 @@ def create_app(
         except ValueError as exc:  # 非法 mode（full-access/plan/未知）→ 422
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"mode": new_mode}
+
+    # 运行时切换模型（P4.29）：`/model <provider>/<model>`，仅 workspace-write 会话。reader 下不注册
+    # （与 /mode 同口径：只读部署姿态恒 read-only，切模型本就不可达；匿名多用户也不该能换计费模型）。
+    # 404 未知 id；409 冷会话 / 只读会话；422 格式非法或 provider 未配置。持会话锁与在飞 turn 串行。
+    @_writer_only(app.post("/api/chat/{conversation_id}/model"))
+    async def chat_model(conversation_id: str, body: ModelBody) -> dict:
+        conv = conversations.get(conversation_id)
+        if conv is None:
+            cold = await anyio.to_thread.run_sync(conversations.cold_info, conversation_id)
+            if cold is not None:
+                raise HTTPException(
+                    status_code=409, detail="会话未激活，先续聊一轮恢复再切模型。"
+                )
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        _reject_if_writable_active()  # 层③ 自死锁修复，同 /mode
+        try:
+            async with conv.lock:
+                return conv.set_model(body.model)
+        except PermissionError as exc:  # 只读会话
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ModelSwitchError as exc:  # 格式非法 / provider 未配置（消息只含 provider 名）
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:  # agentao 重配客户端失败：只报异常类型，不回显其文本（可能含端点/凭据片段）
+            raise HTTPException(
+                status_code=500, detail=f"切换模型失败（{type(exc).__name__}，详见 agentao.log）。"
+            ) from exc
 
     # 撤销本轮写（P4.5 决策P4.5-4/13）：乐观回放最近可写 turn 的写日志（wiki/ + SCHEMA.md）。
     # 统一锁序 conversation.lock → write_lock（与可写 turn 同序、绝不反序，否则交叉死锁，评审 High）；

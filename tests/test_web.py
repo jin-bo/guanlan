@@ -2190,6 +2190,15 @@ class _FakeAgent:
     def get_current_model(self) -> str:
         return self._model or "fake-model"
 
+    def set_provider(self, api_key, base_url=None, model=None, *, api_format=None) -> None:
+        # P4.29 `/model`：只记**是否带了 key**与非密字段，测试断言 key 原样转交但不在任何回包里出现。
+        self.provider_calls = getattr(self, "provider_calls", [])
+        self.provider_calls.append(
+            {"api_key": api_key, "base_url": base_url, "model": model, "api_format": api_format}
+        )
+        if model is not None:
+            self._model = model
+
     def _build_system_prompt(self) -> str:
         return "SYS"  # _context_stats 前置它入 messages_with_system（验 system 分项被计入）
 
@@ -5203,9 +5212,188 @@ def test_reader_frontend_disables_slash_mode() -> None:
     assert 'if (readerMode) return noteLines([t("slash.modeReaderDisabled")]);' in case
     helper = chat[chat.index("function slashHelpLines"):]
     helper = helper[: helper.index("}")]
-    assert '...(readerMode ? [] : [t("slash.help.mode")])' in helper
+    assert '...(readerMode ? [] : [t("slash.help.mode"), t("slash.help.model")])' in helper
     i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
     assert i18n.count('"slash.modeReaderDisabled"') == 2
+
+
+# ── P4.29 /model <provider>/<model> ──────────────────────────────────────────────────────────
+_SECRET = "sk-test-not-a-real-key-0123456789"
+
+
+def _model_env(monkeypatch, **extra) -> None:
+    """中性占位 provider ALPHA；key 是可识别的假串，供断言「原样转交、绝不回显」。"""
+    monkeypatch.setenv("ALPHA_API_KEY", _SECRET)
+    monkeypatch.setenv("ALPHA_BASE_URL", "http://alpha.invalid/v1")
+    monkeypatch.setenv("ALPHA_MODEL", "alpha-default")
+    monkeypatch.delenv("ALPHA_API_FORMAT", raising=False)
+    monkeypatch.delenv("NOKEY_API_KEY", raising=False)
+    monkeypatch.delenv("BETA_API_KEY", raising=False)
+    monkeypatch.delenv("BETA_BASE_URL", raising=False)
+    monkeypatch.delenv("SOMETOOL_API_KEY", raising=False)
+    monkeypatch.delenv("SOMETOOL_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("BETA_MODEL", raising=False)
+    for k, v in extra.items():
+        monkeypatch.setenv(k, v)
+
+
+def _writable_session(client) -> str:
+    _, done, _ = _chat(client, "问")
+    cid = done["conversation_id"]
+    assert client.post(f"/api/chat/{cid}/mode", json={"mode": "workspace-write"}).status_code == 200
+    return cid
+
+
+def test_model_switch_in_writable_session(chat_client, monkeypatch) -> None:
+    """可写会话切到 alpha/m-1：key/端点/默认 wire 原样交给 agentao set_provider；回包与 info 不含 key。"""
+    client, captured = chat_client
+    _model_env(monkeypatch)
+    cid = _writable_session(client)
+    resp = client.post(f"/api/chat/{cid}/model", json={"model": "Alpha/m-1"})
+    assert resp.status_code == 200
+    assert resp.json() == {"provider": "alpha", "model": "m-1"}
+    assert _SECRET not in resp.text
+    call = captured["agents"][-1].provider_calls[-1]
+    assert call == {
+        "api_key": _SECRET,
+        "base_url": "http://alpha.invalid/v1",
+        "model": "m-1",
+        "api_format": "openai-completions",  # 未设 = 默认 wire，不是「沿用当前」
+    }
+    info = client.get(f"/api/chat/{cid}/info")
+    body = info.json()
+    assert body["provider"] == "alpha" and body["model"] == "m-1"
+    assert "alpha" in body["providers"]
+    assert _SECRET not in info.text
+
+
+def test_model_id_may_contain_slash(chat_client, monkeypatch) -> None:
+    """按第一个 `/` 切：provider=alpha，model=org/model-x（model id 自身可含 `/`）。"""
+    client, captured = chat_client
+    _model_env(monkeypatch)
+    cid = _writable_session(client)
+    resp = client.post(f"/api/chat/{cid}/model", json={"model": "alpha/org/model-x"})
+    assert resp.status_code == 200 and resp.json()["model"] == "org/model-x"
+
+
+def test_model_switch_provider_only_uses_its_default_model(chat_client, monkeypatch) -> None:
+    """仅给 provider（不分大小写）→ 取该 provider 块的 `{P}_MODEL`，其余同完整写法。"""
+    client, captured = chat_client
+    _model_env(monkeypatch)
+    cid = _writable_session(client)
+    resp = client.post(f"/api/chat/{cid}/model", json={"model": " ALPHA "})
+    assert resp.status_code == 200
+    assert resp.json() == {"provider": "alpha", "model": "alpha-default"}
+    call = captured["agents"][-1].provider_calls[-1]
+    assert call["model"] == "alpha-default" and call["api_key"] == _SECRET
+
+
+def test_default_provider_without_base_url_still_switches(chat_client, monkeypatch) -> None:
+    """进程默认 provider 未设端点（官方 SDK 默认端点）仍可切：端点要求只针对非默认 provider。"""
+    client, captured = chat_client
+    _model_env(monkeypatch, LLM_PROVIDER="ALPHA")
+    monkeypatch.delenv("ALPHA_BASE_URL")
+    cid = _writable_session(client)
+    resp = client.post(f"/api/chat/{cid}/model", json={"model": "alpha/m-2"})
+    assert resp.status_code == 200
+    assert captured["agents"][-1].provider_calls[-1]["base_url"] is None
+
+
+def test_model_switch_does_not_rewrite_persisted_model(chat_client, monkeypatch) -> None:
+    """切换只改活会话，不改落盘的 model 元数据——冷恢复回到进程默认模型，盘上记录须与之一致。"""
+    client, captured = chat_client
+    _model_env(monkeypatch)
+    cid = _writable_session(client)
+    conv = client.app.state.conversations.get(cid)
+    before = conv._model
+    assert client.post(f"/api/chat/{cid}/model", json={"model": "alpha/m-1"}).status_code == 200
+    assert conv._model == before  # 落盘元数据未被改写
+    assert conv.agent.get_current_model() == "m-1"  # 活会话已切
+
+
+def test_frontend_model_arg_keeps_whole_remainder() -> None:
+    chat = (STATIC_DIR / "chat.js").read_text(encoding="utf-8")
+    case = chat[chat.index('case "model": {'):]
+    assert 'body.slice(1).replace(/^\\S+\\s*/, "")' in case[: case.index("slashSetModel(arg)")]
+
+
+def test_model_switch_refused_in_read_only_session(chat_client, monkeypatch) -> None:
+    """只读会话 → 409，agent 未被触碰。"""
+    client, captured = chat_client
+    _model_env(monkeypatch)
+    _, done, _ = _chat(client, "问")
+    cid = done["conversation_id"]
+    resp = client.post(f"/api/chat/{cid}/model", json={"model": "alpha/m-1"})
+    assert resp.status_code == 409
+    assert not getattr(captured["agents"][-1], "provider_calls", [])
+
+
+@pytest.mark.parametrize(
+    ("value", "extra_env"),
+    [
+        ("alpha/", {}),  # 写了 / 却缺 model：笔误，不当作「仅 provider」
+        ("/m-1", {}),  # 缺 provider
+        ("al-pha/m-1", {}),  # provider 名非环境变量前缀形状
+        ("nokey/m-1", {}),  # 未配置
+        ("alpha/m-1", {"ALPHA_API_FORMAT": "bogus-wire"}),  # wire 非法：动 agent 前拒
+        ("nokey", {}),  # 仅 provider 但未配置
+        ("beta", {"BETA_API_KEY": "sk-beta", "BETA_BASE_URL": "http://beta.invalid"}),  # 无 BETA_MODEL 默认模型
+        ("sometool/m-1", {"SOMETOOL_API_KEY": "sk-tool"}),  # 有 key 无端点的非默认 provider：不发往默认端点
+        ("alpha/m-1", {"LLM_MAX_TOKENS": "abc"}),  # 共享参数非法 → 422 而非 500
+    ],
+)
+def test_model_switch_rejects_bad_values_without_touching_agent(
+    chat_client, monkeypatch, value, extra_env
+) -> None:
+    client, captured = chat_client
+    _model_env(monkeypatch, **extra_env)
+    cid = _writable_session(client)
+    resp = client.post(f"/api/chat/{cid}/model", json={"model": value})
+    assert resp.status_code == 422
+    assert _SECRET not in resp.text
+    assert not getattr(captured["agents"][-1], "provider_calls", [])
+    assert client.get(f"/api/chat/{cid}/info").json()["model"] == "fake-model"  # 原样未变
+
+
+def test_model_body_refuses_credentials_on_the_wire(chat_client, monkeypatch) -> None:
+    """请求体只收 `model`：夹带 apiKey 等字段 → 422（线上只传标识、不传密钥，同 ACP 白名单）。"""
+    client, captured = chat_client
+    _model_env(monkeypatch)
+    cid = _writable_session(client)
+    resp = client.post(f"/api/chat/{cid}/model", json={"model": "alpha/m-1", "apiKey": "x"})
+    assert resp.status_code == 422
+    assert not getattr(captured["agents"][-1], "provider_calls", [])
+
+
+def test_model_endpoint_unknown_session_404(chat_client) -> None:
+    client, _ = chat_client
+    assert client.post("/api/chat/nope/model", json={"model": "alpha/m-1"}).status_code == 404
+
+
+def test_reader_does_not_register_model_endpoint(chat_env, monkeypatch) -> None:
+    kb, _ = chat_env
+    _model_env(monkeypatch)
+    with TestClient(create_app(kb, reader=True)) as client:
+        _, done, _ = _chat(client, "问")
+        cid = done["conversation_id"]
+        assert client.post(f"/api/chat/{cid}/model", json={"model": "alpha/m-1"}).status_code == 404
+        assert "providers" not in client.get(f"/api/chat/{cid}/info").json()  # 部署情报不外泄
+
+
+def test_frontend_slash_model_wiring() -> None:
+    """前端：/model 分支（reader 禁用、带参切换、无参查询）、/help 只在非 reader 列出、中英文案齐。"""
+    chat = (STATIC_DIR / "chat.js").read_text(encoding="utf-8")
+    case = chat[chat.index('case "model": {'):]
+    case = case[: case.index('case "status"')]
+    assert 'if (readerMode) return noteLines([t("slash.modelReaderDisabled")]);' in case
+    assert "slashSetModel(arg)" in case and "slashInfo(cmd)" in case
+    setter = chat[chat.index("async function slashSetModel"):]
+    setter = setter[: setter.index("\n}\n")]
+    assert "JSON.stringify({ model: arg })" in setter  # 只发名字
+    i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
+    for key in ("slash.help.model", "slash.modelReaderDisabled", "slash.modelSwitched", "slash.modelNeedWrite"):
+        assert i18n.count(f'"{key}"') == 2, key
 
 
 def test_create_app_reader_clamps_persist_and_mode(chat_env) -> None:

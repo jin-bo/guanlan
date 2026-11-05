@@ -7,6 +7,11 @@
 
 ### 新增
 
+- **Web 会话内切换模型 `/model <provider>/<model-name>`**（P4.29，`docs/P4.29-Web切换模型.md`）。只写
+  `/model <provider>` 则用该 provider 的默认模型 `{PROVIDER}_MODEL`。仅 workspace-write 会话可用，只影响当前会话；`/model` 无参显示当前 `provider/model` 与环境中已配置的 provider 名，`/status` 也改为显示
+  `provider/model`。新端点 `POST /api/chat/{id}/model` 只收模型名（夹带凭据字段 422），凭据由服务端经 agentao
+  `discover_llm_kwargs` 从进程环境的 `{PROVIDER}_API_KEY` / `_BASE_URL` / `_API_FORMAT` 解析后交给 `set_provider`，
+  不缓存、不记录、不回传；`_API_FORMAT` 未设即默认 wire。只读会话 409，`--reader` 下端点不注册。
 - **Web 内嵌 SVG 渲染**（P4.28，`docs/P4.28-Web内嵌SVG渲染.md`）。页面里独占成块的原始 `<svg>…</svg>` 和
   ```` ```svg ```` 围栏块，现在在 wiki 单页、对话答案和 raw 预览里直接显示成图；此前前者被转义成一屏标签文本。服务端
   只把块级 `<svg>` 改写成转义的 `language-svg` 代码块，原始 HTML 全转义的姿态不变；前端新增 `svg_enhance.js`，
