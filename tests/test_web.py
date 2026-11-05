@@ -5169,14 +5169,43 @@ def test_reader_info_fields_trimmed(kb, chat_env) -> None:
         assert body["conversations"] == 0 and body["max_conversations"] == 100
 
 
-def test_reader_rejects_workspace_write_mode(chat_env) -> None:
-    """reader 下 POST /api/chat/{id}/mode {workspace-write} → 409（强制只读姿态，决策P4.9-4）。"""
+def test_reader_does_not_register_mode_endpoint(chat_env) -> None:
+    """reader 下 POST /api/chat/{id}/mode 不注册 → 404，**两个值都是**（决策P4.9-4 修订，同 undo 的决策P4.9-17）。
+
+    旧口径只挡 workspace-write、端点仍在；切回 read-only 也一并 404，证明是「端点不存在」而非「值被拒」。
+    """
     kb, _ = chat_env
     with TestClient(create_app(kb, reader=True)) as client:
         _, done, _ = _chat(client, "问")
         cid = done["conversation_id"]
+        for mode in ("workspace-write", "read-only"):
+            resp = client.post(f"/api/chat/{cid}/mode", json={"mode": mode})
+            assert resp.status_code == 404, mode
+        # 会话本身仍在、仍只读：404 来自路由缺席，不是会话丢失。
+        assert client.get(f"/api/chat/{cid}/info").json()["mode"] == "read-only"
+
+
+def test_writer_still_registers_mode_endpoint(chat_env) -> None:
+    """非 reader 不回归：同一请求照常切换。"""
+    kb, _ = chat_env
+    with TestClient(create_app(kb)) as client:
+        _, done, _ = _chat(client, "问")
+        cid = done["conversation_id"]
         resp = client.post(f"/api/chat/{cid}/mode", json={"mode": "workspace-write"})
-        assert resp.status_code == 409
+        assert resp.status_code == 200 and resp.json()["mode"] == "workspace-write"
+
+
+def test_reader_frontend_disables_slash_mode() -> None:
+    """前端：reader 下 /mode 回「不可用」、/help 不列 /mode；中英文案齐（纯 UX，安全边界是上面的 404）。"""
+    chat = (STATIC_DIR / "chat.js").read_text(encoding="utf-8")
+    case = chat[chat.index('case "mode": {'):]
+    case = case[: case.index("case \"status\"")]
+    assert 'if (readerMode) return noteLines([t("slash.modeReaderDisabled")]);' in case
+    helper = chat[chat.index("function slashHelpLines"):]
+    helper = helper[: helper.index("}")]
+    assert '...(readerMode ? [] : [t("slash.help.mode")])' in helper
+    i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
+    assert i18n.count('"slash.modeReaderDisabled"') == 2
 
 
 def test_create_app_reader_clamps_persist_and_mode(chat_env) -> None:

@@ -51,7 +51,7 @@ function applyReaderMode() {
     // graph-btn 自 P4.27 起保留：图谱面板走只读 /api/graph（reader 下注册）；面板内「静态列表」链接
     // 指向写者专属的 /graph，reader 下由 graph_view.js 不渲染（决策P4.27-2，原决策P4.9-11 的死链顾虑随之消解）。
     "mcp-btn",                                              // MCP 诊断：连接检查有外部副作用（404，决策P4.19-6）
-    "mode-badge",                                           // 姿态恒只读、/mode 已禁可写 → 冻结隐藏（决策P4.9-4）
+    "mode-badge",                                           // 姿态恒只读、/mode 整条禁用 → 冻结隐藏（决策P4.9-4 修订）
   ];
   for (const id of hideIds) {
     const el = document.getElementById(id);
@@ -245,6 +245,7 @@ function submitChat(override) {
 // resume/clear/edit/budget 是对既有目标的操作，无会话即无目标 → 直接提示、不空建 agent。
 
 // /help 列这 9 条（含 P4.16 的 /goal；**无** /compact，决策P4.4-5）。函数式：每次按当前语言取词（P4.7）。
+// reader 下不列 /mode（只读部署姿态恒 read-only、端点不注册，决策P4.9-4 修订）。
 function slashHelpLines() {
   return [
     t("slash.help.help"),
@@ -254,7 +255,7 @@ function slashHelpLines() {
     t("slash.help.context"),
     t("slash.help.skills"),
     t("slash.help.tools"),
-    t("slash.help.mode"),
+    ...(readerMode ? [] : [t("slash.help.mode")]),
     t("slash.help.goal"),
   ];
 }
@@ -293,7 +294,7 @@ async function handleSlash(raw) {
   // chatStreaming 守卫 + 服务端 is_busy 兜住）**不**撕毁在飞流、仍放行（决策P4.4-1 斜杠流式中可达的本意）。
   if (chatStreaming) {
     const modeArg = body.slice(1).split(/\s+/)[1] || "";
-    if (cmd === "new" || cmd === "clear" || (cmd === "mode" && modeArg)) {
+    if (cmd === "new" || cmd === "clear" || (cmd === "mode" && modeArg && !readerMode)) { // reader 下 /mode 直接回「不可用」
       return noteLines([t("slash.busyLifecycle", cmd)]);
     }
   }
@@ -306,6 +307,8 @@ async function handleSlash(raw) {
     case "clear":
       return slashClear();
     case "mode": {
+      // reader：整条命令禁用（查询与切换都不提供；当前姿态见 /status——徽标在 reader 下已隐藏，决策P4.9-4 修订）。
+      if (readerMode) return noteLines([t("slash.modeReaderDisabled")]);
       // 带参 → 切换姿态（POST /api/chat/{id}/mode）；不带参 → 报当前姿态（只读自省）。
       const arg = (body.slice(1).split(/\s+/)[1] || "").toLowerCase();
       if (arg) return slashSetMode(arg);
@@ -348,7 +351,6 @@ async function slashSetMode(arg) {
     return noteLines([t("slash.modeInvalidArg", arg)]);
   }
   if (!conversationId) {
-    if (readerMode) return noteLines([t("slash.modeNoSession")]); // reader 不自动开会话，保留原提示
     if (!(await ensureActiveConversation())) return; // 无会话先开一个空活会话再切姿态（决策P4.4-7 反转）
   }
   let res;
