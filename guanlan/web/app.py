@@ -1609,14 +1609,10 @@ def create_app(
     # 运行时翻姿态（P4.5 决策P4.5-5）：read-only ↔ workspace-write 真切换（只翻两点置位、不重建
     # agent、不动层① wrapper）。持会话锁与在飞 turn 串行。404 未知 id；409 冷会话（未激活、无 live
     # agent 可翻）；422 非法 mode（含 full-access/plan/full）。逻辑落 chat.py，本端点只分流（决策P4.5-9）。
-    @app.post("/api/chat/{conversation_id}/mode")
+    # reader 下**不注册**（决策P4.9-4 修订，与 undo 的决策P4.9-17 同口径）：只读部署姿态恒为 read-only，
+    # 切换无意义；只挡 workspace-write 而保留端点，等于留一个「写能力开关」在暴露面上——不注册即 404。
+    @_writer_only(app.post("/api/chat/{conversation_id}/mode"))
     async def chat_mode(conversation_id: str, body: ModeBody) -> dict:
-        # reader 强制只读姿态（决策P4.9-4）：拒绝切到 workspace-write（否则可写工作会话能写
-        # workspace/，破「全只读」）。端点本身保留（仍可「切回」read-only、查询无害），仅挡可写姿态。
-        if reader and body.mode == "workspace-write":
-            raise HTTPException(
-                status_code=409, detail="只读部署（--reader）下不可切换到 workspace-write 姿态。"
-            )
         conv = conversations.get(conversation_id)
         if conv is None:
             # 冷会话（盘上有、内存无 live agent）→ 409「先续聊一轮恢复再切」；纯未知 → 404。
