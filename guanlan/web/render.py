@@ -162,6 +162,27 @@ def _sanitize_table_html(raw: str) -> str | None:
     return "".join(parser.parts) if parser.emitted_table else None
 
 
+# ── 内嵌 SVG → ```svg 代码块（P4.28，见 docs/P4.28-Web内嵌SVG渲染.md）────────────────────────────
+# 页面里**独占成块**的原始 `<svg>…</svg>` 原先被 `_EscapeHtmlExtension` 转义成一屏标签文本。这里**不放行**
+# 任何 SVG 标记进 HTML：只把它改写成与 ```svg 围栏块**同形**的 `<pre><code class="language-svg">转义源</code></pre>`
+# （经 htmlStash 还原），由前端 `svg_enhance.js` 统一按 `<img src="data:image/svg+xml,…">` 渲染——图像上下文里
+# SVG 不执行脚本、不加载外部资源、不可交互，安全边界由浏览器给出、服务端无需 SVG 消毒器（决策P4.28-2）。
+# 只认**块级**写法：行首（≤3 空格缩进，4 空格是缩进代码块）起 `<svg`、`</svg>` 后到行尾只剩空白——避开行内
+# code / 正文里顺带提到的 `<svg>` 字样。不跟踪嵌套 `<svg>`（非贪婪到第一个 `</svg>`），嵌套时余下部分照旧转义。
+# 匹配**不得跨过另一个行首 `<svg`**（`_SVG_NO_NEW_BLOCK`）：否则正文里一行未闭合的 `<svg …` 字样会一路吞到后文
+# 真正的 SVG 块，把中间的标题/段落全变成一个渲染失败的代码块；也让扫描对每个起点只走到下一个块为止（免 O(n²)）。
+_SVG_NO_NEW_BLOCK = r"(?!\n[ ]{0,3}<svg\b)"
+_SVG_BLOCK_RE = re.compile(
+    rf"^[ ]{{0,3}}(<svg\b(?:{_SVG_NO_NEW_BLOCK}[^>])*>(?:{_SVG_NO_NEW_BLOCK}.)*?</svg>)[ \t]*$",
+    re.IGNORECASE | re.DOTALL | re.MULTILINE,
+)
+
+
+def _svg_block_html(svg_src: str) -> str:
+    """原始 SVG 源 → 与 ```svg 围栏块同形的转义代码块 HTML（不含任何未转义标记）。"""
+    return '<pre><code class="language-svg">' + html_lib.escape(svg_src) + "</code></pre>"
+
+
 def _wikilink_display(raw: str) -> str:
     """`[[target|alias]]` → alias；`[[target#anchor]]` → target（剥锚点）；其余取原文。"""
     if "|" in raw:
@@ -485,6 +506,27 @@ if _HAS_MARKDOWN:
         def extendMarkdown(self, md) -> None:  # noqa: N802 (markdown API 命名)
             md.preprocessors.register(_TableHtmlPreprocessor(md), "guanlan_table_html", 24)
 
+    class _SvgBlockPreprocessor(_Preprocessor):
+        """块级原始 `<svg>…</svg>` → 转义的 ```svg 代码块（存 htmlStash），交前端以 `<img>` 渲染（P4.28）。
+
+        与 `_TableHtmlPreprocessor` 同机制、但**存进 stash 的不是 SVG 标记**而是转义后的源码块：服务端放行的
+        HTML 只有 `<pre><code>`，原始 HTML 全转义的姿态（决策P4-4）不变。优先级 23 < `fenced_code`(25)：围栏里的
+        `<svg>` 已先被 stash 成占位符，保持字面代码示例（决策P4-3 一致）。
+        """
+
+        def run(self, lines):  # noqa: N802 (markdown API 命名)
+            def repl(m):
+                return "\n\n" + self.md.htmlStash.store(_svg_block_html(m.group(1))) + "\n\n"
+
+            text = "\n".join(lines)
+            if "<svg" not in text.lower():
+                return lines  # 早退：绝大多数页无 SVG
+            return _SVG_BLOCK_RE.sub(repl, text).split("\n")
+
+    class _SvgBlockExtension(_Extension):
+        def extendMarkdown(self, md) -> None:  # noqa: N802 (markdown API 命名)
+            md.preprocessors.register(_SvgBlockPreprocessor(md), "guanlan_svg_block", 23)
+
     class _WikiLinkInlineProcessor(_InlineProcessor):
         """把 `[[…]]` 渲染为站内锚链（resolved）/ raw 源链（`[[raw/…]]`）/ 标灰 span（断链）。"""
 
@@ -742,6 +784,7 @@ def render_markdown(
         _StripCommentsExtension(),  # 整行 HTML 注释解析前抹掉，与扫描器同口径。
         _EscapeHtmlExtension(),  # 安全：关原始 HTML 透传。
         _SafeLinkExtension(),  # 安全：中和 javascript:/data: 链接。
+        _SvgBlockExtension(),  # P4.28：块级 <svg> → 转义 ```svg 代码块，前端以 <img> 渲染。
     ]
     if wiki is not None:
         stem_map = _stem_to_path(wiki)  # 单次扫库，wiki/code 两扩展共享（避免重复 rglob）。

@@ -5,8 +5,8 @@
 // enhanceContent（替换原 enhanceMermaid 调用，一标识符之改、不增删注入点）。
 // 设计见 docs/P4.14-Web数学化学代码渲染.md §3.3；P4.20 加第四类增强即本文件 +1 行（七个注入点零改动）。
 
-// 四增强彼此**区域不相交**（代码在 pre>code 且跳 mermaid/flint、数学跳过 pre/code 的文本节点、
-// mermaid 在 language-mermaid、flint 在 language-flint），故顺序仅为整洁；各自幂等可重入、
+// 各增强彼此**区域不相交**（代码在 pre>code 且跳 mermaid/flint/svg、数学跳过 pre/code 的文本节点、
+// mermaid 在 language-mermaid、flint 在 language-flint、svg 在 language-svg），故顺序仅为整洁；各自幂等可重入、
 // 独立懒加载、独立失败封闭。不 await（互不依赖、并发更快）。
 async function enhanceContent(container) {
   if (!container) return;
@@ -14,5 +14,6 @@ async function enhanceContent(container) {
   highlightCode(container);  // P4.14：```X → 高亮（区域：pre>code）
   typesetMath(container);    // P4.14：$…$（含其内 \ce{}）→ 排版（区域：跳 pre/code 的文本节点）
   enhanceFlint(container);   // P4.20：```flint → 编译成 ECharts option 并渲染成图（区域：language-flint）
+  enhanceSvg(container);     // P4.28：```svg / 块级 <svg> → <img> 沙箱渲染（区域：language-svg）
 }
 window.enhanceContent = enhanceContent;

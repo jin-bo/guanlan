@@ -252,6 +252,13 @@ body.hide-thinking .chat-think { display: none; }
 .mermaid-error { margin: .45rem 0 0; font-size: .82rem; color: var(--lan-ink-soft);
   border-left: 3px solid var(--lan-ripple); padding-left: .5rem; }
 
+/* 内嵌 SVG（P4.28）：```svg 块 / 块级 <svg> 经 enhanceSvg 换成 <figure><img>（图像上下文，不执行脚本）。
+   只有 viewBox 的图由脚本设 width:100%；有固有尺寸的按原尺寸、超栏宽则等比缩。失败徽标同 mermaid。 */
+.svg-rendered { margin: .55rem 0; overflow-x: auto; text-align: center; }
+.svg-rendered img { max-width: 100%; height: auto; }
+.svg-error { margin: .45rem 0 0; font-size: .82rem; color: var(--lan-ink-soft);
+  border-left: 3px solid var(--lan-ripple); padding-left: .5rem; }
+
 /* flint 数据图表（P4.20）：```flint 块经 enhanceFlint 编译渲染后换成的 <figure>。
    注意 ECharts 把 <svg> 以 position:absolute 放进固定尺寸容器，`max-width` 咬不住它——**真正让图落进
    栏里的是渲染前按栏宽重编译**（决策P4.20-19），这里的 max-width/overflow-x 只是事后缩窗口时的兜底
