@@ -34,6 +34,7 @@ async function highlightCode(container) {
     (c) =>
       !c.classList.contains("language-mermaid") &&
       !c.classList.contains("language-flint") &&
+      !c.classList.contains("language-svg") && // P4.28：hljs 的 xml 别名含 svg，不跳会与 enhanceSvg 抢同一块
       !c.classList.contains("hljs")
   );
   if (!blocks.length) return; // 早退：无可高亮块零加载（懒，决策P4.14-1）
