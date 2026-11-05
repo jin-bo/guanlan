@@ -11,11 +11,14 @@ from __future__ import annotations
 import json
 import logging
 import logging.handlers
+import os
 import re
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from agentao.embedding.factory import discover_llm_kwargs, resolve_provider_name
+from agentao.llm._api_format import resolve_api_format
 from agentao.runtime.model import purge_thinking_artifacts as _purge_thinking_artifacts
 from agentao.tools.base import Tool
 
@@ -486,3 +489,84 @@ def disable_agent_log() -> None:
 # 当前 turn 的事件发射器：emit(kind, data)。kind 如 "token" / "compaction" / "thinking"（P4.25）/ "subagent"（P4.26）/
 # 交互帧（P4.15）；done/error 由端点补。消费方须忽略不认识的 kind（IM 只认 token）。
 Emit = Callable[[str, object], None]
+
+
+# ── /model <provider>/<model>（P4.29，docs/P4.29-Web切换模型.md）────────────────────────────────
+# provider 名只收「环境变量前缀」形状：字母开头、字母数字下划线。其余（含 `.`/`-`/空白）一律拒，
+# 杜绝拼出任意环境变量名去探测进程环境。比较与前缀按 agentao 口径 `.upper()`。
+_PROVIDER_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+
+
+class ModelSwitchError(ValueError):
+    """`/model` 取值非法或 provider 未配置（端点 → 422）。消息只含 provider **名**，绝不含 key/端点值。"""
+
+
+def parse_model_spec(value: str) -> tuple[str, str | None]:
+    """`provider/model` → `(PROVIDER, model)`；仅 `provider` → `(PROVIDER, None)`，由调用方取该 provider 块的
+    默认模型 `{P}_MODEL`。按**第一个** `/` 切（model id 自身可含 `/`，同 ACP 口径）。
+
+    provider 归一为 agentao 的大写前缀；model 只去首尾空白、保留大小写（model id 区分大小写）。
+    写了 `/` 却缺任一侧（`alpha/`、`/m-1`）视为笔误、拒，不当作「仅 provider」。
+    """
+    provider, sep, model = (value or "").strip().partition("/")
+    provider, model = provider.strip(), model.strip()
+    if not provider or (sep and not model):
+        raise ModelSwitchError("格式应为 <provider> 或 <provider>/<model-name>，如 openai 或 openai/gpt-5.4。")
+    if not _PROVIDER_NAME_RE.fullmatch(provider):
+        raise ModelSwitchError(f"provider 名只能含字母、数字、下划线：{provider!r}")
+    return provider.upper(), (model or None)
+
+
+def resolve_provider_llm(provider: str) -> dict:
+    """按 agentao 的 provider 前缀口径（`{P}_API_KEY` / `_BASE_URL` / `_API_FORMAT`）从**进程环境**取
+    该 provider 的连接配置，供 `agent.set_provider` 一次性转交。
+
+    取值复用 agentao 公开的 `discover_llm_kwargs`（会话构造期 `build_from_environment` 用的同一函数，
+    `.env` 已在那时载入进程环境），只把 `LLM_PROVIDER` 换成目标名——**guanlan 不自拼 key 变量名、
+    不缓存、不记日志、不回传前端**，key 只在本次调用栈内从环境流到 agentao。缺 key → 拒；
+    wire 协议未设即默认协议（同 ACP：未设 ≠「沿用当前」，否则从 anthropic 切回 openai 会把 key
+    发给错的 SDK）；非法值在动 agent **之前**拒，会话保持原 provider。
+
+    **非默认 provider 必须显式配 `{P}_BASE_URL`**：环境里的 `*_API_KEY` 不全是 LLM key（搜索、地图等
+    第三方服务也用这个后缀），只凭 key 就放行，`/model sometool/x` 会把那个服务的 key 当 bearer 发到 SDK
+    默认端点。进程默认 provider 不受此限——它就是会话构造期已在用、确认可用的那一块（如未设端点的
+    官方 OpenAI / Anthropic）。
+    """
+    try:
+        kwargs = discover_llm_kwargs({**os.environ, "LLM_PROVIDER": provider})
+    except ValueError:  # LLM_TEMPERATURE / LLM_MAX_TOKENS 非数字：agentao 在此抛，给出可读的 422
+        raise ModelSwitchError("环境变量 LLM_TEMPERATURE 或 LLM_MAX_TOKENS 不是合法数字。") from None
+    if not kwargs.get("api_key"):
+        raise ModelSwitchError(f"provider {provider} 未配置（环境中缺 {provider}_API_KEY）。")
+    if not (kwargs.get("base_url") or "").strip() and provider != current_provider():
+        raise ModelSwitchError(
+            f"provider {provider} 未配置端点（环境中缺 {provider}_BASE_URL）；"
+            "为免把非 LLM 服务的 key 发往默认端点，非默认 provider 须显式配置端点。"
+        )
+    try:
+        api_format = resolve_api_format(kwargs.get("api_format"))
+    except (TypeError, ValueError):
+        raise ModelSwitchError(f"provider {provider} 的 {provider}_API_FORMAT 取值无法识别。") from None
+    return {
+        "api_key": kwargs["api_key"],
+        "base_url": kwargs.get("base_url") or None,  # 未设/空串 → None = SDK 默认端点（不继承上一个 provider 的自定义端点）
+        "api_format": api_format,
+        "default_model": kwargs.get("model"),  # `{P}_MODEL`：`/model <provider>` 仅给 provider 时用
+    }
+
+
+def configured_providers() -> list[str]:
+    """环境里配齐 `{P}_API_KEY` + `{P}_BASE_URL` + `{P}_MODEL` 的 provider 名（大写、排序），供 `/model`
+    无参列出可选项。与 agentao CLI `/provider` 列表同口径；**只看变量是否非空、不读出值**。"""
+    out = []
+    for key, value in os.environ.items():
+        if key.endswith("_API_KEY") and value:
+            p = key[: -len("_API_KEY")]
+            if _PROVIDER_NAME_RE.fullmatch(p) and os.environ.get(f"{p}_BASE_URL") and os.environ.get(f"{p}_MODEL"):
+                out.append(p)
+    return sorted(out)
+
+
+def current_provider() -> str:
+    """进程配置的默认 provider（agentao `resolve_provider_name`：`LLM_PROVIDER`，默认 OPENAI）。"""
+    return resolve_provider_name()

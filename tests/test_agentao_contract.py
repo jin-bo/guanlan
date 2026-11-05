@@ -941,3 +941,50 @@ def test_new_mcp_resource_and_skill_tools_are_read_only() -> None:
     for tool in tools:
         assert tool.is_read_only is True, tool.name
         assert tool.name in _READ_TOOL_NAMES, tool.name
+
+
+# ── P4.29 /model：真 agentao 上的跨 provider 切换 ─────────────────────────────────
+
+
+def test_model_switch_reconfigures_real_llm_client(real_conv, monkeypatch) -> None:
+    """`Conversation.set_model` 走真 `set_provider`：model / 端点 / wire 都换到目标 provider 块，
+    并发 MODEL_CHANGED（payload 不含 key）。假 agent 测不到上游签名与重配语义的漂移。"""
+    from agentao.transport import EventType
+
+    monkeypatch.setenv("ALPHA_API_KEY", "sk-contract-alpha")
+    monkeypatch.setenv("ALPHA_BASE_URL", "http://127.0.0.1:2/v1")
+    monkeypatch.setenv("ALPHA_API_FORMAT", "anthropic-messages")
+    monkeypatch.delenv("OPENAI_API_FORMAT", raising=False)  # 不吃开发机环境里的 wire 设置
+    agent = real_conv.agent
+    seen: list = []
+    unsubscribe = agent.transport.subscribe(seen.append)
+    try:
+        real_conv._apply_mode("workspace-write")
+        out = real_conv.set_model("alpha/alpha-model-1")
+    finally:
+        unsubscribe()
+    assert out == {"provider": "alpha", "model": "alpha-model-1"}
+    assert agent.get_current_model() == "alpha-model-1"
+    assert str(agent.llm.base_url).rstrip("/") == "http://127.0.0.1:2/v1"
+    assert agent.llm.api_format == "anthropic-messages"
+    changes = [e.data for e in seen if e.type == EventType.MODEL_CHANGED]
+    assert changes and changes[-1]["new_model"] == "alpha-model-1"
+    assert "sk-contract-alpha" not in repr(changes)
+
+    # 切回原 provider 块：未设 _API_FORMAT = 默认 wire（不是沿用 anthropic），端点也随之换回。
+    real_conv.set_model("openai/contract-test-model")
+    assert agent.llm.api_format == "openai-completions"
+    assert str(agent.llm.base_url).rstrip("/") == "http://127.0.0.1:1"
+
+    # 仅给 provider：取该块的 `{P}_MODEL`。
+    monkeypatch.setenv("ALPHA_MODEL", "alpha-default")
+    assert real_conv.set_model("alpha") == {"provider": "alpha", "model": "alpha-default"}
+    assert agent.get_current_model() == "alpha-default"
+    assert agent.llm.api_format == "anthropic-messages"
+
+
+def test_model_switch_refused_on_read_only_real_conv(real_conv) -> None:
+    before = real_conv.agent.get_current_model()
+    with pytest.raises(PermissionError):
+        real_conv.set_model("openai/other")
+    assert real_conv.agent.get_current_model() == before
