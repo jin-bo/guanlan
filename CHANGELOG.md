@@ -7,6 +7,15 @@
 
 ### 新增
 
+- **`guanlan zip`：把知识库打包成可分享的 zip**（P3.12，`docs/P3.12-知识库打包分享.md`）。零 LLM、只读知识库。
+  按白名单只收 `AGENTAO.md`、`SCHEMA.md`、`wiki/`、`raw/`（`--no-raw` 不收），`graph/` 加 `--with-graph` 才收；
+  `.env`、`agentao.log*`、`.agentao/`（会话、记忆库、权限设置）、`workspace/`、`.trash/` 和库根其他文件一律不收。
+  白名单目录内再滤掉隐藏文件（任一路径段以 `.` 开头）、操作系统与编辑器杂项（`Thumbs.db`、`desktop.ini`、
+  `__MACOSX/`、`~$*`、`*.swp` 等）和符号链接（`raw/` 本身指向库外存储时照常收入）。zip 顶层是库名目录，中文文件名带
+  UTF-8 标记，Windows 解压不乱码。默认输出 `<库名>-YYYYMMDD.zip`，在库内运行时放到库的上一级目录；输出落在库内即拒绝，
+  已存在须 `--force`。报告列出收入与排除的内容，路径过长时提醒 Windows 的 260 字符上限；`--dry-run` 只预览，`--json`
+  含完整文件清单。只按路径过滤、不检查内容。此前反向评审曾判「库归档用 git 即可、无需内建」，那针对的是归档；分享的
+  难点在排除私有数据，故本次修订。
 - **Web 会话内切换模型 `/model <provider>/<model-name>`**（P4.29，`docs/P4.29-Web切换模型.md`）。只写
   `/model <provider>` 则用该 provider 的默认模型 `{PROVIDER}_MODEL`。仅 workspace-write 会话可用，只影响当前会话；`/model` 无参显示当前 `provider/model` 与环境中已配置的 provider 名，`/status` 也改为显示
   `provider/model`。新端点 `POST /api/chat/{id}/model` 只收模型名（夹带凭据字段 422），凭据由服务端经 agentao

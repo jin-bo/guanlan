@@ -28,6 +28,8 @@ from .reindex import reindex_entrypoint
 from .remove import remove_entrypoint
 from .search import search_entrypoint
 from .skill import install_skill
+from .zipkb import add_zip_arguments
+from .zipkb import run_from_args as _zip_run
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -412,6 +414,18 @@ def _add_reindex_parser(sub, dir_parent) -> None:
     p.set_defaults(func=_cmd_reindex)
 
 
+def _add_zip_parser(sub, dir_parent) -> None:
+    # zip（P3.12）：零 LLM 打包分享。白名单只收 AGENTAO.md / SCHEMA.md / wiki/ / raw/（可选 graph/），
+    # 私有配置、日志、会话与工作数据一律不收。
+    p = sub.add_parser(
+        "zip",
+        parents=[dir_parent],
+        help="把知识库打包成可分享的 zip（零 LLM；排除 .env、日志、会话、workspace/ 等私有数据与隐藏文件）",
+    )
+    add_zip_arguments(p)
+    p.set_defaults(func=_zip_run)
+
+
 def _add_remove_parser(sub, dir_parent) -> None:
     # remove（P3.9）：人发起的零-LLM 源撤回——移源自身落盘物入 .trash/ + 摘多源页引用 + 修 index。
     # 默认预览、显式 --yes 才写（比 reindex/convert 默认即写更保守，因删内容页破坏性更大）。
@@ -786,6 +800,7 @@ _SUBCOMMAND_BUILDERS = (
     _add_reindex_parser,
     _add_remove_parser,
     _add_search_parser,
+    _add_zip_parser,
     _add_convert_parser,
     _add_web_parser,
     _add_mcp_parser,

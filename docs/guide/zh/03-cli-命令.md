@@ -99,6 +99,30 @@ guanlan -C my-wiki search "关键词" --json
 
 它是 `query`/skill 的召回前端,也被 Web 的 `/api/search` 与嵌入式聊天的 `guanlan_search` 工具复用(同一内核)。
 
+## `guanlan zip`
+
+把知识库打包成可以直接交给别人的 zip。**零 LLM、只读知识库**,默认排除私有数据与隐藏文件。
+
+```bash
+guanlan -C my-wiki zip                    # 输出 ./my-wiki-YYYYMMDD.zip(在库内运行则放到库的上一级目录)
+guanlan -C my-wiki zip -o share/kb.zip    # 指定输出路径
+guanlan -C my-wiki zip --dry-run          # 只看会收入与排除什么
+```
+
+| 参数 | 说明 |
+|---|---|
+| `-o` / `--output` | 输出路径(不得在库内) |
+| `--no-raw` | 不收 `raw/`,只分享 wiki |
+| `--with-graph` | 同时收入 `graph/`(默认不收,接收方可用 `guanlan graph` 重建) |
+| `--dry-run` | 只预览,不写 zip |
+| `--force` | 输出文件已存在时覆盖 |
+| `--json` | 输出 JSON 契约(含完整文件清单) |
+
+只收 `AGENTAO.md`、`SCHEMA.md`、`wiki/`、`raw/`(可选 `graph/`);`.env`、`agentao.log*`、`.agentao/`(会话等)、
+`workspace/`、`.trash/` 以及库根的其他文件一律不收。白名单目录内的隐藏文件、`Thumbs.db` 之类的系统杂项和符号链接也会跳过。
+zip 顶层是库名目录,接收方解压到父目录即可使用。**只按路径过滤、不检查内容**,分享前请自行确认配置与正文不含不宜外传的信息。
+详见 [`P3.12-知识库打包分享.md`](../../P3.12-知识库打包分享.md)。
+
 ---
 
 ## 其余命令
