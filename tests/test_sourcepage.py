@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from conftest import make_runner
 
-from guanlan.errors import EXIT_OK
+from guanlan.errors import EXIT_CHECK_FAILED, EXIT_OK
 from guanlan.ingest import build_ingest_prompt, run_ingest
 from guanlan.pages import load_page
 from guanlan.provenance import compute_raw_digest, format_digest_value, parse_digest_value
@@ -169,7 +169,7 @@ def test_ingest_does_not_stamp_candidate(kb: Path):
     _raw(kb)
     page = _src(kb, "other-summary", body=f"参见 `raw/{RAW}`。")
     rc = run_ingest(f"raw/{RAW}", root=kb, runner=make_runner(None))
-    assert rc == EXIT_OK
+    assert rc == EXIT_CHECK_FAILED  # 只有候选、未认定 = 本篇没有 source 页 → 产出校验失败
     assert _digest_of(page) is None
 
 

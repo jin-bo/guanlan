@@ -17,7 +17,7 @@ from .catalog import (
     overview_outline,
     raw_outline,
 )
-from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
+from .errors import EXIT_CHECK_FAILED, EXIT_OK, EXIT_USAGE, GuanlanError
 from .gate import run_guarded_write
 from .pages import load_page
 from .paths import require_kb_root
@@ -283,23 +283,43 @@ def run_ingest(
     rc = run_guarded_write(
         kb, build_ingest_prompt(kb, rel), model=model, thinking=thinking, runner=runner
     )
-    if rc == EXIT_OK:
-        _stamp_source_digest(kb, tpath, rel)
+    if rc != EXIT_OK:
+        return rc
+    # 产出校验：门禁只拦「写坏了」，拦不住「什么都没写」——Agent 中途结束（如上下文压缩后把压缩摘要当
+    # 最终回答返回）时没有写入可拦，门禁照样通过。本篇 source 页定位不到即判失败，免得被报成成功、
+    # 又因没有 raw_digest 在以后被当成未入库。已写入的其他页保留（都已过门禁），重跑即可补齐。
+    loc = locate_source_page(kb, rel)
+    if loc.page is None:
+        _report_missing_source_page(kb, rel, loc.candidates)
+        return EXIT_CHECK_FAILED
+    _stamp_source_digest(kb, tpath, rel, loc.page)
     return rc
 
 
-def _stamp_source_digest(kb: Path, raw_file: Path, rel: str) -> None:
+def _report_missing_source_page(kb: Path, rel: str, candidates: list[tuple[Path, str]]) -> None:
+    """stderr 报「本篇没有 source 页」：期望页名 + 未能认定的候选页（若有）+ 重跑提示。"""
+    slug = source_slug(rel)
+    expected = f"wiki/sources/{slug}.md" if slug else "按 skill 约定命名的 source 页"
+    lines = [
+        f"✗ 摄入未产出本篇 source 页：{expected} 不存在，也没有页面经页内证据认定为本篇"
+        "（Agent 可能没写完就结束了）。"
+    ]
+    if candidates:
+        lines.append("  以下既有页提到本篇，但未能认定为其 source 页：")
+        lines += [f"    - {p.relative_to(kb).as_posix()}（{why}）" for p, why in candidates]
+    lines.append(f"  其他页面的改动已过门禁、予以保留；重跑 `guanlan ingest raw/{rel}` 补齐。")
+    print("\n".join(lines), file=sys.stderr)
+
+
+def _stamp_source_digest(kb: Path, raw_file: Path, rel: str, source_page: Path) -> None:
     """门禁后由 wrapper 把本次摄入 raw 的内容指纹 stamp 进对应 source 摘要页（P3.7 §4.2，决策P3.7-3a）。
 
     **只 stamp 本次那一张** source 摘要页（经 `locate_source_page`：先按 slug 定位、容忍 `.`/`-` 归一
     分歧，未命中再认页内归属依据；只有候选、未认定时不 stamp，绝不顺手刷别页——否则抹平别处真实漂移，
-    是致命 bug）。摄入后**重新定位**：Agent 可能刚按 slug 新建了这张页。定位不到 / 该页 frontmatter 本就坏 /
-    写后 check 不过 → `stamp_raw_digest` 跳过并回滚、记一句降级到 stderr，**绝不阻断 ingest**（决策P3.7-9）。
-    指纹计算与写入是 wrapper 确定性代码、不持 LLM client（红线）。
+    是致命 bug）。`source_page` 由调用方在摄入后**重新定位**得出（Agent 可能刚按 slug 新建了这张页；定位不到
+    时调用方已判失败，不进本函数）。该页 frontmatter 本就坏 / 写后 check 不过 → `stamp_raw_digest` 跳过并回滚、
+    记一句降级到 stderr，**绝不阻断 ingest**（决策P3.7-9）。指纹计算与写入是 wrapper 确定性代码、不持 LLM client（红线）。
     """
-    source_page = locate_source_page(kb, rel).page
-    if source_page is None:
-        return  # 无对应 source 页 / 只有候选 → 无声跳过（决策P3.7-5 安全退化、下次自然补）
     try:
         # raw 字节读取也可能抛 OSError（极小窗口：门禁后被删/权限变）；与 audit `_refresh_one` 同口径
         # 兜底——**绝不让 stamp 在门禁已过后崩掉 ingest**（决策P3.7-9）。
