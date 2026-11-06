@@ -24,6 +24,11 @@ def _put_raw(kb: Path, name="doc.md") -> str:
     return f"raw/{name}"
 
 
+def _write_source(root: Path, slug: str = "doc") -> None:
+    """本篇 source 页（wrapper 产出校验要求摄入后它存在）。"""
+    write_page(root, f"wiki/sources/{slug}.md", type="source", sources=f'["{slug}"]')
+
+
 def _write_bad_fm(root: Path, relpath: str) -> None:
     """写一个 frontmatter 阻断性违规页（bad_type）—— 仍阻断写入、会触发自愈。"""
     p = root / relpath
@@ -51,6 +56,7 @@ def test_ingest_broken_link_is_warning_ok(kb: Path):
 
     def action(root: Path):
         write_page(root, "wiki/concepts/Bad.md", body="[[Ghost]]")
+        _write_source(root)
 
     rc = run_ingest(target, root=kb, runner=make_runner(action))
     assert rc == EXIT_OK
@@ -70,6 +76,7 @@ def test_ingest_self_heals_check_failure(kb: Path):
             _write_bad_fm(root, "wiki/concepts/Bad.md")
         else:  # 自愈轮：写成合规页
             write_page(root, "wiki/concepts/Bad.md")
+            _write_source(root)
         return AgentRunResult(ok=True, final_text="done")
 
     rc = run_ingest(_put_raw(kb), root=kb, runner=runner)
@@ -96,6 +103,7 @@ def test_ingest_preexisting_blocking_does_not_fail(kb: Path):
 
     def action(root: Path):
         write_page(root, "wiki/concepts/New.md")  # 本次只写合规页
+        _write_source(root)
 
     rc = run_ingest(_put_raw(kb), root=kb, runner=make_runner(action))
     assert rc == EXIT_OK
@@ -285,6 +293,7 @@ def test_ingest_passes_thinking_to_first_and_repair_rounds(kb: Path):
             _write_bad_fm(root, "wiki/concepts/Bad.md")
         else:
             write_page(root, "wiki/concepts/Bad.md")
+            _write_source(root)
         return AgentRunResult(ok=True, final_text="done")
 
     assert run_ingest(_put_raw(kb), root=kb, runner=runner, thinking="low") == EXIT_OK
@@ -296,3 +305,32 @@ def test_ingest_without_thinking_keeps_runner_kwargs(kb: Path):
     runner = make_runner(lambda root: write_page(root, "wiki/concepts/Foo.md"))
     run_ingest(target, root=kb, runner=runner)
     assert "thinking" not in runner.calls[0]
+
+
+def test_ingest_without_source_page_fails_output_check(kb: Path, capsys):
+    """Agent 正常返回却没写本篇 source 页（如上下文压缩后把摘要当最终回答）→ 门禁照过，产出校验判失败。
+
+    回归：此前报 EXIT_OK，该篇又因无 raw_digest 在以后被当作未入库，批量入库里静默漏掉。
+    """
+    target = _put_raw(kb)
+
+    def action(root: Path):
+        write_page(root, "wiki/concepts/Foo.md")  # 只改了别的页
+
+    rc = run_ingest(target, root=kb, runner=make_runner(action))
+    assert rc == EXIT_CHECK_FAILED
+    err = capsys.readouterr().err
+    assert "摄入未产出本篇 source 页：wiki/sources/doc.md 不存在" in err
+    assert "guanlan ingest raw/doc.md" in err  # 给出重跑命令
+    assert (kb / "wiki" / "concepts" / "Foo.md").is_file()  # 已过门禁的改动保留
+
+
+def test_ingest_output_check_lists_unconfirmed_candidates(kb: Path, capsys):
+    """只有「提到本篇」的候选页、没有认定的 source 页 → 失败，并把候选列给用户（不替其认定）。"""
+    target = _put_raw(kb)
+    write_page(kb, "wiki/sources/other.md", type="source", sources='["other"]', body="参见 `raw/doc.md`。")
+
+    rc = run_ingest(target, root=kb, runner=make_runner(None))
+    assert rc == EXIT_CHECK_FAILED
+    err = capsys.readouterr().err
+    assert "未能认定为其 source 页" in err and "wiki/sources/other.md" in err

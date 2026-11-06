@@ -291,15 +291,16 @@ def test_ingest_stamp_does_not_touch_other_source_pages(kb: Path):
 
 
 def test_ingest_stamp_skips_when_source_missing(kb: Path):
-    """Agent 没建对应 source 页 → ingest 仍 EXIT_OK、不崩（安全退化）。"""
+    """Agent 没建对应 source 页 → 产出校验判 EXIT_CHECK_FAILED、不崩；已写的其他页保留、无处 stamp。"""
     put_raw(kb, "X.md")
 
     def action(root: Path):
         write_page(root, "wiki/concepts/Foo.md")  # 没建 sources/X.md
 
     rc = run_ingest("raw/X.md", root=kb, runner=make_runner(action))
-    assert rc == EXIT_OK
+    assert rc == EXIT_CHECK_FAILED
     assert not (kb / "wiki" / "sources" / "X.md").exists()
+    assert (kb / "wiki" / "concepts" / "Foo.md").is_file()
 
 
 # ── 写路径 / 门禁复用（fake runner）─────────────────────────────────────────

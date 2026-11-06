@@ -6,7 +6,7 @@
 |----|------|------|
 | 0  | EXIT_OK            | 成功，门禁全过 |
 | 1  | EXIT_USAGE         | 用法/IO 错误（非知识库根、目标不在 raw/、非 .md、文件不存在） |
-| 3  | EXIT_CHECK_FAILED  | 内容校验失败（frontmatter / 断链 / sources） |
+| 3  | EXIT_CHECK_FAILED  | 内容校验失败（frontmatter / 断链 / sources；ingest 后定位不到本篇 source 页） |
 | 4  | EXIT_RAW_MUTATED   | raw/ 被改动（调用前后快照 diff 非空） |
 | 5  | EXIT_AGENT_ERROR   | Agentao 运行时错误（子进程非零退出 / status==error / stdout 解析失败） |
 | 6  | EXIT_LINT_FINDINGS | health/lint 在 `--strict` 下有 findings（建议非门禁，见 P3 §7 决策P3-4） |

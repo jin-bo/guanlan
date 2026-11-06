@@ -165,7 +165,9 @@ def test_ingest_prompt_carries_catalog_and_outline(kb: Path):
     _page(kb, "wiki/entities/Alpha.md", 'title: "Alpha"\ntype: entity\naliases: ["甲"]')
     (kb / "wiki" / "overview.md").write_text("# 综述\n\n正文\n\n## 角度一\n\n```\n# 不是标题\n```\n", encoding="utf-8")
     (kb / "raw" / "doc.md").write_text("资料\n", encoding="utf-8")
-    runner = make_runner(None)
+    runner = make_runner(
+        lambda root: write_page(root, "wiki/sources/doc.md", type="source", sources='["doc"]')
+    )
 
     rc = run_ingest("raw/doc.md", root=kb, runner=runner)
     assert rc == EXIT_OK

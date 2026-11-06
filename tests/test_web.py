@@ -1039,6 +1039,13 @@ def _put_raw(kb, name="doc.md") -> str:
     return f"raw/{name}"
 
 
+def _ingest_writes(root, page: str, raw: str = "doc.md") -> None:
+    """假 Agent 的一次入库：写 `page`，并写出本篇 source 页（wrapper 的产出校验要求它存在）。"""
+    write_page(root, page)
+    slug = raw.rsplit(".", 1)[0]
+    write_page(root, f"wiki/sources/{slug}.md", type="source", sources=f'["{slug}"]')
+
+
 def _wait_job(client, job_id: str, timeout: float = 5.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1058,7 +1065,7 @@ def _ingest_once(kb, runner, target) -> dict:
 
 def test_ingest_job_success(kb) -> None:
     target = _put_raw(kb)
-    runner = make_runner(lambda root: write_page(root, "wiki/concepts/New.md"))
+    runner = make_runner(lambda root: _ingest_writes(root, "wiki/concepts/New.md"))
     data = _ingest_once(kb, runner, target)
     assert data["kind"] == "ingest"
     assert data["state"] == "done"
@@ -1077,7 +1084,7 @@ def test_ingest_job_emits_progress_heartbeat(kb, monkeypatch) -> None:
     observed = threading.Event()
 
     def action(root):
-        write_page(root, "wiki/concepts/New.md")  # 落一页，使心跳可数到「已写 N 页」
+        _ingest_writes(root, "wiki/concepts/New.md")  # 落页，使心跳可数到「已写 N 页」
         observed.wait(timeout=3.0)  # < 下方轮询 deadline，超时也能让作业先收尾
 
     runner = make_runner(action)
@@ -1145,7 +1152,7 @@ def test_two_ingests_run_serially(kb) -> None:
     def runner(prompt, **kwargs):
         n = len(order) + 1
         order.append(prompt)
-        write_page(kwargs["working_directory"], f"wiki/concepts/N{n}.md")
+        _ingest_writes(kwargs["working_directory"], f"wiki/concepts/N{n}.md", "a.md" if n == 1 else "b.md")
         return AgentRunResult(ok=True, final_text="done")
 
     with TestClient(create_app(kb, runner=runner)) as client:
@@ -1989,7 +1996,7 @@ def test_raw_write_serial_does_not_collide_with_ingest(kb) -> None:
         order.append("ingest")
         started.set()
         gate.wait(timeout=3)  # 卡住，模拟在飞 ingest（其 raw/ 快照窗口张开）
-        write_page(kwargs["working_directory"], "wiki/concepts/N.md")
+        _ingest_writes(kwargs["working_directory"], "wiki/concepts/N.md", "src.md")
         return AgentRunResult(ok=True, final_text="done")
 
     with TestClient(create_app(kb, runner=runner)) as client:
@@ -3882,7 +3889,7 @@ def test_heal_empty_worklist_job(kb) -> None:
 def test_jobs_result_null_for_ingest(kb) -> None:
     """旧作业兼容：ingest 作业 result 恒为 null（worker int 分支不变、零回归）。"""
     target = _put_raw(kb)
-    runner = make_runner(lambda root: write_page(root, "wiki/concepts/New.md"))
+    runner = make_runner(lambda root: _ingest_writes(root, "wiki/concepts/New.md"))
     data = _ingest_once(kb, runner, target)
     assert data["kind"] == "ingest"
     assert data["result"] is None
@@ -3925,7 +3932,7 @@ def test_heal_serial_behind_ingest(kb) -> None:
         else:
             order.append("ingest")
             gate.wait(timeout=3)
-            write_page(kwargs["working_directory"], "wiki/concepts/N.md")
+            _ingest_writes(kwargs["working_directory"], "wiki/concepts/N.md", "src.md")
         return AgentRunResult(ok=True, final_text="done")
 
     with TestClient(create_app(kb, runner=runner)) as client:
@@ -4091,7 +4098,7 @@ def test_audit_serial_behind_ingest(kb) -> None:
         else:
             order.append("ingest")
             gate.wait(timeout=3)
-            write_page(wd, "wiki/concepts/N.md")
+            _ingest_writes(wd, "wiki/concepts/N.md", "src.md")
         return AgentRunResult(ok=True, final_text="done")
 
     with TestClient(create_app(kb, runner=runner)) as client:
@@ -4237,7 +4244,7 @@ def test_backfill_serial_behind_ingest(kb) -> None:
         else:
             order.append("ingest")
             gate.wait(timeout=3)
-            write_page(kwargs["working_directory"], "wiki/concepts/N.md")
+            _ingest_writes(kwargs["working_directory"], "wiki/concepts/N.md", "src.md")
         return AgentRunResult(ok=True, final_text="done")
 
     with TestClient(create_app(kb, runner=runner)) as client:
