@@ -34,7 +34,7 @@ QUERY_PROMPT = (
 _BACKFILL_SUFFIX = (
     " 若这是一个值得沉淀的好答案，把它回填到 `wiki/syntheses/<slug>.md`"
     "（`type: synthesis`、frontmatter 齐全、引用转 `[[wikilink]]`），并在 `index.md` 的"
-    " Syntheses 区追加一行（用 `search_file_content` 定位该分区，不整读 index；描述一句话、约 80 字以内），"
+    " Syntheses 区追加一行（用 `search_file_content` 定位该分区，不整读 index；描述一到两句、200 字以内），"
     "向 `log.md` 追加一条 `## [<日期>] backfill | <标题>`。"
     "**永不修改 `raw/`。**"
 )
