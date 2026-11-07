@@ -17,10 +17,13 @@ from .runtime import AgentRunner, run_agent_task
 # 召回措辞**传输中立**（P5.1 决策P5.1-6）：不硬编码「先用 `guanlan search` CLI」——只读 CLI query
 # 与只读 Web 会话都没 shell，那是死指令；改成「用可用的 search 入口」，宿主 `guanlan_search` 工具
 # （Web 只读会话）/ `guanlan search` CLI（有 shell 时）/ 扫目录（都不可用）按可达性回退。
+# index.md 只当目录、不整读：大库的 index 有数十万字，整读会被单次读取上限截成首尾两段（与 skill query 第 2 步同口径）。
 QUERY_PROMPT = (
     "请按 `guanlan-wiki` skill 的 query 工作流回答：{question}。"
     "先用**可用的 search 入口**（宿主 `guanlan_search` 工具 / `guanlan search \"<关键词>\"` CLI）召回候选页"
-    "（确定性整页 BM25 召回，CJK 走 2-gram、别名已纳入匹配面），读这些候选页 + `wiki/index.md` 综合；"
+    "（确定性整页 BM25 召回，CJK 走 2-gram、别名已纳入匹配面），读这些候选页综合；"
+    "`wiki/index.md` 只是目录，**不要整读**（库大时会超出单次读取上限被截断），"
+    "需要浏览某类页面时用 `search_file_content` 按分区或关键词定位条目、只读命中范围；"
     "**不要重复等价检索；证据足够即回答。**"
     "都不可用或空手而回时再扫相关目录或请我补关键词；"
     "综合出**带 `[[页]]` 引用**的答案；无可靠来源时明说、不编造。"
@@ -31,7 +34,8 @@ QUERY_PROMPT = (
 _BACKFILL_SUFFIX = (
     " 若这是一个值得沉淀的好答案，把它回填到 `wiki/syntheses/<slug>.md`"
     "（`type: synthesis`、frontmatter 齐全、引用转 `[[wikilink]]`），并在 `index.md` 的"
-    " Syntheses 区追加一行、向 `log.md` 追加一条 `## [<日期>] backfill | <标题>`。"
+    " Syntheses 区追加一行（用 `search_file_content` 定位该分区，不整读 index；描述一句话、约 80 字以内），"
+    "向 `log.md` 追加一条 `## [<日期>] backfill | <标题>`。"
     "**永不修改 `raw/`。**"
 )
 

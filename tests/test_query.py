@@ -23,6 +23,16 @@ def test_query_prompt_has_convergence_rule():
     assert "不要重复等价检索" in QUERY_PROMPT
 
 
+def test_query_prompt_does_not_read_whole_index():
+    """回归：CLI query 提示曾要求「读候选页 + `wiki/index.md`」。大库 index 数十万字，整读会被单次读取上限截断，
+    与 skill query 第 2 步「index 只当目录、不整读」冲突。只读与回填两条路径都只许定位、不许整读。"""
+    from guanlan.query import _BACKFILL_SUFFIX, QUERY_PROMPT
+
+    assert "+ `wiki/index.md`" not in QUERY_PROMPT
+    assert "不要整读" in QUERY_PROMPT and "search_file_content" in QUERY_PROMPT
+    assert "不整读 index" in _BACKFILL_SUFFIX
+
+
 # --- 默认只读路径 ---
 
 
