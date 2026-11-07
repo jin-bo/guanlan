@@ -56,6 +56,7 @@ __all__ = [
     "fold_stem",
     "link_fold_stem",
     "iter_pages",
+    "page_stem_groups",
     "page_stem_index",
     "alias_index",
     "link_target_stems",
@@ -616,20 +617,29 @@ def iter_pages(wiki: Path) -> Iterator[Path]:
         yield path
 
 
+def page_stem_groups(wiki: Path) -> dict[str, list[str]]:
+    """`wiki/` 下**所有**页面（**含 config**）按 stem(小写) 分组 → 相对知识库根的 posix 路径列表（按路径排序）。
+
+    `page_stem_index` 与 `health.duplicate_stem`（P3.13）的**共同底座**：前者取每组第一个作解析目标，
+    后者报每组其余的页。两边同出一处，「解析到谁」与「报谁按名不可达」不会各算一套、口径漂移。
+    """
+    root = wiki.parent
+    groups: dict[str, list[str]] = {}
+    for path in sorted(wiki.rglob("*.md")):
+        if path.is_file():
+            groups.setdefault(path.stem.lower(), []).append(path.relative_to(root).as_posix())
+    return groups
+
+
 def page_stem_index(wiki: Path) -> dict[str, str]:
     """`wiki/` 下**所有**页面（**含 config**）的 stem(小写) → 相对知识库根的 posix 路径。
 
     `[[wikilink]]` 解析的**单一归口**：`_base_resolution_index`（→ `link_resolution_index` 解析表 +
     `resolve_owner`，check/graph/heal/Web 共用）由它派生，避免各扫一遍、解析口径漂移（决策P3-6：config
     页不被校验/不建节点，但**可作合法链接目标**）。stem 全库唯一是按名解析的固有前提；万一
-    重名，按排序取第一个，保持确定性。
+    重名，按排序取第一个，保持确定性——其余同名页按名不可达，由 `health.duplicate_stem` 报出（P3.13）。
     """
-    root = wiki.parent
-    index: dict[str, str] = {}
-    for path in sorted(wiki.rglob("*.md")):
-        if path.is_file():
-            index.setdefault(path.stem.lower(), path.relative_to(root).as_posix())
-    return index
+    return {stem: paths[0] for stem, paths in page_stem_groups(wiki).items()}
 
 
 def alias_index(
@@ -795,6 +805,7 @@ FINDING_CAUSAL_ORDER: tuple[str, ...] = (
     # 第一档 · 根因 / 数据完整性（修之即消解下游症状）
     "lint.missing_entity",  # 根因：建页即消解其聚合的多条 broken_link（机械因果）
     "lint.broken_link",  # 断链（missing_entity 之果 + 零散单引）
+    "health.duplicate_stem",  # 同 stem 多页：除解析目标外按名不可达（P3.13）
     "health.index_missing_page",  # 磁盘有页未入 index（结构未接好）
     "health.index_dangling",  # index 悬挂链接
     "health.raw_walk_incomplete",  # raw/ 没遍历全（无原文判定因此整批压下）

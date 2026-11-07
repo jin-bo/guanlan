@@ -5,6 +5,16 @@
 
 ## [未发布]
 
+### 新增
+
+- **`guanlan health` 报同名页：`health.duplicate_stem`**（P3.13，`docs/P3.13-同名页检测.md`）。`[[链接]]` 按 stem（文件名，不分大小写、
+  不看目录）全库解析，两张以上页面同 stem 时只有路径排序第一张能被按名链到，其余按名不可达，图谱里也与它共用一个节点。
+  此前 `check` 只报别名撞名，页面本身同名不报：真实库里出现过 source 页与同名实体页并存、source 页长期链不到的情况。
+  新提示报在不可达的那几张页上，写明 `[[名字]]` 实际落到哪张，并建议合并或改名。分组与解析同出新增的
+  `pages.page_stem_groups`，测试锁定报出的解析目标等于 `resolve_owner` 的结果。只认 stem 完全相同，`foo_bar`/`foo-bar`
+  这类变体各有解析键，不报；含 config 页（如 `concepts/overview.md` 会遮蔽顶层 overview）。建议性，默认退出码 0、
+  `--strict` 下退出码 6，不接写门禁。
+
 ### 变更
 
 - **`guanlan-wiki` 技能：问答不再整读 `wiki/index.md`，并收紧 index 条目约定**。问答流程第 2 步原为「读召回的候选页与

@@ -715,3 +715,123 @@ def test_hidden_dangling_link_does_not_count(tmp_path: Path):
     _page(wiki, "sources/cited.md", type="source", body=LONG)
     assert _orphan_sources(wiki) == ["wiki/sources/cited.md"]
     assert _walk_findings(wiki) == []
+
+
+# ---------- 同 stem 多页（P3.13） ----------
+
+
+def _dup(report) -> list:
+    return [f for f in report.findings if f.kind == "health.duplicate_stem"]
+
+
+def test_duplicate_stem_reports_unreachable_page_not_owner(tmp_path: Path):
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "entities/Foo.md", type="entity", body=LONG)
+    _page(wiki, "sources/Foo.md", type="source", body=LONG)
+
+    hits = _dup(run_health(wiki))
+    # 路径排序 entities/ < sources/：entities 页是解析目标，sources 页按名不可达 → 只报后者。
+    assert [f.page for f in hits] == ["wiki/sources/Foo.md"]
+    assert "wiki/entities/Foo.md" in hits[0].detail and "[[Foo]]" in hits[0].detail
+
+
+def test_duplicate_stem_owner_matches_link_resolution(tmp_path: Path):
+    """报出的「解析到谁」必须就是 `[[…]]` 真实解析目标——把检查与解析口径锁在一起。"""
+    from guanlan.pages import link_resolution_index, resolve_owner
+
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "sources/Bar.md", type="source", body=LONG)
+    _page(wiki, "concepts/Bar.md", body=LONG)
+
+    hits = _dup(run_health(wiki))
+    owner = resolve_owner("Bar", link_resolution_index(wiki))
+    assert owner == "wiki/concepts/Bar.md"
+    assert [f.page for f in hits] == ["wiki/sources/Bar.md"]
+    assert owner in hits[0].detail
+
+
+def test_duplicate_stem_is_case_insensitive(tmp_path: Path):
+    """只差大小写也撞名（解析按小写 stem）——这条防的是漏报：若比较时忘了转小写，正例测不出来。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/Qux.md", body=LONG)
+    _page(wiki, "entities/qux.md", type="entity", body=LONG)
+
+    assert [f.page for f in _dup(run_health(wiki))] == ["wiki/entities/qux.md"]
+
+
+def test_duplicate_stem_includes_config_pages(tmp_path: Path):
+    """content 页与 config 页同名同样遮蔽：concepts/overview.md 排在 wiki/overview.md 之前。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/overview.md", body=LONG)
+
+    hits = _dup(run_health(wiki))
+    assert [f.page for f in hits] == ["wiki/overview.md"]
+    # config 页不能改名、也不建图谱节点：提示改名对象只能是 content 页，且不谈「共用节点」。
+    assert "请给 wiki/concepts/overview.md 改名" in hits[0].detail
+    assert "节点" not in hits[0].detail
+
+
+
+def test_duplicate_stem_config_page_shadows_content_page(tmp_path: Path):
+    """反向：顶层 config 页排在前（wiki/log.md < wiki/sources/log.md），被遮蔽的 content 页才是该改名的。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "sources/log.md", type="source", body=LONG)
+
+    hits = _dup(run_health(wiki))
+    assert [f.page for f in hits] == ["wiki/sources/log.md"]
+    assert "请给本页改名" in hits[0].detail
+    assert "节点" not in hits[0].detail
+
+def test_duplicate_stem_three_way_reports_each_unreachable(tmp_path: Path):
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    for d, t in (("concepts", "concept"), ("entities", "entity"), ("syntheses", "synthesis")):
+        _page(wiki, f"{d}/Baz.md", type=t, body=LONG)
+
+    assert [f.page for f in _dup(run_health(wiki))] == [
+        "wiki/entities/Baz.md",
+        "wiki/syntheses/Baz.md",
+    ]
+
+
+def test_fold_variants_are_not_duplicate_stems(tmp_path: Path):
+    """`foo_bar` 与 `foo-bar` 各有精确解析键、互不遮蔽（P3.8 撞则不折叠）→ 不报。"""
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/foo_bar.md", body=LONG)
+    _page(wiki, "entities/foo-bar.md", type="entity", body=LONG)
+
+    assert _dup(run_health(wiki)) == []
+
+
+def test_duplicate_stem_strict_exit_six_and_json(tmp_path: Path, capsys):
+    import json
+
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/Dup.md", body=LONG)
+    _page(wiki, "entities/Dup.md", type="entity", body=LONG)
+
+    assert health_entrypoint(tmp_path, json_output=True, strict=False) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert any(
+        f["kind"] == "health.duplicate_stem" and f["page"] == "wiki/entities/Dup.md"
+        for f in data["findings"]
+    )
+    assert health_entrypoint(tmp_path, json_output=True, strict=True) == 6
+
+
+def test_duplicate_stem_sorts_before_content_advice(tmp_path: Path):
+    wiki = tmp_path / "wiki"
+    _seed_config(wiki)
+    _page(wiki, "concepts/Same.md", body=LONG)
+    _page(wiki, "entities/Same.md", type="entity", body=LONG)
+    _page(wiki, "concepts/Stub.md", body="")
+
+    kinds = _kinds(run_health(wiki))
+    assert kinds.index("health.duplicate_stem") < kinds.index("health.stub_page")

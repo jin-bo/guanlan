@@ -105,7 +105,7 @@ def build_graph(wiki: Path) -> Graph:
     # 这是 wikilink 按名解析的固有前提，由命名约定保证。若两张非 config 页 stem 相同
     # （如 sources/Foo.md 与 entities/Foo.md），它们会共享 id、在邻接/孤儿上被视作同一逻辑节点；
     # 这是 stem 寻址模型下不可消除的歧义，应由"页名唯一"约定避免，而非在此改用路径 id（那会破坏
-    # 上述不变式）。重名探测属"duplicate-stem lint"，超出 P3 §6 范围（§10 推后）。
+    # 上述不变式）。重名由 `health.duplicate_stem` 报出（P3.13）。
     nodes: list[Node] = []
     node_ids: set[str] = set()
     bodies: list[tuple[str, str]] = []  # (node_id, body)
