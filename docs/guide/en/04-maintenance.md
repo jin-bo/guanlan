@@ -6,7 +6,7 @@ Keeping a knowledge base fresh relies on a set of **zero-LLM deterministic maint
 
 ## `guanlan health`
 
-File-level structural check: **stub pages + index↔disk sync**.
+File-level structural check: **stub pages + index↔disk sync**, plus advisories for page-type↔directory drift, source pages without raw, overview size and **duplicate page names**.
 
 ```bash
 guanlan -C my-wiki health
@@ -20,6 +20,8 @@ guanlan -C my-wiki health --strict     # fail with exit 6 if there are findings 
 | `--strict` | Exit `6` (`EXIT_LINT_FINDINGS`) on findings, to turn advisories into failures in CI/nightly |
 
 Advisory by default: exits `0` even with findings. `index_missing_page` (a page on disk not in the index) is fixed by [`reindex`](#guanlan-reindex).
+
+`duplicate_stem`: when two pages share a file name (case-insensitive, regardless of directory), `[[name]]` can only resolve to the one that sorts first by path; the others are unreachable by name and share one graph node. The finding is reported on each unreachable page. Fix it by merging the pages, or by renaming one and updating the links to it (the old name cannot then be its alias — it would collide with the other page). See [`P3.13`](../../P3.13-同名页检测.md).
 
 ---
 

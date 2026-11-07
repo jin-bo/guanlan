@@ -3,6 +3,10 @@
 `health` 关注"知识库作为记账产物是否内部自洽"，与 `check`（frontmatter/链接是否合法）正交：
 
 - **桩页 / 空页**（`health.stub_page`）：正文几乎没有内容的建库残留空壳。
+- **同 stem 多页**（`health.duplicate_stem`，docs/P3.13）：`[[名字]]` 按 stem（大小写不敏感）全库解析，
+  同 stem 的页只有路径排序第一张能被按名链到，其余按名不可达、在图谱里也与它共用一个节点。报在不可达的
+  那几页上；分组与解析同出 `pages.page_stem_groups`，「解析到谁」不会另算一套。只认 stem 完全相同
+  （转小写后）——`foo_bar`/`foo-bar` 这类 fold 变体各有精确解析键、互不遮蔽，不报。
 - **index 与磁盘双向同步**（`health.index_missing_page` / `health.index_dangling`）。
 - **source 页无原文**（`health.source_without_raw`）：`wiki/sources/` 下的页在 `raw/` 里找不到对应原文——
   文件名（与 `rawio.find_source_page` 同一套容错）、`raw_digest`、`> 原始资料：` 声明行三路都没指向现存
@@ -44,6 +48,7 @@ from .pages import (
     iter_pages,
     load_page,
     order_findings,
+    page_stem_groups,
     report_json,
 )
 from .paths import require_kb_root
@@ -302,6 +307,30 @@ def _check_source_without_raw(
     )
 
 
+def _check_duplicate_stems(wiki: Path, content: frozenset[str]) -> list[Finding]:
+    """同 stem 多页（`health.duplicate_stem`，决策P3.13-1/2）：每组除解析目标外，每张页一条。
+
+    含 config 页——`concepts/overview.md` 会把顶层 `overview.md` 挤出按名解析（排序在前者胜）。
+    `content` 是非 config 页的相对路径集：牵涉 config 页时图谱不建它的节点、它也不能改名，提示语随之换。
+    """
+    findings: list[Finding] = []
+    for paths in page_stem_groups(wiki).values():
+        if len(paths) < 2:
+            continue
+        owner = paths[0]
+        for page in paths[1:]:
+            stem = posixpath.splitext(posixpath.basename(page))[0]
+            head = f"与 {owner} 同名（stem 不分大小写）：`[[{stem}]]` 一律解析到 {owner}，本页按名不可达"
+            if page not in content:
+                tail = f"；{page} 是配置页、不能改名，请给 {owner} 改名并改正指向它的链接"
+            elif owner not in content:
+                tail = f"；{owner} 是配置页、不能改名，请给本页改名并改正指向它的链接"
+            else:
+                tail = "，图谱里也与它共用一个节点；请合并两页，或给其中一页改名并改正指向它的链接"
+            findings.append(Finding(page, "health.duplicate_stem", head + tail))
+    return findings
+
+
 def _check_overview_size(wiki: Path, root: Path) -> Finding | None:
     path = wiki / "overview.md"
     try:
@@ -362,6 +391,8 @@ def run_health(wiki: Path) -> HealthReport:
         findings.append(_check_raw_walk(unreachable, len(orphan_sources)))
     else:
         findings.extend(orphan_sources)
+    content = frozenset(p.relative_to(root).as_posix() for p in content_pages)
+    findings.extend(_check_duplicate_stems(wiki, content))
     findings.extend(_check_index_sync(wiki, root, content_pages))
     overview = _check_overview_size(wiki, root)
     if overview is not None:
