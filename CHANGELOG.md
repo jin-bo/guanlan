@@ -3,6 +3,17 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [未发布]
+
+### 变更
+
+- **`guanlan-wiki` 技能：问答不再整读 `wiki/index.md`，并收紧 index 条目约定**。问答流程第 2 步原为「读召回的候选页与
+  `wiki/index.md`」：一个上千页的真实库里 index 已到数十万字，整读必然超出单次读取上限、被截成首尾两段，中间的分区看不到，
+  还占掉大量上下文。现改为只读召回的候选页，需要浏览某类页面时用 `search_file_content` 按分区或关键词定位条目后只读命中范围；
+  召回兜底同样改为定位而非整读。`references/conventions.md` 的 index 约定补两条：条目按页面所在目录登记到对应分区
+  （实测有实体页被成批登记到 Sources 分区，`reindex` 只补登漏登、不纠正错位），以及「一句话」限约 80 字、修订时改写不追加。
+  技能文本由 agentao 在激活时载入并缓存，改动在重新激活或新会话后生效。
+
 ## [0.1.33] - 2026-11-06
 
 ### 新增

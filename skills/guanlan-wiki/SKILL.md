@@ -113,8 +113,8 @@ wrapper 确定性生成最小模板（`AGENTAO.md`、`SCHEMA.md`、`raw/`、含 
 1. **召回**：先用 search 入口取 top-N 候选页路径（确定性整页 BM25，中文 2-gram，含 aliases）。按可用的能力选一个：
    - 只读 Web 会话：宿主的 `guanlan_search` 工具（没有 shell 也能调用）。
    - 有 shell：`guanlan search "<关键词>"`。
-   - 都不可用或没有结果：退回扫 `index.md`、相关目录与现有页 `aliases`，或请用户补充关键词。
-2. **作答**：读召回的候选页与 `wiki/index.md`，综合出答案。结论带 `[[页]]` 引用，引用一律写裸 `[[stem]]`。没有可靠来源时明说，不得编造。
+   - 都不可用或没有结果：用 `search_file_content` 在 `wiki/index.md` 与相关目录中按关键词定位条目，结合现有页 `aliases`，或请用户补充关键词。
+2. **作答**：读召回的候选页，综合出答案。`wiki/index.md` 只是目录，**不要整读**——库大时它会超出单次读取上限而被截断；需要浏览某类页面时，按分区或关键词用 `search_file_content` 定位条目后只读命中范围。结论带 `[[页]]` 引用，引用一律写裸 `[[stem]]`。没有可靠来源时明说，不得编造。
 3. **回填**：默认只读。只有显式 `--backfill` 时，才写 `wiki/syntheses/<slug>.md`，并经过与 ingest 相同的写门禁。synthesis 是时点快照，见 conventions §页面模板。
 
 ### heal — `guanlan heal`
