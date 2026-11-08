@@ -7,7 +7,7 @@
 **候选集（封闭，新形态改本 docstring，不改正则；决策P3.14-2）**：
 - 收：`“…”`、`"…"` 与 `「…」` 引号内文字，归一后 ≥ `MIN_LEN` 字；`--no-corner` 不收 `「…」`（初版默认不收，
   模型用「」写的直接引语因此整批漏查，见 docs/P3.14 §14）。
-- 不收：围栏代码块内（含 mermaid）、行内 code 内（其中的引号也不参与配对）、config 页、序列标签（§3.5：按 → ↔ ⇒ — ／ 切成 ≥3 段且每段
+- 不收：围栏代码块内（含 mermaid）、行内 code 内（其中的引号也不参与配对）、`overview.md` 以外的 config 页、序列标签（§3.5：按 → ↔ ⇒ — ／ 切成 ≥3 段且每段
   归一后 ≤6 字、段内无标点）。
 - 不收日期、数字（另行度量）。
 
@@ -83,6 +83,8 @@ __all__ = [
 ]
 
 MIN_LEN = 15
+# config 页里唯一写正文的一页：活体综述，ingest 与问答都会读，引语同样要核对（P3.14 §15）。
+_CHECKED_CONFIG = frozenset({"overview.md"})
 COVERAGE_THRESHOLD = 0.6
 TOP_PAGES = 15
 STRICT_LIST = 50
@@ -447,11 +449,11 @@ def run_quotes(
                 owner = None
         if owner is None or not (root / owner).is_file():
             raise GuanlanError(f"找不到页面：{page}")
-        if "/" not in owner.removeprefix("wiki/") and owner.rsplit("/", 1)[-1] in _CONFIG_PAGES:
+        if "/" not in owner.removeprefix("wiki/") and owner.rsplit("/", 1)[-1] in _CONFIG_PAGES - _CHECKED_CONFIG:
             raise GuanlanError(f"{owner} 是 config 页，不核对引语")
         paths = [root / owner]
     else:
-        paths = list(iter_pages(wiki))
+        paths = sorted([*iter_pages(wiki), *(p for n in _CHECKED_CONFIG if (p := wiki / n).is_file())])
 
     counts: collections.Counter[str] = collections.Counter()
     findings: list[QuoteFinding] = []

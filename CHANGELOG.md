@@ -25,6 +25,7 @@
 
 ### 变更
 
+- **`guanlan quotes` 也核对 `overview.md`**（`docs/P3.14-引语核对.md` §15）。原先把它和 `index.md`、`log.md` 一样当 config 页跳过；它其实是写跨资料判断的活体综述，直接引语写法与内容页相同，ingest 与问答都会读。全库跑法照核，`--page overview` 也可用，其余 config 页仍不收。在一个真实库上临时放开后，overview 的引语在所注出处逐字通过的只有 31%（全库 95.7%）；另一个库的 overview 有 3 条计入 `--strict`。用 `--strict` 把关的库，升级后可能由通过变为退出码 6。
 - **`guanlan quotes` 默认也核对「」内的文字**（`docs/P3.14-引语核对.md` §14）。原先只收双引号，「」要加 `--include-corner`。实测模型会用「」写直接引语：一次对照实验里 213 条引语全部用「」，默认跑法一条没核对；真实库里 15 字以上的整句引语四成用「」。现在默认收，`--no-corner` 排除；`--include-corner` 保留为无操作，既有脚本不报错。实测库因此多报 133 条，其中 64 条计入 `--strict`，抽看 12 条都是真问题；用 `--strict` 把关的库升级后可能由通过变为退出码 6。
 - **`guanlan-wiki` 技能：直接引语统一用 `“…”`**。conventions〈直接引语〉与 `SKILL.md` ingest 要求写明：直接引语用双引号，引语里再套引语用单引号，不用「」。
 - **`guanlan audit`：提示词与 `references/audit.md` 明确禁止 shell，只读命令也不行**。原提示词写的是「不要运行 shell 改文件」，模型据此用 `pwd; ls`、`tail`、`grep` 读文件；`tail` 这类命令免确认，带引号的 `grep` 要确认，无人值守下一遇确认整轮中止。对照实验里两次 audit 都因此作废；改后同一任务两版技能各跑一次都完成，留痕正确。措辞与 ingest、heal 一致：不运行 shell 命令，读写只用内置文件工具，并在 `audit.md` 列出可用的工具。

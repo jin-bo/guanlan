@@ -177,8 +177,23 @@ def test_fenced_code_and_short_terms_and_config_pages_are_skipped(tmp_path):
     body = '```mermaid\nA["一二三四五六七八九十一二三四五六"]\n```\n短语"两个短词"。\n'
     pages = {"sources/a.md": _src("raw/a.md", body)}
     kb = _kb(tmp_path, {"raw/a.md": RAW_A}, pages)
-    (kb / "wiki" / "overview.md").write_text('综述"一二三四五六七八九十一二三四五六"\n', encoding="utf-8")
+    for name in ("index.md", "log.md"):
+        (kb / "wiki" / name).write_text('目录"一二三四五六七八九十一二三四五六"\n', encoding="utf-8")
     assert run_quotes(kb).counts.get("candidates", 0) == 0
+
+
+def test_overview_is_checked_though_config(tmp_path):
+    """overview 是活体综述，引语照核：全库跑法与 `--page overview` 都收；index/log 仍不收（P3.14 §15）。"""
+    bad = Q_OK.replace("丙", "甲")
+    kb = _kb(tmp_path, {"raw/a.md": RAW_A}, {"sources/a.md": _src("raw/a.md")})
+    (kb / "wiki" / "overview.md").write_text(
+        f"---\ntitle: '总览'\ntype: synthesis\ntags: []\nsources: ['a']\nlast_updated: '2026-11-08'\n---\n\n"
+        f'综述说"{Q_OK}"，又说"{bad}"。\n', encoding="utf-8")
+    full = run_quotes(kb)
+    assert full.counts.get("candidates") == 2 and _kinds(full) == ["altered"]
+    assert full.findings[0].page == "wiki/overview.md"
+    assert _kinds(run_quotes(kb, page="overview")) == ["altered"]
+    assert quotes_entrypoint(kb, json_output=False, strict=False, page="index") != 0
 
 
 def test_sequence_label_skipped_but_label_like_still_checked_and_not_strict(tmp_path):
