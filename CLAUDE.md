@@ -89,4 +89,4 @@ These come up repeatedly in DESIGN and the skill; preserve them in any change:
 
 ## Conventions
 
-The codebase (code comments, docstrings, design docs, user-facing CLI output) is written in **Chinese**. Match that when editing existing files.
+The codebase (code comments, docstrings, design docs, user-facing CLI output) is written in **Chinese**. Match that when editing existing files. One deliberate exception: `skills/guanlan-wiki/references/heal.md` is written in English following ASD-STE100 (Simplified Technical English) rules — on a real KB this wording measurably raised verbatim-quote rates in heal-created pages (see CHANGELOG). Keep it in STE English when editing; it tells the Agent to write page content in Chinese.

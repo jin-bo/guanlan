@@ -1,42 +1,89 @@
-# heal 工作流 — `guanlan heal`
+# heal workflow — `guanlan heal`
 
-`guanlan-wiki` skill 的 heal 工作流。用词与硬约束见 [`../SKILL.md`](../SKILL.md)，页面格式见 [`conventions.md`](conventions.md)。
+This file is the heal workflow of the `guanlan-wiki` skill. For terms and hard rules, read [`../SKILL.md`](../SKILL.md). For page format, read [`conventions.md`](conventions.md).
 
+The heal workflow makes content pages for high-frequency missing entities. A high-frequency missing entity is a broken link. Two or more pages link to it, but it has no page (`lint.missing_entity`).
 
-把高频缺失实体物化成内容页。高频缺失实体是被至少 2 页引用、却没有页的断链（`lint.missing_entity`）。wrapper 已在 prompt 里给出本批目标名和每个目标的引用页清单，你不必自己查找引用。对每个目标：
+**Write all page content in Chinese.** This file is in English. The wiki is in Chinese. Page text, titles, index lines, and log lines must be in Chinese.
 
-1. **读上下文**：只读所列引用页与 `wiki/index.md`，不要读全库。目标名已是归一键，可以直接用作文件名。
-2. **定目录 `<dir>`**：
-   - 实体（人物、组织、模型、系统）→ `entities/`。
-   - 概念（方法、理论、术语、算法、架构、训练技巧）→ `concepts/`。
-   - 拿不准时当实体。`SCHEMA.md` 只影响实体与概念的划分口径，不能增加第三个目录。
-3. **三选一**：上下文足以确认目标值得建页时，按决定树处理。新页一律建在第 2 步定的 `<dir>/`：
+## Terms
+
+Each term below has one meaning in this file.
+
+- **Target**: one missing entity name in this batch. The wrapper gives all targets in the prompt.
+- **Linking page**: an existing page that links to a target. The wrapper gives the list of linking pages for each target.
+- **Source page**: a page in `wiki/sources/`. One source page records one source document.
+- **Citation**: `[[source page]]:line`. A citation points to one line of a source page.
+
+## Steps
+
+Do these steps for each target, in this order.
+
+1. **Read the linking pages.** Read only the linking pages of the target and `wiki/index.md`. Do not read the full wiki. Do not search for other linking pages. The target name is already a normalized key. Use it as the file name.
+2. **Choose the directory `<dir>`.**
+   - An entity (a person, an organization, a model, a system) goes in `entities/`.
+   - A concept (a method, a theory, a term, an algorithm, an architecture, a training technique) goes in `concepts/`.
+   - If you are not sure, treat the target as an entity.
+   - `SCHEMA.md` controls only the split between entities and concepts. It cannot add a third directory.
+3. **Choose A, B, or C.** Use the decision tree below when the linking pages show that the target needs a page. Make every new page in the `<dir>/` from step 2.
+
+   To find out if a page exists, use the `glob` tool (for example `wiki/*/产业链*.md`) or the `list_directory` tool. Do not use shell commands.
 
    ```
-   目标是某既有 entities/∪concepts/ 页的变体？（读 index.md/引用页可认出）
-     是 → C：只向该页 aliases 末尾追加原目标名，并把 last_updated 改成当天
-            （不新建重复页、不改正文、不动其它 frontmatter）
-     否 → 目标名够规范、可直接当文件名？
-            是 → A：建 <dir>/<目标>.md（默认最稳，[[原引用]] 经同一归一天然解析）
-            否（口语/缩写，且引用上下文给出更规范全称）
-                → B：建 <dir>/<规范名>.md + frontmatter aliases 收编原目标名
-                     （如 aliases: ['大模型']；否则断链不消、回执 still_broken）
-   拿不准 → 一律走 A
+   Is the target a variant of an existing page in entities/ or concepts/? (index.md or a linking page shows this)
+     Yes → C: Add the target name to the end of the aliases of that page. Set last_updated to today.
+              Do not make a new page. Do not change the body. Do not change other frontmatter.
+     No  → Is the target name standard enough to use as a file name?
+              Yes → A: Make <dir>/<target>.md. A is the default. [[target]] then resolves to the new page.
+              No (the target is informal or an abbreviation, and a linking page gives the full name)
+                  → B: Make <dir>/<full name>.md. Write the target name in frontmatter aliases (for example aliases: ['大模型']).
+                       If you do not write the alias, the link stays broken and the receipt records still_broken.
+   Not sure → choose A.
    ```
 
-4. **登记 index**：在 `wiki/index.md` 与目录匹配的分区登记一行。
-   - 新页：`- [<标题>](<dir>/<stem>.md) — <一句话>`。
-   - B 与 C：在句末注明别名，如 `…（别名：大模型/LLM）`。这样查重、2-gram 召回与 `health` 都能看见它。
-5. **写 log**：向 `wiki/log.md` 追加一条 `## [YYYY-MM-DD] heal | <目标>`。
-6. **只从引用上下文合成**：不得写引用页里没有的事实。引用页有出处时，`sources` 可以沿用。没有出处就留空（合法）。
-   - **直接引语只照搬，不改写**：你看不到原文，只能看到引用页。要用引号标出原话，就把引用页里已有的直接引语原样照搬：不改字，不缩写，不把两段拼成一句，省略处保留原有的「……」。出处照抄引用页给这条引语标的资料出处，即 source 页及其行号（如 `[[资料]]:行`）；不要改成引用页本身，既不写 `[[某概念页]]:行`，也不写「原注 :行」。引用页里只是转述的内容，照样转述，不要加上引号当成原话。其余规则见 conventions §直接引语。
-7. **跳过**：上下文不足、目标更像主题页、或无法判断时，跳过该目标，用一句话说明。不需要特定格式：wrapper 重新计算断链来判定成败，不解析你的说明。
+4. **Write only facts that the linking pages contain.** Do not write a fact that no linking page contains. If a linking page has `sources` in its frontmatter, you can copy them to the new page. If no linking page has them, leave `sources` empty. An empty `sources` is valid.
+5. **Copy each direct quote and its citation.** You cannot read the source documents. You can read only the linking pages. Thus every direct quote in the new page must come from a linking page.
+   - Copy the words of the quote exactly. Do not change a character. Do not shorten the quote. Do not join two quotes into one. Keep each "……" that the linking page has.
+   - Copy the citation that the linking page gives for the quote. The citation has the form `[[source page]]:line`.
+   - Do not cite the linking page instead of the source page. These forms are wrong: `[[某概念页]]:行` and `[[某概念页]]:行，原注 :行`.
+   - If the linking page paraphrases a statement, paraphrase it in the new page too. Do not put quotation marks around a paraphrase.
 
-**heal 的写入范围**：只新建 `entities/`、`concepts/` 页，向既有页追加别名，编辑 `index.md`，追加 `log.md`。不得删除或重写已有页正文，不得修改 `raw/`。以下越界写会被 wrapper 的写集审计标为 `unexpected_write`：
+   Example. Line 12 of the linking page `concepts/X.md` is:
 
-- 建页到 `entities/`、`concepts/` 之外。
-- 改已有页正文，或改 `aliases`、`last_updated` 以外的 frontmatter。
-- 删页，或把页换成符号链接。
-- 收编时夹带本批目标以外的别名。
+   > 讲话指出"把调查研究作为基本功"（[[某讲话]]:88）。
 
-收尾见 SKILL.md〈写工作流收尾（共用）〉。
+   Correct: `讲话指出"把调查研究作为基本功"（[[某讲话]]:88）。`
+
+   Wrong: `讲话指出"把调查研究作为基本功"（[[X]]:12）。`
+
+   For the other quote rules, read conventions §直接引语.
+6. **Add the page to the index.** Add one line to the section of `wiki/index.md` that matches `<dir>`.
+   - For a new page, write: `- [<title>](<dir>/<stem>.md) — <one sentence>`.
+   - For B and C, put the alias at the end of the line, for example `…（别名：大模型/LLM）`. The duplicate check, the 2-gram search, and `health` use this line to find the alias.
+7. **Write the log.** Add one line to `wiki/log.md`: `## [YYYY-MM-DD] heal | <target>`.
+8. **Skip a target that you cannot write.** Skip the target in these conditions:
+   - The linking pages do not give enough content.
+   - The target is better as a topic page.
+   - You cannot decide.
+
+   Give the reason in one sentence. The reason has no required format. The wrapper counts the broken links again to find the result. It does not read your reason.
+
+## Write scope
+
+The heal workflow makes only these writes:
+
+- Make a new page in `entities/` or `concepts/`.
+- Add an alias to the `aliases` of an existing page.
+- Edit `index.md`.
+- Add lines to `log.md`.
+
+Do not delete the body of an existing page. Do not write the body again. Do not change `raw/`. The write audit of the wrapper marks these writes as `unexpected_write`:
+
+- A new page outside `entities/` and `concepts/`.
+- A change to the body of an existing page.
+- A change to a frontmatter field of an existing page, other than `aliases` and `last_updated`.
+- A deleted page.
+- A symbolic link that replaces a page.
+- An alias that is not a target of this batch.
+
+For the end of the workflow, read SKILL.md〈写工作流收尾（共用）〉.
