@@ -24,6 +24,7 @@ from .ingest import run_ingest
 from .init import run_init
 from .lint import MISSING_ENTITY_MIN_REFS, lint_entrypoint
 from .query import run_query
+from .quotes import add_quotes_arguments, quotes_entrypoint
 from .reindex import reindex_entrypoint
 from .remove import remove_entrypoint
 from .search import search_entrypoint
@@ -335,6 +336,29 @@ def _add_lint_parser(sub, dir_parent) -> None:
     p.add_argument("--json", action="store_true", help="输出 JSON 契约")
     p.add_argument("--strict", action="store_true", help="有建议则以退出码 6 失败（供 CI/nightly）")
     p.set_defaults(func=_cmd_lint)
+
+
+def _cmd_quotes(args: argparse.Namespace) -> int:
+    return quotes_entrypoint(
+        args.dir,
+        json_output=args.json,
+        strict=args.strict,
+        page=args.page,
+        min_len=args.min_len,
+        include_corner=args.include_corner,
+        show_misattributed=args.show_misattributed,
+    )
+
+
+def _add_quotes_parser(sub, dir_parent) -> None:
+    # quotes（P3.14）：零 LLM 引语核对——引号内文字是否逐字出自所引 raw 原文；只读、建议非门禁。
+    p = sub.add_parser(
+        "quotes",
+        parents=[dir_parent],
+        help="引语核对：引号内文字是否逐字出自所引 raw 原文（零 LLM，只读，建议非门禁）",
+    )
+    add_quotes_arguments(p)
+    p.set_defaults(func=_cmd_quotes)
 
 
 def _add_graph_parser(sub, dir_parent) -> None:
@@ -794,6 +818,7 @@ _SUBCOMMAND_BUILDERS = (
     _add_check_parser,
     _add_health_parser,
     _add_lint_parser,
+    _add_quotes_parser,
     _add_graph_parser,
     _add_heal_parser,
     _add_audit_parser,
