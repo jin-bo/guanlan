@@ -13,6 +13,7 @@
   - **出处**：取引语之后同句内的第一个引用标记，裸行号承接本行此前的带名引用；映射复用 `claimed_raw_paths`；出处不可读时不扩大范围。出处只用来缩小核对范围：范围外逐字命中算措辞属实，只计数（`--show-misattributed` 才列出）。
   - **分类与退出码**：`altered`、`unsupported`、`no_source`、`source_unreadable`、`scan_incomplete`；默认退出码 0，`--strict` 只计入 `altered` ∧ 无 OCR 提示 ∧ 非标签形态（真实库两轮分层人工抽样精确率 85%）；raw 遍历不完整时 `--strict` 也判失败，不让不完整的核对通过 CI。
   - **其他**：`--page` 逐条列出单页；`--json` 带 `summary` 与每条的 `strict`、`strict_reason`。千余页、约 2,000 万字 raw 的库全量约 16 秒。
+  - **按需归一**：raw 遍历时只读盘、解码，`norm()` 推迟到首次取用时做；`--page` 单页由约 3 秒降到 0.4 秒，结果不变（`docs/P3.14-引语核对.md` §13）。
 
 - **`guanlan health` 报同名页：`health.duplicate_stem`**（P3.13，`docs/P3.13-同名页检测.md`）。`[[链接]]` 按 stem（文件名，不分大小写、
   不看目录）全库解析，两张以上页面同 stem 时只有路径排序第一张能被按名链到，其余按名不可达，图谱里也与它共用一个节点。

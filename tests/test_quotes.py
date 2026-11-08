@@ -596,3 +596,41 @@ def test_page_arg_with_wrong_dir_case_still_treated_as_source(tmp_path):
     kb = _kb(tmp_path, {"raw/a.md": RAW_A}, {"sources/a.md": _src("raw/a.md", f"他说“{Q_OK}”。")})
     rep = run_quotes(kb, page="Sources/a")
     assert rep.counts.get("passed") == 1 and not rep.findings
+
+
+# ---------- 性能：raw 按需归一 ----------
+
+
+def test_page_run_normalizes_only_raws_it_needs(tmp_path, monkeypatch):
+    import guanlan.quotes as q
+
+    unrelated = "无关原文的独有标记甲甲甲乙乙乙丙丙丙丁丁丁。\n"
+    kb = _kb(tmp_path, {"raw/a.md": RAW_A, "raw/z.md": unrelated},
+             {"sources/a.md": _src("raw/a.md", f'正文说"{Q_OK}"。'), "sources/z.md": _src("raw/z.md")})
+    seen: list[str] = []
+    real_norm = q.norm
+    monkeypatch.setattr(q, "norm", lambda s: (seen.append(s), real_norm(s))[1])
+    report = run_quotes(kb, page="a")
+    assert report.counts["passed"] == 1
+    # 引语在本页范围内命中：别的 raw 不该被归一（全库 raw 归一是 --page 的主要耗时）
+    assert not any("独有标记" in s for s in seen)
+
+
+def test_page_run_still_scans_all_raws_for_verbatim_elsewhere(tmp_path):
+    # 按需归一不能漏掉「别处逐字」：范围内不中时仍须逐份 raw 核对
+    raws = {"raw/a.md": RAW_A, "raw/b.md": "另一份原文与本句无关的内容写在这里。\n"}
+    pages = {
+        "sources/a.md": _src("raw/a.md"),
+        "sources/b.md": _src("raw/b.md"),
+        "concepts/c.md": _concept(f'讲话称"{Q_OK}"（[[b]]:1）。', ["b"]),
+    }
+    report = run_quotes(_kb(tmp_path, raws, pages), page="c", show_misattributed=True)
+    assert [(f.kind, f.hit_raw) for f in report.findings] == [("misattributed", "raw/a.md")]
+
+
+def test_page_run_still_reports_undecodable_raw_and_fails_strict(tmp_path):
+    # 解码仍在遍历时做：--page 下与本页无关的坏 raw 也要记入遍历不完整，--strict 照旧失败（P3.14-7）
+    kb = _kb(tmp_path, {"raw/a.md": RAW_A}, {"sources/a.md": _src("raw/a.md", f'正文说"{Q_OK}"。')})
+    (kb / "raw" / "bad.md").write_bytes(b"\xff\xfe\x00bad")
+    report = run_quotes(kb, page="a", strict=True)
+    assert report.raw_unreachable == ["raw/bad.md"] and report.ok is False
