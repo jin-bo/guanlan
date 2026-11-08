@@ -59,7 +59,7 @@ guanlan -C my-wiki quotes --strict           # exit 6 if any strict-counted mism
 |---|---|
 | `--page <name>` | Check one page and list each finding |
 | `--min-len N` | Minimum normalized quote length (default 15; shorter ones are mostly terms) |
-| `--include-corner` | Also check text in 「」 (default: double quotes only) |
+| `--no-corner` | Skip text in 「」 (default: check double quotes and 「」) |
 | `--show-misattributed` | List quotes that are verbatim but not in the cited source (default: count only) |
 | `--json` / `--strict` | As for health |
 

@@ -7,6 +7,8 @@
 
 wrapper 已完成确定性粗筛：比对每张 source 页 frontmatter 的 `raw_digest`（资料内容指纹，见 conventions §frontmatter）与资料现在的字节，找出变化的资料，以及沿 `sources` 引用它们的页。prompt 里每行一个目标：`page | reason | drifted_slugs | raw_paths`。你只做语义判断，不必自己找变化的资料或解析指纹。
 
+只用内置文件工具：`read_file`、`search_file_content`、`glob`、`list_directory`、`write_file`、`replace`。不要用 shell 命令，`ls`、`pwd`、`grep`、`tail` 这类只读命令也不行。一条需要确认的 shell 命令就会中止整轮，已做的工作作废（SKILL.md〈写工作流的工具（共用）〉）。
+
 对每个目标页：
 
 1. **对照现版本**：读该页正文，以及该行 `raw_paths` 列出的资料的**现版本**，判断页中论断是否仍被支持。
