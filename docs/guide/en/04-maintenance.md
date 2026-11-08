@@ -44,6 +44,36 @@ Advisory by default. `missing_entity` (frequent broken links) is materialized in
 
 ---
 
+## `guanlan quotes`
+
+Quote check: is the text a page puts in quotation marks verbatim in the raw source it cites? **Zero-LLM, read-only** — it changes nothing.
+
+```bash
+guanlan -C my-wiki quotes                    # KB summary: counts + pages with most mismatches
+guanlan -C my-wiki quotes --page SomePage    # one page, listed item by item
+guanlan -C my-wiki quotes --json             # machine-readable (with summary)
+guanlan -C my-wiki quotes --strict           # exit 6 if any strict-counted mismatch exists
+```
+
+| Arg | Meaning |
+|---|---|
+| `--page <name>` | Check one page and list each finding |
+| `--min-len N` | Minimum normalized quote length (default 15; shorter ones are mostly terms) |
+| `--include-corner` | Also check text in 「」 (default: double quotes only) |
+| `--show-misattributed` | List quotes that are verbatim but not in the cited source (default: count only) |
+| `--json` / `--strict` | As for health |
+
+Reading the result:
+
+- `altered`: mostly from the source, but with changed characters, an unmarked cut (no 「……」), or separate sentences spliced together. **Only this kind counts for `--strict`, and only when the raw carries no OCR hint and the quote does not look like a label** (about 85% precision over two sampled rounds on a real KB).
+- `unsupported`: not found in the source — mostly paraphrases, labels or the wiki's own wording put in quotes; advisory only.
+- Verbatim but source unverified: the quote exists word for word, just not in the source this line cites. Citation styles vary too much to judge, so the command only counts these.
+- Not checked: no source, unreadable source (e.g. a citation to an entity page that has no raw), or an incomplete raw walk — "could not check", not "checked and missing". Under `--strict`, an incomplete raw walk is itself a failure: a partial check must not let CI pass.
+
+When the raw is OCR output, a mismatch may come from recognition errors; `ocr_hint` shows the raw's parse info, such findings never count for strict, and should be checked against the scan before editing. Writing rules: the skill's conventions 〈直接引语〉; design and measurement: [`P3.14`](../../P3.14-引语核对.md).
+
+---
+
 ## `guanlan graph`
 
 Deterministic graph build: `[[wikilink]]` → `graph/graph.json` + a self-contained zero-JS `graph/graph.html` (with communities, topology hints, bridges/cut-vertices).
