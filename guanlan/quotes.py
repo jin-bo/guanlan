@@ -5,7 +5,8 @@
 `--strict` 也退 6（决策P3.14-7）。
 
 **候选集（封闭，新形态改本 docstring，不改正则；决策P3.14-2）**：
-- 收：`“…”` 与 `"…"` 引号内文字，归一后 ≥ `MIN_LEN` 字；`--include-corner` 另收 `「…」`。
+- 收：`“…”`、`"…"` 与 `「…」` 引号内文字，归一后 ≥ `MIN_LEN` 字；`--no-corner` 不收 `「…」`（初版默认不收，
+  模型用「」写的直接引语因此整批漏查，见 docs/P3.14 §14）。
 - 不收：围栏代码块内（含 mermaid）、行内 code 内（其中的引号也不参与配对）、config 页、序列标签（§3.5：按 → ↔ ⇒ — ／ 切成 ≥3 段且每段
   归一后 ≤6 字、段内无标点）。
 - 不收日期、数字（另行度量）。
@@ -378,7 +379,7 @@ def run_quotes(
     *,
     page: str | None = None,
     min_len: int = MIN_LEN,
-    include_corner: bool = False,
+    include_corner: bool = True,
     show_misattributed: bool = False,
     strict: bool = False,
 ) -> QuotesReport:
@@ -676,7 +677,7 @@ def quotes_entrypoint(
     strict: bool,
     page: str | None = None,
     min_len: int = MIN_LEN,
-    include_corner: bool = False,
+    include_corner: bool = True,
     show_misattributed: bool = False,
 ) -> int:
     """`guanlan quotes` 的单一落地：核对 → 渲染 → 退出码（默认 0；`--strict` 且有 strict 条目或 raw 遍历不完整 → 6）。"""
@@ -702,7 +703,9 @@ def add_quotes_arguments(p: argparse.ArgumentParser) -> None:
                    help="有计入 strict 的引语不符（altered ∧ 无 OCR 提示 ∧ 非标签形态）或 raw 遍历不完整，则以退出码 6 失败")
     p.add_argument("--page", metavar="名", help="只核对一页，并逐条列出")
     p.add_argument("--min-len", type=positive_int, default=MIN_LEN, metavar="N", help=f"引语归一后最少字数（默认 {MIN_LEN}）")
-    p.add_argument("--include-corner", action="store_true", help="另收「」内文字")
+    p.add_argument("--no-corner", dest="include_corner", action="store_false", help="不收「」内文字（默认收）")
+    # 旧开关：「」已默认收，保留为无操作，免得既有脚本报错。
+    p.add_argument("--include-corner", dest="include_corner", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--show-misattributed", action="store_true", help="逐条列出措辞属实、出处未能核实的引语")
 
 

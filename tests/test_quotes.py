@@ -477,6 +477,19 @@ def test_corner_wrapping_curly_quote_is_counted_once(tmp_path):
     assert run_quotes(kb, include_corner=True).counts.get("candidates") == 1
 
 
+def test_corner_quote_is_checked_by_default(tmp_path):
+    """模型会用「」写直接引语；默认不收时这些引语整批漏查（P3.14 §14）。默认收，`--no-corner` 才排除。"""
+    from guanlan.quotes import main
+
+    bad = Q_OK.replace("丙", "甲")
+    kb = _kb(tmp_path, {"raw/a.md": RAW_A}, {"sources/a.md": _src("raw/a.md", f"讲话说「{bad}」。")})
+    assert _kinds(run_quotes(kb)) == ["altered"]
+    assert run_quotes(kb, include_corner=False).counts.get("candidates", 0) == 0
+    assert main(["-C", str(kb), "--strict"]) == 6
+    assert main(["-C", str(kb), "--strict", "--no-corner"]) == 0
+    assert main(["-C", str(kb), "--strict", "--include-corner"]) == 6  # 旧开关保留为无操作，不报错
+
+
 def test_cite_mark_inside_later_quote_is_not_earlier_quotes_source(tmp_path):
     """前一条引语不得借后一条引语内文里的 `[[y]]:N` 作出处（那条是配对存疑，自身已被剔除）。"""
     from guanlan.quotes import run_quotes
