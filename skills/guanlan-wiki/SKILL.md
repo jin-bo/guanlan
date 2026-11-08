@@ -150,7 +150,7 @@ ingest、heal、audit、`query --backfill` 等写 `wiki/` 的工作流，收尾�
 
 - frontmatter 不是合法 YAML、`sources` 缺失或写错或丢掉旧来源名、`aliases` 与页名相撞或重复。
 - 修改 `raw/` 的任何字节。
-- heal 越界写（见 `references/heal.md`〈heal 的写入范围〉）。
+- heal 越界写（见 `references/heal.md`〈Write scope〉）。
 
 **不阻断、但要自查的警告**：
 
