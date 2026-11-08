@@ -225,11 +225,17 @@ _OCR_RE = re.compile(r"(?<![a-z])ocr|ocr(?![a-z])", re.IGNORECASE)
 
 
 class _RawStore:
-    """全部 raw 的归一正文（已剥 frontmatter）与 frontmatter 原文；遍历口径同 `health._raw_anchor_stems`。"""
+    """全部 raw 的正文（已剥 frontmatter）与 frontmatter 原文；遍历口径同 `health._raw_anchor_stems`。
+
+    遍历时只读盘、解码（读不出的照旧当场记入 `unreachable`，`--strict` 与 scan_incomplete 的口径不变）；
+    `norm()` 是大头（全库 raw 归一占 `--page` 耗时九成），推迟到 `get()` 首次取用时做并缓存。
+    """
 
     def __init__(self, root: Path) -> None:
         self.root = root
-        self.text: dict[str, str] = {}
+        # 值先是解码后的原始正文，首次 `get()` 时换成归一正文；`_normed` 记哪些已换。
+        self._text: dict[str, str] = {}
+        self._normed: set[str] = set()
         self.meta: dict[str, str] = {}
         # 真实路径 → 已入库的键：防环会跳过「指向已遍历目录的链接目录」，经另一条路径写的声明靠它找回。
         self.real: dict[str, str] = {}
@@ -278,17 +284,27 @@ class _RawStore:
                     self.unreachable.append(rel)
                     continue
                 block, body = split_frontmatter(content)
-                self.text[rel] = norm(body)
+                self._text[rel] = body
                 self.meta[rel] = block or ""
                 self.real.setdefault(os.path.realpath(path), rel)
 
     def get(self, rel: str) -> str | None:
-        return self.text.get(rel)
+        """归一后的正文；不在库里 → None。"""
+        if rel not in self._text:
+            return None
+        if rel not in self._normed:
+            self._text[rel] = norm(self._text[rel])
+            self._normed.add(rel)
+        return self._text[rel]
+
+    def keys(self) -> list[str]:
+        """全部已读入 raw 的键，遍历序。"""
+        return list(self._text)
 
     def key(self, claimed: str) -> str | None:
         """页内写的 raw 路径 → 已读入 raw 的键（normpath + NFC，与入库口径一致）；读不到 → None。"""
         k = unicodedata.normalize("NFC", posixpath.normpath(claimed))
-        if k in self.text:
+        if k in self._text:
             return k
         # 防环按真实路径只走一遍：`raw/alias -> sub` 先被遍历时，`raw/sub/x.md` 不在键里，但它是同一份原文。
         if not k.startswith("raw/"):
@@ -517,7 +533,7 @@ def run_quotes(
                                                  strict_reason=_REASONS["unchecked"], **base))
                     continue
                 # 范围内的 raw 刚核过、必不命中，不再重扫。
-                hit = next((r for r, z in raws.text.items() if r not in checked and ordered_hit(segs, z)), None)
+                hit = next((r for r in raws.keys() if r not in checked and ordered_hit(segs, raws.get(r) or "")), None)
                 if hit is not None:
                     counts["misattributed"] += 1
                     if show_misattributed:
