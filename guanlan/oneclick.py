@@ -1104,6 +1104,9 @@ def _import_main(
     if modes != 1:
         _stderr("用法：guanlan import <file> | --resume | --status | --cancel（四选一）。")
         return EXIT_USAGE
+    if dry_run and not src:  # --dry-run 只对 `import <file>` 有意义：别让 `--resume --dry-run` 悄悄真跑入库 / 真放弃
+        _stderr("--dry-run 只能与 `import <file>` 同用（--resume / --status / --cancel 不支持预演）。")
+        return EXIT_USAGE
     try:
         root = require_kb_root(root_dir, writable=not status)
     except GuanlanError as exc:

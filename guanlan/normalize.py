@@ -55,7 +55,16 @@ _WATERMARK_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+\S")
 _LIST_RE = re.compile(r"^\s*(?:[-*+]|\d{1,3}[.)])\s+")
-_FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
+_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+
+
+def fence_closes(open_mark: str, line: str) -> bool:
+    """CommonMark 围栏闭合：同种字符、长度不短于开栏、其后只有空白。四个反引号的块里出现 ``` 不算闭合。"""
+    m = _FENCE_RE.match(line)
+    if not m:
+        return False
+    mark, rest = m.group(1), m.group(2)
+    return mark[0] == open_mark[0] and len(mark) >= len(open_mark) and not rest.strip()
 _IMAGE_LINE_RE = re.compile(r"^\s*!\[")
 _COMMENT_RE = re.compile(r"^\s*<!--")
 _HTML_TAG_RE = re.compile(r"^\s*</?[A-Za-z][^>]*>\s*$")
@@ -175,7 +184,7 @@ def _classify(lines: list[str]) -> list[str]:
         m = _FENCE_RE.match(line)
         if in_fence:
             kinds.append("fence")
-            if m and m.group(1) == fence_mark:
+            if fence_closes(fence_mark, line):
                 in_fence = False
             continue
         if m:
@@ -303,6 +312,8 @@ def _detect_noise(
 
     n_all = len(content_pages)
     parity_pages = {par: [p for p in content_pages if p.number % 2 == par] for par in (0, 1)}
+    # 页号 → 在同奇偶序列里的位置（章节页眉判「连续」用）：每个候选键都要查，只建一次。
+    parity_pos = {par: {p.number: n for n, p in enumerate(seq)} for par, seq in parity_pages.items()}
 
     def qualifies(count: int, n: int) -> bool:
         return count >= HEADER_MIN_PAGES and n > 0 and count >= HEADER_MIN_RATIO * n
@@ -320,8 +331,7 @@ def _detect_noise(
                     # 章节页眉：页首、同奇偶序列里连续 ≥ CHAPTER_HEADER_RUN 次（§3.3 补充三）。
                     # 只认页首的普通文本行：标题形式的页眉须达到全书/奇偶页门槛（决策P4.30-13），
                     # 否则连续几页各自小节开头的同名小标题（「（一）适用范围」）会被误删。
-                    seq = parity_pages[par]
-                    pos_of = {p.number: n for n, p in enumerate(seq)}
+                    pos_of = parity_pos[par]
                     ordered = sorted(ph, key=lambda t: pos_of[t[0].number])
                     run: list[tuple[_Page, int]] = []
                     for item in ordered + [None]:  # type: ignore[list-item]
@@ -477,7 +487,7 @@ def _first_h1(body: str) -> str | None:
         if m_f:  # 与 _classify 同口径：只有同种围栏线（``` / ~~~）才闭合，别把代码块里的 `# 注释` 当书名
             if not in_fence:
                 in_fence, fence_mark = True, m_f.group(1)
-            elif m_f.group(1) == fence_mark:
+            elif fence_closes(fence_mark, line):
                 in_fence = False
             continue
         if not in_fence:

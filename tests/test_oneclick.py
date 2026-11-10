@@ -502,6 +502,17 @@ def test_json_mode_always_prints_one_json_document(kb: Path, capsys):
     assert out["ok"] is False and out["exit_code"] == EXIT_USAGE and "没有未完成" in out["error"]
 
 
+def test_dry_run_only_with_import_file(kb: Path):
+    """`--resume --dry-run` / `--cancel --dry-run` 不能悄悄忽略 --dry-run 去真入库 / 真放弃。"""
+
+    def boom(raw_rel: str, root: Path) -> int:  # pragma: no cover - 不应被调用
+        raise AssertionError("dry-run 不得触发 ingest")
+
+    for kw in ({"do_resume": True}, {"do_cancel": True}, {"status": True}):
+        code = oneclick.import_entrypoint(kb, src=None, dry_run=True, ingest=boom, interactive=False, **kw)
+        assert code == EXIT_USAGE
+
+
 def test_cli_graph_takes_kb_lock_like_web_graph():
     from guanlan.cli import build_parser
     from guanlan.kblock import needs_kb_lock
@@ -532,6 +543,28 @@ def test_sample_named_images_does_not_claim_shared_image_root(kb: Path, tmp_path
     task = _prepare(kb, src)
     assert task["sample"] != "images"
     assert task["precheck"]["status"] == "ok"
+
+
+def test_readonly_lock_file_still_excludes(kb: Path):
+    """锁文件对本用户只读（共享库里别人建的）：仍用只读描述符取锁、照样互斥，不静默退化成无锁。"""
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root 无视文件权限")
+    lockfile = kb / ".guanlan.lock"
+    lockfile.write_text("", encoding="utf-8")
+    lockfile.chmod(0o444)
+    try:
+        lock = acquire(kb, "cli: ingest")
+        try:
+            assert lock.held and not lock.nested
+            code = f"from guanlan.kblock import acquire, KBLockBusy\ntry:\n    acquire({str(kb)!r}, 'x')\n    print('held')\nexcept KBLockBusy:\n    print('busy')\n"
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+            assert out.stdout.strip() == "busy"
+        finally:
+            lock.release()
+    finally:
+        lockfile.chmod(0o644)
 
 
 def test_cli_write_commands_refused_while_locked(kb: Path, capsys, monkeypatch):

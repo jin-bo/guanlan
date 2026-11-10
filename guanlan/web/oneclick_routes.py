@@ -327,12 +327,10 @@ def register(
             cancel(root, task_id)
             return EXIT_OK
 
-        job = await anyio.to_thread.run_sync(
-            jobs.submit_and_wait,
-            "oneclick-cancel",
-            _wrap(_cancel),
-            abandon_on_cancel=True,
-        )
+        # 在事件循环上直接入队（不经线程池再 submit）：入队次序 = 请求次序，紧随其后的确认请求
+        # 不会抢先排进 FIFO 而把用户已点的放弃变成「状态为 done，不能放弃」。
+        job = jobs.get_job(jobs.enqueue("oneclick-cancel", _wrap(_cancel)))
+        await anyio.to_thread.run_sync(job.done_event.wait, abandon_on_cancel=True)
         if job.exit_code != EXIT_OK:
             raise HTTPException(status_code=409, detail=job.output.strip() or "放弃失败。")
         return {"cancelled": task_id}

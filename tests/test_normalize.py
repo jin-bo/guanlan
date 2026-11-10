@@ -288,3 +288,14 @@ def test_control_chars_cleaned_so_raw_admission_passes():
     check_text_admission(r.text)
     assert "第一段\n第二段。" in r.body
     assert r.meta["normalized"]["control_chars_removed"] == 3
+
+
+def test_four_backtick_fence_not_closed_by_inner_three_backticks():
+    """CommonMark：四反引号块里的 ``` 示例不闭合围栏，其后的 `# 注释` 仍在代码块里，不当标题。"""
+    from guanlan.normalize import _classify, _first_h1, fence_closes
+
+    body = "````md\n```python\n# 注释\n```\n````\n\n# 真标题\n"
+    assert _first_h1(body) == "真标题"
+    kinds = _classify(body.split("\n"))
+    assert kinds[:5] == ["fence"] * 5 and kinds[6] == "heading"
+    assert not fence_closes("```", "```python") and fence_closes("```", "````  ")

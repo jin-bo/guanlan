@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass, field
 
 from .imageio import _MD_IMAGE, _is_external_ref
-from .normalize import PAGE_ANCHOR_RE, count_chars
+from .normalize import _FENCE_RE, PAGE_ANCHOR_RE, count_chars, fence_closes  # 围栏判定与 normalize 同一口径
 from .rawio import dump_frontmatter, raw_slug
 
 __all__ = [
@@ -48,7 +48,6 @@ BASENAME_MAX_BYTES = 200  # 整个 basename（含 .md）字节上限：Linux 按
 INDEX_SUFFIX = "目录"
 
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
-_FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
 _SENTENCE_CUT_RE = re.compile(r"[。！？；!?;]+[”」』）)]*")
 
 # 切点优先级
@@ -124,7 +123,7 @@ def _units(body: str) -> list[_Unit]:
         m_f = _FENCE_RE.match(content)
         if in_fence:
             units.append(_Unit(line, count_chars(content)))
-            if m_f and m_f.group(1) == fence_mark:
+            if fence_closes(fence_mark, content):
                 in_fence = False
             prev_blank = False
             continue
@@ -385,7 +384,7 @@ def split_document(body: str, *, sample: str) -> list[Part]:
             continue
         m_f = _FENCE_RE.match(u.text.rstrip("\r\n"))
         if in_fence:
-            if m_f and m_f.group(1) == mark:
+            if fence_closes(mark, u.text.rstrip("\r\n")):
                 in_fence = False
         elif m_f:
             in_fence, mark = True, m_f.group(1)

@@ -189,7 +189,7 @@ class KBLock:
         fd, self._fd = self._fd, None
         if fd is None:
             return
-        if os.environ.get(TOKEN_ENV) == self.holder.get("token"):  # 本次令牌作废，还原继承来的
+        if self.holder.get("token") and os.environ.get(TOKEN_ENV) == self.holder["token"]:  # 本次令牌作废，还原继承来的
             # 只换值、不删键：多线程宿主里别的线程可能正在拷贝 os.environ，增删键会让它抛
             # 「dictionary changed size during iteration」。空串 = 没有令牌。
             os.environ[TOKEN_ENV] = self._prev_token or ""
@@ -209,7 +209,16 @@ def acquire(root: str | Path, origin: str) -> KBLock:
     """非阻塞获取库级锁；被占用 → `KBLockBusy`（带执行者信息）。祖先写运行持锁 → 嵌套放行。"""
     root = Path(root).resolve()
     path = root / LOCK_NAME
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    writable = True
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except PermissionError:
+        # 锁文件由别的用户建、本用户只读（共享库常见）：POSIX flock 对只读描述符同样互斥，照样取锁，
+        # 只是写不了执行者信息（显示不出是谁、也不放行嵌套）。Windows 的 msvcrt.locking 不保证只读可锁 → 照抛。
+        if sys.platform == "win32" or not path.is_file():
+            raise
+        fd = os.open(path, os.O_RDONLY)
+        writable = False
     try:
         if not _try_lock(fd):
             nested = _nested_holder(root)
@@ -224,13 +233,17 @@ def acquire(root: str | Path, origin: str) -> KBLock:
             "started": time.strftime("%Y-%m-%d %H:%M:%S"),
             "token": token,
         }
-        data = json.dumps(holder, ensure_ascii=False).encode("utf-8")
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.ftruncate(fd, 0)
-        os.write(fd, data)
+        if writable:
+            data = json.dumps(holder, ensure_ascii=False).encode("utf-8")
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, data)
     except BaseException:
         os.close(fd)
         raise
+    if not writable:  # 令牌没写进锁文件，放进环境也无从比对：不放行嵌套
+        holder.pop("token")
+        return KBLock(root, fd, holder)
     prev = os.environ.get(TOKEN_ENV) or None
     os.environ[TOKEN_ENV] = token  # 持锁期间派生的子进程继承它（键已存在时只换值，见 reserve_token_slot）
     return KBLock(root, fd, holder, prev_token=prev)
@@ -259,7 +272,10 @@ def run_locked(root_dir: str | Path, origin: str, fn: Callable[[], int]) -> int:
     except KBLockBusy as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
-    except (GuanlanError, OSError):
+    except GuanlanError:
+        return fn()  # 库根无效 / 不可写：交给命令自己报错
+    except OSError as exc:
+        print(f"警告：建不了库级锁（{exc}）；本次写入不与其它写者互斥。", file=sys.stderr)
         return fn()
     try:
         return fn()
