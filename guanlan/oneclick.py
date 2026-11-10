@@ -40,7 +40,7 @@ from .kblock import KBLockBusy, acquire, describe_holder, read_holder
 from .normalize import normalize
 from .pages import load_page
 from .paths import require_kb_root
-from .provenance import compute_raw_digest, parse_digest_value
+from .provenance import parse_digest_value
 from .rawio import atomic_write_text, check_text_admission, raw_slug
 from .sourcepage import locate_source_page
 from .splitdoc import index_name, render_index, render_part, split_document
@@ -419,6 +419,8 @@ def prepare(
             "请先继续（--resume）或放弃（--cancel）它。"
         )
     sample = _cap_sample(raw_slug(src.stem)) or "import"
+    if sample.lower() == "images":  # raw/images/ 是所有未拆文档共用的图片根，不能当本任务的分卷目录
+        sample = f"{sample}-doc"
     base = f"{time.strftime('%Y%m%d-%H%M%S')}-{sample}"
     task_id, n = base, 1
     while _task_file(root, task_id).exists():  # 同一秒内的第二个任务不能覆盖第一个的清单
@@ -739,19 +741,15 @@ def _wiki_state(root: Path) -> dict[str, tuple[int, int]]:
     return out
 
 
-def _digest_matches(root: Path, raw_rel: str) -> bool:
+def _digest_matches(root: Path, raw_rel: str, raw_sha: str) -> bool:
+    """source 页的 `raw_digest` 是否指向本篇的现字节。`raw_sha` 由调用方刚算过（与
+    `compute_raw_digest` 同口径：整文件 sha256 十六进制），不再整读一遍 raw 文件。"""
     rel = raw_rel.removeprefix("raw/")
     loc = locate_source_page(root, rel)
     if loc.page is None:
         return False
     meta, _ = load_page(loc.page)
-    parsed = parse_digest_value((meta or {}).get("raw_digest"))
-    if parsed is None:
-        return False
-    try:
-        return parsed == (raw_rel, compute_raw_digest(root / raw_rel))
-    except OSError:
-        return False
+    return parse_digest_value((meta or {}).get("raw_digest")) == (raw_rel, raw_sha)
 
 
 def _broken_links(root: Path) -> int | None:
@@ -818,7 +816,7 @@ def _ingest_items(
         if cur != it.get("sha256"):
             _pause(root, task, log, f"{it['raw']} 与任务记录不一致（被改动或删除），请核对后再继续")
             return EXIT_USAGE, task
-        if it.get("state") == "done" and _digest_matches(root, it["raw"]):
+        if it.get("state") == "done" and _digest_matches(root, it["raw"], cur):
             log(f"[{k}/{n}] 跳过 {it['raw']}（本任务已入库且指纹一致）")
             continue
         it["state"] = "running"

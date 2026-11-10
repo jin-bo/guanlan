@@ -36,6 +36,7 @@ __all__ = [
     "kb_write_lock",
     "run_locked",
     "needs_kb_lock",
+    "reserve_token_slot",
     "read_holder",
     "holder_alive",
     "describe_holder",
@@ -151,6 +152,11 @@ def _unlock(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def reserve_token_slot() -> None:
+    """多线程宿主（Web）启动时调用：先把令牌键放进 `os.environ`，此后取锁/释放只换值、不增删键。"""
+    os.environ.setdefault(TOKEN_ENV, "")
+
+
 def _nested_holder(root: Path) -> dict | None:
     """锁的持有者是不是本进程的祖先写运行：令牌一致、不是本进程、且还活着。"""
     token = os.environ.get(TOKEN_ENV)
@@ -184,10 +190,9 @@ class KBLock:
         if fd is None:
             return
         if os.environ.get(TOKEN_ENV) == self.holder.get("token"):  # 本次令牌作废，还原继承来的
-            if self._prev_token is None:
-                os.environ.pop(TOKEN_ENV, None)
-            else:
-                os.environ[TOKEN_ENV] = self._prev_token
+            # 只换值、不删键：多线程宿主里别的线程可能正在拷贝 os.environ，增删键会让它抛
+            # 「dictionary changed size during iteration」。空串 = 没有令牌。
+            os.environ[TOKEN_ENV] = self._prev_token or ""
         with contextlib.suppress(OSError):  # 清掉执行者信息：锁空闲时不再显示「谁在写」
             os.ftruncate(fd, 0)
         _unlock(fd)
@@ -226,8 +231,8 @@ def acquire(root: str | Path, origin: str) -> KBLock:
     except BaseException:
         os.close(fd)
         raise
-    prev = os.environ.get(TOKEN_ENV)
-    os.environ[TOKEN_ENV] = token  # 持锁期间派生的子进程继承它
+    prev = os.environ.get(TOKEN_ENV) or None
+    os.environ[TOKEN_ENV] = token  # 持锁期间派生的子进程继承它（键已存在时只换值，见 reserve_token_slot）
     return KBLock(root, fd, holder, prev_token=prev)
 
 

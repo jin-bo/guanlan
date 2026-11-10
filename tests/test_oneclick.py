@@ -480,6 +480,30 @@ def test_cli_graph_takes_kb_lock_like_web_graph():
     assert not needs_kb_lock(build_parser().parse_args(["check"]))
 
 
+def test_release_keeps_token_key_in_environ(kb: Path):
+    """释放只换值不删键：多线程宿主里别的线程拷贝 os.environ 时不会撞上键数变化。"""
+    import os
+
+    from guanlan.kblock import TOKEN_ENV, reserve_token_slot
+
+    reserve_token_slot()
+    keys = len(os.environ)
+    lock = acquire(kb, "web")
+    assert os.environ[TOKEN_ENV] == lock.holder["token"] and len(os.environ) == keys
+    lock.release()
+    assert TOKEN_ENV in os.environ and os.environ[TOKEN_ENV] != lock.holder["token"] and len(os.environ) == keys
+
+
+def test_sample_named_images_does_not_claim_shared_image_root(kb: Path, tmp_path: Path):
+    (kb / "raw" / "images" / "别的文档").mkdir(parents=True)
+    (kb / "raw" / "images" / "别的文档" / "a.png").write_bytes(b"\x89PNG")
+    src = tmp_path / "images.md"
+    src.write_text("# 图集\n\n正文。\n", encoding="utf-8")
+    task = _prepare(kb, src)
+    assert task["sample"] != "images"
+    assert task["precheck"]["status"] == "ok"
+
+
 def test_cli_write_commands_refused_while_locked(kb: Path, capsys, monkeypatch):
     called = []
     monkeypatch.setattr("guanlan.cli.run_ingest", lambda *a, **k: called.append(1) or 0)

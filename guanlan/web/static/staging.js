@@ -625,6 +625,14 @@ function renderOneclickPanel(panel, data) {
     r.textContent = t("oc.reason", task.reason);
     card.appendChild(r);
   }
+  if (task.last_error && !task.job_id) {
+    // 上一次确认/继续作业失败（库被占用、复检被拒等）：任务退回原状态，原因只在作业输出里，在此透出。
+    const e = document.createElement("p");
+    e.className = "report-bad";
+    e.style.whiteSpace = "pre-wrap";
+    e.textContent = task.last_error;
+    card.appendChild(e);
+  }
   card.append(actions, status);
 
   // 详情（可展开，只供查看）：整理摘要、图片警告、逐份文件、进展日志尾。

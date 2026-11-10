@@ -58,6 +58,7 @@ class KBWriteLock:
         self._lock = threading.Lock()
         self._root = Path(root)
         self._kb: kblock.KBLock | None = None
+        kblock.reserve_token_slot()  # 构造在启动线程：之后各写线程取锁只换令牌值，不增删 os.environ 的键
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         if not self._lock.acquire(blocking, timeout):

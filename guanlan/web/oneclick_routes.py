@@ -123,6 +123,10 @@ def register(
     """把一键入库端点挂到 `app`（reader 下 `writer_only` 不注册写端点；只读端点同样只给可写宿主）。"""
     # 任务 → (本进程在跑的作业号, 该作业的暂停标志)。标志随作业登记、随作业清理，不另开一张只增不减的表。
     running_jobs: dict[str, tuple[str, threading.Event]] = {}
+    # 任务 → 本进程最近一次失败作业的输出（确认/继续作业没跑起来或被拒：库被 CLI 占用、冲突复检等）。
+    # 这些失败不一定写进任务日志，任务又退回「等待确认 / 已暂停」，不透出就成了「点了没反应」。
+    # 下一次确认/继续登记作业时清掉。
+    last_failure: dict[str, str] = {}
     state_lock = threading.Lock()
 
     # 启动时恢复（§6.4）：拿得到库级锁 → 原执行者已退出，preparing→failed、running→paused；拿不到 → 不改清单。
@@ -156,6 +160,9 @@ def register(
         with state_lock:
             if running_jobs.get(task_id) is entry:  # 只清这一条：期间新登记的作业不受影响
                 running_jobs.pop(task_id, None)
+                if job is not None and job.exit_code not in (None, EXIT_OK):
+                    tail = (job.output or "").strip().splitlines()[-5:]  # 逐篇 ingest 的输出可能很长，只留末尾
+                    last_failure[task_id] = "\n".join(tail) or f"退出码 {job.exit_code}"
         return None
 
     def _job_for(task_id: str) -> str | None:
@@ -165,6 +172,7 @@ def register(
     def _track(task_id: str, job_id: str, flag: threading.Event) -> None:
         with state_lock:
             running_jobs[task_id] = (job_id, flag)
+            last_failure.pop(task_id, None)
 
     def _wrap(fn):
         """作业 thunk：一键入库的用法/状态错误打印给 job.output、以 EXIT_USAGE 结束。"""
@@ -181,12 +189,15 @@ def register(
     def _view(task: dict) -> dict:
         # 暂停标志只在本进程作业还在跑时有意义：作业结束后留着的标志不能让任务显示成「正在暂停」。
         entry = _running(task["task_id"])
-        return task_view(
+        view = task_view(
             root,
             task,
             job_id=entry[0] if entry is not None else None,
             pausing=entry is not None and entry[1].is_set(),
         )
+        with state_lock:
+            view["last_error"] = last_failure.get(task["task_id"])
+        return view
 
     def _load(task_id: str) -> dict:
         try:
