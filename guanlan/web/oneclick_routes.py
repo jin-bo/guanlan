@@ -113,8 +113,8 @@ def register(
     reader: bool = False,
 ) -> None:
     """把一键入库端点挂到 `app`（reader 下 `writer_only` 不注册写端点；只读端点同样只给可写宿主）。"""
-    pause_flags: dict[str, threading.Event] = {}
-    running_jobs: dict[str, str] = {}
+    # 任务 → (本进程在跑的作业号, 该作业的暂停标志)。标志随作业登记、随作业清理，不另开一张只增不减的表。
+    running_jobs: dict[str, tuple[str, threading.Event]] = {}
     state_lock = threading.Lock()
 
     # 启动时恢复（§6.4）：拿得到库级锁 → 原执行者已退出，preparing→failed、running→paused；拿不到 → 不改清单。
@@ -136,21 +136,27 @@ def register(
     def _ingest(raw_rel: str, kb: Path) -> int:
         return run_ingest(raw_rel, root=kb, model=model, runner=runner)
 
-    def _flag(task_id: str) -> threading.Event:
+    def _running(task_id: str) -> tuple[str, threading.Event] | None:
+        """本进程为该任务在跑（未结束）的作业及其暂停标志；作业已结束 → 清掉登记、返回 None。"""
         with state_lock:
-            return pause_flags.setdefault(task_id, threading.Event())
+            entry = running_jobs.get(task_id)
+        if entry is None:
+            return None
+        job = jobs.get_job(entry[0])
+        if job is not None and job.state != "done":
+            return entry
+        with state_lock:
+            if running_jobs.get(task_id) is entry:  # 只清这一条：期间新登记的作业不受影响
+                running_jobs.pop(task_id, None)
+        return None
 
     def _job_for(task_id: str) -> str | None:
-        with state_lock:
-            job_id = running_jobs.get(task_id)
-        if job_id is None:
-            return None
-        job = jobs.get_job(job_id)
-        return job_id if job is not None and job.state != "done" else None
+        entry = _running(task_id)
+        return entry[0] if entry is not None else None
 
-    def _track(task_id: str, job_id: str) -> None:
+    def _track(task_id: str, job_id: str, flag: threading.Event) -> None:
         with state_lock:
-            running_jobs[task_id] = job_id
+            running_jobs[task_id] = (job_id, flag)
 
     def _wrap(fn):
         """作业 thunk：一键入库的用法/状态错误打印给 job.output、以 EXIT_USAGE 结束。"""
@@ -166,8 +172,13 @@ def register(
 
     def _view(task: dict) -> dict:
         # 暂停标志只在本进程作业还在跑时有意义：作业结束后留着的标志不能让任务显示成「正在暂停」。
-        job_id = _job_for(task["task_id"])
-        return task_view(root, task, job_id=job_id, pausing=job_id is not None and _flag(task["task_id"]).is_set())
+        entry = _running(task["task_id"])
+        return task_view(
+            root,
+            task,
+            job_id=entry[0] if entry is not None else None,
+            pausing=entry is not None and entry[1].is_set(),
+        )
 
     def _load(task_id: str) -> dict:
         try:
@@ -218,8 +229,7 @@ def register(
             raise HTTPException(status_code=409, detail=f"任务当前状态为 {task.get('state')}，不在等待确认。")
         if _job_for(task_id) is not None:  # 确认作业已在队列里（排在别的写作业后，状态还没翻）
             raise HTTPException(status_code=409, detail="该任务已确认，正在排队执行。")
-        flag = _flag(task_id)
-        flag.clear()
+        flag = threading.Event()  # 每个作业一枚新标志
         overwrite = body.overwrite
 
         def _run(emit) -> int:
@@ -229,7 +239,7 @@ def register(
             return code
 
         job_id = jobs.enqueue("oneclick", _wrap(_run))
-        _track(task_id, job_id)
+        _track(task_id, job_id, flag)
         return {"job_id": job_id}
 
     @writer_only(app.post("/api/oneclick/{task_id}/resume"))
@@ -240,8 +250,7 @@ def register(
             raise HTTPException(status_code=409, detail=f"任务当前状态为 {task.get('state')}，不能继续。")
         if _job_for(task_id) is not None:
             raise HTTPException(status_code=409, detail="该任务正在执行。")
-        flag = _flag(task_id)
-        flag.clear()
+        flag = threading.Event()  # 每个作业一枚新标志
 
         def _run(emit) -> int:
             _recover_in_job()  # 原执行者已退出的 running → paused
@@ -251,14 +260,15 @@ def register(
             return code
 
         job_id = jobs.enqueue("oneclick", _wrap(_run))
-        _track(task_id, job_id)
+        _track(task_id, job_id, flag)
         return {"job_id": job_id}
 
     @writer_only(app.post("/api/oneclick/{task_id}/pause"))
     async def oneclick_pause(task_id: str) -> dict:
-        if _job_for(task_id) is None:
+        entry = _running(task_id)
+        if entry is None:
             raise HTTPException(status_code=409, detail="该任务当前没有在执行。")
-        _flag(task_id).set()
+        entry[1].set()
         return {"pausing": True}
 
     @writer_only(app.post("/api/oneclick/{task_id}/cancel"))

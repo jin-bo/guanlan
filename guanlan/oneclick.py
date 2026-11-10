@@ -631,10 +631,14 @@ def resume(
     if task.get("state") != "paused":
         raise OneClickError(f"任务 {task_id} 当前状态为 {task.get('state')}，不能继续。")
     if overwrite and not task.get("overwrite"):
-        task["overwrite"] = True
-        log("已确认覆盖 raw/ 中本任务的旧文件")
+        if precheck(root, task)["status"] == "overwritable":  # 只在此刻确实「可覆盖」时生效，不留宽于需要的授权
+            task["overwrite"] = True
+            log("已确认覆盖 raw/ 中本任务的旧文件")
+        else:
+            log("当前没有需要覆盖的旧文件，忽略 --overwrite")
     task["state"] = "running"
     task.pop("reason", None)
+    task.pop("paused_by_user", None)  # 继续后不再是「用户暂停」状态，别让旧标志留在清单里
     save_task(root, task)
     log("▶ 继续入库")
     return _execute(root, task, log=log, ingest=ingest, should_pause=should_pause)
@@ -776,9 +780,8 @@ def _execute(root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_p
     done_now: list[float] = []
     for k, it in enumerate(items, 1):
         if should_pause():
+            task["paused_by_user"] = True  # 先置位，`_pause` 一次落盘
             _pause(root, task, log, f"已按要求暂停（{k - 1}/{n} 篇已处理）")
-            task["paused_by_user"] = True
-            save_task(root, task)
             return EXIT_OK, task
         raw_path = root / it["raw"]
         cur = _sha_file(raw_path)
@@ -1030,18 +1033,22 @@ def import_entrypoint(
 
 def _cli_status(root: Path, json_output: bool) -> int:
     busy = False
-    try:
-        lock = acquire(root, "cli: import --status")
-    except KBLockBusy:
-        lock, busy = None, True
-    except OSError:  # 只读库等：建不出锁文件，不是「有人在写」
-        lock = None
-    try:
-        _recover_if_owner(root, lock)
-        task = active_task(root)
-    finally:
-        if lock is not None:
-            lock.release()
+    task = active_task(root)
+    # 只有可能需要恢复（preparing / running）时才去取写锁：库级锁不排队，--status 这种只读查询白占一下锁，
+    # 恰好此刻起步的 Web 作业 / CLI 写命令就会被误报「库被占用」。
+    if task is not None and task.get("state") in ("preparing", "running"):
+        try:
+            lock = acquire(root, "cli: import --status")
+        except KBLockBusy:
+            lock, busy = None, True
+        except OSError:  # 只读库等：建不出锁文件，不是「有人在写」
+            lock = None
+        try:
+            _recover_if_owner(root, lock)
+            task = active_task(root)
+        finally:
+            if lock is not None:
+                lock.release()
     if busy:
         _stderr(f"库正在被写（{describe_holder(read_holder(root))}）；以下为清单原样，未做恢复。")
     if task is None:
@@ -1154,20 +1161,26 @@ def _cli_import(
     _stderr("\n".join(summary_lines(task, detail=False)))
     pc = task["precheck"]
     if pc["status"] == "conflict":
-        _cancel_locked(root, task["task_id"])
+        task = _cancel_locked(root, task["task_id"])
         _stderr("存在不可覆盖的冲突，任务已放弃。")
+        if json_output:  # --json 的 stdout 契约：任何结局都给一份 JSON 回执，不留空 stdout
+            _receipt(task, True)
         return EXIT_USAGE
     if pc["status"] == "overwritable" and not overwrite:
-        _cancel_locked(root, task["task_id"])
+        task = _cancel_locked(root, task["task_id"])
         _stderr("raw/ 中已有本次的目标文件；如确认覆盖，请加 --overwrite 重新导入。任务已放弃。")
+        if json_output:
+            _receipt(task, True)
         return EXIT_USAGE
     try:
         start = yes or _ask_start()
     except KeyboardInterrupt:  # 在确认提示处 Ctrl+C = 回答「否」：不留一个挡住下次导入的等待确认任务
         start = False
     if not start:
-        _cancel_locked(root, task["task_id"])
+        task = _cancel_locked(root, task["task_id"])
         _stderr("已放弃；parsed/ 中的产物保留。")
+        if json_output:
+            _receipt(task, True)
         return EXIT_OK
     with acquire(root, "cli: import"):
         code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)

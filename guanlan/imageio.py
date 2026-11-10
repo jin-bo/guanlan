@@ -15,6 +15,10 @@ re-localize（parsed 内）」四处共用**同一套**图片引用准入安全�
   原样保留、不视为错误。额外记每图 realpath + SHA256 指纹供写锁内 TOCTOU 复检（决策P4.6.1-16）。
 - **`relocalize`（磁盘 copy + 全局 GC，拆分/合并用，决策P4.6.1-5/6）**：对**磁盘上既有** parsed md +
   图文件做 copy 到「该文件名下 image 目录」+ 改名编号 + 重写引用，原图仅在**全局零引用**时回收。
+
+P4.30（决策P4.30-2）：Web 解析 / 晋级 / relocalize 端点随一键入库下线；现存调用方是 CLI `convert`
+（`collect_and_rewrite`）与一键入库（`collect_and_rewrite` + `collect_for_promotion(strict=False)` +
+`commit_md_with_images`）。上文对已下线端点的描述只作历史出处保留。
 """
 
 from __future__ import annotations
@@ -205,7 +209,7 @@ def collect_for_promotion(
             return m.group(0)
         if resolved is None:  # 相对但未准入（越界/symlink/非白名单/悬空）→ 硬错
             raise ValueError(
-                f"图片引用无法解析或越界：{url}（请先在暂存区「重整」修复断链后再晋级）。"
+                f"图片引用无法解析或越界：{url}（请先修复断链）。"
             )
         key = str(resolved)
         img = collected.get(key)
@@ -298,8 +302,8 @@ def commit_md_with_images(
 ) -> int:
     """落「图 + md」原子提交归口（决策P5.2.1-9 落盘顺序）：图先 staging-swap → md 末步提交 → 失败回滚。
 
-    供 `commit_promotion` / `parse_upload` / `relocalize_commit` **三处共用**（消安全关键落盘序列漂移，
-    决策P4.6.1-4 altitude）：
+    安全关键落盘序列的唯一归口（决策P4.6.1-4 altitude；P4.6.1 的晋级/解析/重整三处调用方已随 P4.30
+    下线，现由一键入库 `oneclick._land` 使用）：
 
     - **须动图目录**（`need_swap`）= `images` 非空 **或** `overwrite` 且旧图目录已存在——后者是**无图
       覆盖**场景：新 md 不再引用本地图，旧 `<base>/images/<slug>/` 必须一并清掉，否则旧图仍会被

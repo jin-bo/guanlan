@@ -223,6 +223,18 @@ def test_resume_with_overwrite_unblocks_overwritable_pause(kb: Path, book: Path)
     assert code == EXIT_OK and t["state"] == "done"
 
 
+def test_resume_overwrite_ignored_when_nothing_overwritable(kb: Path, book: Path):
+    from guanlan.oneclick import resume
+
+    task = _prepare(kb, book)
+    task.update(state="paused", overwrite=False)
+    task["stages"]["confirm"] = "done"
+    oneclick.save_task(kb, task)
+    with acquire(kb, "test"):
+        code, t = resume(kb, task["task_id"], ingest=FakeIngest(), overwrite=True)
+    assert code == EXIT_OK and t["overwrite"] is False
+
+
 def test_changed_part_count_is_conflict(kb: Path, book: Path, tmp_path: Path):
     task = _prepare(kb, book)
     _confirm(kb, task, FakeIngest())
