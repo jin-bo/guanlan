@@ -896,7 +896,7 @@ wheels = [
 
 [[package]]
 name = "lark-oapi"
-version = "1.7.2"
+version = "1.7.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -905,9 +905,9 @@ dependencies = [
     { name = "requests-toolbelt" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/63/02/9992aa997e7085507237554ba5b49b998d77a6f8971e05ce105b04fbc324/lark_oapi-1.7.2.tar.gz", hash = "sha256:deee5ed90f6b54448e00af6749af90a1ac72f212050c24a6c619f5a12c542774", size = 2328627, upload-time = "2026-08-05T09:22:52.805Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/08/da/8dc51e0e808b7f84c4598869a057aa46f0c0f8d27872e0ff87a6512f3b93/lark_oapi-1.7.5.tar.gz", hash = "sha256:81258795e7cfc5ef797e71aff14435359a2abaf698ef0e6f9d3857fe08b719ab", size = 2351682, upload-time = "2026-10-15T08:49:18.901Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/34/151efd46acca34d086a2db86d1820ec2452a72d1a8281bb73d5991f03505/lark_oapi-1.7.2-py3-none-any.whl", hash = "sha256:d73cbcac28d8e7cd75efe64a8c350da50b1a45be046c5e5b8382701ea8bb764c", size = 7629022, upload-time = "2026-08-05T09:22:50.485Z" },
+    { url = "https://files.pythonhosted.org/packages/21/7b/54d1df1f73ac1339b7df051982d386223202add5560a97839cf6326e6adc/lark_oapi-1.7.5-py3-none-any.whl", hash = "sha256:ff70fd5cdf436e26d80bf903fdd7a80cbdbd71981b87ce4c2aa49bb95fc96020", size = 7711907, upload-time = "2026-10-15T08:49:16.653Z" },
 ]
 
 [[package]]
