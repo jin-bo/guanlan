@@ -260,13 +260,21 @@ def precheck(root: Path, task: dict) -> dict:
     whole = raw / f"{sample}.md"
     if whole.is_file():
         existing.append(_rel(root, whole))
+    def _visible_files(d: Path) -> list[str]:
+        # 隐藏文件（macOS Finder 的 `.DS_Store` 等）不是库内容、不属于任何任务：算进来会让覆盖 / 续跑永远判「冲突」。
+        return [
+            _rel(root, p)
+            for p in sorted(d.rglob("*"))
+            if p.is_file() and not any(part.startswith(".") for part in p.relative_to(d).parts)
+        ]
+
     folder = raw / sample
     if folder.is_dir():
-        existing += [_rel(root, p) for p in sorted(folder.rglob("*")) if p.is_file()]
+        existing += _visible_files(folder)
     if not split:  # 未拆分的图片落 raw/images/<sample>/，覆盖时会被整盘替换
         img = raw / "images" / sample
         if img.is_dir():
-            existing += [_rel(root, p) for p in sorted(img.rglob("*")) if p.is_file()]
+            existing += _visible_files(img)
 
     details: list[str] = []
     self_ok, self_diffs = _self_owned(root, task)
@@ -807,10 +815,6 @@ def _ingest_items(
     started = time.monotonic()
     done_now: list[float] = []
     for k, it in enumerate(items, 1):
-        if should_pause():
-            task["paused_by_user"] = True  # 先置位，`_pause` 一次落盘
-            _pause(root, task, log, f"已按要求暂停（{k - 1}/{n} 篇已处理）")
-            return EXIT_OK, task
         raw_path = root / it["raw"]
         cur = _sha_file(raw_path)
         if cur != it.get("sha256"):
@@ -819,6 +823,10 @@ def _ingest_items(
         if it.get("state") == "done" and _digest_matches(root, it["raw"], cur):
             log(f"[{k}/{n}] 跳过 {it['raw']}（本任务已入库且指纹一致）")
             continue
+        if should_pause():  # 放在跳过判定之后：剩下的都已入库时，暂停请求不必把任务停在「已暂停」
+            task["paused_by_user"] = True  # 先置位，`_pause` 一次落盘
+            _pause(root, task, log, f"已按要求暂停（{k - 1}/{n} 篇已处理）")
+            return EXIT_OK, task
         it["state"] = "running"
         it["started"] = _now()
         it.pop("exit_code", None)
@@ -924,7 +932,7 @@ class _PauseFlag:
     """CLI Ctrl+C：第一次 = 本篇入完后暂停；第二次 = 立即中止（抛 KeyboardInterrupt）。
 
     ingest 子进程在新会话里（`start_new_session`），关终端的 SIGHUP、外部 SIGTERM 都到不了它；
-    这两个信号在父进程里一律按「立即中止」处理，`subprocess.run` 随之杀掉子进程——否则父进程一死，
+    这两个信号在父进程里一律按「立即中止」处理，`runtime._run_in_new_session` 随之整组杀掉子进程——否则父进程一死，
     agentao 会在没有门禁收尾、库级锁已释放的情况下继续写 wiki/。
     """
 
@@ -1024,22 +1032,28 @@ def import_entrypoint(
 ) -> int:
     """`guanlan import` 的单一落地。`ingest` / `interactive` 供测试注入。"""
     _JSON_OUT.update(emitted=False, last_error=None)
-    code = _import_main(
-        root_dir,
-        src=src,
-        dry_run=dry_run,
-        yes=yes,
-        overwrite=overwrite,
-        do_resume=do_resume,
-        status=status,
-        do_cancel=do_cancel,
-        json_output=json_output,
-        model=model,
-        thinking=thinking,
-        backend=backend,
-        ingest=ingest,
-        interactive=interactive,
-    )
+    try:
+        code = _import_main(
+            root_dir,
+            src=src,
+            dry_run=dry_run,
+            yes=yes,
+            overwrite=overwrite,
+            do_resume=do_resume,
+            status=status,
+            do_cancel=do_cancel,
+            json_output=json_output,
+            model=model,
+            thinking=thinking,
+            backend=backend,
+            ingest=ingest,
+            interactive=interactive,
+        )
+    except Exception as exc:  # 意外异常（任务已就地暂停）：--json 照样给一份 JSON，再原样上抛
+        if json_output and not _JSON_OUT["emitted"]:
+            err = f"{type(exc).__name__}: {exc}"
+            print(json.dumps({"ok": False, "exit_code": None, "error": err}, ensure_ascii=False))
+        raise
     if json_output and not _JSON_OUT["emitted"]:
         print(json.dumps({"ok": False, "exit_code": code, "error": _JSON_OUT["last_error"]}, ensure_ascii=False))
     return code

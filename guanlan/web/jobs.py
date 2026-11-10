@@ -74,9 +74,11 @@ class KBWriteLock:
 
     def release(self) -> None:
         kb, self._kb = self._kb, None
-        if kb is not None:
-            kb.release()
-        self._lock.release()
+        try:
+            if kb is not None:
+                kb.release()
+        finally:  # 库级锁释放出错（如 os.close 的 EIO）也必须还进程内锁，否则此后所有写永久卡死
+            self._lock.release()
 
     def locked(self) -> bool:
         return self._lock.locked()

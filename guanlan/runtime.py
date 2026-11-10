@@ -284,7 +284,7 @@ def _subprocess_runner(
 ) -> AgentRunResult:
     # `new_session=True`（P4.30 `guanlan import`）：子进程放进新会话，终端 Ctrl+C 只送到观澜自己——
     # 第一次 Ctrl+C 表示「本篇入完后暂停」，不能连带打断正在跑的 agentao；第二次 Ctrl+C 在父进程抛
-    # KeyboardInterrupt，`subprocess.run` 照常 kill 子进程。默认 False，其余命令行为不变。
+    # KeyboardInterrupt，`_run_in_new_session` 整组 kill 子进程。默认 False，其余命令行为不变。
     # 安装态下用户库的发现路径里没有 guanlan-wiki skill，首次需要时幂等装到全局
     # （best-effort；放在默认 runner 而非 run_agent_task，注入 runner 的测试不碰全局目录）。
     from .skill import SKILL_NAME, ensure_skill_available

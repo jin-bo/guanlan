@@ -202,6 +202,25 @@ def test_same_set_owned_by_old_task_is_overwritable(kb: Path, book: Path):
     assert code == EXIT_OK and task2["state"] == "done"
 
 
+def test_hidden_file_in_part_folder_does_not_block_overwrite(kb: Path, book: Path):
+    """Finder 的 `.DS_Store` 不是库内容：不能把「可覆盖」变成「冲突」。"""
+    task = _prepare(kb, book)
+    _confirm(kb, task, FakeIngest())
+    (kb / "raw" / "示例书" / ".DS_Store").write_bytes(b"\0")
+    task2 = _prepare(kb, book)
+    assert task2["precheck"]["status"] == "overwritable"
+
+
+def test_visible_unowned_file_in_part_folder_still_conflicts(kb: Path, book: Path):
+    """过滤隐藏文件后，可见的非任务文件照样报冲突（防过滤吞掉该报的）。"""
+    task = _prepare(kb, book)
+    _confirm(kb, task, FakeIngest())
+    (kb / "raw" / "示例书" / "手工笔记.txt").write_text("x\n", encoding="utf-8")
+    task2 = _prepare(kb, book)
+    assert task2["precheck"]["status"] == "conflict"
+    assert any("手工笔记.txt" in d for d in task2["precheck"]["details"])
+
+
 def test_resume_with_overwrite_unblocks_overwritable_pause(kb: Path, book: Path):
     """暂停后复检发现可覆盖的旧文件：不带 overwrite 继续仍停下，带上才继续（「冲突」不受影响）。"""
     from guanlan.oneclick import resume
