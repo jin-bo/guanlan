@@ -62,6 +62,7 @@ _HTML_TAG_RE = re.compile(r"^\s*</?[A-Za-z][^>]*>\s*$")
 
 # 罗马页码只认 i/v/x 组成、≤ xxxix 的形态（前言页码的实际范围）：c/d/l/m 会把试卷的选项行「C」「D」、
 # 单词「Mix」误当页码；单个大写字母（I/V/X）同样常是选项或编号，只认小写的单字母。
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _ROMAN_RE = re.compile(r"^(?:x{0,3})(?:ix|iv|v?i{0,3})$", re.IGNORECASE)
 _PAGE_NUMBER_FORMS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^[-–—]?\s*(\d{1,4})\s*[-–—]?$"),  # 15 / - 15 - / —15—
@@ -87,7 +88,7 @@ _WS_RE = re.compile(r"\s+")
 class Op:
     """一条整理操作（进作业输出 / 任务日志，供事后核对）。"""
 
-    kind: str  # page_number | header | watermark | watermark_suspect | heading_kept | join
+    kind: str  # page_number | header | watermark | watermark_suspect | heading_kept | join | control
     page: int | None
     text: str
     rule: str = ""
@@ -101,6 +102,7 @@ class Op:
             "watermark_suspect": "疑似水印（保留）",
             "heading_kept": "保留首个同名标题",
             "join": "跨页接句",
+            "control": "清除控制字符",
         }.get(self.kind, self.kind)
         rule = f"［{self.rule}］" if self.rule else ""
         return f"{label} {where}{rule}：{self.text}"
@@ -506,12 +508,17 @@ def normalize(
 ) -> NormalizeResult:
     """规范化整理（§3）。顺序固定：分页 → 去噪 → 跨页接句 → 统计正文、写元数据。"""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # 转换器常带出换页符 \x0c 等 C0 控制字符：raw/ 的文本闸（rawio.check_text_admission）会拒收整本。
+    # 换页符换成换行（它本来就是分隔），其余清掉；记一条操作供核对。
+    text, n_ctrl = _CONTROL_RE.subn(lambda m: "\n" if m.group() == "\x0c" else "", text)
     old_meta, body = _split_meta(text)
     lines = body.split("\n")
     kinds = _classify(lines)
     pages, total = _paginate(lines, kinds)
 
     ops: list[Op] = []
+    if n_ctrl:
+        ops.append(Op("control", None, f"{n_ctrl} 个", "C0 控制字符（换页符改为换行）"))
     if pages:
         delete, notes = _detect_noise(lines, kinds, pages, total or 0)
         ops.extend(delete[i] for i in sorted(delete))
@@ -529,6 +536,8 @@ def normalize(
         "watermarks_removed": sum(1 for o in ops if o.kind == "watermark"),
         "sentences_joined": sum(1 for o in ops if o.kind == "join"),
     }
+    if n_ctrl:
+        summary["control_chars_removed"] = n_ctrl
     meta: dict = {"title": title}
     if origin:
         meta["origin"] = origin

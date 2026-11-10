@@ -41,7 +41,7 @@ from .normalize import normalize
 from .pages import load_page
 from .paths import require_kb_root
 from .provenance import compute_raw_digest, parse_digest_value
-from .rawio import atomic_write_text, raw_slug
+from .rawio import atomic_write_text, check_text_admission, raw_slug
 from .sourcepage import locate_source_page
 from .splitdoc import index_name, render_index, render_part, split_document
 
@@ -275,7 +275,9 @@ def precheck(root: Path, task: dict) -> dict:
     # slug 冲突（沿 ingest._reject_source_slug_collision）：在预检阶段就查，不留到 ⑥ 才炸。
     target_slugs = {raw_slug(Path(t).stem): t for t in targets}
     if raw.is_dir():
-        for p in raw.rglob("*.md"):
+        for p in raw.rglob("*"):  # 后缀不分大小写：与 ingest 的 slug 冲突检查同口径（`X.MD` 同样建 source 页）
+            if p.suffix.lower() != ".md":
+                continue
             rel = _rel(root, p)
             if rel in targets or not p.is_file():
                 continue
@@ -364,6 +366,10 @@ def _check_images(root: Path, items: list[dict], split: bool, sample: str) -> li
     for it in items:
         md = ws / it["parsed"]
         text = md.read_text(encoding="utf-8")
+        try:  # 与投喂 / convert 同一道文本闸（空 / 超限 / NUL / 控制字符）：准备阶段就挡下，不让它进 raw/
+            check_text_admission(text)
+        except ValueError as exc:
+            raise OneClickError(f"{it['parsed']}：{exc}") from None
         try:
             col = collect_for_promotion(text, source_md=md, root=parsed, stem=Path(it["raw"]).stem, strict=False)
         except ConvertError as exc:  # 单份图片超容量：准备阶段就挡下，别留到 ⑤ 才炸
@@ -766,6 +772,9 @@ def _fmt_duration(seconds: float) -> str:
 def _execute(root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_pause: Callable[[], bool]) -> tuple[int, dict]:
     try:
         code = _land(root, task, log)
+    except KeyboardInterrupt:  # 第二次 Ctrl+C / SIGTERM：同样不留 running（`writing` 项续跑时由 ⑤ 自行补记或重写）
+        _pause(root, task, log, "落 raw/ 时被中止，已暂停；继续会从未写完的那一份重试")
+        raise
     except Exception as exc:  # 与 ⑥ 同口径：不留 running（否则放弃被拒、只能等下次取锁恢复）
         _pause(root, task, log, f"落 raw/ 异常（{type(exc).__name__}: {exc}），已暂停；处理后继续会从未写完的那一份重试")
         raise
@@ -1128,8 +1137,13 @@ def _cli_cancel(root: Path, json_output: bool) -> int:
 
 
 def _cancel_locked(root: Path, task_id: str) -> dict:
-    with acquire(root, "cli: import --cancel"):
-        return cancel(root, task_id)
+    """放弃本次刚准备好的任务。锁恰好被别的写者拿着 → 不抛：任务留在等待确认，提示稍后 --cancel。"""
+    try:
+        with acquire(root, "cli: import --cancel"):
+            return cancel(root, task_id)
+    except KBLockBusy as exc:
+        _stderr(f"{exc}\n任务 {task_id} 仍在等待确认；等它结束后运行 `guanlan import --cancel` 放弃。")
+        return load_task(root, task_id)
 
 
 def _ask_start() -> bool:

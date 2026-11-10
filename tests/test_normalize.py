@@ -278,3 +278,13 @@ def test_option_letters_and_roman_like_words_not_page_numbers():
         assert _page_number_value(kept) is None, kept
     for form, value in (("i", 1), ("iv", 4), ("xii", 12), ("XII", 12), ("IV", 4), ("xxxix", 39), ("ix", 9)):
         assert _page_number_value(form) == value, form
+
+
+def test_control_chars_cleaned_so_raw_admission_passes():
+    from guanlan.rawio import check_text_admission
+
+    text = "# 读本\n\n第一段\x0c第二段\x00。\x07\n"
+    r = normalize(text, title_hint="t")
+    check_text_admission(r.text)
+    assert "第一段\n第二段。" in r.body
+    assert r.meta["normalized"]["control_chars_removed"] == 3
