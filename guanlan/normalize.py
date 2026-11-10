@@ -60,7 +60,9 @@ _IMAGE_LINE_RE = re.compile(r"^\s*!\[")
 _COMMENT_RE = re.compile(r"^\s*<!--")
 _HTML_TAG_RE = re.compile(r"^\s*</?[A-Za-z][^>]*>\s*$")
 
-_ROMAN_RE = re.compile(r"^(?=[ivxlcdm]+$)m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$", re.IGNORECASE)
+# 罗马页码只认 i/v/x 组成、≤ xxxix 的形态（前言页码的实际范围）：c/d/l/m 会把试卷的选项行「C」「D」、
+# 单词「Mix」误当页码；单个大写字母（I/V/X）同样常是选项或编号，只认小写的单字母。
+_ROMAN_RE = re.compile(r"^(?:x{0,3})(?:ix|iv|v?i{0,3})$", re.IGNORECASE)
 _PAGE_NUMBER_FORMS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^[-–—]?\s*(\d{1,4})\s*[-–—]?$"),  # 15 / - 15 - / —15—
     re.compile(r"^第\s*(\d{1,4})\s*页$"),  # 第 15 页
@@ -145,7 +147,7 @@ def _page_number_value(s: str) -> int | None:
         m = pat.match(t)
         if m:
             return int(m.group(1))
-    if _ROMAN_RE.match(t) and len(t) <= 7:
+    if t and _ROMAN_RE.match(t) and (len(t) > 1 or t.islower()):
         return 0  # 罗马数字：值不参与上限判断
     return None
 
@@ -432,7 +434,13 @@ def _join_sentences(lines: list[str]) -> tuple[list[str], list[Op]]:
                 lines[j] = kept
             else:
                 remove.add(j)
-        kinds = _classify(lines)
+        # 只有 j / k 两行变了：就地重分类，不必每个锚点都重扫全文（数百页的书是 O(页数×行数)）。
+        # 两行都在围栏外；改完后若意外成了围栏线，围栏状态会波及后文，才退回全量重分类。
+        local = [_classify([lines[i]])[0] for i in (j, k)]
+        if "fence" in local:
+            kinds = _classify(lines)
+        else:
+            kinds[j], kinds[k] = local
     if remove:
         lines = _apply_deletions(lines, remove)
     return lines, ops

@@ -545,7 +545,7 @@ function renderOneclickPanel(panel, data) {
   actions.className = "oc-actions";
   const pc = task.precheck || {};
 
-  if (task.state === "awaiting_confirm") {
+  if (task.state === "awaiting_confirm" && !task.job_id) {
     let overwrite = null;
     if (pc.status === "conflict") {
       const c = document.createElement("div");
@@ -585,6 +585,12 @@ function renderOneclickPanel(panel, data) {
       actions.appendChild(ocButton(t("oc.pause"), async () => {
         try { await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/pause`); loadOneclickPanel(); } catch (e) { fail(e); }
       }));
+    } else if (!data.holder) {
+      // 「入库中」却没有本进程作业、也没有别的写者在持锁：执行者已退出（作业异常等）。后端 resume
+      // 会先把它恢复成已暂停再继续，给出口，不让任务卡在这里只能等重启。
+      actions.appendChild(ocButton(t("oc.resume"), async () => {
+        try { await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/resume`); loadOneclickPanel(); } catch (e) { fail(e); }
+      }, { disabled: blocked }));
     }
   } else if (task.state === "paused") {
     const prog = document.createElement("p");

@@ -743,6 +743,10 @@ def _execute(root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_p
             it["state"] = "pending"
             _pause(root, task, log, f"已立即中止；{it['raw']} 的 wiki 写入可能未经门禁收尾，请先运行 `guanlan check`")
             raise
+        except Exception as exc:  # 不留 running：否则 Web 卡在「入库中」、放弃也被拒，只能等重启恢复
+            it["state"] = "failed"
+            _pause(root, task, log, f"[{k}/{n}] {it['raw']} 入库异常（{type(exc).__name__}: {exc}），已暂停；处理后继续会从这一篇重试")
+            raise
         took = time.monotonic() - t0
         after = _wiki_state(root)
         created = sum(1 for p in after if p not in before)
@@ -824,12 +828,21 @@ def summary_lines(task: dict, *, detail: bool = False) -> list[str]:
 # ── CLI：guanlan import ──────────────────────────────────────────────────────
 
 
+_ABORT_SIGNALS = tuple(getattr(signal, n) for n in ("SIGHUP", "SIGTERM") if hasattr(signal, n))
+
+
 class _PauseFlag:
-    """CLI Ctrl+C：第一次 = 本篇入完后暂停；第二次 = 立即中止（抛 KeyboardInterrupt）。"""
+    """CLI Ctrl+C：第一次 = 本篇入完后暂停；第二次 = 立即中止（抛 KeyboardInterrupt）。
+
+    ingest 子进程在新会话里（`start_new_session`），关终端的 SIGHUP、外部 SIGTERM 都到不了它；
+    这两个信号在父进程里一律按「立即中止」处理，`subprocess.run` 随之杀掉子进程——否则父进程一死，
+    agentao 会在没有门禁收尾、库级锁已释放的情况下继续写 wiki/。
+    """
 
     def __init__(self) -> None:
         self.event = threading.Event()
         self._old = None
+        self._old_abort: dict[int, object] = {}
 
     def __call__(self) -> bool:
         return self.event.is_set()
@@ -842,14 +855,23 @@ class _PauseFlag:
         signal.signal(signal.SIGINT, signal.default_int_handler)
         raise KeyboardInterrupt
 
+    @staticmethod
+    def _abort(signum, frame) -> None:  # noqa: ARG004
+        raise KeyboardInterrupt
+
     def __enter__(self) -> _PauseFlag:
         if threading.current_thread() is threading.main_thread():
             self._old = signal.signal(signal.SIGINT, self._handler)
+            for sig in _ABORT_SIGNALS:
+                self._old_abort[sig] = signal.signal(sig, self._abort)
         return self
 
     def __exit__(self, *exc: object) -> None:
         if self._old is not None:
             signal.signal(signal.SIGINT, self._old)
+        for sig, old in self._old_abort.items():
+            signal.signal(sig, old)
+        self._old_abort.clear()
 
 
 def _default_ingest(model: str | None, thinking: str | None) -> IngestFn:
@@ -923,7 +945,9 @@ def import_entrypoint(
         if do_cancel:
             return _cli_cancel(root, json_output)
         if do_resume:
-            return _cli_resume(root, json_output, run_ingest_fn)
+            return _cli_resume(
+                root, json_output, run_ingest_fn, overwrite=overwrite, yes=yes, interactive=interactive
+            )
         return _cli_import(
             root,
             Path(src),  # type: ignore[arg-type]
@@ -947,11 +971,12 @@ def import_entrypoint(
 
 
 def _cli_status(root: Path, json_output: bool) -> int:
+    busy = False
     try:
         lock = acquire(root, "cli: import --status")
     except KBLockBusy:
-        lock = None
-    except OSError:
+        lock, busy = None, True
+    except OSError:  # 只读库等：建不出锁文件，不是「有人在写」
         lock = None
     try:
         if lock is not None:
@@ -960,7 +985,7 @@ def _cli_status(root: Path, json_output: bool) -> int:
     finally:
         if lock is not None:
             lock.release()
-    if lock is None:
+    if busy:
         _stderr(f"库正在被写（{describe_holder(read_holder(root))}）；以下为清单原样，未做恢复。")
     if task is None:
         if json_output:
@@ -988,23 +1013,59 @@ def _cli_cancel(root: Path, json_output: bool) -> int:
     return EXIT_OK
 
 
+def _cancel_locked(root: Path, task_id: str) -> dict:
+    with acquire(root, "cli: import --cancel"):
+        return cancel(root, task_id)
+
+
+def _ask_start() -> bool:
+    try:
+        print("开始入库？[y/N] ", end="", file=sys.stderr, flush=True)
+        answer = input().strip().lower()
+    except EOFError:
+        answer = ""
+    return answer in ("y", "yes")
+
+
 def _run_with_pause(fn: Callable[..., tuple[int, dict]], *args, **kwargs) -> tuple[int, dict]:
     with _PauseFlag() as flag:
         return fn(*args, should_pause=flag, **kwargs)
 
 
-def _cli_resume(root: Path, json_output: bool, ingest: IngestFn) -> int:
+def _cli_resume(
+    root: Path,
+    json_output: bool,
+    ingest: IngestFn,
+    *,
+    overwrite: bool = False,
+    yes: bool = False,
+    interactive: bool = False,
+) -> int:
     with acquire(root, "cli: import --resume"):
         recover_stale(root)
         task = active_task(root)
         if task is None:
             _stderr("没有未完成的一键入库任务。")
             return EXIT_USAGE
-        if task["state"] != "paused":
+        state = task["state"]
+        if state == "paused":
+            code, task = _run_with_pause(resume, root, task["task_id"], emit=_stderr, ingest=ingest)
+            _receipt(task, json_output)
+            return code
+        if state != "awaiting_confirm":
             _stderr("\n".join(summary_lines(task)))
-            _stderr("该任务不是「已暂停」状态，无法继续。")
+            _stderr("该任务不是「等待确认」或「已暂停」状态，无法继续。")
             return EXIT_USAGE
-        code, task = _run_with_pause(resume, root, task["task_id"], emit=_stderr, ingest=ingest)
+    # 等待确认：与 `import <file>` 的确认同一口径（问答期间不持锁；确认本身在锁内复检）
+    _stderr("\n".join(summary_lines(task, detail=False)))
+    if not yes and not interactive:
+        _stderr("非交互终端须加 --yes 才能确认开始入库。")
+        return EXIT_USAGE
+    if not yes and not _ask_start():
+        _stderr("未开始；任务仍在等待确认（可再 --resume，或 --cancel 放弃）。")
+        return EXIT_OK
+    with acquire(root, "cli: import --resume"):
+        code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)
     _receipt(task, json_output)
     return code
 
@@ -1036,23 +1097,17 @@ def _cli_import(
     _stderr("\n".join(summary_lines(task, detail=False)))
     pc = task["precheck"]
     if pc["status"] == "conflict":
-        cancel(root, task["task_id"])
+        _cancel_locked(root, task["task_id"])
         _stderr("存在不可覆盖的冲突，任务已放弃。")
         return EXIT_USAGE
     if pc["status"] == "overwritable" and not overwrite:
-        cancel(root, task["task_id"])
+        _cancel_locked(root, task["task_id"])
         _stderr("raw/ 中已有本次的目标文件；如确认覆盖，请加 --overwrite 重新导入。任务已放弃。")
         return EXIT_USAGE
-    if not yes:
-        try:
-            print("开始入库？[y/N] ", end="", file=sys.stderr, flush=True)
-            answer = input().strip().lower()
-        except EOFError:
-            answer = ""
-        if answer not in ("y", "yes"):
-            cancel(root, task["task_id"])
-            _stderr("已放弃；parsed/ 中的产物保留。")
-            return EXIT_OK
+    if not yes and not _ask_start():
+        _cancel_locked(root, task["task_id"])
+        _stderr("已放弃；parsed/ 中的产物保留。")
+        return EXIT_OK
     with acquire(root, "cli: import"):
         code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)
     _receipt(task, json_output)

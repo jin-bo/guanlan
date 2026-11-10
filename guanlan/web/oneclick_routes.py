@@ -205,6 +205,8 @@ def register(
         task = await anyio.to_thread.run_sync(_load, task_id)
         if task.get("state") != "awaiting_confirm":
             raise HTTPException(status_code=409, detail=f"任务当前状态为 {task.get('state')}，不在等待确认。")
+        if _job_for(task_id) is not None:  # 确认作业已在队列里（排在别的写作业后，状态还没翻）
+            raise HTTPException(status_code=409, detail="该任务已确认，正在排队执行。")
         flag = _flag(task_id)
         flag.clear()
         overwrite = body.overwrite

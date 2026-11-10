@@ -422,6 +422,33 @@ def test_cli_import_failure_exit_code_and_resume(kb: Path, book: Path, capsys):
     assert active_task(kb) is None
 
 
+def test_ingest_exception_pauses_instead_of_leaving_running(kb: Path, book: Path):
+    task = _prepare(kb, book)
+
+    def boom(raw_rel: str, root: Path) -> int:
+        raise RuntimeError("炸了")
+
+    with pytest.raises(RuntimeError):
+        _confirm(kb, task, boom)
+    task = load_task(kb, task["task_id"])
+    assert task["state"] == "paused"
+    assert task["items"][0]["state"] == "failed"
+    code, task = _resume(kb, task, FakeIngest())
+    assert code == EXIT_OK and task["state"] == "done"
+
+
+def test_cli_resume_confirms_awaiting_task(kb: Path, book: Path, capsys):
+    _prepare(kb, book)
+    # 非交互且没给 --yes：不开始，任务仍等待确认
+    assert oneclick.import_entrypoint(kb, src=None, do_resume=True, ingest=FakeIngest(), interactive=False) == EXIT_USAGE
+    assert active_task(kb)["state"] == "awaiting_confirm"
+    ingest = FakeIngest()
+    code = oneclick.import_entrypoint(kb, src=None, do_resume=True, yes=True, ingest=ingest, interactive=False)
+    assert code == EXIT_OK
+    assert active_task(kb) is None
+    assert len(ingest.calls) == 3
+
+
 def test_cli_cancel(kb: Path, book: Path):
     _prepare(kb, book)
     assert oneclick.import_entrypoint(kb, src=None, do_cancel=True, interactive=False) == EXIT_OK

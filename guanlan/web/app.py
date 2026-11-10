@@ -668,9 +668,10 @@ def create_app(
             abandon_on_cancel=True,
         )
         # 退出码 → HTTP 分流（对齐 §2，**不可**一律塌缩成 409，否则"磁盘满"被误报"已存在"）。
+        # EXIT_USAGE = 同名冲突或库被 CLI 占用（P4.30 库级锁），detail 取 job.output 区分。
         if job.exit_code == EXIT_USAGE:
             raise HTTPException(status_code=409, detail=job.output or "raw/ 同名文件已存在。")
-        if job.exit_code != EXIT_OK:  # 落盘 IO 失败 / 库被 CLI 占用 → 500
+        if job.exit_code != EXIT_OK:  # 落盘 IO 失败 → 500
             raise HTTPException(status_code=500, detail=job.output or "写盘失败。")
         return {"saved": f"raw/{target.name}", "bytes": payload_bytes}
 

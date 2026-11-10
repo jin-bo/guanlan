@@ -253,3 +253,13 @@ def test_chapter_run_rule_only_at_page_top():
         pages[no] = _middle(no, pages[no]) + "\n\n年月日"  # 只落在页尾窗口
     r = normalize(_book(pages, 30), title_hint="t")
     assert r.body.count("年月日") == 3
+
+
+def test_option_letters_and_roman_like_words_not_page_numbers():
+    """试卷选项行「C」「D」、单个大写字母、像罗马数字的单词不当页码删；小写前言页码照删。"""
+    from guanlan.normalize import _page_number_value
+
+    for kept in ("C", "D", "M", "L", "I", "V", "X", "Mix", "DL", "CD"):
+        assert _page_number_value(kept) is None, kept
+    for removed in ("i", "iv", "xii", "XII", "IV", "xxxix"):
+        assert _page_number_value(removed) == 0, removed

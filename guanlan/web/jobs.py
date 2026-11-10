@@ -22,9 +22,8 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
-
 from pathlib import Path
+from typing import Literal
 
 from .. import kblock
 from ..errors import EXIT_AGENT_ERROR, EXIT_USAGE
@@ -167,10 +166,6 @@ class WriteGate:
             held[0] = True
 
         return _acq
-
-
-class _SkipJob(Exception):
-    """worker 内部控制流：拿不到库级锁时跳过 fn()。"""
 
 
 @dataclass
@@ -320,22 +315,20 @@ class JobQueue:
                 if lock_error is not None:
                     buf.write(str(lock_error))
                     job.exit_code = EXIT_USAGE
-                    raise _SkipJob
-                # 进程级 redirect：捕获 run_ingest 的人读 stdout/stderr。只在此单 worker 串行
-                # 发生，故无跨线程竞态（读/问答路径都不打印，见模块 docstring 红线）。
-                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                    outcome = fn(emit)
-                # 鸭子分流（决策P4.3-1）：int → 退出码（ingest/投喂，口径不变）；否则为带
-                # `.exit_code` 的结构化结果（heal 的 HealRun），整体存进 result、再取退出码。
-                # worker 仍**域无关**——只碰 `.exit_code`，不 import heal 类型；result 的序列化
-                # 落在 /api/jobs/{id} 端点。
-                if isinstance(outcome, int):
-                    job.exit_code = outcome
                 else:
-                    job.result = outcome
-                    job.exit_code = outcome.exit_code
-            except _SkipJob:
-                pass
+                    # 进程级 redirect：捕获 run_ingest 的人读 stdout/stderr。只在此单 worker 串行
+                    # 发生，故无跨线程竞态（读/问答路径都不打印，见模块 docstring 红线）。
+                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                        outcome = fn(emit)
+                    # 鸭子分流（决策P4.3-1）：int → 退出码（ingest/投喂，口径不变）；否则为带
+                    # `.exit_code` 的结构化结果（heal 的 HealRun），整体存进 result、再取退出码。
+                    # worker 仍**域无关**——只碰 `.exit_code`，不 import heal 类型；result 的序列化
+                    # 落在 /api/jobs/{id} 端点。
+                    if isinstance(outcome, int):
+                        job.exit_code = outcome
+                    else:
+                        job.result = outcome
+                        job.exit_code = outcome.exit_code
             except Exception as exc:  # noqa: BLE001 — worker 绝不能死，异常归一为作业失败
                 job.exit_code = EXIT_AGENT_ERROR
                 buf.write(f"\n作业执行异常：{type(exc).__name__}: {exc}")
