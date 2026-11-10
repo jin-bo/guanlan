@@ -155,6 +155,11 @@ def register(
 
         return thunk
 
+    def _view(task: dict) -> dict:
+        # 暂停标志只在本进程作业还在跑时有意义：作业结束后留着的标志不能让任务显示成「正在暂停」。
+        job_id = _job_for(task["task_id"])
+        return task_view(root, task, job_id=job_id, pausing=job_id is not None and _flag(task["task_id"]).is_set())
+
     def _load(task_id: str) -> dict:
         try:
             return load_task(root, task_id)
@@ -169,16 +174,13 @@ def register(
             holder = None
         if task is None:
             return {"active": None, "holder": describe_holder(holder) if holder else None}
-        tid = task["task_id"]
-        view = await anyio.to_thread.run_sync(
-            lambda: task_view(root, task, job_id=_job_for(tid), pausing=_flag(tid).is_set())
-        )
+        view = await anyio.to_thread.run_sync(lambda: _view(task))
         return {"active": view, "holder": describe_holder(holder) if holder else None}
 
     @writer_only(app.get("/api/oneclick/{task_id}"))
     async def oneclick_task(task_id: str) -> dict:
         task = await anyio.to_thread.run_sync(_load, task_id)
-        return task_view(root, task, job_id=_job_for(task_id), pausing=_flag(task_id).is_set())
+        return _view(task)
 
     @writer_only(app.post("/api/oneclick"))
     async def oneclick_start(body: OneClickBody) -> dict:

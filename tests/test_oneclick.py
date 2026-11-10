@@ -509,3 +509,12 @@ def test_holder_info_cleared_on_release(kb: Path):
     assert read_holder(kb)["origin"] == "cli: heal"
     lock.release()
     assert read_holder(kb) is None
+
+
+def test_split_long_line_hard_cuts_oversized_middle_sentence():
+    from guanlan.splitdoc import PART_MAX, _split_long_line
+
+    line = "短句。" + "长" * (PART_MAX + 10_000) + "。" + "收尾。"
+    pieces = _split_long_line(line, "\n")
+    assert "".join(pieces) == line + "\n"
+    assert all(len(p.rstrip("\n")) <= PART_MAX for p in pieces)

@@ -169,6 +169,12 @@ class TaskLog:
                 self.emit(line)
 
 
+def _recover_if_owner(root: Path, lock) -> None:
+    """持**真锁**才恢复：嵌套放行的锁（祖先写运行持锁，`lock.nested`）说明原执行者还活着，不能改清单。"""
+    if lock is not None and not lock.nested:
+        recover_stale(root)
+
+
 def recover_stale(root: Path) -> list[str]:
     """**持锁时调用**：原执行者已退出 → preparing 改 failed、running 改 paused。返回被改动的任务号。"""
     changed: list[str] = []
@@ -350,11 +356,11 @@ def _check_images(root: Path, items: list[dict], split: bool, sample: str) -> li
     for it in items:
         md = ws / it["parsed"]
         text = md.read_text(encoding="utf-8")
-        col = collect_for_promotion(text, source_md=md, root=ws, stem=Path(it["raw"]).stem, strict=False)
+        col = collect_for_promotion(text, source_md=md, root=parsed, stem=Path(it["raw"]).stem, strict=False)
         for url in col.missing:
             # 分卷在 parsed/<sample>/ 下：同一个引用若按整本所在的 parsed/ 解析得到、按分卷位置却找不到，
             # 说明拆分漏改写了它（`../` 前缀没加上）。加过前缀的引用与整本指向同一个文件，不会落进这里。
-            if split and _admit_image_ref(url, parsed, ws) is not None:
+            if split and _admit_image_ref(url, parsed, parsed) is not None:
                 raise OneClickError(f"拆分改写图片引用出错：{it['parsed']} 中的 {url} 找不到（这是一键入库的缺陷，请报告）。")
             warnings.append(f"{Path(it['parsed']).name}：图片 {url} 找不到，原样保留")
         it["image_count"] = len(col.images)
@@ -650,8 +656,12 @@ def _land(root: Path, task: dict, log: TaskLog) -> int:
                 _pause(root, task, log, f"{it['raw']} 上次写到一半，盘上与记录不符：" + "、".join(diffs[:5]))
                 return EXIT_USAGE
         md = ws / it["parsed"]
+        expected = (task.get("prepared_sha256") or {}).get(it["parsed"])
+        if expected is not None and _sha_file(md) != expected:  # 暂停期间 parsed/ 被改：不能落未经确认的内容
+            _pause(root, task, log, f"{it['parsed']} 在确认后被改动或删除，与确认时的内容不符；请放弃后重新导入")
+            return EXIT_USAGE
         text = md.read_text(encoding="utf-8")
-        col = collect_for_promotion(text, source_md=md, root=ws, stem=target.stem, strict=False)
+        col = collect_for_promotion(text, source_md=md, root=ws / "parsed", stem=target.stem, strict=False)  # 准入边界 = parsed/
         img_dir = _images_dir(target)
         it["sha256"] = _sha_bytes(col.markdown.encode("utf-8"))
         it["images"] = {_rel(root, img_dir / img.name): img.sha256 for img in col.images}
@@ -972,10 +982,7 @@ def import_entrypoint(
             ingest=run_ingest_fn,
             interactive=interactive,
         )
-    except KBLockBusy as exc:
-        _stderr(str(exc))
-        return exc.exit_code
-    except GuanlanError as exc:
+    except GuanlanError as exc:  # 含 KBLockBusy
         _stderr(str(exc))
         return exc.exit_code
     except KeyboardInterrupt:
@@ -992,8 +999,7 @@ def _cli_status(root: Path, json_output: bool) -> int:
     except OSError:  # 只读库等：建不出锁文件，不是「有人在写」
         lock = None
     try:
-        if lock is not None:
-            recover_stale(root)
+        _recover_if_owner(root, lock)
         task = active_task(root)
     finally:
         if lock is not None:
@@ -1015,8 +1021,8 @@ def _cli_status(root: Path, json_output: bool) -> int:
 
 
 def _cli_cancel(root: Path, json_output: bool) -> int:
-    with acquire(root, "cli: import --cancel"):
-        recover_stale(root)
+    with acquire(root, "cli: import --cancel") as lock:
+        _recover_if_owner(root, lock)
         task = active_task(root)
         if task is None:
             _stderr("没有未完成的一键入库任务。")
@@ -1054,8 +1060,8 @@ def _cli_resume(
     yes: bool = False,
     interactive: bool = False,
 ) -> int:
-    with acquire(root, "cli: import --resume"):
-        recover_stale(root)
+    with acquire(root, "cli: import --resume") as lock:
+        _recover_if_owner(root, lock)
         task = active_task(root)
         if task is None:
             _stderr("没有未完成的一键入库任务。")
@@ -1096,8 +1102,8 @@ def _cli_import(
     interactive: bool,
 ) -> int:
     origin = "cli: import --dry-run" if dry_run else "cli: import"
-    with acquire(root, origin):
-        recover_stale(root)
+    with acquire(root, origin) as lock:
+        _recover_if_owner(root, lock)
         task = prepare(root, src, origin_kind="cli", backend=backend, emit=_stderr, dry_run=dry_run)
     # 进入 awaiting_confirm：释放锁（等待确认期间不妨碍其它写操作）
     if dry_run:

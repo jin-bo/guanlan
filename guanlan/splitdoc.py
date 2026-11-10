@@ -89,19 +89,22 @@ class Part:
 
 def _split_long_line(line: str, eol: str) -> list[str]:
     """单行超过 PART_MAX → 在句末标点后切成片段（拼回 == 原行）；连句末标点都没有时按字符硬切。"""
-    pieces: list[str] = []
+    segs: list[str] = []
     start = 0
     last_cut: int | None = None
     for m in _SENTENCE_CUT_RE.finditer(line):
         if last_cut is not None and last_cut > start and count_chars(line[start : m.end()]) > PART_MAX:
-            pieces.append(line[start:last_cut])
+            segs.append(line[start:last_cut])
             start = last_cut
         last_cut = m.end()
-    tail = line[start:]
-    while count_chars(tail) > PART_MAX:
-        pieces.append(tail[:PART_MAX])
-        tail = tail[PART_MAX:]
-    pieces.append(tail + eol)
+    segs.append(line[start:])
+    pieces: list[str] = []
+    for seg in segs:  # 单句本身超限（不只是末段）同样硬切，保证每片 ≤ PART_MAX
+        while count_chars(seg) > PART_MAX:
+            pieces.append(seg[:PART_MAX])
+            seg = seg[PART_MAX:]
+        pieces.append(seg)
+    pieces[-1] += eol
     return pieces
 
 
