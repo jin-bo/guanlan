@@ -87,13 +87,28 @@ def test_join_after_noise_removed():
 # ── 页码 ─────────────────────────────────────────────────────────────────────
 
 
+_ROMAN = ["", "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii", "xiii", "xiv", "xv"]
+
+
 def test_page_number_forms_removed():
-    forms = ["15", "- 15 -", "第 15 页", "15/20", "xii"]
-    pages = {no: f"{_filler(no)}\n\n{forms[no % len(forms)]}" for no in range(1, 11)}
+    forms = ["{n}", "- {n} -", "第 {n} 页", "{n}/20", "{r}"]
+    pages = {
+        no: f"{_filler(no)}\n\n{forms[no % len(forms)].format(n=no + 4, r=_ROMAN[no + 4])}" for no in range(1, 11)
+    }
     r = normalize(_book(pages, 20), title_hint="t")
     assert r.meta["normalized"]["page_numbers_removed"] == 10
-    for f in ("- 15 -", "第 15 页", "15/20"):
+    for f in ("- 10 -", "第 11 页", "12/20"):
         assert f not in r.body
+
+
+def test_lone_edge_numbers_without_cross_page_evidence_kept():
+    """页尾孤立的一个数字、列表项「- 12」凑不出跨页一致的偏移：证据不足，保留。"""
+    pages = {no: _filler(no) for no in range(1, 11)}
+    pages[4] += "\n\n42"
+    pages[7] += "\n\n- 12"
+    r = normalize(_book(pages, 300), title_hint="t")
+    assert r.meta["normalized"]["page_numbers_removed"] == 0
+    assert "42" in r.body and "- 12" in r.body  # 可能被跨页接句挪位，但内容不丢
 
 
 def test_numbers_in_body_not_removed():
@@ -261,5 +276,5 @@ def test_option_letters_and_roman_like_words_not_page_numbers():
 
     for kept in ("C", "D", "M", "L", "I", "V", "X", "Mix", "DL", "CD"):
         assert _page_number_value(kept) is None, kept
-    for removed in ("i", "iv", "xii", "XII", "IV", "xxxix"):
-        assert _page_number_value(removed) == 0, removed
+    for form, value in (("i", 1), ("iv", 4), ("xii", 12), ("XII", 12), ("IV", 4), ("xxxix", 39), ("ix", 9)):
+        assert _page_number_value(form) == value, form

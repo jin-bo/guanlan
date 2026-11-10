@@ -100,10 +100,15 @@ def _sha_bytes(data: bytes) -> str:
 
 
 def _sha_file(path: Path) -> str | None:
+    """分块读、流式哈希：上传件可达 256 MiB，不整读进内存。读不到 → None。"""
+    h = hashlib.sha256()
     try:
-        return _sha_bytes(path.read_bytes())
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
     except OSError:
         return None
+    return h.hexdigest()
 
 
 def save_task(root: Path, task: dict) -> None:
@@ -356,7 +361,10 @@ def _check_images(root: Path, items: list[dict], split: bool, sample: str) -> li
     for it in items:
         md = ws / it["parsed"]
         text = md.read_text(encoding="utf-8")
-        col = collect_for_promotion(text, source_md=md, root=parsed, stem=Path(it["raw"]).stem, strict=False)
+        try:
+            col = collect_for_promotion(text, source_md=md, root=parsed, stem=Path(it["raw"]).stem, strict=False)
+        except ConvertError as exc:  # 单份图片超容量：准备阶段就挡下，别留到 ⑤ 才炸
+            raise OneClickError(f"{it['parsed']}：{exc}") from None
         for url in col.missing:
             # 分卷在 parsed/<sample>/ 下：同一个引用若按整本所在的 parsed/ 解析得到、按分卷位置却找不到，
             # 说明拆分漏改写了它（`../` 前缀没加上）。加过前缀的引用与整本指向同一个文件，不会落进这里。
@@ -406,12 +414,14 @@ def prepare(
     while _task_file(root, task_id).exists():  # 同一秒内的第二个任务不能覆盖第一个的清单
         n += 1
         task_id = f"{base}-{n}"
-    data = src.read_bytes()
+    upload_sha = _sha_file(src)
+    if upload_sha is None:
+        raise OneClickError(f"输入文件读不出：{src}")
     task: dict = {
         "task_id": task_id,
         "sample": sample,
         "upload": _origin_label(root, src),
-        "upload_sha256": _sha_bytes(data),
+        "upload_sha256": upload_sha,
         "origin": origin_kind,
         "state": "preparing",
         "created": _now(),
@@ -449,7 +459,10 @@ def _prepare_steps(root: Path, src: Path, task: dict, *, backend: str, log: Task
     log(f"① 解析 {src.name} …")
     if src.suffix.lower() == ".md":
         text = src.read_text(encoding="utf-8", errors="replace")
-        res = collect_and_rewrite(text, produced_md=src.resolve(), root=src.resolve().parent, stem=sample)
+        try:  # 图片超容量同样是 ConvertError：与转换分支同口径归一为用法错误，不让 CLI 抛 traceback
+            res = collect_and_rewrite(text, produced_md=src.resolve(), root=src.resolve().parent, stem=sample)
+        except ConvertError as exc:
+            raise OneClickError(f"解析失败：{exc}") from None
         backend_used = None
     else:
         try:
@@ -729,7 +742,11 @@ def _fmt_duration(seconds: float) -> str:
 
 
 def _execute(root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_pause: Callable[[], bool]) -> tuple[int, dict]:
-    code = _land(root, task, log)
+    try:
+        code = _land(root, task, log)
+    except Exception as exc:  # 与 ⑥ 同口径：不留 running（否则放弃被拒、只能等下次取锁恢复）
+        _pause(root, task, log, f"落 raw/ 异常（{type(exc).__name__}: {exc}），已暂停；处理后继续会从未写完的那一份重试")
+        raise
     if code != EXIT_OK:
         return code, task
     items = task["items"]
@@ -985,6 +1002,9 @@ def import_entrypoint(
     except GuanlanError as exc:  # 含 KBLockBusy
         _stderr(str(exc))
         return exc.exit_code
+    except (ConvertError, OSError) as exc:  # 图片超容量 / 落盘 IO 失败：任务已记失败或暂停，不抛 traceback
+        _stderr(f"一键入库中止：{exc}")
+        return EXIT_USAGE
     except KeyboardInterrupt:
         _stderr("已中止。")
         return EXIT_USAGE

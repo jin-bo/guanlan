@@ -516,6 +516,9 @@ async function ocPost(url, body) {
 }
 
 function renderOneclickPanel(panel, data) {
+  // 每 2 秒重画：沿用用户上次对「详情」的展开/收起（首次渲染才按状态给默认值）。
+  const prevDet = panel.querySelector("details");
+  const prevOpen = prevDet ? prevDet.open : null;
   panel.innerHTML = "";
   const task = data.active;
   if (!task) {
@@ -641,7 +644,7 @@ function renderOneclickPanel(panel, data) {
     pre.textContent = task.log_tail.slice(-40).join("\n");
     det.appendChild(pre);
   }
-  if (task.job_id || task.state === "running") det.open = true; // 入库中默认展开日志
+  det.open = prevOpen !== null ? prevOpen : !!(task.job_id || task.state === "running"); // 入库中默认展开日志
   card.appendChild(det);
   panel.appendChild(card);
 }

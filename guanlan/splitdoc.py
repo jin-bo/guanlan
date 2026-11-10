@@ -92,10 +92,14 @@ def _split_long_line(line: str, eol: str) -> list[str]:
     segs: list[str] = []
     start = 0
     last_cut: int | None = None
+    acc = 0  # count_chars(line[start:last_cut])，逐句累加：不每句都从 start 重数（超长行是 O(句数×PART_MAX)）
     for m in _SENTENCE_CUT_RE.finditer(line):
-        if last_cut is not None and last_cut > start and count_chars(line[start : m.end()]) > PART_MAX:
+        prev_end = last_cut if last_cut is not None else start
+        sent = count_chars(line[prev_end : m.end()])
+        if last_cut is not None and last_cut > start and acc + sent > PART_MAX:
             segs.append(line[start:last_cut])
-            start = last_cut
+            start, acc = last_cut, 0
+        acc += sent
         last_cut = m.end()
     segs.append(line[start:])
     pieces: list[str] = []

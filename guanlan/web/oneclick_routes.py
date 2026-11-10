@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 
@@ -119,10 +120,17 @@ def register(
     # reader 零写（决策P4.9-2）：连锁文件都不建。
     if not reader:
         try:
-            with acquire(root, "web: startup"):
-                recover_stale(root)
+            with acquire(root, "web: startup") as lock:
+                if not lock.nested:  # 嵌套放行 = 祖先写运行还活着，不能改它的清单（同 oneclick._recover_if_owner）
+                    recover_stale(root)
         except (KBLockBusy, OSError):
             pass
+
+    def _recover_in_job() -> None:
+        """作业内恢复：只有本进程**真持**库级锁时才恢复。嵌套放行（持有者是祖先进程）或锁文件建不出
+        （`KBWriteLock` 退化为只有进程内锁）时，都不能断定原执行者已退出。"""
+        if (read_holder(root) or {}).get("pid") == os.getpid():
+            recover_stale(root)
 
     def _ingest(raw_rel: str, kb: Path) -> int:
         return run_ingest(raw_rel, root=kb, model=model, runner=runner)
@@ -180,7 +188,7 @@ def register(
     @writer_only(app.get("/api/oneclick/{task_id}"))
     async def oneclick_task(task_id: str) -> dict:
         task = await anyio.to_thread.run_sync(_load, task_id)
-        return _view(task)
+        return await anyio.to_thread.run_sync(lambda: _view(task))  # 读日志尾是阻塞 IO，不占事件循环
 
     @writer_only(app.post("/api/oneclick"))
     async def oneclick_start(body: OneClickBody) -> dict:
@@ -195,7 +203,7 @@ def register(
         backend = body.backend
 
         def _prepare(emit) -> int:
-            recover_stale(root)
+            _recover_in_job()
             prepare(root, upload_path, origin_kind="web", backend=backend, emit=emit)
             return EXIT_OK
 
@@ -235,7 +243,7 @@ def register(
         flag.clear()
 
         def _run(emit) -> int:
-            recover_stale(root)  # 原执行者已退出的 running → paused
+            _recover_in_job()  # 原执行者已退出的 running → paused
             code, _task = resume(root, task_id, emit=emit, ingest=_ingest, should_pause=flag.is_set)
             return code
 

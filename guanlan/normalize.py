@@ -148,8 +148,17 @@ def _page_number_value(s: str) -> int | None:
         if m:
             return int(m.group(1))
     if t and _ROMAN_RE.match(t) and (len(t) > 1 or t.islower()):
-        return 0  # 罗马数字：值不参与上限判断
+        return _roman_value(t)  # 前置页的罗马页码：同样按跨页偏移一致性取证
     return None
+
+
+def _roman_value(t: str) -> int:
+    vals = {"i": 1, "v": 5, "x": 10}
+    total = 0
+    digits = [vals[c] for c in t.lower()]
+    for k, d in enumerate(digits):
+        total += -d if k + 1 < len(digits) and d < digits[k + 1] else d
+    return total
 
 
 # ── 行分类 ───────────────────────────────────────────────────────────────────
@@ -255,14 +264,23 @@ def _detect_noise(
     if not content_pages:
         return delete, notes
 
-    # 1) 页码：首尾窗口内整行只有页码形态（非标题/列表/表格等结构行）。
+    # 1) 页码：首尾窗口内整行只有页码形态（非标题/列表/表格等结构行），且**跨页有证据**——
+    #    印刷页码与锚点页号的差（偏移，前置页 / 跳页会让它分段变化）至少在 HEADER_MIN_PAGES 页上一致。
+    #    孤零零一个数字（页尾一行「42」、列表项「- 12」）凑不出同一偏移，证据不足就保留。
+    cands: list[tuple[_Page, int, int]] = []
     for p in content_pages:
         for i, _pos in _edge_hits(p):
             if kinds[i] not in ("text", "list"):
                 continue
             v = _page_number_value(lines[i])
             if v is not None and v <= max_page + PAGE_NUMBER_SLACK:
-                delete[i] = Op("page_number", p.number, lines[i].strip())
+                cands.append((p, i, v - p.number))
+    support: dict[int, set[int]] = {}
+    for p, _i, off in cands:
+        support.setdefault(off, set()).add(p.number)
+    for p, i, off in cands:
+        if len(support[off]) >= HEADER_MIN_PAGES:
+            delete[i] = Op("page_number", p.number, lines[i].strip())
 
     # 2) 页眉/页脚：统计 (键, 位置) 出现在哪些页。标题行可参与（标题形式的页眉），其余结构行不参与。
     occ: dict[tuple[str, str], list[tuple[_Page, int]]] = {}
