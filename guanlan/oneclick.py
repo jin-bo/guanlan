@@ -709,7 +709,10 @@ def _land(root: Path, task: dict, log: TaskLog) -> int:
         it["land"] = "writing"
         save_task(root, task)
         overwrite = bool(task.get("overwrite")) or target.exists() and _sha_file(target) == it["sha256"]
-        code = commit_md_with_images(target, col.markdown, col.images, overwrite=overwrite)
+        # `atomic_write_raw` 同名冲突时把提示 print 到 stdout：`import --json` 的 stdout 只能有一份 JSON，
+        # 故改道 stderr（Web worker 下 stderr 同样被重定向进 job.output，提示不丢）。
+        with contextlib.redirect_stdout(sys.stderr):
+            code = commit_md_with_images(target, col.markdown, col.images, overwrite=overwrite)
         if code != EXIT_OK:
             _pause(root, task, log, f"写入 {it['raw']} 失败（退出码 {code}）")
             return code
@@ -780,6 +783,24 @@ def _execute(root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_p
         raise
     if code != EXIT_OK:
         return code, task
+    try:
+        return _ingest_items(root, task, log=log, ingest=ingest, should_pause=should_pause)
+    except BaseException as exc:
+        # 逐篇 ingest 之外的地方被中断（第二次 Ctrl+C / SIGTERM 落在统计、落清单等处）或异常：同样不留 running，
+        # 否则 Web 一直显示「入库中」、只能等下次取锁恢复。ingest 本身的中断/异常已就地暂停，这里不重复。
+        if task.get("state") == "running":
+            for x in task["items"]:
+                if x.get("state") == "running":
+                    x["state"] = "pending"
+            with contextlib.suppress(Exception):
+                _pause(root, task, log, f"入库被中断（{type(exc).__name__}），已暂停；继续会从未完成的那一篇重试")
+        raise
+
+
+def _ingest_items(
+    root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_pause: Callable[[], bool]
+) -> tuple[int, dict]:
+    """⑥ 依次入库（⑤ 已落盘之后）。"""
     items = task["items"]
     n = len(items)
     if task.get("links_before") is None:
@@ -818,16 +839,16 @@ def _execute(root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_p
             _pause(root, task, log, f"[{k}/{n}] {it['raw']} 入库异常（{type(exc).__name__}: {exc}），已暂停；处理后继续会从这一篇重试")
             raise
         took = time.monotonic() - t0
-        after = _wiki_state(root)
-        created = sum(1 for p in after if p not in before)
-        updated = sum(1 for p, v in after.items() if p in before and before[p] != v)
         it.update(finished=_now(), seconds=round(took, 1), exit_code=rc)
         if rc != EXIT_OK:
             it["state"] = "failed"
             _pause(root, task, log, f"[{k}/{n}] {it['raw']} 入库失败（退出码 {rc}），已暂停；处理后继续会从这一篇重试")
             return rc, task
         it["state"] = "done"
-        save_task(root, task)
+        save_task(root, task)  # 先记完成再做统计：统计期间被中断不至于把已入库的这篇打回重跑
+        after = _wiki_state(root)
+        created = sum(1 for p in after if p not in before)
+        updated = sum(1 for p, v in after.items() if p in before and before[p] != v)
         done_now.append(took)
         log(f"[{k}/{n}] 入库 {it['raw']} … 完成（{_fmt_duration(took)}，wiki 新建 {created} 页、更新 {updated} 页）")
         left = sum(1 for x in items[k:] if x.get("state") != "done")

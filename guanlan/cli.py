@@ -22,7 +22,7 @@ from .heal import DEFAULT_LIMIT, heal_entrypoint, positive_int
 from .health import health_entrypoint
 from .ingest import run_ingest
 from .init import run_init
-from .kblock import run_locked
+from .kblock import needs_kb_lock, run_locked
 from .lint import MISSING_ENTITY_MIN_REFS, lint_entrypoint
 from .query import run_query
 from .quotes import add_quotes_arguments, quotes_entrypoint
@@ -916,28 +916,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _needs_kb_lock(args: argparse.Namespace) -> bool:
-    """库级写锁覆盖的写入口（P4.30 §6.4，决策P4.30-15）。只读预览（`--dry-run`、`remove` 不带 `--yes`、
-    普通 `query`）不取锁。`import` 自己管锁（`--status` 拿不到锁也要能看），不在这里取。"""
-    cmd = args.command
-    if cmd in ("ingest", "graph"):  # graph 写 graph/，与 Web `/graph` 同样持锁，免得两边互相覆盖
-        return True
-    if cmd == "query":
-        return bool(args.backfill)
-    if cmd in ("heal", "audit", "reindex", "convert"):
-        return not args.dry_run
-    if cmd == "remove":
-        return bool(args.yes)
-    return False
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     # -C/--dir 用 SUPPRESS 默认（顶层与子命令共享），未给时统一回落到当前目录。
     if not hasattr(args, "dir"):
         args.dir = "."
-    if not _needs_kb_lock(args):
+    if not needs_kb_lock(args):
         return args.func(args)
     # 只由最外层入口取锁（决策P4.30-15）：内核函数（run_ingest 等）一律不取。
     return run_locked(args.dir, f"cli: {args.command}", lambda: args.func(args))

@@ -64,11 +64,11 @@ class KBWriteLock:
             return False
         try:
             self._kb = kblock.acquire(self._root, "web")
-        except kblock.KBLockBusy:
-            self._lock.release()
-            raise
         except OSError:
             self._kb = None
+        except BaseException:  # KBLockBusy 及任何意外：不能把进程内锁留在持有态，否则此后所有写永久卡死
+            self._lock.release()
+            raise
         return True
 
     def release(self) -> None:

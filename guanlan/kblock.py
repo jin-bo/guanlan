@@ -35,6 +35,7 @@ __all__ = [
     "acquire",
     "kb_write_lock",
     "run_locked",
+    "needs_kb_lock",
     "read_holder",
     "holder_alive",
     "describe_holder",
@@ -259,3 +260,21 @@ def run_locked(root_dir: str | Path, origin: str, fn: Callable[[], int]) -> int:
         return fn()
     finally:
         lock.release()
+
+
+def needs_kb_lock(args: object) -> bool:
+    """CLI 哪些子命令持库级锁（P4.30 §6.4，决策P4.30-15）；`args` 是 argparse 解析结果。
+
+    只读预览（`--dry-run`、`remove` 不带 `--yes`、普通 `query`）不取锁。`import` 自己管锁
+    （`--status` 拿不到锁也要能看），不在这里取。`graph` 写 `graph/`，与 Web `/graph` 同样持锁。
+    """
+    cmd = getattr(args, "command", None)
+    if cmd in ("ingest", "graph"):
+        return True
+    if cmd == "query":
+        return bool(getattr(args, "backfill", False))
+    if cmd in ("heal", "audit", "reindex", "convert"):
+        return not getattr(args, "dry_run", False)
+    if cmd == "remove":
+        return bool(getattr(args, "yes", False))
+    return False
