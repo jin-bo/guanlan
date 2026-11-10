@@ -308,6 +308,13 @@ def _subprocess_runner(
                 # std 流编码（见 envelope_child_env），其余逐项照传。
                 env=envelope_child_env(),
                 start_new_session=new_session,
+                # Windows 上 start_new_session 不生效（控制台 Ctrl+C 会送到同一控制台的全部进程）：
+                # 改用新进程组，子进程收不到 CTRL_C_EVENT，「第一次 Ctrl+C = 本篇后暂停」才成立。
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+                    if new_session and sys.platform == "win32"
+                    else 0
+                ),
             )
     except OSError as exc:
         # agentao 不在 PATH（或无法启动子进程）：归一为运行时错误，遵守退出码契约，

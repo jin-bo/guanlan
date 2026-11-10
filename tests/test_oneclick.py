@@ -434,9 +434,42 @@ def test_nested_child_of_lock_holder_passes_unrelated_process_refused(kb: Path):
         assert read_holder(kb)["origin"] == "cli: ingest"  # 嵌套放行不改写执行者信息
     finally:
         lock.release()
-    # 持有者释放后令牌失效：继承令牌的进程走正常取锁
+    # 持有者释放后令牌失效、环境还原：之后起的进程走正常取锁
+    assert TOKEN_ENV not in os.environ or os.environ[TOKEN_ENV] != lock.holder["token"]
     after = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert after.stdout.strip() == "held"
+
+
+def test_token_from_earlier_hold_rejected_on_next_hold(kb: Path):
+    """上一次持锁期间派生、活得更久的进程（后台 shell、长驻 MCP server）拿着旧令牌：下一次持锁时不放行。"""
+    import os
+
+
+    code = (
+        "from guanlan.kblock import acquire, KBLockBusy\n"
+        f"try:\n    acquire({str(kb)!r}, 'child')\n    print('passed')\n"
+        "except KBLockBusy:\n    print('busy')\n"
+    )
+    first = acquire(kb, "web")
+    stale_env = dict(os.environ)  # 第一次持锁期间派生的子进程看到的环境
+    first.release()
+    second = acquire(kb, "web")
+    try:
+        assert second.holder["token"] != first.holder["token"]
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, env=stale_env)
+        assert out.stdout.strip() == "busy"
+    finally:
+        second.release()
+
+
+def test_json_mode_always_prints_one_json_document(kb: Path, capsys):
+    """--json：用法错误 / 找不到任务等提前退出也在 stdout 给一份 JSON。"""
+    import json as _json
+
+    code = oneclick.import_entrypoint(kb, src=None, do_resume=True, json_output=True, interactive=False)
+    assert code == EXIT_USAGE
+    out = _json.loads(capsys.readouterr().out)
+    assert out["ok"] is False and out["exit_code"] == EXIT_USAGE and "没有未完成" in out["error"]
 
 
 def test_cli_write_commands_refused_while_locked(kb: Path, capsys, monkeypatch):

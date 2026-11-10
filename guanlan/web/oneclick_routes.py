@@ -34,6 +34,7 @@ from ..oneclick import (
 from .uploads import _safe_upload_file
 
 LOG_TAIL_LINES = 200
+_LOG_TAIL_BYTES = 256 * 1024  # 每 2 秒轮询只读日志末尾这么多字节，不随长任务的日志整读
 
 
 class OneClickBody(BaseModel):
@@ -59,9 +60,16 @@ def _log_tail(root: Path, task: dict) -> list[str]:
     if not rel:
         return []
     try:
-        lines = (root / rel).read_text(encoding="utf-8", errors="replace").splitlines()
+        with (root / rel).open("rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            start = max(0, size - _LOG_TAIL_BYTES)
+            fh.seek(start)
+            data = fh.read()
     except OSError:
         return []
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if start > 0 and lines:  # 从中间截起：第一行可能是半行，丢掉
+        lines = lines[1:]
     return lines[-LOG_TAIL_LINES:]
 
 

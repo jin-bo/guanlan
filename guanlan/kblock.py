@@ -7,10 +7,11 @@
 - **只由最外层入口取锁**（`cli.py` 子命令分发处、Web `WriteGate`）；`run_ingest`、`run_guarded_write` 等内核
   函数一律不取。POSIX `flock` 对同一进程里另开的文件描述符同样互斥，重复获取会让自己失败。
 - **嵌套写放行**：持锁的写运行里，Agent 照 `AGENTAO.md` / `SKILL.md` 在 shell 里跑 `guanlan convert` /
-  `ingest` / `reindex` 等子命令时，子进程拿不到锁。取锁进程在 `os.environ` 放一个**进程令牌**（只设一次，
-  子进程继承），并写进锁文件的执行者信息；子孙进程发现锁的持有者带着自己继承来的令牌、且持有者还活着，
-  就当作嵌套调用、不再取锁（返回不持有任何东西的 `KBLock`）。无关进程没有这个令牌，照常互斥；
-  持有者释放时清空执行者信息，令牌随之失效。
+  `ingest` / `reindex` 等子命令时，子进程拿不到锁。**每次真取锁**都新生成一个令牌，写进锁文件的执行者信息，
+  并在持锁期间放进 `os.environ`（子进程继承），释放时还原；子孙进程发现锁的持有者带着自己继承来的令牌、
+  且持有者还活着，就当作嵌套调用、不再取锁（返回不持有任何东西的 `KBLock`）。无关进程没有这个令牌，
+  照常互斥；令牌只对**这一次**持锁有效——上一次持锁期间派生、活得更久的进程（后台 shell、长驻 MCP
+  server），在下一次取锁时拿着的是旧令牌，同样被拒。
 """
 
 from __future__ import annotations
@@ -149,15 +150,6 @@ def _unlock(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
-def _process_token() -> str:
-    """本进程（及其子孙）的锁令牌：继承来的就沿用，否则生成一个并放进 `os.environ` 让子进程继承。"""
-    token = os.environ.get(TOKEN_ENV)
-    if not token:
-        token = secrets.token_hex(8)
-        os.environ[TOKEN_ENV] = token
-    return token
-
-
 def _nested_holder(root: Path) -> dict | None:
     """锁的持有者是不是本进程的祖先写运行：令牌一致、不是本进程、且还活着。"""
     token = os.environ.get(TOKEN_ENV)
@@ -172,11 +164,14 @@ def _nested_holder(root: Path) -> dict | None:
 class KBLock:
     """已获取的库级锁。`release()` 幂等。`nested=True`：祖先进程持锁，本对象不持有任何东西。"""
 
-    def __init__(self, root: Path, fd: int | None, holder: dict, *, nested: bool = False) -> None:
+    def __init__(
+        self, root: Path, fd: int | None, holder: dict, *, nested: bool = False, prev_token: str | None = None
+    ) -> None:
         self.root = root
         self._fd: int | None = fd
         self.holder = holder
         self.nested = nested
+        self._prev_token = prev_token  # 取锁前继承来的令牌（释放时还原）
 
     @property
     def held(self) -> bool:
@@ -187,6 +182,11 @@ class KBLock:
         fd, self._fd = self._fd, None
         if fd is None:
             return
+        if os.environ.get(TOKEN_ENV) == self.holder.get("token"):  # 本次令牌作废，还原继承来的
+            if self._prev_token is None:
+                os.environ.pop(TOKEN_ENV, None)
+            else:
+                os.environ[TOKEN_ENV] = self._prev_token
         with contextlib.suppress(OSError):  # 清掉执行者信息：锁空闲时不再显示「谁在写」
             os.ftruncate(fd, 0)
         _unlock(fd)
@@ -203,7 +203,6 @@ def acquire(root: str | Path, origin: str) -> KBLock:
     """非阻塞获取库级锁；被占用 → `KBLockBusy`（带执行者信息）。祖先写运行持锁 → 嵌套放行。"""
     root = Path(root).resolve()
     path = root / LOCK_NAME
-    token = _process_token()
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         if not _try_lock(fd):
@@ -212,6 +211,7 @@ def acquire(root: str | Path, origin: str) -> KBLock:
                 os.close(fd)
                 return KBLock(root, None, nested, nested=True)
             raise KBLockBusy(read_holder(root))
+        token = secrets.token_hex(8)  # 每次真取锁一个新令牌：只对这一次持锁有效
         holder = {
             "pid": os.getpid(),
             "origin": origin,
@@ -225,7 +225,9 @@ def acquire(root: str | Path, origin: str) -> KBLock:
     except BaseException:
         os.close(fd)
         raise
-    return KBLock(root, fd, holder)
+    prev = os.environ.get(TOKEN_ENV)
+    os.environ[TOKEN_ENV] = token  # 持锁期间派生的子进程继承它
+    return KBLock(root, fd, holder, prev_token=prev)
 
 
 @contextlib.contextmanager

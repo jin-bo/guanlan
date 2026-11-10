@@ -924,6 +924,9 @@ class _PauseFlag:
         if threading.current_thread() is threading.main_thread():
             self._old = signal.signal(signal.SIGINT, self._handler)
             for sig in _ABORT_SIGNALS:
+                # 继承来的「忽略」（如 `nohup guanlan import` 对 SIGHUP）照旧忽略：不能把关终端变成立即中止。
+                if signal.getsignal(sig) is signal.SIG_IGN:
+                    continue
                 self._old_abort[sig] = signal.signal(sig, self._abort)
         return self
 
@@ -950,7 +953,13 @@ def _default_ingest(model: str | None, thinking: str | None) -> IngestFn:
     return run
 
 
+# `--json` 契约：每条出口在 stdout 恰好给一份 JSON。回执路径置 `emitted`；其余（用法错误、找不到任务等）
+# 由 `import_entrypoint` 末尾补一份 `{"ok": false, ...}`，错误文本取最后一条 stderr 消息。
+_JSON_OUT = {"emitted": False, "last_error": None}
+
+
 def _stderr(line: str) -> None:
+    _JSON_OUT["last_error"] = line
     print(line, file=sys.stderr, flush=True)
 
 
@@ -963,6 +972,7 @@ def _receipt(task: dict, json_output: bool) -> None:
             for it in task.get("items", [])
         ]
         print(json.dumps(out, ensure_ascii=False, indent=2))
+        _JSON_OUT["emitted"] = True
     else:
         print("\n".join(summary_lines(task)))
 
@@ -985,6 +995,45 @@ def import_entrypoint(
     interactive: bool | None = None,
 ) -> int:
     """`guanlan import` 的单一落地。`ingest` / `interactive` 供测试注入。"""
+    _JSON_OUT.update(emitted=False, last_error=None)
+    code = _import_main(
+        root_dir,
+        src=src,
+        dry_run=dry_run,
+        yes=yes,
+        overwrite=overwrite,
+        do_resume=do_resume,
+        status=status,
+        do_cancel=do_cancel,
+        json_output=json_output,
+        model=model,
+        thinking=thinking,
+        backend=backend,
+        ingest=ingest,
+        interactive=interactive,
+    )
+    if json_output and not _JSON_OUT["emitted"]:
+        print(json.dumps({"ok": False, "exit_code": code, "error": _JSON_OUT["last_error"]}, ensure_ascii=False))
+    return code
+
+
+def _import_main(
+    root_dir: str | Path,
+    *,
+    src: str | None,
+    dry_run: bool,
+    yes: bool,
+    overwrite: bool,
+    do_resume: bool,
+    status: bool,
+    do_cancel: bool,
+    json_output: bool,
+    model: str | None,
+    thinking: str | None,
+    backend: str,
+    ingest: IngestFn | None,
+    interactive: bool | None,
+) -> int:
     modes = sum(bool(x) for x in (src, do_resume, status, do_cancel))
     if modes != 1:
         _stderr("用法：guanlan import <file> | --resume | --status | --cancel（四选一）。")
@@ -1054,6 +1103,7 @@ def _cli_status(root: Path, json_output: bool) -> int:
     if task is None:
         if json_output:
             print("null")
+            _JSON_OUT["emitted"] = True
         else:
             print("没有未完成的一键入库任务。")
         return EXIT_OK
