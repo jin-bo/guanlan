@@ -147,3 +147,10 @@ def test_incomplete_labels_match_server():
         assert key in ZH_ENTRIES, f"前端缺 {key}（服务端已有这个 reason）"
         assert ZH_ENTRIES[key] == label, f"{key} 前后端文案不一致：{ZH_ENTRIES[key]!r} vs {label!r}"
     assert ZH_ENTRIES["incomplete.fallback"] == _INCOMPLETE_FALLBACK
+
+
+def test_no_keys_outside_language_blocks():
+    """词条只能在 zh / en 两个对象里：写在 `zh: {…},` 之后、`en: {` 之前的键会变成 I18N 的顶层属性，
+    t() 查不到、静默回退英文——`_block("zh")` 按「到 en: 为止」切段，前面几条测试都看不出来。"""
+    stray = re.search(r'\n  \},\n(?:[ \t]*\n)*[ \t]*"[^"]+"\s*:', I18N_JS)
+    assert stray is None, f"语言块外有词条：{I18N_JS[stray.start():stray.start() + 120]!r}"

@@ -434,7 +434,7 @@ def _prepare_steps(root: Path, src: Path, task: dict, *, backend: str, log: Task
         backend_used = None
     else:
         try:
-            res = convert_to_markdown(src, stem=sample, backend=backend, cwd=root, progress=lambda ln: log(ln, detail=True))
+            res = convert_to_markdown(src, stem=sample, backend=backend, cwd=root, progress=lambda ln: log("  " + ln))
         except ConvertError as exc:
             raise OneClickError(f"解析失败：{exc}") from None
         backend_used = res.backend

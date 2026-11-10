@@ -15,7 +15,9 @@
   - 写入前整批预检：`raw/<sample>.md` 与 `raw/<sample>/` 一起查，只有旧一键入库任务写下的同一组文件可加 `--overwrite` 覆盖，其余一律报冲突；slug 冲突也在这一步发现。
   - 拆分改写图片引用造成的断链判失败，解析时就断的图片链接只作警告；入库前后各统计一次 wiki 断链数，不自动跑 heal。
   - 另有 `--dry-run`（只看摘要，不建任务、不写 `raw/`）、`--status`、`--cancel`、`--json`、`--yes`。
-- **库级写锁**（决策P4.30-15）：`ingest`、`query --backfill`、`heal`/`audit`/`reindex`/`convert`（非 `--dry-run`）、`remove --yes`、`import` 在库根 `.guanlan.lock` 上取操作系统文件锁；库正被写时立即失败并显示执行者，不排队。只读预览不受影响。
+- **Web 暂存区改为一键入库**（P4.30 §1、§7）。「上传文件」里每个文件只有「一键入库」和删除；点一键入库后自动解析、整理、拆分，暂存区顶部出现任务卡：显示份数和预计耗时，确认后开始，可暂停、继续、放弃，进展日志实时刷新，页面刷新或服务重启后仍能接着看。「已解析」只保留只读预览和删除。Web 与 CLI 共用任务清单，可以互相续跑。
+  - **下线**：`POST /api/parse`、`GET /api/workspace/image-lint`、`POST /api/workspace/relocalize`、`POST /api/raw` 的 `source` 晋级分支（返回 400），以及「让 agent 修订」「合并选中」。粘贴投喂（`POST /api/raw {content}`）不变。
+- **库级写锁**（决策P4.30-15）：`ingest`、`query --backfill`、`heal`/`audit`/`reindex`/`convert`（非 `--dry-run`）、`remove --yes`、`import` 以及 Web 宿主的每个写操作，在库根 `.guanlan.lock` 上取操作系统文件锁（Web 只在写操作期间持有）；库正被写时立即失败并显示执行者，不排队。只读预览不受影响。
 
 ### 变更
 

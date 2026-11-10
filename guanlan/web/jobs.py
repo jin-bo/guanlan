@@ -24,7 +24,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-from ..errors import EXIT_AGENT_ERROR
+from pathlib import Path
+
+from .. import kblock
+from ..errors import EXIT_AGENT_ERROR, EXIT_USAGE
 from ..runtime import HEARTBEAT_INTERVAL_S
 
 JobState = Literal["queued", "running", "done"]
@@ -41,6 +44,49 @@ Emit = Callable[[str], None]
 ProgressCb = Callable[[float], str]
 # = 共用节拍 HEARTBEAT_INTERVAL_S 的本模块别名（保留独立名便于测试 monkeypatch）。
 _JOB_HEARTBEAT_INTERVAL_S = HEARTBEAT_INTERVAL_S
+
+
+class KBWriteLock:
+    """`threading.Lock` 外加库级 OS 文件锁（P4.30，决策P4.30-15）：Web 写者与 CLI 写命令互斥。
+
+    接口与 `threading.Lock` 相容（`acquire` / `release` / `locked` / with）。`acquire` 先取进程内锁，
+    再**非阻塞**取库级锁；库正被 CLI 等其它进程写 → 释放进程内锁并抛 `kblock.KBLockBusy`（不排队）。
+    只在每个写操作期间持有——开着 Web 时 CLI 照样能写。锁文件建不出来（OSError，如只读介质）时
+    退化为只有进程内锁，不让 Web 因此不可用。
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._lock = threading.Lock()
+        self._root = Path(root)
+        self._kb: kblock.KBLock | None = None
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if not self._lock.acquire(blocking, timeout):
+            return False
+        try:
+            self._kb = kblock.acquire(self._root, "web")
+        except kblock.KBLockBusy:
+            self._lock.release()
+            raise
+        except OSError:
+            self._kb = None
+        return True
+
+    def release(self) -> None:
+        kb, self._kb = self._kb, None
+        if kb is not None:
+            kb.release()
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def __enter__(self) -> KBWriteLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
 
 
 class WriteGate:
@@ -60,8 +106,9 @@ class WriteGate:
       「有可写会话在跑」、不是「有人持写锁」，两者语义不同。
     """
 
-    def __init__(self) -> None:
-        self.write_lock = threading.Lock()
+    def __init__(self, root: Path | None = None) -> None:
+        # root 给定（可写宿主）→ 写锁同时持库级 OS 文件锁（P4.30）；None（reader / 旧测试）→ 纯进程内锁。
+        self.write_lock = KBWriteLock(root) if root is not None else threading.Lock()
         self._turns = 0
         self._turns_lock = threading.Lock()  # 独立于 write_lock：只护计数器
         # wiki 写代际（P4.5-4 修订）：每次 wiki/ 内容可能变化（ingest/heal 作业、改了 violation
@@ -120,6 +167,10 @@ class WriteGate:
             held[0] = True
 
         return _acq
+
+
+class _SkipJob(Exception):
+    """worker 内部控制流：拿不到库级锁时跳过 fn()。"""
 
 
 @dataclass
@@ -258,9 +309,18 @@ class JobQueue:
 
             # 单写者写锁（P4.5）：包住真正的写执行 `fn(emit)`，与可写 chat turn / 撤销 / GET /graph
             # 串行。在 worker 线程上阻塞 acquire 无碍（非事件循环线程）；None 时退回无锁（P4 行为）。
+            # 库被 CLI 等其它进程占用（P4.30 库级锁）→ 本作业直接以 EXIT_USAGE 完成、说明谁在写，不排队。
+            lock_error: Exception | None = None
             if self._write_lock is not None:
-                self._write_lock.acquire()
+                try:
+                    self._write_lock.acquire()
+                except kblock.KBLockBusy as exc:
+                    lock_error = exc
             try:
+                if lock_error is not None:
+                    buf.write(str(lock_error))
+                    job.exit_code = EXIT_USAGE
+                    raise _SkipJob
                 # 进程级 redirect：捕获 run_ingest 的人读 stdout/stderr。只在此单 worker 串行
                 # 发生，故无跨线程竞态（读/问答路径都不打印，见模块 docstring 红线）。
                 with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
@@ -274,6 +334,8 @@ class JobQueue:
                 else:
                     job.result = outcome
                     job.exit_code = outcome.exit_code
+            except _SkipJob:
+                pass
             except Exception as exc:  # noqa: BLE001 — worker 绝不能死，异常归一为作业失败
                 job.exit_code = EXIT_AGENT_ERROR
                 buf.write(f"\n作业执行异常：{type(exc).__name__}: {exc}")
@@ -286,7 +348,7 @@ class JobQueue:
                     if hb_thread is not None:
                         hb_thread.join(timeout=1.0)
                 job.progress = ""  # 清瞬时进度：最终结果只看 output（干净摘要，不含心跳历史）
-                if self._write_lock is not None:
+                if self._write_lock is not None and lock_error is None:
                     self._write_lock.release()  # 写执行收尾即释放，早于状态翻转/唤醒
                 # 顺序要紧：先写 output、再翻 state="done"，最后 set()。轮询读者只在见到
                 # state=="done" 后读 output（同线程程序序 + GIL 原子赋值保证"见 done 必见完整

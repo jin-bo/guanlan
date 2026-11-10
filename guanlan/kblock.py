@@ -20,7 +20,16 @@ from pathlib import Path
 
 from .errors import EXIT_USAGE, GuanlanError
 
-__all__ = ["LOCK_NAME", "KBLock", "KBLockBusy", "acquire", "kb_write_lock", "read_holder", "describe_holder"]
+__all__ = [
+    "LOCK_NAME",
+    "KBLock",
+    "KBLockBusy",
+    "acquire",
+    "kb_write_lock",
+    "read_holder",
+    "holder_alive",
+    "describe_holder",
+]
 
 LOCK_NAME = ".guanlan.lock"
 _WIN_LOCK_OFFSET = 1 << 30  # Windows 锁一个远离文件内容的字节，执行者信息仍可被其它进程读取
@@ -48,13 +57,30 @@ def describe_holder(holder: dict | None) -> str:
 
 
 def read_holder(root: Path) -> dict | None:
-    """读锁文件里的执行者信息（只用于显示）。读不到/坏 → None。"""
+    """读锁文件里的执行者信息（只用于显示）。读不到/坏/空（锁空闲）→ None。
+
+    持有者被 kill 时来不及清空，信息会留到下一次获取；显示前可用 `holder_alive` 粗判。
+    """
     try:
         text = (Path(root) / LOCK_NAME).read_text(encoding="utf-8")
         data = json.loads(text) if text.strip() else None
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def holder_alive(holder: dict | None) -> bool:
+    """执行者 pid 是否还活着（只用于显示，不参与正确性）。"""
+    pid = (holder or {}).get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # 无权限探测 = 进程存在
+        return True
+    return True
 
 
 def _try_lock(fd: int) -> bool:
@@ -106,6 +132,8 @@ class KBLock:
         fd, self._fd = self._fd, None
         if fd is None:
             return
+        with contextlib.suppress(OSError):  # 清掉执行者信息：锁空闲时不再显示「谁在写」
+            os.ftruncate(fd, 0)
         _unlock(fd)
         os.close(fd)
 

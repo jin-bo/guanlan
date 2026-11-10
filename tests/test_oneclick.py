@@ -446,3 +446,10 @@ def test_default_ingest_output_goes_to_stderr(kb: Path, monkeypatch, capsys):
     assert run("raw/x.md", kb) == 0
     out = capsys.readouterr()
     assert out.out == "" and "摄入完成" in out.err
+
+
+def test_holder_info_cleared_on_release(kb: Path):
+    lock = acquire(kb, "cli: heal")
+    assert read_holder(kb)["origin"] == "cli: heal"
+    lock.release()
+    assert read_holder(kb) is None
