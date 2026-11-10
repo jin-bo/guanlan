@@ -83,6 +83,8 @@ def holder_alive(holder: dict | None) -> bool:
     pid = (holder or {}).get("pid")
     if not isinstance(pid, int) or pid <= 0:
         return False
+    if sys.platform == "win32":  # pragma: no cover - Windows 上 os.kill(pid, 0) 是发 CTRL_C_EVENT，不是探测
+        return _win_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -90,6 +92,28 @@ def holder_alive(holder: dict | None) -> bool:
     except OSError:  # 无权限探测 = 进程存在
         return True
     return True
+
+
+def _win_pid_alive(pid: int) -> bool:  # pragma: no cover - CI 跑 POSIX
+    import ctypes
+    from ctypes import wintypes
+
+    # use_last_error + get_last_error：ctypes 自己的调用会覆盖线程的 GetLastError，直接再调一次读不准。
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = wintypes.HANDLE  # 默认 int 会截断 64 位句柄
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED = 进程存在、只是无权探测
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _try_lock(fd: int) -> bool:

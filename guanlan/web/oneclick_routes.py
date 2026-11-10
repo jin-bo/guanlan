@@ -78,6 +78,7 @@ def task_view(root: Path, task: dict, *, job_id: str | None = None, pausing: boo
         "split",
         "normalized",
         "precheck",
+        "overwrite",
         "warnings",
         "estimate_seconds",
         "links_before",
@@ -232,7 +233,7 @@ def register(
         return {"job_id": job_id}
 
     @writer_only(app.post("/api/oneclick/{task_id}/resume"))
-    async def oneclick_resume(task_id: str) -> dict:
+    async def oneclick_resume(task_id: str, body: ConfirmBody | None = None) -> dict:
         reject_if_writable_active()
         task = await anyio.to_thread.run_sync(_load, task_id)
         if task.get("state") not in ("paused", "running"):
@@ -244,7 +245,9 @@ def register(
 
         def _run(emit) -> int:
             _recover_in_job()  # 原执行者已退出的 running → paused
-            code, _task = resume(root, task_id, emit=emit, ingest=_ingest, should_pause=flag.is_set)
+            code, _task = resume(
+                root, task_id, emit=emit, ingest=_ingest, should_pause=flag.is_set, overwrite=bool(body and body.overwrite)
+            )
             return code
 
         job_id = jobs.enqueue("oneclick", _wrap(_run))

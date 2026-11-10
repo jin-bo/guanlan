@@ -191,6 +191,9 @@ def recover_stale(root: Path) -> list[str]:
         elif state == "running":
             task["state"] = "paused"
             task["reason"] = "执行中断（原执行者已退出）；继续后从未完成的那一篇重试。"
+            for it in task.get("items", []):  # 中断在途的那一篇不能继续显示「入库中」
+                if it.get("state") == "running":
+                    it["state"] = "pending"
         else:
             continue
         save_task(root, task)
@@ -372,6 +375,7 @@ def _check_images(root: Path, items: list[dict], split: bool, sample: str) -> li
                 raise OneClickError(f"拆分改写图片引用出错：{it['parsed']} 中的 {url} 找不到（这是一键入库的缺陷，请报告）。")
             warnings.append(f"{Path(it['parsed']).name}：图片 {url} 找不到，原样保留")
         it["image_count"] = len(col.images)
+        it["prepared_images"] = {img.name: img.sha256 for img in col.images}  # ⑤ 落盘前复检（图同 md 一样须是确认时的内容）
     return warnings
 
 
@@ -615,12 +619,20 @@ def resume(
     emit: Emit | None = None,
     ingest: IngestFn,
     should_pause: Callable[[], bool] = lambda: False,
+    overwrite: bool = False,
 ) -> tuple[int, dict]:
-    """继续（**调用方持锁**）：从清单读出断点，逐项判定跳过/重入/停下。"""
+    """继续（**调用方持锁**）：从清单读出断点，逐项判定跳过/重入/停下。
+
+    `overwrite=True`：暂停后复检发现其余目标变成「可覆盖」（只可能是旧一键入库任务写下的同一组文件）时，
+    继续可以补给覆盖确认；它只放宽 overwritable，「冲突」照样拒绝。
+    """
     task = load_task(root, task_id)
     log = TaskLog(root, task_id, emit)
     if task.get("state") != "paused":
         raise OneClickError(f"任务 {task_id} 当前状态为 {task.get('state')}，不能继续。")
+    if overwrite and not task.get("overwrite"):
+        task["overwrite"] = True
+        log("已确认覆盖 raw/ 中本任务的旧文件")
     task["state"] = "running"
     task.pop("reason", None)
     save_task(root, task)
@@ -664,7 +676,9 @@ def _land(root: Path, task: dict, log: TaskLog) -> int:
                 save_task(root, task)
                 log(f"  [{k}/{n}] {it['raw']} 已在盘上（上次写入后未及更新清单），补记为已写入", detail=True)
                 continue
-            if any(v is not None for v in state.values()):
+            # md 是末步提交：md 不在盘上 = 上次停在「图已换、md 未写」之间，照常重写即可（图会整盘再换）；
+            # md 已在盘上却与记录不符 → 写入后被改动，停下报差异。
+            if state[it["raw"]] is not None:
                 diffs = [rel for rel, sha in files.items() if state[rel] != sha]
                 _pause(root, task, log, f"{it['raw']} 上次写到一半，盘上与记录不符：" + "、".join(diffs[:5]))
                 return EXIT_USAGE
@@ -675,6 +689,10 @@ def _land(root: Path, task: dict, log: TaskLog) -> int:
             return EXIT_USAGE
         text = md.read_text(encoding="utf-8")
         col = collect_for_promotion(text, source_md=md, root=ws / "parsed", stem=target.stem, strict=False)  # 准入边界 = parsed/
+        expected_imgs = it.get("prepared_images")
+        if expected_imgs is not None and {img.name: img.sha256 for img in col.images} != expected_imgs:
+            _pause(root, task, log, f"{it['parsed']} 引用的图片在确认后被改动或删除；请放弃后重新导入")
+            return EXIT_USAGE
         img_dir = _images_dir(target)
         it["sha256"] = _sha_bytes(col.markdown.encode("utf-8"))
         it["images"] = {_rel(root, img_dir / img.name): img.sha256 for img in col.images}
@@ -1088,7 +1106,7 @@ def _cli_resume(
             return EXIT_USAGE
         state = task["state"]
         if state == "paused":
-            code, task = _run_with_pause(resume, root, task["task_id"], emit=_stderr, ingest=ingest)
+            code, task = _run_with_pause(resume, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)
             _receipt(task, json_output)
             return code
         if state != "awaiting_confirm":

@@ -202,6 +202,27 @@ def test_same_set_owned_by_old_task_is_overwritable(kb: Path, book: Path):
     assert code == EXIT_OK and task2["state"] == "done"
 
 
+def test_resume_with_overwrite_unblocks_overwritable_pause(kb: Path, book: Path):
+    """暂停后复检发现可覆盖的旧文件：不带 overwrite 继续仍停下，带上才继续（「冲突」不受影响）。"""
+    from guanlan.oneclick import resume
+
+    _confirm(kb, _prepare(kb, book), FakeIngest())
+    task = _prepare(kb, book)
+    assert task["precheck"]["status"] == "overwritable"
+    # 模拟「确认时尚无旧文件、落了一份后暂停，复检才发现可覆盖」的盘面
+    task.update(state="paused", overwrite=False)
+    task["stages"]["confirm"] = "done"
+    first = task["items"][0]
+    first.update(land="written", sha256=oneclick._sha_file(kb / first["raw"]), images={})
+    oneclick.save_task(kb, task)
+    with acquire(kb, "test"):
+        code, t = resume(kb, task["task_id"], ingest=FakeIngest())
+    assert code != EXIT_OK and t["state"] == "paused"
+    with acquire(kb, "test"):
+        code, t = resume(kb, task["task_id"], ingest=FakeIngest(), overwrite=True)
+    assert code == EXIT_OK and t["state"] == "done"
+
+
 def test_changed_part_count_is_conflict(kb: Path, book: Path, tmp_path: Path):
     task = _prepare(kb, book)
     _confirm(kb, task, FakeIngest())

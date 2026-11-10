@@ -599,8 +599,22 @@ function renderOneclickPanel(panel, data) {
     const prog = document.createElement("p");
     prog.textContent = t("oc.progress", task.done, task.items.length);
     card.appendChild(prog);
+    // 暂停原因是「复检发现可覆盖的旧文件」：继续时可补给覆盖确认（「冲突」不给这个选项）
+    let pOverwrite = null;
+    if (task.precheck && task.precheck.status === "overwritable" && !task.overwrite) {
+      const label = document.createElement("label");
+      label.className = "oc-overwrite";
+      pOverwrite = document.createElement("input");
+      pOverwrite.type = "checkbox";
+      label.append(pOverwrite, document.createTextNode(" " + t("oc.overwrite")));
+      card.appendChild(label);
+    }
     actions.appendChild(ocButton(t("oc.resume"), async () => {
-      try { await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/resume`); loadOneclickPanel(); } catch (e) { fail(e); }
+      if (pOverwrite && !pOverwrite.checked) { status.textContent = t("oc.overwriteNeeded"); return; }
+      try {
+        await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/resume`, { overwrite: !!(pOverwrite && pOverwrite.checked) });
+        loadOneclickPanel();
+      } catch (e) { fail(e); }
     }, { disabled: blocked }));
     actions.appendChild(ocCancelButton(task, fail, blocked));
   }

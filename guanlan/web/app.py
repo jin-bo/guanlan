@@ -697,6 +697,8 @@ def create_app(
             lambda emit: _atomic_write_upload(target, data),  # thunk 收 emit、此处忽略（决策P4.6.1-11）
             abandon_on_cancel=True,
         )
+        if job.exit_code == EXIT_USAGE:  # 库被 CLI 占用（P4.30 库级锁）→ 409，不是写盘失败
+            raise HTTPException(status_code=409, detail=job.output or "知识库正被占用。")
         if job.exit_code != EXIT_OK:  # 落盘 IO 失败 → 归一为 EXIT_AGENT_ERROR
             raise HTTPException(status_code=500, detail=job.output or "写盘失败。")
         return {
@@ -755,6 +757,8 @@ def create_app(
             lambda emit: _delete_workspace_scratch(target),  # thunk 收 emit、此处忽略
             abandon_on_cancel=True,
         )
+        if job.exit_code == EXIT_USAGE:  # 库被 CLI 占用（P4.30 库级锁）→ 409
+            raise HTTPException(status_code=409, detail=job.output or "知识库正被占用。")
         if job.exit_code != EXIT_OK:  # 删除 IO 失败 → 归一为 EXIT_AGENT_ERROR
             raise HTTPException(status_code=500, detail=job.output or "删除失败。")
         return {"deleted": path}
@@ -773,6 +777,8 @@ def create_app(
             lambda emit: _rmtree_workspace_dir(target),  # thunk 收 emit、此处忽略
             abandon_on_cancel=True,
         )
+        if job.exit_code == EXIT_USAGE:  # 库被 CLI 占用（P4.30 库级锁）→ 409
+            raise HTTPException(status_code=409, detail=job.output or "知识库正被占用。")
         if job.exit_code != EXIT_OK:
             raise HTTPException(status_code=500, detail=job.output or "删除失败。")
         return {"deleted": path}
