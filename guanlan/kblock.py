@@ -6,6 +6,11 @@
   不参与正确性判断。
 - **只由最外层入口取锁**（`cli.py` 子命令分发处、Web `WriteGate`）；`run_ingest`、`run_guarded_write` 等内核
   函数一律不取。POSIX `flock` 对同一进程里另开的文件描述符同样互斥，重复获取会让自己失败。
+- **嵌套写放行**：持锁的写运行里，Agent 照 `AGENTAO.md` / `SKILL.md` 在 shell 里跑 `guanlan convert` /
+  `ingest` / `reindex` 等子命令时，子进程拿不到锁。取锁进程在 `os.environ` 放一个**进程令牌**（只设一次，
+  子进程继承），并写进锁文件的执行者信息；子孙进程发现锁的持有者带着自己继承来的令牌、且持有者还活着，
+  就当作嵌套调用、不再取锁（返回不持有任何东西的 `KBLock`）。无关进程没有这个令牌，照常互斥；
+  持有者释放时清空执行者信息，令牌随之失效。
 """
 
 from __future__ import annotations
@@ -13,25 +18,29 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import secrets
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from .errors import EXIT_USAGE, GuanlanError
 
 __all__ = [
     "LOCK_NAME",
+    "TOKEN_ENV",
     "KBLock",
     "KBLockBusy",
     "acquire",
     "kb_write_lock",
+    "run_locked",
     "read_holder",
     "holder_alive",
     "describe_holder",
 ]
 
 LOCK_NAME = ".guanlan.lock"
+TOKEN_ENV = "GUANLAN_KB_LOCK_TOKEN"
 _WIN_LOCK_OFFSET = 1 << 30  # Windows 锁一个远离文件内容的字节，执行者信息仍可被其它进程读取
 
 
@@ -116,19 +125,41 @@ def _unlock(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
-class KBLock:
-    """已获取的库级锁。`release()` 幂等。"""
+def _process_token() -> str:
+    """本进程（及其子孙）的锁令牌：继承来的就沿用，否则生成一个并放进 `os.environ` 让子进程继承。"""
+    token = os.environ.get(TOKEN_ENV)
+    if not token:
+        token = secrets.token_hex(8)
+        os.environ[TOKEN_ENV] = token
+    return token
 
-    def __init__(self, root: Path, fd: int, holder: dict) -> None:
+
+def _nested_holder(root: Path) -> dict | None:
+    """锁的持有者是不是本进程的祖先写运行：令牌一致、不是本进程、且还活着。"""
+    token = os.environ.get(TOKEN_ENV)
+    holder = read_holder(root)
+    if not token or not holder or holder.get("token") != token:
+        return None
+    if holder.get("pid") == os.getpid() or not holder_alive(holder):
+        return None
+    return holder
+
+
+class KBLock:
+    """已获取的库级锁。`release()` 幂等。`nested=True`：祖先进程持锁，本对象不持有任何东西。"""
+
+    def __init__(self, root: Path, fd: int | None, holder: dict, *, nested: bool = False) -> None:
         self.root = root
         self._fd: int | None = fd
         self.holder = holder
+        self.nested = nested
 
     @property
     def held(self) -> bool:
-        return self._fd is not None
+        return self._fd is not None or self.nested
 
     def release(self) -> None:
+        self.nested = False
         fd, self._fd = self._fd, None
         if fd is None:
             return
@@ -145,14 +176,24 @@ class KBLock:
 
 
 def acquire(root: str | Path, origin: str) -> KBLock:
-    """非阻塞获取库级锁；被占用 → `KBLockBusy`（带执行者信息）。"""
+    """非阻塞获取库级锁；被占用 → `KBLockBusy`（带执行者信息）。祖先写运行持锁 → 嵌套放行。"""
     root = Path(root).resolve()
     path = root / LOCK_NAME
+    token = _process_token()
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         if not _try_lock(fd):
+            nested = _nested_holder(root)
+            if nested is not None:
+                os.close(fd)
+                return KBLock(root, None, nested, nested=True)
             raise KBLockBusy(read_holder(root))
-        holder = {"pid": os.getpid(), "origin": origin, "started": time.strftime("%Y-%m-%d %H:%M:%S")}
+        holder = {
+            "pid": os.getpid(),
+            "origin": origin,
+            "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "token": token,
+        }
         data = json.dumps(holder, ensure_ascii=False).encode("utf-8")
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
@@ -168,5 +209,27 @@ def kb_write_lock(root: str | Path, origin: str) -> Iterator[KBLock]:
     lock = acquire(root, origin)
     try:
         yield lock
+    finally:
+        lock.release()
+
+
+def run_locked(root_dir: str | Path, origin: str, fn: Callable[[], int]) -> int:
+    """CLI 写命令的最外层取锁（决策P4.30-15）：持库级锁跑 `fn`，被占用 → 打印执行者、返回 EXIT_USAGE。
+
+    库根无效 / 不可写 / 锁文件建不出（`GuanlanError` / `OSError`）时不取锁，照跑 `fn`，交给命令自己
+    报错（它们都会先 `require_kb_root`）。
+    """
+    from .paths import require_kb_root
+
+    try:
+        root = require_kb_root(root_dir, writable=True)
+        lock = acquire(root, origin)
+    except KBLockBusy as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
+    except (GuanlanError, OSError):
+        return fn()
+    try:
+        return fn()
     finally:
         lock.release()

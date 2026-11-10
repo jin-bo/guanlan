@@ -22,10 +22,8 @@ from .heal import DEFAULT_LIMIT, heal_entrypoint, positive_int
 from .health import health_entrypoint
 from .ingest import run_ingest
 from .init import run_init
-from .kblock import KBLockBusy
-from .kblock import acquire as _acquire_kb_lock
+from .kblock import run_locked
 from .lint import MISSING_ENTITY_MIN_REFS, lint_entrypoint
-from .paths import require_kb_root
 from .query import run_query
 from .quotes import add_quotes_arguments, quotes_entrypoint
 from .reindex import reindex_entrypoint
@@ -941,20 +939,8 @@ def main(argv: list[str] | None = None) -> int:
         args.dir = "."
     if not _needs_kb_lock(args):
         return args.func(args)
-    # 只由最外层入口取锁（决策P4.30-15）：内核函数（run_ingest 等）一律不取。库根无效 / 不可写时
-    # 不取锁，交给命令自己报错（它们都会先 require_kb_root）。
-    try:
-        root = require_kb_root(args.dir, writable=True)
-        lock = _acquire_kb_lock(root, f"cli: {args.command}")
-    except KBLockBusy as exc:
-        print(exc, file=sys.stderr)
-        return exc.exit_code
-    except (GuanlanError, OSError):
-        return args.func(args)
-    try:
-        return args.func(args)
-    finally:
-        lock.release()
+    # 只由最外层入口取锁（决策P4.30-15）：内核函数（run_ingest 等）一律不取。
+    return run_locked(args.dir, f"cli: {args.command}", lambda: args.func(args))
 
 
 if __name__ == "__main__":

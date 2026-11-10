@@ -352,11 +352,24 @@ def _check_images(root: Path, items: list[dict], split: bool, sample: str) -> li
         text = md.read_text(encoding="utf-8")
         col = collect_for_promotion(text, source_md=md, root=ws, stem=Path(it["raw"]).stem, strict=False)
         for url in col.missing:
-            if split and url.startswith("../") and _admit_image_ref(url[3:], parsed, ws) is not None:
+            # 分卷在 parsed/<sample>/ 下：同一个引用若按整本所在的 parsed/ 解析得到、按分卷位置却找不到，
+            # 说明拆分漏改写了它（`../` 前缀没加上）。加过前缀的引用与整本指向同一个文件，不会落进这里。
+            if split and _admit_image_ref(url, parsed, ws) is not None:
                 raise OneClickError(f"拆分改写图片引用出错：{it['parsed']} 中的 {url} 找不到（这是一键入库的缺陷，请报告）。")
             warnings.append(f"{Path(it['parsed']).name}：图片 {url} 找不到，原样保留")
         it["image_count"] = len(col.images)
     return warnings
+
+
+_SAMPLE_MAX_BYTES = 180  # 留出 `<时间戳>-…json` / `….origin.md` 的余量：Linux 文件名按字节计 255
+
+
+def _cap_sample(sample: str) -> str:
+    """sample 会拼进任务清单 / 日志 / `parsed/<sample>.origin.md` 等文件名，按 UTF-8 字节截短（不切坏字符）。"""
+    data = sample.encode("utf-8")
+    if len(data) <= _SAMPLE_MAX_BYTES:
+        return sample
+    return data[:_SAMPLE_MAX_BYTES].decode("utf-8", errors="ignore").rstrip("-.")
 
 
 def prepare(
@@ -381,7 +394,7 @@ def prepare(
             f"已有未完成的入库任务 {existing['task_id']}（{_STATE_LABEL.get(existing['state'], existing['state'])}）；"
             "请先继续（--resume）或放弃（--cancel）它。"
         )
-    sample = raw_slug(src.stem) or "import"
+    sample = _cap_sample(raw_slug(src.stem)) or "import"
     base = f"{time.strftime('%Y%m%d-%H%M%S')}-{sample}"
     task_id, n = base, 1
     while _task_file(root, task_id).exists():  # 同一秒内的第二个任务不能覆盖第一个的清单
@@ -1104,7 +1117,11 @@ def _cli_import(
         _cancel_locked(root, task["task_id"])
         _stderr("raw/ 中已有本次的目标文件；如确认覆盖，请加 --overwrite 重新导入。任务已放弃。")
         return EXIT_USAGE
-    if not yes and not _ask_start():
+    try:
+        start = yes or _ask_start()
+    except KeyboardInterrupt:  # 在确认提示处 Ctrl+C = 回答「否」：不留一个挡住下次导入的等待确认任务
+        start = False
+    if not start:
         _cancel_locked(root, task["task_id"])
         _stderr("已放弃；parsed/ 中的产物保留。")
         return EXIT_OK

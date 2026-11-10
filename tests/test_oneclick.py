@@ -377,6 +377,35 @@ def test_lock_released_when_holder_process_exits(kb: Path):
     acquire(kb, "after").release()
 
 
+def test_nested_child_of_lock_holder_passes_unrelated_process_refused(kb: Path):
+    """持锁写运行里 Agent 在 shell 跑的 guanlan 子命令（继承令牌）放行；没有令牌的无关进程照常被拒。"""
+    import os
+
+    from guanlan.kblock import TOKEN_ENV
+
+    code = (
+        "from guanlan.kblock import acquire, KBLockBusy\n"
+        f"try:\n    lk = acquire({str(kb)!r}, 'child')\n    print('nested' if lk.nested else 'held')\n"
+        "except KBLockBusy:\n    print('busy')\n"
+    )
+    lock = acquire(kb, "cli: ingest")
+    try:
+        inherit = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+        assert inherit.stdout.strip() == "nested"
+        env = {k: v for k, v in os.environ.items() if k != TOKEN_ENV}
+        stranger = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, env=env)
+        assert stranger.stdout.strip() == "busy"
+        env[TOKEN_ENV] = "someone-else"
+        forged = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, env=env)
+        assert forged.stdout.strip() == "busy"
+        assert read_holder(kb)["origin"] == "cli: ingest"  # 嵌套放行不改写执行者信息
+    finally:
+        lock.release()
+    # 持有者释放后令牌失效：继承令牌的进程走正常取锁
+    after = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert after.stdout.strip() == "held"
+
+
 def test_cli_write_commands_refused_while_locked(kb: Path, capsys, monkeypatch):
     called = []
     monkeypatch.setattr("guanlan.cli.run_ingest", lambda *a, **k: called.append(1) or 0)
