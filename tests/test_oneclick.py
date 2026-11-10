@@ -472,6 +472,13 @@ def test_json_mode_always_prints_one_json_document(kb: Path, capsys):
     assert out["ok"] is False and out["exit_code"] == EXIT_USAGE and "没有未完成" in out["error"]
 
 
+def test_cli_graph_takes_kb_lock_like_web_graph():
+    from guanlan.cli import _needs_kb_lock, build_parser
+
+    assert _needs_kb_lock(build_parser().parse_args(["graph"]))
+    assert not _needs_kb_lock(build_parser().parse_args(["check"]))
+
+
 def test_cli_write_commands_refused_while_locked(kb: Path, capsys, monkeypatch):
     called = []
     monkeypatch.setattr("guanlan.cli.run_ingest", lambda *a, **k: called.append(1) or 0)

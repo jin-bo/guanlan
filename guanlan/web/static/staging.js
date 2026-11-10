@@ -594,6 +594,7 @@ function renderOneclickPanel(panel, data) {
       actions.appendChild(ocButton(t("oc.resume"), async () => {
         try { await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/resume`); loadOneclickPanel(); } catch (e) { fail(e); }
       }, { disabled: blocked }));
+      actions.appendChild(ocCancelButton(task, fail, blocked)); // 后端放弃同样先恢复：不必先继续入库才能放弃
     }
   } else if (task.state === "paused") {
     const prog = document.createElement("p");

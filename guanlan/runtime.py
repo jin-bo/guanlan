@@ -246,6 +246,31 @@ def run_spec_text(prompt: str) -> str:
     return _YAML_UNSAFE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
 
 
+def _run_in_new_session(cmd: list[str], *, input: str, capture_output: bool, **kwargs) -> subprocess.CompletedProcess:
+    """`subprocess.run` 的新会话版：中断（第二次 Ctrl+C / SIGHUP / SIGTERM 转成的 KeyboardInterrupt）时**整组**杀掉。
+
+    `subprocess.run` 被中断只 kill 直接子进程；子进程在新会话里，agentao 派生的 shell 工具等孙进程
+    收不到终端信号，会在父进程退出、库级锁释放之后继续写 wiki/。会话首进程的 pid 即进程组号。
+    """
+    pipe = subprocess.PIPE if capture_output else None
+    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=pipe, stderr=pipe, **kwargs) as proc:
+        try:
+            stdout, stderr = proc.communicate(input)
+        except BaseException:
+            try:
+                if sys.platform == "win32":  # pragma: no cover - CI 跑 POSIX
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
+                else:
+                    import signal
+
+                    os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            proc.wait()
+            raise
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
 def _subprocess_runner(
     prompt: str,
     *,
@@ -290,7 +315,7 @@ def _subprocess_runner(
         # capture_output 仍把子进程 stdout（JSON 信封）缓冲到结束；心跳是父进程旁路打到 stderr，
         # 二者互不干扰——既保住信封解析，又在交互式终端给出「还活着」的进展信号。
         with _progress_heartbeat(working_directory):
-            proc = subprocess.run(
+            proc = (_run_in_new_session if new_session else subprocess.run)(
                 cmd,
                 cwd=str(working_directory),
                 capture_output=True,

@@ -285,10 +285,15 @@ def register(
         await anyio.to_thread.run_sync(_load, task_id)
         if _job_for(task_id) is not None:
             raise HTTPException(status_code=409, detail="该任务正在执行；请先暂停。")
+        def _cancel(emit) -> int:
+            _recover_in_job()  # 原执行者已退出的 running → paused，才能放弃（同 CLI --cancel）
+            cancel(root, task_id)
+            return EXIT_OK
+
         job = await anyio.to_thread.run_sync(
             jobs.submit_and_wait,
             "oneclick-cancel",
-            _wrap(lambda emit: (cancel(root, task_id), EXIT_OK)[1]),
+            _wrap(_cancel),
             abandon_on_cancel=True,
         )
         if job.exit_code != EXIT_OK:

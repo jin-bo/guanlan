@@ -920,7 +920,7 @@ def _needs_kb_lock(args: argparse.Namespace) -> bool:
     """库级写锁覆盖的写入口（P4.30 §6.4，决策P4.30-15）。只读预览（`--dry-run`、`remove` 不带 `--yes`、
     普通 `query`）不取锁。`import` 自己管锁（`--status` 拿不到锁也要能看），不在这里取。"""
     cmd = args.command
-    if cmd == "ingest":
+    if cmd in ("ingest", "graph"):  # graph 写 graph/，与 Web `/graph` 同样持锁，免得两边互相覆盖
         return True
     if cmd == "query":
         return bool(args.backfill)
