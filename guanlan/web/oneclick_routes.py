@@ -235,10 +235,13 @@ def register(
         existing = await anyio.to_thread.run_sync(active_task, root)
         # 残留的「准备中」（执行者已退出：CLI 被 kill / 关终端、或本进程启动时锁被占而没恢复）没有继续/放弃
         # 的出口：不在这里 409，交给作业——作业持锁先 `_recover_in_job` 把它改成失败，`prepare` 再复检。
+        # 持有者是本进程（正在跑别的写作业）时，准备中的任务若是本进程的，下面的排队检查会拦住；
+        # 否则它就是别处留下的残留，不能因为「持有者活着」而 409。
+        holder = await anyio.to_thread.run_sync(read_holder, root)
         stale_preparing = (
             existing is not None
             and existing.get("state") == "preparing"
-            and not holder_alive(await anyio.to_thread.run_sync(read_holder, root))
+            and (not holder_alive(holder) or (holder or {}).get("pid") == os.getpid())
         )
         if existing is not None and not stale_preparing:
             raise HTTPException(

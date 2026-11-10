@@ -690,6 +690,9 @@ def _land(root: Path, task: dict, log: TaskLog, pc: dict | None = None) -> int:
         pc = precheck(root, task)
     if pc["status"] == "conflict" or (pc["status"] == "overwritable" and not task.get("overwrite")):
         task["state"] = "awaiting_confirm" if not any(it.get("land") != "pending" for it in task["items"]) else "paused"
+        if task["state"] == "awaiting_confirm":  # 退回等待确认：上一次确认作废，别留「已确认」的痕迹
+            task["stages"]["confirm"] = "pending"
+            task.pop("confirmed", None)
         task["precheck"] = pc
         task["reason"] = "写入前复检发现 raw/ 有变化：" + "；".join(pc["details"])
         save_task(root, task)
@@ -1240,10 +1243,26 @@ def _cli_resume(
             return EXIT_USAGE
     # 等待确认：与 `import <file>` 的确认同一口径（问答期间不持锁；确认本身在锁内复检）
     _stderr("\n".join(summary_lines(task, detail=False)))
+    pc = precheck(root, task)  # 现查（只读、不落清单）：存下的预检可能已过时；确认时仍在锁内复检
+    # 与 `import <file>` 同口径：明知会被 confirm 拒的情形先说清，别等用户答了「y」再拒。
+    if pc.get("status") == "conflict":
+        _stderr("存在不可覆盖的冲突，只能放弃（--cancel）。")
+        if json_output:
+            _receipt(task, True)
+        return EXIT_USAGE
+    if pc.get("status") == "overwritable" and not overwrite:
+        _stderr("raw/ 中已有本次的目标文件；如确认覆盖，请加 --overwrite 再 --resume。")
+        if json_output:
+            _receipt(task, True)
+        return EXIT_USAGE
     if not yes and not interactive:
         _stderr("非交互终端须加 --yes 才能确认开始入库。")
         return EXIT_USAGE
-    if not yes and not _ask_start():
+    try:
+        start = yes or _ask_start()
+    except KeyboardInterrupt:  # 在确认提示处 Ctrl+C = 回答「否」（同 `_cli_import`）
+        start = False
+    if not start:
         _stderr("未开始；任务仍在等待确认（可再 --resume，或 --cancel 放弃）。")
         if json_output:  # --json 契约：正常结局给回执，不落到兜底的 {"ok": false, "exit_code": 0}
             _receipt(task, True)

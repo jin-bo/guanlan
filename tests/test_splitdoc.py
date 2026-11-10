@@ -142,6 +142,17 @@ def test_heading_inside_fence_is_not_a_cut():
     assert not any(p.body.startswith("## 不是标题") for p in parts)
 
 
+def test_oversized_fence_rendered_parts_stay_balanced():
+    """超过 PART_MAX 的代码块只能在围栏内切：正文切片照旧无损，渲染出的每份围栏仍成对。"""
+    code = "".join(f"# 代码注释{i}\n" for i in range(PART_MAX // 4))
+    body = _section("第一章", 5_000) + "```\n" + code + "```\n\n" + _section("第二章", 5_000)
+    parts = split_document(body, sample="样例")
+    _assert_lossless(body, parts)
+    assert len(parts) >= 2
+    for p in parts:
+        assert render_part(p, sample="样例", doc_meta={"title": "书"}).count("```") % 2 == 0
+
+
 def test_filename_byte_limit_with_long_cjk_titles():
     """超长中文章名：basename 按 UTF-8 字节限 200（Linux 按字节计）。"""
     long = "很长的章节标题" * 20

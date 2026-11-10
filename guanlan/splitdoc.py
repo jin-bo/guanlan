@@ -375,6 +375,21 @@ def split_document(body: str, *, sample: str) -> list[Part]:
         page_at.append(cur)
         if u.page is not None:
             cur = u.page
+    # 每个单元起始时所在的未闭合围栏（"" = 不在围栏内）。超过 PART_MAX 的代码块只能在围栏内硬切，
+    # 渲染时据此给分卷补开 / 补闭围栏，否则代码行（含 `# 注释`）在分卷里会被当正文 / 标题。
+    fence_at: list[str] = []
+    in_fence, mark = False, ""
+    for u in units:
+        fence_at.append(mark if in_fence else "")
+        if u.cut == _P_SENTENCE:  # 超长行切出的后续片段：不是行首，不可能是围栏线（同 `_units`）
+            continue
+        m_f = _FENCE_RE.match(u.text.rstrip("\r\n"))
+        if in_fence:
+            if m_f and m_f.group(1) == mark:
+                in_fence = False
+        elif m_f:
+            in_fence, mark = True, m_f.group(1)
+    fence_at.append(mark if in_fence else "")
     parts: list[Part] = []
     for leaf in leaves:
         text = "".join(u.text for u in units[leaf.lo : leaf.hi])
@@ -396,6 +411,7 @@ def split_document(body: str, *, sample: str) -> list[Part]:
                 method=leaf.method,
                 name_segments=list(leaf.names),
                 pages=pages,  # type: ignore[arg-type]
+                extra={"fence_open": fence_at[leaf.lo], "fence_close": fence_at[leaf.hi]},
             )
         )
     total = len(parts)
@@ -453,6 +469,11 @@ def render_part(part: Part, *, sample: str, doc_meta: dict) -> str:
     body = rewrite_image_refs(part.body)
     if not body.endswith("\n"):
         body += "\n"
+    # 切在代码块中间（见 split_document 的 fence_at）：分卷各自补成闭合的围栏，`body` 本身仍是原文精确切片。
+    if part.extra.get("fence_open"):
+        body = f"{part.extra['fence_open']}\n{body}"
+    if part.extra.get("fence_close"):
+        body += f"{part.extra['fence_close']}\n"
     return dump_frontmatter(meta, body)
 
 
