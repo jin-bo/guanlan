@@ -471,9 +471,14 @@ def _join_sentences(lines: list[str]) -> tuple[list[str], list[Op]]:
 
 def _first_h1(body: str) -> str | None:
     in_fence = False
+    fence_mark = ""
     for line in body.split("\n"):
-        if _FENCE_RE.match(line):
-            in_fence = not in_fence
+        m_f = _FENCE_RE.match(line)
+        if m_f:  # 与 _classify 同口径：只有同种围栏线（``` / ~~~）才闭合，别把代码块里的 `# 注释` 当书名
+            if not in_fence:
+                in_fence, fence_mark = True, m_f.group(1)
+            elif m_f.group(1) == fence_mark:
+                in_fence = False
             continue
         if not in_fence:
             m = re.match(r"^\s{0,3}#\s+(.+?)\s*#*\s*$", line)

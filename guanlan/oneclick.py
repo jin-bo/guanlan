@@ -209,17 +209,28 @@ def _rel(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def _owned_by_other_tasks(root: Path, exclude: str) -> set[str]:
-    """旧任务清单记录为已写入（`written`）的 raw/ 文件（md 与图片）。归属只认清单，不凭路径推断。"""
-    owned: set[str] = set()
+def _owned_by_other_tasks(root: Path, exclude: str) -> dict[str, set[str | None]]:
+    """旧任务清单记录为已写入的 raw/ 文件（md 与图片）→ 当时写入的哈希。归属只认清单，不凭路径推断。"""
+    owned: dict[str, set[str | None]] = {}
     for task in iter_tasks(root):
         if task["task_id"] == exclude:
             continue
         for it in task.get("items", []):
             if it.get("land") in ("written", "writing"):
-                owned.add(it["raw"])
-                owned.update((it.get("images") or {}).keys())
+                owned.setdefault(it["raw"], set()).add(it.get("sha256"))
+                for rel, sha in (it.get("images") or {}).items():
+                    owned.setdefault(rel, set()).add(sha)
     return owned
+
+
+def _modified_since_written(root: Path, files: list[str], owned: dict[str, set[str | None]]) -> list[str]:
+    """旧任务写下、但盘上内容已与当时记录不同的文件（`raw/` 本应不可变：哈希变了说明有人手工改过）。"""
+    out: list[str] = []
+    for rel in files:
+        shas = owned.get(rel)
+        if shas and None not in shas and _sha_file(root / rel) not in shas:
+            out.append(rel)
+    return out
 
 
 def _self_owned(root: Path, task: dict) -> tuple[set[str], list[str]]:
@@ -301,7 +312,8 @@ def precheck(root: Path, task: dict) -> dict:
     owned = _owned_by_other_tasks(root, task["task_id"])
     md_existing = {e for e in existing if e.endswith(".md") and "/images/" not in e}
     unowned = [e for e in remaining if e not in owned]
-    if md_existing == targets and not unowned:
+    modified = _modified_since_written(root, [e for e in remaining if e in owned], owned)
+    if md_existing == targets and not unowned and not modified:
         return {
             "status": "overwritable",
             "details": [f"{len(remaining)} 个文件已由旧的一键入库任务写入，目标集合与本次相同，可覆盖"],
@@ -313,6 +325,8 @@ def precheck(root: Path, task: dict) -> dict:
         details.append("本次新增：" + "、".join(sorted(targets - md_existing)[:10]))
     if unowned:
         details.append("不属于任何一键入库任务：" + "、".join(unowned[:10]) + ("…" if len(unowned) > 10 else ""))
+    if modified:  # 覆盖会悄悄冲掉手工改动：判冲突，交给用户处理
+        details.append("写入后被改动过：" + "、".join(modified[:10]) + ("…" if len(modified) > 10 else ""))
     details.append("首版不做整书替换：请先自行清理 raw/ 中的相关文件后再导入。")
     return {"status": "conflict", "details": details, "existing": existing}
 
@@ -359,11 +373,8 @@ def _clear_part_dir(folder: Path) -> None:
 
 
 def _origin_label(root: Path, src: Path) -> str:
-    resolved = src.expanduser().resolve()
-    try:
-        return resolved.relative_to(_ws(root).resolve()).as_posix()
-    except ValueError:
-        return _default_origin(src, root)
+    """`origin` 沿决策P5.2-11（与 `guanlan convert` 同口径）：库内 → 相对库根，库外 → 绝对路径。"""
+    return _default_origin(src.expanduser(), root)
 
 
 def _check_images(root: Path, items: list[dict], split: bool, sample: str) -> list[str]:

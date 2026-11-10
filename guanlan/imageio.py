@@ -325,7 +325,7 @@ def commit_md_with_images(
         bak = _stage_and_swap_images(target, images)  # OSError 上抛（real/旧 md 未碰）
     try:
         code = atomic_write_raw(target, content, overwrite)  # 末步提交 md
-    except OSError:
+    except BaseException:  # OSError 之外，一键入库的 SIGTERM / 第二次 Ctrl+C（KeyboardInterrupt）同样须回滚图，不留 .bak
         if need_swap:
             _rollback_images(target, bak)
         raise

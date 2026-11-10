@@ -132,6 +132,7 @@ def register(
     # 这些失败不一定写进任务日志，任务又退回「等待确认 / 已暂停」，不透出就成了「点了没反应」。
     # 下一次确认/继续登记作业时清掉。
     last_failure: dict[str, str] = {}
+    pending_prepare: dict[str, str] = {}  # 本进程最近一次准备作业（只在事件循环线程读写）
     state_lock = threading.Lock()
 
     # 启动时恢复（§6.4）：拿得到库级锁 → 原执行者已退出，preparing→failed、running→paused；拿不到 → 不改清单。
@@ -244,6 +245,13 @@ def register(
                 status_code=409,
                 detail=f"已有未完成的入库任务 {existing['task_id']}；请先继续或放弃它。",
             )
+        # 准备作业排在别的写作业后面时，任务清单还没建出来：上面的检查拦不住第二次点击，
+        # 第二个作业会白跑到 prepare 里才失败。按本进程排队中的准备作业再拦一次。
+        pending = pending_prepare.get("job_id")
+        if pending is not None:
+            job = jobs.get_job(pending)
+            if job is not None and job.state != "done":
+                raise HTTPException(status_code=409, detail="已有一个入库准备作业在排队或执行中。")
         backend = body.backend
 
         def _prepare(emit) -> int:
@@ -251,7 +259,9 @@ def register(
             prepare(root, upload_path, origin_kind="web", backend=backend, emit=emit)
             return EXIT_OK
 
-        return {"job_id": jobs.enqueue("oneclick-prepare", _wrap(_prepare))}
+        job_id = jobs.enqueue("oneclick-prepare", _wrap(_prepare))
+        pending_prepare["job_id"] = job_id
+        return {"job_id": job_id}
 
     @writer_only(app.post("/api/oneclick/{task_id}/confirm"))
     async def oneclick_confirm(task_id: str, body: ConfirmBody) -> dict:

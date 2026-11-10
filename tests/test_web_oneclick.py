@@ -112,7 +112,7 @@ def test_prepare_then_confirm_lands_and_ingests(kb, fake_convert, ingest):
         assert len(task["items"]) == 3
         assert list((kb / "raw").iterdir()) == []
         meta = yaml.safe_load(split_frontmatter((kb / "workspace" / "parsed" / "书.md").read_text("utf-8"))[0])
-        assert meta["parsed_by"] == "mineru" and meta["origin"] == "uploads/书.pdf"
+        assert meta["parsed_by"] == "mineru" and meta["origin"] == "workspace/uploads/书.pdf"
         # 「已解析」里能预览分卷
         part = "workspace/" + task["items"][0]["parsed"]
         assert client.get("/api/workspace/file", params={"path": part}).status_code == 200

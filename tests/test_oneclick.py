@@ -254,6 +254,17 @@ def test_resume_overwrite_ignored_when_nothing_overwritable(kb: Path, book: Path
     assert code == EXIT_OK and t["overwrite"] is False
 
 
+def test_hand_edited_file_from_old_task_is_conflict_not_overwritable(kb: Path, book: Path):
+    """旧任务写下的文件被手工改过：覆盖会悄悄冲掉改动，判冲突。"""
+    task = _prepare(kb, book)
+    _confirm(kb, task, FakeIngest())
+    edited = kb / task["items"][0]["raw"]
+    edited.write_text(edited.read_text(encoding="utf-8") + "\n手工补注。\n", encoding="utf-8")
+    task2 = _prepare(kb, book)
+    assert task2["precheck"]["status"] == "conflict"
+    assert any("被改动" in d for d in task2["precheck"]["details"])
+
+
 def test_changed_part_count_is_conflict(kb: Path, book: Path, tmp_path: Path):
     task = _prepare(kb, book)
     _confirm(kb, task, FakeIngest())
