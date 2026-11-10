@@ -7698,8 +7698,8 @@ class _RecordingUpload:
 def test_read_upload_capped_never_reads_more_than_limit_plus_one(monkeypatch) -> None:
     """限读归口只要 `MAX_UPLOAD_BYTES + 1` 字节——多出的一字节只用来判超限。
 
-    上限临时调小（归口在调用时读模块全局）：证明"不为超限体全量分配"的用例自己先分配 50 MiB，
-    未免可笑，且断言与真实 50 MiB 字面值无关——它断的是"要了 上限+1、而不是裸 `read()` 的 -1"。
+    上限临时调小（归口在调用时读模块全局）：证明"不为超限体全量分配"的用例自己先分配 256 MiB，
+    未免可笑，且断言与真实 256 MiB 字面值无关——它断的是"要了 上限+1、而不是裸 `read()` 的 -1"。
     """
     import anyio
 

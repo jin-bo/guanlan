@@ -26,7 +26,7 @@ const pendingAttachments = [];
 
 // 图像扩展名白名单（与服务端 _IMAGE_EXT_TO_MIME / agentao 视觉通道同口径）。
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
-// 视觉单图上限（同 agentao.media_limits.MAX_IMAGE_BYTES）：超出仍可上传（≤50MiB），但不走
+// 视觉单图上限（同 agentao.media_limits.MAX_IMAGE_BYTES）：超出仍可上传（≤256MiB），但不走
 // 视觉通道、agent 只看 <attachment> 文本引用——徽章上预先提示（镜像 chahua visionOversize）。
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
