@@ -255,7 +255,11 @@ def _subprocess_runner(
     model: str | None,
     max_iterations: int,
     thinking: str | None = None,
+    new_session: bool = False,
 ) -> AgentRunResult:
+    # `new_session=True`（P4.30 `guanlan import`）：子进程放进新会话，终端 Ctrl+C 只送到观澜自己——
+    # 第一次 Ctrl+C 表示「本篇入完后暂停」，不能连带打断正在跑的 agentao；第二次 Ctrl+C 在父进程抛
+    # KeyboardInterrupt，`subprocess.run` 照常 kill 子进程。默认 False，其余命令行为不变。
     # 安装态下用户库的发现路径里没有 guanlan-wiki skill，首次需要时幂等装到全局
     # （best-effort；放在默认 runner 而非 run_agent_task，注入 runner 的测试不碰全局目录）。
     from .skill import SKILL_NAME, ensure_skill_available
@@ -303,6 +307,7 @@ def _subprocess_runner(
                 # 显式传 env（不再裸继承）：剔除毒空 `*_API_KEY`（见 scrubbed_environ）+ 钉死子端
                 # std 流编码（见 envelope_child_env），其余逐项照传。
                 env=envelope_child_env(),
+                start_new_session=new_session,
             )
     except OSError as exc:
         # agentao 不在 PATH（或无法启动子进程）：归一为运行时错误，遵守退出码契约，

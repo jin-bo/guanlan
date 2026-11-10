@@ -10,6 +10,12 @@
 - **一键入库（P4.30，进行中）：整理与拆分内核**（`docs/P4.30-一键入库.md` §3–§4）。两个零 LLM、不写盘的纯函数，供后续 `guanlan import` 与 Web 暂存区调用：
   - `guanlan/normalize.py`：按分页锚点切页，删除页码、页眉页脚（全书 ≥30% 或奇偶页分计；同行页码只在等于锚点页号时剥离；页首连续 ≥3 次的章节页眉）与明确模式的扫描水印；其余重复短句只记「疑似」、原样保留；去噪后把被分页切开的句子接回较长的一侧；写入 title / origin / parsed_by / source_sha256 / pages / chars / normalized 元数据。
   - `guanlan/splitdoc.py`：≤4 万字不拆；按出现 ≥2 次的最高级标题切章，超长章递归、无下级标题时按大小拆（切点：标题前 > 分页锚点前 > 段落边界，单段超长才切在句末）；相邻小章合并，避免几十字的碎片；文件名按 UTF-8 字节限长；每份带 `split:` 前后链元数据，另生成目录索引。各份正文按序拼接与拆前完全一致。
+- **`guanlan import`：一键入库命令行**（P4.30 §5–§6）。`guanlan -C <kb> import <file>` 依次解析、整理、拆分，打印确认摘要（份数、预计耗时、冲突），确认后逐篇原子落 `raw/` 并串行 ingest：
+  - 任务清单落 `workspace/tasks/<id>.json`，进展日志落同名 `.log`；任意一篇失败即暂停，`--resume` 从该篇重试；第一次 Ctrl+C 在本篇入完后暂停，第二次立即中止。
+  - 写入前整批预检：`raw/<sample>.md` 与 `raw/<sample>/` 一起查，只有旧一键入库任务写下的同一组文件可加 `--overwrite` 覆盖，其余一律报冲突；slug 冲突也在这一步发现。
+  - 拆分改写图片引用造成的断链判失败，解析时就断的图片链接只作警告；入库前后各统计一次 wiki 断链数，不自动跑 heal。
+  - 另有 `--dry-run`（只看摘要，不建任务、不写 `raw/`）、`--status`、`--cancel`、`--json`、`--yes`。
+- **库级写锁**（决策P4.30-15）：`ingest`、`query --backfill`、`heal`/`audit`/`reindex`/`convert`（非 `--dry-run`）、`remove --yes`、`import` 在库根 `.guanlan.lock` 上取操作系统文件锁；库正被写时立即失败并显示执行者，不排队。只读预览不受影响。
 
 ### 变更
 

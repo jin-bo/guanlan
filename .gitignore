@@ -47,3 +47,4 @@ agentao.log.*
 .env
 .env.*
 !.env.example
+/.guanlan.lock
