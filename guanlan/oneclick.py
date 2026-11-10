@@ -625,7 +625,8 @@ def confirm(
     task["confirmed"] = _now()
     save_task(root, task)
     log(f"✓ 已确认，开始入库（{len(task['items'])} 份）")
-    return _execute(root, task, log=log, ingest=ingest, should_pause=should_pause)
+    # 刚复检过、其间 raw/ 未动：把结果交给 ⑤，不再整扫 raw/、重哈希本任务已写文件一遍
+    return _execute(root, task, log=log, ingest=ingest, should_pause=should_pause, pc=pc)
 
 
 def resume(
@@ -670,11 +671,12 @@ def _pause(root: Path, task: dict, log: TaskLog, reason: str) -> None:
 # ── ⑤ 落 raw/ ───────────────────────────────────────────────────────────────
 
 
-def _land(root: Path, task: dict, log: TaskLog) -> int:
+def _land(root: Path, task: dict, log: TaskLog, pc: dict | None = None) -> int:
     ws = _ws(root).resolve()
     if task["stages"].get("land") == "done":
         return EXIT_OK
-    pc = precheck(root, task)
+    if pc is None:
+        pc = precheck(root, task)
     if pc["status"] == "conflict" or (pc["status"] == "overwritable" and not task.get("overwrite")):
         task["state"] = "awaiting_confirm" if not any(it.get("land") != "pending" for it in task["items"]) else "paused"
         task["precheck"] = pc
@@ -778,9 +780,17 @@ def _fmt_duration(seconds: float) -> str:
     return f"{h} 小时 {m} 分"
 
 
-def _execute(root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_pause: Callable[[], bool]) -> tuple[int, dict]:
+def _execute(
+    root: Path,
+    task: dict,
+    *,
+    log: TaskLog,
+    ingest: IngestFn,
+    should_pause: Callable[[], bool],
+    pc: dict | None = None,
+) -> tuple[int, dict]:
     try:
-        code = _land(root, task, log)
+        code = _land(root, task, log, pc)
     except KeyboardInterrupt:  # 第二次 Ctrl+C / SIGTERM：同样不留 running（`writing` 项续跑时由 ⑤ 自行补记或重写）
         _pause(root, task, log, "落 raw/ 时被中止，已暂停；继续会从未写完的那一份重试")
         raise
@@ -1224,6 +1234,8 @@ def _cli_resume(
         return EXIT_USAGE
     if not yes and not _ask_start():
         _stderr("未开始；任务仍在等待确认（可再 --resume，或 --cancel 放弃）。")
+        if json_output:  # --json 契约：正常结局给回执，不落到兜底的 {"ok": false, "exit_code": 0}
+            _receipt(task, True)
         return EXIT_OK
     with acquire(root, "cli: import --resume"):
         code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)

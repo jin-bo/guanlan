@@ -119,8 +119,13 @@ def register(
     model: str | None,
     runner=None,
     reader: bool = False,
+    owns_kb_lock=None,
 ) -> None:
-    """把一键入库端点挂到 `app`（reader 下 `writer_only` 不注册写端点；只读端点同样只给可写宿主）。"""
+    """把一键入库端点挂到 `app`（reader 下 `writer_only` 不注册写端点；只读端点同样只给可写宿主）。
+
+    `owns_kb_lock()`：作业内问写锁「本进程是否真持库级锁」（`KBWriteLock.owns_kb_lock`）；不给则按锁文件
+    里的 pid 判断（只给旧测试兜底）。
+    """
     # 任务 → (本进程在跑的作业号, 该作业的暂停标志)。标志随作业登记、随作业清理，不另开一张只增不减的表。
     running_jobs: dict[str, tuple[str, threading.Event]] = {}
     # 任务 → 本进程最近一次失败作业的输出（确认/继续作业没跑起来或被拒：库被 CLI 占用、冲突复检等）。
@@ -142,7 +147,8 @@ def register(
     def _recover_in_job() -> None:
         """作业内恢复：只有本进程**真持**库级锁时才恢复。嵌套放行（持有者是祖先进程）或锁文件建不出
         （`KBWriteLock` 退化为只有进程内锁）时，都不能断定原执行者已退出。"""
-        if (read_holder(root) or {}).get("pid") == os.getpid():
+        owns = owns_kb_lock() if owns_kb_lock is not None else (read_holder(root) or {}).get("pid") == os.getpid()
+        if owns:
             recover_stale(root)
 
     def _ingest(raw_rel: str, kb: Path) -> int:
@@ -226,7 +232,14 @@ def register(
         reject_if_writable_active()
         upload_path = _safe_upload_file(root, body.upload)  # 越界 400 / 缺失 404
         existing = await anyio.to_thread.run_sync(active_task, root)
-        if existing is not None:
+        # 残留的「准备中」（执行者已退出：CLI 被 kill / 关终端、或本进程启动时锁被占而没恢复）没有继续/放弃
+        # 的出口：不在这里 409，交给作业——作业持锁先 `_recover_in_job` 把它改成失败，`prepare` 再复检。
+        stale_preparing = (
+            existing is not None
+            and existing.get("state") == "preparing"
+            and not holder_alive(await anyio.to_thread.run_sync(read_holder, root))
+        )
+        if existing is not None and not stale_preparing:
             raise HTTPException(
                 status_code=409,
                 detail=f"已有未完成的入库任务 {existing['task_id']}；请先继续或放弃它。",

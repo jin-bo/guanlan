@@ -794,6 +794,7 @@ def create_app(
         model=model,
         runner=runner,
         reader=reader,
+        owns_kb_lock=lambda: bool(getattr(write_gate.write_lock, "owns_kb_lock", False)),
     )
 
     # 零 LLM 报告（决策P4-7）：只序列化既有 *Report，与 CLI `--json` 字节对齐；阻塞跑 to_thread。

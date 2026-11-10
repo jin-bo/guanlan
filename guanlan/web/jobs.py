@@ -83,6 +83,13 @@ class KBWriteLock:
     def locked(self) -> bool:
         return self._lock.locked()
 
+    @property
+    def owns_kb_lock(self) -> bool:
+        """本进程此刻**真持**库级 OS 锁（不是嵌套放行、也不是锁文件建不出时的进程内退化锁）。
+        只有这时才能断定原执行者已退出、可以恢复它留下的任务。"""
+        kb = self._kb
+        return kb is not None and not kb.nested and kb.held
+
     def __enter__(self) -> KBWriteLock:
         self.acquire()
         return self
@@ -312,12 +319,16 @@ class JobQueue:
             if self._write_lock is not None:
                 try:
                     self._write_lock.acquire()
-                except kblock.KBLockBusy as exc:
+                except Exception as exc:  # noqa: BLE001 — 取锁的任何意外都不能让 worker 死（否则此后作业全卡死）
                     lock_error = exc
             try:
                 if lock_error is not None:
-                    buf.write(str(lock_error))
-                    job.exit_code = EXIT_USAGE
+                    if isinstance(lock_error, kblock.KBLockBusy):
+                        buf.write(str(lock_error))
+                        job.exit_code = EXIT_USAGE
+                    else:
+                        buf.write(f"取写锁异常：{type(lock_error).__name__}: {lock_error}")
+                        job.exit_code = EXIT_AGENT_ERROR
                 else:
                     # 进程级 redirect：捕获 run_ingest 的人读 stdout/stderr。只在此单 worker 串行
                     # 发生，故无跨线程竞态（读/问答路径都不打印，见模块 docstring 红线）。
