@@ -431,3 +431,18 @@ def test_cli_cancel(kb: Path, book: Path):
 def test_cli_modes_are_exclusive(kb: Path, book: Path):
     assert oneclick.import_entrypoint(kb, src=str(book), status=True, interactive=False) == EXIT_USAGE
     assert oneclick.import_entrypoint(kb, src=None, interactive=False) == EXIT_USAGE
+
+
+def test_default_ingest_output_goes_to_stderr(kb: Path, monkeypatch, capsys):
+    """逐篇 ingest 打在 stdout 的回执转到 stderr：`--json` 时 stdout 只有 JSON（真实运行发现）。"""
+    import guanlan.ingest as ingest_mod
+
+    def fake_run_ingest(target, **kw):
+        print("摄入完成：一段 Agent 摘要")
+        return 0
+
+    monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+    run = oneclick._default_ingest(None, None)
+    assert run("raw/x.md", kb) == 0
+    out = capsys.readouterr()
+    assert out.out == "" and "摄入完成" in out.err

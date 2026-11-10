@@ -859,7 +859,10 @@ def _default_ingest(model: str | None, thinking: str | None) -> IngestFn:
     runner = functools.partial(_subprocess_runner, new_session=True)
 
     def run(raw_rel: str, root: Path) -> int:
-        return run_ingest(raw_rel, root=root, model=model, thinking=thinking, runner=runner)
+        # ingest 的人读回执（Agent 摘要、门禁结论）打在 stdout；import 的 stdout 只留最终回执（--json 时为 JSON），
+        # 故逐篇 ingest 的输出一律转到 stderr，与进展日志同处。
+        with contextlib.redirect_stdout(sys.stderr):
+            return run_ingest(raw_rel, root=root, model=model, thinking=thinking, runner=runner)
 
     return run
 
