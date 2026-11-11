@@ -313,3 +313,19 @@ def test_upload_refuses_original_of_preparing_task_on_disk(kb):
     finally:
         lock.release()
     assert (kb / "workspace" / "uploads" / "书.pdf").read_bytes() == b"%PDF old"
+
+
+def test_upload_ignores_stale_preparing_task(kb):
+    """残留的「准备中」（执行者已退出、没人持锁）不拦同名上传：否则「重新上传再一键入库」永远 409。"""
+    (kb / "workspace" / "uploads").mkdir(parents=True)
+    (kb / "workspace" / "uploads" / "书.pdf").write_bytes(b"%PDF old")
+    with TestClient(create_app(kb)) as client:
+        # 启动恢复之后才出现的残留（如 CLI 被 kill）：清单停在「准备中」，锁已无人持有
+        oneclick.save_task(
+            kb,
+            {"task_id": "20261111-120000-书", "state": "preparing", "upload": "workspace/uploads/书.pdf", "created": "x"},
+        )
+        assert oneclick.active_task(kb)["state"] == "preparing"
+        r = client.post("/api/upload", files={"file": ("书.pdf", b"%PDF new", "application/pdf")})
+        assert r.status_code == 200, r.text
+    assert (kb / "workspace" / "uploads" / "书.pdf").read_bytes() == b"%PDF new"

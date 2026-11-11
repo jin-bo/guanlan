@@ -12,6 +12,7 @@ import base64
 import contextlib
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import BinaryIO
 from xml.sax.saxutils import quoteattr
@@ -19,7 +20,6 @@ from xml.sax.saxutils import quoteattr
 from agentao.media_limits import MAX_IMAGE_BYTES, MAX_IMAGES_PER_TURN
 from fastapi import HTTPException
 
-from ..errors import EXIT_OK
 from .rawfeed import _normalize_basename, _raw_slug
 
 # ── 文件上传（POST /api/upload）：暂存进 workspace/uploads/，作对话附件 ───────────────
@@ -87,6 +87,27 @@ def discard_upload(tmp: Path) -> None:
         tmp.unlink()
 
 
+STALE_UPLOAD_TMP_SECONDS = 3600  # 隐藏临时文件超过这么久没动过，才算上次进程中途退出留下的残留
+
+
+def sweep_stale_upload_tmps(uploads_dir: Path, *, now: float | None = None) -> int:
+    """删掉 `spool_upload` 中途被杀（kill / 断电）留下的 `.upload-*.tmp`（可写宿主启动时调，#172）。
+
+    这些文件是点文件，导入面板看不见，又可能各有上百 MiB。只删 mtime 超过 `STALE_UPLOAD_TMP_SECONDS`
+    的：同一个库若还开着另一个 Web 进程、正在写某份上传，它的临时文件在持续更新，不会被误删。返回删除个数。
+    """
+    if not uploads_dir.is_dir():
+        return 0
+    cutoff = (time.time() if now is None else now) - STALE_UPLOAD_TMP_SECONDS
+    removed = 0
+    for path in uploads_dir.glob(".upload-*.tmp"):
+        with contextlib.suppress(OSError):
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+    return removed
+
+
 # 图像扩展名 → MIME（与 agentao 视觉通道同口径白名单，镜像 chahua `_EXT_TO_MIME`）：命中者除
 # `<attachment>` 标签外，还经 `arun(images=)` 传 base64 走视觉通道；其余扩展名只发标签（agent 自己
 # 用读工具取内容）。`.svg` 刻意不入此表（文本格式、视觉通道不收），仍按文本附件分类。
@@ -144,7 +165,7 @@ def _classify_upload(target: Path, data: bytes) -> str:
     """
     if target.suffix.lower() in _IMAGE_EXT_TO_MIME:
         return "image"
-    head = data[:65536]
+    head = data[:_UPLOAD_HEAD]
     if target.suffix.lower() in _TEXT_EXTENSIONS:
         try:
             head.decode("utf-8")

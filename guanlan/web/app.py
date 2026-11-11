@@ -97,6 +97,7 @@ from .uploads import (
     commit_upload,
     discard_upload,
     spool_upload,
+    sweep_stale_upload_tmps,
 )
 from .workspace import (
     _delete_workspace_scratch,
@@ -684,9 +685,18 @@ def create_app(
     async def upload(file: UploadFile = File(...)) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
         target = _safe_workspace_target(root, "uploads", file.filename or "")
-        tmp, size, head = await anyio.to_thread.run_sync(spool_upload, file.file, target.parent)
+        try:
+            tmp, size, head = await anyio.to_thread.run_sync(spool_upload, file.file, target.parent)
+        except OSError as exc:  # 建目录 / 临时文件失败（磁盘满、无权限）
+            raise HTTPException(status_code=500, detail=f"写盘失败：{exc}") from None
+        busy = await upload_in_use(target)
         # 以下在事件循环线程上同步完成，中间没有 await：与 `POST /api/oneclick` 登记准备作业互不穿插。
-        busy = upload_in_use(target)
+        try:
+            # 分块写盘可能要好几秒：期间开始的可写 turn 同样要挡（层③），不能在它读写 workspace/ 时换掉文件。
+            _reject_if_writable_active()
+        except HTTPException:
+            discard_upload(tmp)
+            raise
         if busy is not None:
             discard_upload(tmp)
             raise HTTPException(status_code=409, detail=busy)
@@ -778,6 +788,8 @@ def create_app(
 
     # P4.30 一键入库（替代 P4.6.1 的解析 / 断链检查 / 重整 / 晋级四个端点）：端点与作业 thunk 在
     # `oneclick_routes`，内核在 `guanlan/oneclick.py`（与 CLI `guanlan import` 共用任务清单）。
+    if not reader:  # reader 零写（决策P4.9-2）
+        sweep_stale_upload_tmps(root / "workspace" / "uploads")  # 上次中途被杀的上传留下的隐藏临时文件
     upload_in_use = oneclick_routes.register(
         app,
         root=root,

@@ -8035,3 +8035,36 @@ def test_import_panel_upload_button_wired() -> None:
     assert "loadStaging(); // 重拉" in staging
     i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
     assert '"btn.staging": "导入"' in i18n and '"btn.staging": "Import"' in i18n
+
+
+def test_sweep_stale_upload_tmps_only_removes_old_hidden_tmps(tmp_path) -> None:
+    """只删超时的 `.upload-*.tmp`：新的（可能另一个进程正在写）和普通上传文件都不动。"""
+    import os
+
+    from guanlan.web import uploads as uploadsmod
+
+    old = tmp_path / ".upload-old.tmp"
+    fresh = tmp_path / ".upload-fresh.tmp"
+    keep = tmp_path / "书.pdf"
+    for p in (old, fresh, keep):
+        p.write_bytes(b"x")
+    now = 10_000_000.0
+    stale = now - uploadsmod.STALE_UPLOAD_TMP_SECONDS - 1
+    os.utime(old, (stale, stale))
+    os.utime(keep, (stale, stale))
+    os.utime(fresh, (now, now))
+    assert uploadsmod.sweep_stale_upload_tmps(tmp_path, now=now) == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".upload-fresh.tmp", "书.pdf"]
+    assert uploadsmod.sweep_stale_upload_tmps(tmp_path / "none", now=now) == 0
+
+
+def test_writer_startup_sweeps_stale_upload_tmp(kb) -> None:
+    import os
+
+    uploads = kb / "workspace" / "uploads"
+    uploads.mkdir(parents=True)
+    leftover = uploads / ".upload-crash.tmp"
+    leftover.write_bytes(b"half")
+    os.utime(leftover, (1.0, 1.0))
+    create_app(kb)
+    assert not leftover.exists()
