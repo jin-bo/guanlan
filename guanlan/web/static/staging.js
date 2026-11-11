@@ -297,7 +297,7 @@ function fileRowHead(it) {
   return [ico, nm];
 }
 
-// uploads/ 行：徽章 + 文件名 + 大小 + [一键入库] + 🗑。
+// uploads/ 行：徽章 + 文件名 + 大小 + [一键入库图标] + 🗑。
 function renderUploadRow(it, blocked) {
   const row = document.createElement("div");
   row.className = "stage-row";
@@ -306,8 +306,7 @@ function renderUploadRow(it, blocked) {
   sz.textContent = fmtBytes(it.bytes);
   const go = document.createElement("button");
   go.className = "stage-act stage-oneclick";
-  go.textContent = t("staging.oneclick");
-  go.title = blocked ? `${t("tip.oneclick")}（${t("staging.writeBusy")}）` : t("tip.oneclick");
+  setStageIcon(go, "i-oneclick", t("staging.oneclick"), t("tip.oneclick"), blocked);
   go.disabled = blocked;
   go.addEventListener("click", () => triggerOneclick(it.path));
   row.append(...fileRowHead(it), sz, go, trashButton(it.path, row, blocked));
@@ -456,7 +455,7 @@ async function triggerOneclick(uploadPath) {
       throw new Error(d.detail || `HTTP ${res.status}`);
     }
     const { job_id } = await res.json();
-    await pollJob(job_id, t("staging.ocPreparing"), renderOneclickPrepared);
+    await pollJob(job_id, t("staging.ocPreparing"), renderOneclickPrepared, "oc-joblog");
   } catch (e) {
     $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.ocFail", e.message))}</p>`;
   }
@@ -467,6 +466,7 @@ function renderOneclickPrepared(job) {
   const box = $("#overlay-body");
   box.innerHTML = `<p><span class="report-bad">${escapeHtml(t("common.exitCode", job.exit_code))}</span></p>`;
   const pre = document.createElement("pre");
+  pre.className = "oc-joblog";
   pre.textContent = collapseCR(job.output || t("common.noOutput"));
   const back = document.createElement("button");
   back.className = "stage-act";

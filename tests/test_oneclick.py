@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -611,8 +612,11 @@ def test_cli_import_yes_runs_end_to_end_and_status(kb: Path, book: Path, capsys)
     ingest = FakeIngest()
     code = oneclick.import_entrypoint(kb, src=str(book), yes=True, json_output=True, ingest=ingest, interactive=False)
     assert code == EXIT_OK
-    out = json.loads(capsys.readouterr().out)
+    cap = capsys.readouterr()
+    out = json.loads(cap.out)
     assert out["state"] == "done" and len(out["items"]) == 3
+    # 进度行带 [HH:MM:SS]（与 Web 浮层同口径）
+    assert re.search(r"^\[\d\d:\d\d:\d\d\] ① 解析 ", cap.err, re.MULTILINE), cap.err
     assert oneclick.import_entrypoint(kb, src=None, status=True, interactive=False) == EXIT_OK
     assert "没有未完成" in capsys.readouterr().out
 

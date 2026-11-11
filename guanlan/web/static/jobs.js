@@ -128,7 +128,7 @@ async function triggerIngest(target) {
 
 // 通用作业轮询骨架（ingest / heal 共用）。`renderDone(job)` 可选：heal 有结构化 result，传入
 // 自定义渲染；省略则走 ingest 默认（退出码徽标 + output 文本）。完成后统一 loadPages 刷新。
-async function pollJob(jobId, label, renderDone) {
+async function pollJob(jobId, label, renderDone, outClass = "") {
   for (;;) {
     const job = await getJSON(`/api/jobs/${jobId}`);
     if (job.state === "done") {
@@ -147,7 +147,8 @@ async function pollJob(jobId, label, renderDone) {
     // running 态：渲染已累加的增量 output（决策P4.6.1-7③/-11）——解析作业的 backend 分级日志在此
     // 实时可见（emit 推上）；ingest/heal/backfill 顺带受益。无 output 时仍只显运行徽标。
     const running = `<p class="muted">${escapeHtml(t("job.running", label, job.state))}</p>`;
-    const out = job.output ? `<pre>${escapeHtml(collapseCR(job.output))}</pre>` : "";
+    const cls = outClass ? ` class="${outClass}"` : "";
+    const out = job.output ? `<pre${cls}>${escapeHtml(collapseCR(job.output))}</pre>` : "";
     // 瞬时进度行（A+ 心跳）：ingest 这类静默长跑作业的活跃提示（「⏳ 仍在运行 Ns · wiki/ 已写 N 页」）。
     // 仅 running 期出现，done 后服务端清空 → 最终结果只剩干净摘要。放在 output 之后、轻样式。
     const prog = job.progress
