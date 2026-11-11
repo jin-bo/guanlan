@@ -523,6 +523,11 @@ def _prepare_steps(root: Path, src: Path, task: dict, *, backend: str, log: Task
         f"② 整理：删页眉页脚 {s['headers_removed']} 处、页码 {s['page_numbers_removed']} 处、"
         f"水印 {s['watermarks_removed']} 处，接句 {s['sentences_joined']} 处"
         + (f"；{len(suspects)} 条疑似水印已保留（见日志）" if suspects else "")
+        + (
+            f"；按目录定标题层级（目录 {s['toc_entries']} 条，命中 {s['toc_matched']} 条）"
+            if s.get("toc_applied")
+            else (f"；目录 {s['toc_entries']} 条仅命中 {s['toc_matched']} 条，未按目录改层级" if s.get("toc_entries") else "")
+        )
     )
     task["stages"]["normalize"] = "done"
     task["title"] = norm.title
@@ -531,7 +536,8 @@ def _prepare_steps(root: Path, src: Path, task: dict, *, backend: str, log: Task
     task["normalized"] = dict(s)
 
     # ③④ 拆分 + 目录索引
-    parts = split_document(norm.body, sample=sample)
+    # 已按目录规范化（#175）→ 拆分直接信任标题层级（目录优先）
+    parts = split_document(norm.body, sample=sample, trust_levels=bool(s.get("toc_applied")))
     folder = parsed / sample
     _clear_part_dir(folder)
     items: list[dict] = []
