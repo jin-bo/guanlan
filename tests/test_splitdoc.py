@@ -210,3 +210,68 @@ def test_unicode_line_separators_do_not_split_markdown_lines():
     units = _units(body)
     assert "".join(u.text for u in units) == body
     assert [u.text for u in units] == ["前文\u2028# 不是标题\n", "下一行\n"]
+
+
+# ── #171 标题形状：多篇法规连排、Markdown 层级不一致 ─────────────────────────
+
+
+def _law(title: str, title_level: int, ch_level: int, n_ch: int = 3, ch_chars: int = 6_000, tag: str = "文") -> str:
+    out = f"{'#' * title_level} {title}\n\n"
+    for c in range(1, n_ch + 1):
+        out += f"{'#' * ch_level} 第{c}章 章名{c}\n\n" + "\n\n".join(_para(2_000, tag) for _ in range(ch_chars // 2_000)) + "\n\n"
+    return out
+
+
+def _owner(parts, tag: str) -> list[list[str]]:
+    return [p.path for p in parts if tag in p.body]
+
+
+def test_lower_leveled_doc_title_starts_its_own_part():
+    """第三篇的标题被识别成 ##：不能并进第二篇（#171）。"""
+    body = (
+        _law("甲市物业管理条例", 1, 2, tag="甲")
+        + _law("乙省消防安全办法", 1, 2, tag="乙")
+        + _law("丙区档案管理规定", 2, 3, tag="丙")
+    )
+    parts = split_document(body, sample="s")
+    _assert_lossless(body, parts)
+    assert [p.path for p in parts] == [["甲市物业管理条例"], ["乙省消防安全办法"], ["丙区档案管理规定"]]
+    assert _owner(parts, "丙") == [["丙区档案管理规定"]]
+    assert _owner(parts, "乙") == [["乙省消防安全办法"]]
+
+
+def test_higher_leveled_chapters_do_not_become_doc_parts():
+    """乙篇的章被识别成 #（与文档标题同级）：只按文档标题切，章跟随本篇（#171）。"""
+    body = (
+        _law("甲市物业管理条例", 1, 2, ch_chars=14_000, tag="甲")
+        + _law("乙省消防安全办法", 1, 1, ch_chars=14_000, tag="乙")
+    )
+    parts = split_document(body, sample="s")
+    _assert_lossless(body, parts)
+    assert {p.path[0] for p in parts} == {"甲市物业管理条例", "乙省消防安全办法"}
+    assert all(p.path[0] == "甲市物业管理条例" for p in parts if "甲" * 10 in p.body)
+    assert all(p.path[0] == "乙省消防安全办法" for p in parts if "乙" * 10 in p.body)
+    # 下一层仍按章拆（含被识别成 # 的章），且本篇标题不会自成一章
+    yi = [p.path for p in parts if p.path[0] == "乙省消防安全办法"]
+    assert yi == [["乙省消防安全办法", "第1章 章名1"], ["乙省消防安全办法", "第2章 章名2"], ["乙省消防安全办法", "第3章 章名3"]]
+
+
+def test_unrecognized_heading_shapes_keep_level_behavior():
+    """认不出形状的标题（普通书的章节名）维持纯层级行为：低一级的标题不被提升。"""
+    body = _section("引言", 15_000, level=1) + _section("研究背景", 15_000, level=1) + _section("讨论", 15_000, level=2)
+    parts = split_document(body, sample="s")
+    _assert_lossless(body, parts)
+    assert [p.path for p in parts] == [["引言"], ["研究背景"]]
+
+
+def test_nested_doc_shaped_subsections_are_not_promoted():
+    """章下的「一般规定」「审查意见」形状像文档标题，却嵌在本篇章节之下：不能提升成文档切点（#171）。"""
+    body = ""
+    for title, tag in (("甲市物业管理条例", "甲"), ("乙省消防安全办法", "乙")):
+        body += f"# {title}\n\n"
+        for c in range(1, 4):
+            body += f"## 第{c}章 章名{c}\n\n{_para(4_000, tag)}\n\n### 一般规定\n\n{_para(4_000, tag)}\n\n"
+            body += f"### 审查意见\n\n{_para(4_000, tag)}\n\n"
+    parts = split_document(body, sample="s")
+    _assert_lossless(body, parts)
+    assert [p.path for p in parts] == [["甲市物业管理条例"], ["乙省消防安全办法"]]

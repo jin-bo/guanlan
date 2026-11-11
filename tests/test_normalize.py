@@ -71,6 +71,76 @@ def test_latin_join_adds_space_and_hyphen_rejoins():
     assert "international law applies." in r.body
 
 
+def _page_of(body: str, text: str) -> int | None:
+    """text 所在的页（其前最近一个锚点的页号）。"""
+    import re
+
+    pos = body.index(text)
+    nums = [int(m.group(1)) for m in re.finditer(r"<!-- page (\d+)", body[:pos])]
+    return nums[-1] if nums else None
+
+
+def test_no_join_standalone_page_end_text():
+    """页末是落款 / 日期 / 未标 # 的章名 / 文号，下页另起：都不接，文本留在原页（#171）。"""
+    cases = [
+        ("本规定自发布之日起施行。\n\n某某管理局\n\n2023年5月1日", "关于印发某某办法的通知"),
+        ("第一条 为了规范管理，制定本办法。\n\n第二章 管理职责", "第五条 主管部门负责本行政区域内的监督管理。"),
+        ("文件编号 某发〔2023〕1号", "发布日期：2023年5月1日"),
+        ("二〇二三年五月一日", "附件：某某申报表"),
+    ]
+    for tail, head in cases:
+        src = f"{tail}\n\n<!-- page 2 -->\n\n{head}\n"
+        r = normalize(src, title_hint="t")
+        assert not [o for o in r.ops if o.kind == "join"], tail
+        assert f"\n\n<!-- page 2 -->\n\n{head}\n" in r.body
+        assert _page_of(r.body, tail.split("\n")[-1]) is None  # 仍在锚点之前（第 1 页）
+
+
+def test_no_join_when_next_page_opens_field_or_clause():
+    """上一页是长正文残句，但下一页以条款 / 列项 / 字段起头 → 不接（#171）。"""
+    for head in ("第十二条 违反本办法的，依法处理。", "（一）建立健全管理制度；", "联系人：张某某"):
+        src = f"本办法适用于本行政区域内依法设立的各类单位以及与其相关的组织和个人\n\n<!-- page 9 -->\n\n{head}\n"
+        r = normalize(src, title_hint="t")
+        assert not [o for o in r.ops if o.kind == "join"], head
+        assert _page_of(r.body, head) == 9
+
+
+def test_url_on_next_page_is_not_a_field():
+    """下一页以 URL 起头不是「标签：」字段，照常接句（#171）。"""
+    src = "更多信息请访问本局官方网站，网址为\n\n<!-- page 3 -->\n\nhttps://example.com 获取。\n"
+    r = normalize(src, title_hint="t")
+    assert [o for o in r.ops if o.kind == "join"]
+
+
+def test_short_body_fragment_and_mid_sentence_refs_still_join():
+    """页末只有一小段正文残句、句中引文号、续句以「附件」起头：都照接（#171 不能矫枉过正）。"""
+    cases = [
+        ("所谓单位是指依法设立并从事", "相关活动的组织。", "所谓单位是指依法设立并从事相关活动的组织。"),
+        ("各地应当依据国发〔2023〕1号", "文件要求，落实相关工作。", "依据国发〔2023〕1号文件要求，"),
+        ("具体名单详见", "附件所列清单中的单位。", "具体名单详见附件所列清单中的单位。"),
+        ("资料可以从网址", "https://example.com 获取。", "资料可以从网址https://example.com 获取。"),
+    ]
+    for tail, head, joined in cases:
+        r = normalize(f"{tail}\n\n<!-- page 2 -->\n\n{head}\n", title_hint="t")
+        assert [o.kind for o in r.ops] == ["join"], tail
+        assert joined in r.body, tail
+
+
+def test_no_join_page_end_signature():
+    """页末孤立一行是机关落款：不接（#171）。"""
+    r = normalize("以上意见请认真贯彻执行。\n\n某某市人民政府\n\n<!-- page 2 -->\n\n抄送本市各区教育局\n", title_hint="t")
+    assert not [o for o in r.ops if o.kind == "join"]
+
+
+def test_body_continuation_still_joins_with_page_attribution():
+    """正常正文续句照接：挪动的片段按规则归到对应页（#171 回归）。"""
+    src = "本办法所称的单位，是指依法设立并从事\n\n<!-- page 5 -->\n\n相关经营活动的组织，包括分支机构。\n"
+    r = normalize(src, title_hint="t")
+    assert [o.rule for o in r.ops if o.kind == "join"] == ["后段前移"]
+    assert "是指依法设立并从事相关经营活动的组织，\n\n<!-- page 5 -->\n\n包括分支机构。" in r.body
+    assert _page_of(r.body, "相关经营活动") is None and _page_of(r.body, "包括分支机构") == 5
+
+
 def test_join_after_noise_removed():
     """页码、页眉夹在被切开的句子之间：先去噪再接句，结果仍正确。"""
     pages = {}
