@@ -8016,3 +8016,15 @@ def test_retired_staging_endpoints_gone(client, kb) -> None:
     r = client.post("/api/raw", json={"name": "a", "source": "workspace/parsed/a.md"})
     assert r.status_code == 400 and "一键入库" in r.json()["detail"]
     assert not (kb / "raw" / "a.md").exists()
+
+
+def test_import_panel_upload_button_wired() -> None:
+    """「导入」面板的「上传文件…」：多选 file input → 逐个 POST /api/upload → 重拉列表；可写会话进行中置灰。"""
+    staging = (STATIC_DIR / "staging.js").read_text(encoding="utf-8")
+    assert "uploadBar(blocked)" in staging
+    assert 'input.multiple = true' in staging
+    assert 'fetch("/api/upload", { method: "POST", body: fd })' in staging
+    assert "btn.disabled = blocked || uploadBusy" in staging
+    assert "loadStaging(); // 重拉" in staging
+    i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
+    assert '"btn.staging": "导入"' in i18n and '"btn.staging": "Import"' in i18n

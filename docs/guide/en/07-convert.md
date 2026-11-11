@@ -36,7 +36,7 @@ guanlan -C my-wiki convert a.pdf --backend marker      # pick a backend
 
 ## MinerU parse tiers
 
-`convert`, `import` and the Web staging parse all run the same skill script, so this section applies to all three. The tier and hardware data come from the MinerU 4.0.12 package description (`mineru-4.0.12.dist-info/METADATA`) and the official [Tiers and runtimes](https://opendatalab.github.io/MinerU/usage/tiers/) page; after a MinerU upgrade, the official docs win.
+`convert`, `import` and the Web "Import" parse all run the same skill script, so this section applies to all three. The tier and hardware data come from the MinerU 4.0.12 package description (`mineru-4.0.12.dist-info/METADATA`) and the official [Tiers and runtimes](https://opendatalab.github.io/MinerU/usage/tiers/) page; after a MinerU upgrade, the official docs win.
 
 ### How GuānLán relates to MinerU
 

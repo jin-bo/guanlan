@@ -29,10 +29,11 @@ guanlan -C my-wiki web --port 9000 --no-browser # different port / no browser
 - **Browse the wiki**, click `[[wikilink]]` to navigate
 - Run **check·health·lint** reports
 - **Graph panel** (top bar "Graph"): browse the wiki's link structure by community — community overview → click a community to expand it → click a page to open it; "View in graph" on a wiki page jumps to that page's one-hop neighborhood. Each view shows at most the 300 most-connected pages and says so when it cuts; isolated pages are only counted (they are in the `lint` orphan list). Read-only, never writes `graph/`, also available under `--reader`; the panel's "Static list" link opens the zero-JS `graph.html` from `guanlan graph` (P4.27)
-- Pick a source from `raw/` and **trigger ingest** (single worker, serialized, polled)
+- Top-bar "Ingest": pick a source from `raw/` and **trigger ingest** (lists not-yet-ingested sources by default; ingested ones can be re-run; single worker, serialized, polled). Unlike "One-click import" under "Import", it parses no originals and only takes `.md` already in `raw/`
 - **Read-only multi-turn chat** with the agent (token-streamed)
 - **Full-text search** (`/api/search`), debounced recall from the input box
-- **Feed / upload / promote**: paste-to-save (`POST /api/raw`), upload files to a staging area, parse → human review → promote into a `raw/` source
+- **Feed** (top bar "Feed"): paste a piece of material into `raw/` (`POST /api/raw`)
+- **Import** (top bar "Import"): click "Upload files…" to send PDF, DOCX and other originals to `workspace/uploads/` (multiple allowed; attaching files in the chat works too), then click "One-click import" on a file: parse · normalize · split → confirm → land in `raw/` → ingest one by one; it shares task manifests with the CLI `guanlan import`
 - **Backfill** (`query --backfill`): persist Q&A into the wiki (gated)
 - **Semantic audit** (`audit`): re-review drifted sources whose `raw/` changed but wiki wasn't re-synthesized (top-bar "Audit" button: preview drifted-source groups → review in one click → poll the structured receipt; gated)
 - **Slash commands + read-only introspection**: `/status` `/context` `/skills` `/tools` `/mode`, stop button
