@@ -44,6 +44,7 @@ from .provenance import parse_digest_value
 from .rawio import atomic_write_text, check_text_admission, raw_slug
 from .sourcepage import locate_source_page
 from .splitdoc import index_name, render_index, render_part, split_document
+from .tocnorm import TocReviewer, toc_title_lines
 
 __all__ = [
     "ACTIVE_STATES",
@@ -423,10 +424,12 @@ def prepare(
     backend: str = "auto",
     emit: Emit | None = None,
     dry_run: bool = False,
+    toc_reviewer: TocReviewer | None = None,
 ) -> dict:
     """①–④（**调用方持锁**）：解析 → 整理 → 拆分 → 预检，停在 `awaiting_confirm`。返回任务清单。
 
     `dry_run=True`：照跑 ①–④、写 `parsed/`，但**不创建任务记录**（返回的 dict 只用于打印摘要）。
+    `toc_reviewer`：整理时送审目录（#175，见 tocreview.py）；None = 只用规则解析。
     """
     src = Path(src).expanduser()
     if not src.is_file():
@@ -465,7 +468,7 @@ def prepare(
         save_task(root, task)
         task["log"] = _rel(root, _log_file(root, task_id))
     try:
-        _prepare_steps(root, src, task, backend=backend, log=log)
+        _prepare_steps(root, src, task, backend=backend, log=log, toc_reviewer=toc_reviewer)
     except BaseException as exc:
         if not dry_run:
             task["state"] = "failed"
@@ -479,7 +482,9 @@ def prepare(
     return task
 
 
-def _prepare_steps(root: Path, src: Path, task: dict, *, backend: str, log: TaskLog) -> None:
+def _prepare_steps(
+    root: Path, src: Path, task: dict, *, backend: str, log: TaskLog, toc_reviewer: TocReviewer | None = None
+) -> None:
     sample = task["sample"]
     ws = _ws(root)
     parsed = ws / "parsed"
@@ -507,14 +512,32 @@ def _prepare_steps(root: Path, src: Path, task: dict, *, backend: str, log: Task
     log(f"  解析完成（{'backend=' + backend_used if backend_used else '已是 markdown'}，{len(res.images)} 张图片）")
 
     # ② 整理
+    if toc_reviewer is not None and toc_title_lines(res.markdown.split("\n")):
+        log("② 整理：发现目录，交模型审校目录结构（只读，约一两分钟）…")
     norm = normalize(
         res.markdown,
         title_hint=src.stem,
         origin=task["upload"],
         parsed_by=backend_used,
         source_sha256=task["upload_sha256"],
+        toc_reviewer=toc_reviewer,
     )
     atomic_write_text(whole, norm.text)
+    toc_file = parsed / f"{sample}.toc.json"
+    if norm.toc:  # 采用的目录条目落盘，供核对「按目录改了哪些层级」
+        summary = norm.meta["normalized"]
+        atomic_write_text(
+            toc_file,
+            json.dumps(
+                {k: summary.get(k) for k in ("toc_source", "toc_review", "toc_matched", "toc_applied")}
+                | {"entries": norm.toc},
+                ensure_ascii=False,
+                indent=1,
+            )
+            + "\n",
+        )
+    elif toc_file.exists():
+        toc_file.unlink()
     for op in norm.ops:
         log("  " + op.describe(), detail=True)
     s = norm.meta["normalized"]
@@ -524,7 +547,9 @@ def _prepare_steps(root: Path, src: Path, task: dict, *, backend: str, log: Task
         f"水印 {s['watermarks_removed']} 处，接句 {s['sentences_joined']} 处"
         + (f"；{len(suspects)} 条疑似水印已保留（见日志）" if suspects else "")
         + (
-            f"；按目录定标题层级（目录 {s['toc_entries']} 条，命中 {s['toc_matched']} 条）"
+            f"；按目录定标题层级（目录 {s['toc_entries']} 条，命中 {s['toc_matched']} 条"
+            + ("，经模型审校" if s.get("toc_source") == "llm" else "")
+            + "）"
             if s.get("toc_applied")
             else (f"；目录 {s['toc_entries']} 条仅命中 {s['toc_matched']} 条，未按目录改层级" if s.get("toc_entries") else "")
         )
@@ -1023,6 +1048,16 @@ def _default_ingest(model: str | None, thinking: str | None) -> IngestFn:
     return run
 
 
+def _default_toc_reviewer(root: Path, model: str | None, thinking: str | None) -> TocReviewer:
+    from .runtime import _subprocess_runner
+    from .tocreview import make_toc_reviewer
+
+    # 与逐篇 ingest 同：子进程放进新会话，第一次 Ctrl+C 不连带打断它
+    return make_toc_reviewer(
+        root, model=model, thinking=thinking, runner=functools.partial(_subprocess_runner, new_session=True)
+    )
+
+
 # `--json` 契约：每条出口在 stdout 恰好给一份 JSON。回执路径置 `emitted`；其余（用法错误、找不到任务等）
 # 由 `import_entrypoint` 末尾补一份 `{"ok": false, ...}`，错误文本取最后一条 stderr 消息。
 _JSON_OUT = {"emitted": False, "last_error": None}
@@ -1063,8 +1098,13 @@ def import_entrypoint(
     backend: str = "auto",
     ingest: IngestFn | None = None,
     interactive: bool | None = None,
+    toc_review: bool = True,
+    toc_reviewer: TocReviewer | None = None,
 ) -> int:
-    """`guanlan import` 的单一落地。`ingest` / `interactive` 供测试注入。"""
+    """`guanlan import` 的单一落地。`ingest` / `interactive` / `toc_reviewer` 供测试注入。
+
+    `toc_review=False`（`--no-toc-review`）：目录只用规则解析，不调模型。
+    """
     _JSON_OUT.update(emitted=False, last_error=None)
     try:
         code = _import_main(
@@ -1082,6 +1122,8 @@ def import_entrypoint(
             backend=backend,
             ingest=ingest,
             interactive=interactive,
+            toc_review=toc_review,
+            toc_reviewer=toc_reviewer,
         )
     except Exception as exc:  # 意外异常（任务已就地暂停）：--json 照样给一份 JSON，再原样上抛
         if json_output and not _JSON_OUT["emitted"]:
@@ -1109,6 +1151,8 @@ def _import_main(
     backend: str,
     ingest: IngestFn | None,
     interactive: bool | None,
+    toc_review: bool = True,
+    toc_reviewer: TocReviewer | None = None,
 ) -> int:
     modes = sum(bool(x) for x in (src, do_resume, status, do_cancel))
     if modes != 1:
@@ -1152,6 +1196,10 @@ def _import_main(
             backend=backend,
             ingest=run_ingest_fn,
             interactive=interactive,
+            # 目录审校默认开启（#175）；--dry-run 保持零 LLM，--no-toc-review 关掉
+            toc_reviewer=None
+            if dry_run or not toc_review
+            else (toc_reviewer or _default_toc_reviewer(root, model, thinking)),
         )
     except GuanlanError as exc:  # 含 KBLockBusy
         _stderr(str(exc))
@@ -1314,11 +1362,14 @@ def _cli_import(
     backend: str,
     ingest: IngestFn,
     interactive: bool,
+    toc_reviewer: TocReviewer | None = None,
 ) -> int:
     origin = "cli: import --dry-run" if dry_run else "cli: import"
     with acquire(root, origin) as lock:
         _recover_if_owner(root, lock)
-        task = prepare(root, src, origin_kind="cli", backend=backend, emit=_stderr, dry_run=dry_run)
+        task = prepare(
+            root, src, origin_kind="cli", backend=backend, emit=_stderr, dry_run=dry_run, toc_reviewer=toc_reviewer
+        )
     # 进入 awaiting_confirm：释放锁（等待确认期间不妨碍其它写操作）
     if dry_run:
         if json_output:

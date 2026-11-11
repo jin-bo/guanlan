@@ -155,6 +155,7 @@ def _cmd_import(args: argparse.Namespace) -> int:
         model=args.model,
         thinking=args.thinking,
         backend=args.backend,
+        toc_review=args.toc_review,
     )
 
 
@@ -543,7 +544,7 @@ def _add_import_parser(sub, dir_parent) -> None:
         help="一键入库：解析、整理、拆分后落 raw/ 并依次 ingest（确认后执行；可暂停、可续跑）",
     )
     p.add_argument("src", nargs="?", default=None, help="待导入的文件（PDF/DOCX/…/.md）")
-    p.add_argument("--dry-run", action="store_true", help="只跑解析/整理/拆分并打印确认摘要；不写 raw/、不建任务（零 LLM）")
+    p.add_argument("--dry-run", action="store_true", help="只跑解析/整理/拆分并打印确认摘要；不写 raw/、不建任务（零 LLM：目录只用规则解析）")
     p.add_argument("--yes", action="store_true", help="跳过交互确认（非交互终端必须给）")
     p.add_argument("--overwrite", action="store_true", help="允许覆盖旧一键入库任务写入的同一组 raw/ 文件")
     p.add_argument("--resume", action="store_true", help="继续本库未完成的入库任务（Web 发起的也可以）")
@@ -559,6 +560,12 @@ def _add_import_parser(sub, dir_parent) -> None:
         help="推理档位（透传每篇 ingest）",
     )
     p.add_argument("--backend", choices=_CONVERT_BACKENDS, default="auto", help="转换后端（透传 skill，默认 auto）")
+    p.add_argument(
+        "--no-toc-review",
+        dest="toc_review",
+        action="store_false",
+        help="整理时目录只用规则解析，不交模型审校（默认有目录时审校一次；--dry-run 不审校）",
+    )
     p.set_defaults(func=_cmd_import)
 
 

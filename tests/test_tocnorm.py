@@ -120,7 +120,7 @@ def test_only_heading_marks_change(monkeypatch):
 
     src = _book()
     after = normalize(src, title_hint="t").body.split("\n")
-    monkeypatch.setattr(N, "normalize_by_toc", lambda lines: TocResult(lines, promoted=[]))
+    monkeypatch.setattr(N, "normalize_by_toc", lambda lines, **kw: TocResult(lines, promoted=[]))
     before = normalize(src, title_hint="t").body.split("\n")
     assert len(after) == len(before) and after != before
     for a, b in zip(after, before):
@@ -189,3 +189,124 @@ def test_in_document_sections_sharing_toc_marker_are_not_promoted():
     hs = _headings(r.body)
     assert "# 七、附则" not in hs
     assert sum(1 for h in hs if h.startswith("# ")) == 2
+
+
+# ── 规则解析补强：并行、图表目录、贴字页码 ─────────────────────────────────
+
+
+def _thesis(toc: str) -> str:
+    body = "\n<!-- page 3 -->\n\n## 摘要\n\n正文。\n\n## Abstract\n\n正文。\n\n<!-- page 5 -->\n\n# 引言\n\n正文。\n\n"
+    for n in range(1, 5):
+        body += f"<!-- page {4 + 2 * n} -->\n\n## {n} 第{n}部分\n\n正文。\n\n# {n}.1 小节{n}\n\n正文。\n\n"
+    return "# 某某论文\n\n" + toc + body
+
+
+def test_merged_toc_lines_figure_lists_and_glued_pages():
+    toc = (
+        "## 目录\n\n"
+        "摘要....I Abstract....II 引言 1\n\n"  # 三条并成一行，罗马页码
+        "1 第1部分……2\n\n1.1 小节1……2\n\n"
+        "2 第2部分》4\n\n"  # 页码贴字（无引导点）——规则只认书名号/括号后的贴字页码，这一条当折行
+        "2 第2部分 4\n\n2.1 小节2 4\n\n"  # 空白后的裸页码
+        "3 第3部分……(6)\n\n3.1 小节3……(6)\n\n4 第4部分……8\n\n4.1 小节4……8\n\n"
+        "图表目录图1.1 某某示意图……3\n\n表2-1 某某统计……5\n\n"  # 图表目录：不算条目
+    )
+    r = normalize(_thesis(toc), title_hint="t")
+    assert r.summary["toc_applied"] is True
+    titles = [e["title"] for e in r.toc]
+    assert titles[:3] == ["摘要", "Abstract", "引言"]
+    assert not any(t.startswith(("图", "表")) for t in titles)
+    hs = _headings(r.body)
+    assert "# 1 第1部分" in hs and "## 1.1 小节1" in hs and "# 4 第4部分" in hs
+
+
+def test_glued_page_after_book_title_mark():
+    toc = "## 目录\n\n" + "".join(f"- {k}.《某某规定{k}》{k * 2}\n" for k in range(1, 7))
+    body = "".join(f"\n<!-- page {k * 2} -->\n\n## {k}.《某某规定{k}》\n\n正文。\n" for k in range(1, 7))
+    r = normalize(toc + body, title_hint="t")
+    assert r.summary["toc_applied"] is True and r.summary["toc_matched"] == 6
+    assert [e["page"] for e in r.toc] == [2, 4, 6, 8, 10, 12]
+
+
+# ── 模型审校（注入假审校函数；真调用见 tocreview） ─────────────────────────────
+
+
+def _bad_toc_book() -> str:
+    """规则解析只认出 3 条带页码的条目（不够 5 条，不成目录），需要审校才能用。"""
+    toc = "## 目 录\n\n第一章 总则 第二章 管理 第三章 监督 第四章 责任……(9)\n\n第五章 附则……(12)\n\n"
+    body = "".join(
+        f"\n<!-- page {p} -->\n\n# 第{c}章 {t}\n\n正文{t}。\n"
+        for p, c, t in ((3, "一", "总则"), (5, "二", "管理"), (7, "三", "监督"), (9, "四", "责任"), (12, "五", "附则"))
+    )
+    return "# 某某办法\n\n" + toc + body
+
+
+_GOOD_REVIEW = [
+    {"title": "第一章 总则", "page": 3, "level": 1},
+    {"title": "第二章 管理", "page": 5, "level": 1},
+    {"title": "第三章 监督", "page": 7, "level": 1},
+    {"title": "第四章 责任", "page": 9, "level": 1},
+    {"title": "第五章 附则", "page": 12, "level": 1},
+]
+
+
+def test_review_fixes_toc_rules_could_not_parse():
+    seen = {}
+
+    def reviewer(region: str, draft: list[dict]) -> list[dict]:
+        seen["region"], seen["draft"] = region, draft
+        return _GOOD_REVIEW
+
+    r = normalize(_bad_toc_book(), title_hint="t", toc_reviewer=reviewer)
+    assert "目 录" in seen["region"] and seen["draft"] == []  # 规则没认出目录：草稿为空，送审标题起的一段
+    s = r.summary
+    assert (s["toc_source"], s["toc_review"], s["toc_applied"], s["toc_matched"]) == ("llm", "ok", True, 5)
+    assert r.title == "某某办法"
+
+
+def test_review_rejected_when_titles_not_in_toc_text():
+    """审校编造条目（目录原文里没有）→ 整份不用，沿用规则解析。"""
+
+    def reviewer(region: str, draft: list[dict]) -> list[dict]:
+        return _GOOD_REVIEW + [{"title": f"第{n}章 编造的章节", "page": 20, "level": 1} for n in "六七八"]
+
+    r = normalize(_bad_toc_book(), title_hint="t", toc_reviewer=reviewer)
+    assert r.summary.get("toc_review") == "rejected"
+    assert "toc_applied" not in r.summary  # 规则本就没认出目录：与不送审一样
+    assert any(o.kind == "toc_review" for o in r.ops)
+
+
+def test_review_failure_falls_back_to_rules():
+    def reviewer(region: str, draft: list[dict]) -> list[dict]:
+        raise RuntimeError("没有配置模型")
+
+    src = _book()
+    r = normalize(src, title_hint="t", toc_reviewer=reviewer)
+    s = r.summary
+    assert (s["toc_source"], s["toc_review"], s["toc_applied"]) == ("rules", "failed", True)
+    assert _headings(r.body) == _headings(normalize(src, title_hint="t").body)
+
+
+def test_review_invalid_items_rejected():
+    for bad in ([], "不是列表", [{"title": "第一章 总则", "page": 3, "level": 9}] * 6):
+        r = normalize(_bad_toc_book(), title_hint="t", toc_reviewer=lambda region, draft, b=bad: b)
+        assert r.summary.get("toc_review") == "rejected", bad
+
+
+def test_review_cannot_change_body_text():
+    """审校只给条目；正文仍只有标题标记会变。"""
+    r = normalize(_bad_toc_book(), title_hint="t", toc_reviewer=lambda region, draft: _GOOD_REVIEW)
+    assert r.summary["toc_applied"] is True
+    before = normalize(_bad_toc_book(), title_hint="t").body.split("\n")
+    after = r.body.split("\n")
+    assert len(after) == len(before)
+    assert [_strip_marks(x) for x in after] == [_strip_marks(x) for x in before]
+
+
+def test_page_only_continuation_line_gives_page_to_previous_entry():
+    """折行条目的页码单独一行「…………(440)」：挂到上一条，目录不在这里断开（866 页汇编实测）。"""
+    toc = "## 目录\n\n" + "".join(f"- {k}.某某管理办法{k}（1997年1月{k}日）\n- …………({k * 2})\n" for k in range(1, 8))
+    body = "".join(f"\n<!-- page {k * 2} -->\n\n## {k}. 某某管理办法{k}\n\n正文。\n" for k in range(1, 8))
+    r = normalize(toc + body, title_hint="t")
+    assert r.summary["toc_entries"] == 7 and r.summary["toc_applied"] is True
+    assert [e["page"] for e in r.toc] == [2, 4, 6, 8, 10, 12, 14]

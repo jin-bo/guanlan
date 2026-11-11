@@ -695,3 +695,41 @@ def test_split_long_line_hard_cuts_oversized_middle_sentence():
     pieces = _split_long_line(line, "\n")
     assert "".join(pieces) == line + "\n"
     assert all(len(p.rstrip("\n")) <= PART_MAX for p in pieces)
+
+
+# ── #175 目录审校接入 ─────────────────────────────────────────────────────────
+
+
+def _toc_book_md(tmp_path: Path) -> Path:
+    from tests.test_tocnorm import _book as toc_book
+
+    p = tmp_path / "src2" / "汇编.md"
+    p.parent.mkdir()
+    p.write_text(toc_book(4_000), encoding="utf-8")
+    return p
+
+
+def test_prepare_with_reviewer_writes_toc_json(kb: Path, tmp_path: Path):
+    src = _toc_book_md(tmp_path)
+    called = []
+
+    def reviewer(region: str, draft: list[dict]) -> list[dict]:
+        called.append(len(draft))
+        return draft  # 原样认可规则草稿
+
+    task = _prepare(kb, src, toc_reviewer=reviewer)
+    assert called and called[0] == 12
+    assert task["normalized"]["toc_source"] == "llm" and task["normalized"]["toc_applied"] is True
+    data = json.loads((kb / "workspace" / "parsed" / f"{task['sample']}.toc.json").read_text(encoding="utf-8"))
+    assert data["toc_source"] == "llm" and len(data["entries"]) == 12 and all(e["matched"] for e in data["entries"])
+
+
+def test_cli_dry_run_and_no_toc_review_skip_reviewer(kb: Path, tmp_path: Path):
+    src = _toc_book_md(tmp_path)
+
+    def boom(region: str, draft: list[dict]) -> list[dict]:  # pragma: no cover - 不应被调用
+        raise AssertionError("不应送审")
+
+    assert oneclick.import_entrypoint(kb, src=str(src), dry_run=True, toc_reviewer=boom, interactive=False) == EXIT_OK
+    data = json.loads((kb / "workspace" / "parsed" / "汇编.toc.json").read_text(encoding="utf-8"))
+    assert data["toc_source"] == "rules"

@@ -21,7 +21,7 @@ import yaml
 
 from .pages import split_frontmatter
 from .rawio import dump_frontmatter
-from .tocnorm import normalize_by_toc
+from .tocnorm import TocReviewer, normalize_by_toc
 
 __all__ = [
     "EDGE_WINDOW",
@@ -148,6 +148,7 @@ class Op:
             "control": "清除控制字符",
             "toc": "按目录定标题层级",
             "toc_skipped": "未按目录改层级",
+            "toc_review": "目录审校",
         }.get(self.kind, self.kind)
         rule = f"［{self.rule}］" if self.rule else ""
         return f"{label} {where}{rule}：{self.text}"
@@ -162,6 +163,7 @@ class NormalizeResult:
     title: str = ""
     pages: int | None = None
     chars: int = 0
+    toc: list[dict] = field(default_factory=list)  # 采用的目录条目（#175），供落盘核对
 
     @property
     def summary(self) -> dict:
@@ -580,6 +582,7 @@ def normalize(
     origin: str | None = None,
     parsed_by: str | None = None,
     source_sha256: str | None = None,
+    toc_reviewer: TocReviewer | None = None,
 ) -> NormalizeResult:
     """规范化整理（§3）。顺序固定：分页 → 去噪 → 跨页接句 → 统计正文、写元数据。"""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -602,9 +605,11 @@ def normalize(
     # 书名在按目录改层级之前取：封面标题会被降级，免得与目录第 1 级争层级
     h1 = _first_h1("\n".join(lines))
     # 按目录规范化标题层级（#175）：在接句之前——目录条目所在行改成标题后，不会被接进上一页的残句
-    toc = normalize_by_toc(lines)
+    toc = normalize_by_toc(lines, reviewer=toc_reviewer)
     lines = toc.lines
     ops.extend(Op("toc", page, text, f"目录第 {level} 级") for page, level, text in toc.promoted)
+    if toc.review and toc.review != "ok":
+        ops.append(Op("toc_review", None, toc.review.split(":", 1)[-1], "目录审校未采用，沿用规则解析"))
     if toc.entries and not toc.applied:
         ops.append(Op("toc_skipped", None, f"目录 {toc.entries} 条，正文命中 {toc.matched} 条", "命中率不足，未按目录改层级"))
     if pages:
@@ -626,6 +631,9 @@ def normalize(
         summary["toc_entries"] = toc.entries
         summary["toc_matched"] = toc.matched
         summary["toc_applied"] = toc.applied
+        summary["toc_source"] = toc.source
+    if toc.review:
+        summary["toc_review"] = toc.review.split(":", 1)[0]
     meta: dict = {"title": title}
     if origin:
         meta["origin"] = origin
@@ -650,4 +658,5 @@ def normalize(
         title=title,
         pages=total,
         chars=chars,
+        toc=toc.toc,
     )
