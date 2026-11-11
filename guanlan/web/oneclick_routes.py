@@ -30,6 +30,7 @@ from ..oneclick import (
     confirm,
     load_task,
     prepare,
+    progress_info,
     recover_stale,
     resume,
 )
@@ -105,6 +106,7 @@ def task_view(root: Path, task: dict, *, job_id: str | None = None, pausing: boo
         for it in task.get("items", [])
     ]
     out["done"] = sum(1 for it in task.get("items", []) if it.get("state") == "done")
+    out["progress"] = progress_info(root, task)
     out["job_id"] = job_id
     out["pausing"] = pausing
     out["log_tail"] = _log_tail(root, task)

@@ -604,6 +604,14 @@ body.hide-thinking .chat-think { display: none; }
 .oc-overwrite { display: block; margin: .3rem 0; font-size: .82rem; }
 .oc-items { margin: .3rem 0; padding-left: 1.4rem; font-size: .8rem; }
 .oc-log { max-height: 14rem; overflow: auto; font-size: .625rem; white-space: pre-wrap; word-break: break-word; }
+.oc-progress-row { display: flex; align-items: center; gap: .6rem; margin: .4rem 0 .2rem; }
+.oc-progress progress { flex: 1; height: .5rem; -webkit-appearance: none; appearance: none; border: 0; border-radius: 999px; overflow: hidden; background: var(--lan-mist); }
+.oc-progress progress::-webkit-progress-bar { background: var(--lan-mist); border-radius: 999px; }
+.oc-progress progress::-webkit-progress-value { background: var(--lan-ripple); border-radius: 999px; }
+.oc-progress progress::-moz-progress-bar { background: var(--lan-ripple); border-radius: 999px; }
+.oc-progress p { margin: .2rem 0; }
+.oc-current { font-weight: 600; word-break: break-all; }
+.oc-items li.oc-item-current { font-weight: 600; color: var(--lan-deep); }
 /* 一键入库解析进度（浮层）与任务卡日志同为 10px：比通用作业输出（.72rem）小 2px 左右，长日志一屏看得全。 */
 .overlay-body pre.oc-joblog { font-size: .625rem; }
 .stage-promote-status { flex-basis: 100%; font-size: .82rem; display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }

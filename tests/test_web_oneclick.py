@@ -106,6 +106,9 @@ def _prepare(client) -> dict:
     assert all(re.match(r"\[\d\d:\d\d:\d\d\] ", ln) for ln in job["output"].splitlines() if ln.strip())
     active = client.get("/api/oneclick").json()["active"]
     assert active["state"] == "awaiting_confirm"
+    pi = active["progress"]  # 任务卡进度：共几篇、完成几篇、预计剩余（等待确认时还没有当前篇）
+    assert pi["total"] == len(active["items"]) and pi["done"] == 0 and pi["current"] is None
+    assert pi["remaining"] == pi["total"] and pi["eta_seconds"] > 0
     return active
 
 
