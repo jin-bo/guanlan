@@ -1253,13 +1253,13 @@ def _cli_resume(
             _stderr("该任务不是「等待确认」或「已暂停」状态，无法继续。")
             return EXIT_USAGE
     # 等待确认：与 `import <file>` 的确认同一口径（问答期间不持锁；确认本身在锁内复检）
-    _stderr("\n".join(summary_lines(task, detail=False)))
     pc = precheck(root, task)  # 现查（只读、不落清单）：存下的预检可能已过时；确认时仍在锁内复检
-    # 回执（--json）同样报现查结果：别让 stdout 的 precheck 仍是过时的「ok」、stderr 却说冲突。只改内存。
+    # 摘要与回执（--json）都报现查结果：别让摘要/stdout 仍是过时的预检、结论却说冲突。只改内存。
     task = {**task, "precheck": pc}
+    _stderr("\n".join(summary_lines(task, detail=False)))  # 冲突/可覆盖的明细已在摘要里
     # 与 `import <file>` 同口径：明知会被 confirm 拒的情形先说清，别等用户答了「y」再拒。
     if pc.get("status") == "conflict":
-        _stderr("存在不可覆盖的冲突，只能放弃（--cancel）：\n  " + "\n  ".join(pc.get("details", [])))
+        _stderr("存在不可覆盖的冲突，只能放弃（--cancel）。")
         if json_output:
             _receipt(task, True)
         return EXIT_USAGE
