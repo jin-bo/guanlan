@@ -89,6 +89,24 @@ _SENTENCE_END = set("。！？；…」』”）】.!?;:：\"')]")
 _BREAK_PUNCT = set("，。；：！？,;:!?")
 _CLAUSE_PUNCT = _BREAK_PUNCT | set("、")
 
+# 接句否决（#171）：页末 / 页首是独立文本时不接——漏接只留一处断句，误拼会改坏原文与页码归属。
+# 孤立短行：前面是空行 / 锚点 / 文首，且无句读标点、不超过这么多字（落款、日期、未标 # 的标题行）。
+_STANDALONE_MAX_CHARS = 30
+_CN_NUM = "一二三四五六七八九十百千零〇○"
+# 整行是日期：2023年5月1日 / 二〇二三年五月一日 / 2023-05-01 / 2023.5.1
+_DATE_LINE_RE = re.compile(
+    rf"^\s*(?:[\d{_CN_NUM}]{{2,4}}\s*年\s*[\d{_CN_NUM}]{{1,2}}\s*月(?:\s*[\d{_CN_NUM}]{{1,3}}\s*日)?"
+    r"|\d{4}\s*[-./]\s*\d{1,2}\s*[-./]\s*\d{1,2})\s*$"
+)
+# 行尾是文号：某发〔2023〕1号 / [2023] 第 12 号
+_DOCNO_TAIL_RE = re.compile(r"[〔\[［(（]\s*\d{4}\s*[〕\]］)）]\s*第?\s*\d+\s*号\s*$")
+# 下一页首段以结构标记开头：第X条/章/节/编、一、、（一）、1.、附件
+_STRUCT_START_RE = re.compile(
+    rf"^(?:第[\d{_CN_NUM}]+[条章节编款]|[{_CN_NUM}]+、|[（(][\d{_CN_NUM}]+[)）]|\d+[.．、](?!\d)|附件|附表|附[:：])"
+)
+# 下一页首段是「标签：」字段（标签短、不含句读）：发布日期：… / 文号：…
+_FIELD_START_RE = re.compile(r"^[^\s，。、；：,;:！？!?]{1,10}[：:]")
+
 _URL_PART_RE = re.compile(r"(!?\[[^\]]*\])\([^)]*\)")
 _WS_RE = re.compile(r"\s+")
 
@@ -413,6 +431,26 @@ def _join(a: str, b: str) -> str:
     return a + b
 
 
+def _standalone_short(lines: list[str], kinds: list[str], j: int) -> bool:
+    """j 是孤立短行：自成一段（上一行是空行 / 锚点 / 文首），且无句读标点、不超过 _STANDALONE_MAX_CHARS 字。"""
+    if j > 0 and kinds[j - 1] not in ("blank", "anchor"):  # 紧贴上一行：多行段落的末行
+        return False
+    s = lines[j].strip()
+    return _nonws_len(s) <= _STANDALONE_MAX_CHARS and not any(ch in _CLAUSE_PUNCT for ch in s)
+
+
+def _join_vetoed(lines: list[str], kinds: list[str], j: int, prev: str, nxt: str) -> bool:
+    """页末 / 页首是独立文本（落款、日期、文号、标题行、条款起头、字段）→ 不接（#171）。"""
+    if _DATE_LINE_RE.match(prev) or _DATE_LINE_RE.match(nxt) or _DOCNO_TAIL_RE.search(prev):
+        return True
+    if _STRUCT_START_RE.match(nxt) or _FIELD_START_RE.match(nxt):
+        return True
+    # 拉丁文有明确的续句信号（下页小写开头 / 上页连字符断词）：孤立短行也照接。
+    if (nxt[0].isascii() and nxt[0].islower()) or prev.endswith("-"):
+        return False
+    return kinds[j] == "text" and _standalone_short(lines, kinds, j)
+
+
 def _join_sentences(lines: list[str]) -> tuple[list[str], list[Op]]:
     ops: list[Op] = []
     kinds = _classify(lines)
@@ -433,6 +471,8 @@ def _join_sentences(lines: list[str]) -> tuple[list[str], list[Op]]:
         prev = lines[j].rstrip()
         nxt = lines[k].lstrip()
         if not prev or not nxt or prev[-1] in _SENTENCE_END:
+            continue
+        if _join_vetoed(lines, kinds, j, prev, nxt):
             continue
         m = PAGE_ANCHOR_RE.match(lines[a])
         page_no = int(m.group(1)) if m else None

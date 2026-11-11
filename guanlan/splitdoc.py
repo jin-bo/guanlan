@@ -205,12 +205,55 @@ def _size_split(units: list[_Unit], lo: int, hi: int) -> list[tuple[int, int]]:
     return out
 
 
-def _headings_by_level(units: list[_Unit], lo: int, hi: int, min_level: int) -> dict[int, list[int]]:
+def _headings_by_level(
+    units: list[_Unit], lo: int, hi: int, min_level: int, skip: frozenset[int] = frozenset()
+) -> dict[int, list[int]]:
     found: dict[int, list[int]] = {}
     for i in range(lo, hi):
         lv = units[i].heading
-        if lv and lv >= min_level:
+        if lv and lv >= min_level and i not in skip:
             found.setdefault(lv, []).append(i)
+    return found
+
+
+# 标题「形状」（#171）：MinerU 给同级文档（多篇法规连排）的标题层级常不一致，只认 `#` 个数会把后一篇
+# 的正文归进前一篇。认得出形状的标题按形状归同级；认不出的维持纯层级行为。
+_CN_NUM = "一二三四五六七八九十百千零〇○"
+_STRUCT_SHAPE_RE = re.compile(rf"^第\s*[\d{_CN_NUM}]+\s*([编章节])")
+_DOC_TITLE_RE = re.compile(
+    r"^(?!第).{2,58}?(?:条例|规定|办法|细则|决定|规则|解释|通知|意见|批复|章程|准则|纲要|公告|通告|决议|(?<![方做说用手想写算语文书兵句章技看司立执守办])法)"
+    r"(?:[（(][^）)]{1,30}[）)])?$"
+)
+
+
+def _shape(title: str) -> str | None:
+    """doc（文档标题）/ 编 / 章 / 节；认不出 → None。"""
+    m = _STRUCT_SHAPE_RE.match(title)
+    if m:
+        return m.group(1)
+    if _DOC_TITLE_RE.match(title.replace("《", "").replace("》", "")):
+        return "doc"
+    return None
+
+
+def _shape_starts(units: list[_Unit], lo: int, hi: int, starts: list[int], skip: frozenset[int]) -> list[int] | None:
+    """按形状修正切点；不需要修正 → None。
+
+    - 选中层级的标题同一形状 → 其它层级同形状的标题也是切点（层级被识别高 / 低了的同级文档或章）；
+    - 选中层级混着文档标题与编/章/节（别篇的章被识别成文档级）→ 只按文档标题切，章留给下一层递归。
+    """
+    shapes = {_shape(units[i].title) for i in starts}
+    if None in shapes:
+        return None
+    if len(shapes) == 1:
+        target = shapes.pop()
+    elif "doc" in shapes:
+        target = "doc"
+    else:
+        return None
+    found = [i for i in range(lo, hi) if units[i].heading and i not in skip and _shape(units[i].title) == target]
+    if len(found) < 2 or found == starts:
+        return None
     return found
 
 
@@ -279,12 +322,18 @@ def _pack(units: list[_Unit], pieces: list[tuple[int, int, str | None]]) -> list
     return groups
 
 
-def _split_seg(units: list[_Unit], seg: _Seg, min_level: int) -> list[_Seg]:
-    """§4.2 递归：返回叶子段列表（names 尚未编号，(0, 0, 名) 占位由调用方补）。"""
-    levels = _headings_by_level(units, seg.lo, seg.hi, min_level)
+def _split_seg(units: list[_Unit], seg: _Seg, min_level: int, skip: frozenset[int] = frozenset()) -> list[_Seg]:
+    """§4.2 递归：返回叶子段列表（names 尚未编号，(0, 0, 名) 占位由调用方补）。
+
+    skip = 上层已用作切点的标题下标：按形状切时下一层从 1 级起找，须跳过它们（否则段首标题自成一章）。
+    """
+    levels = _headings_by_level(units, seg.lo, seg.hi, min_level, skip)
     level = next((lv for lv in sorted(levels) if len(levels[lv]) >= 2), None)
     if level is not None:
         starts = levels[level]
+        by_shape = _shape_starts(units, seg.lo, seg.hi, starts, skip)
+        if by_shape is not None:
+            starts = by_shape
         bounds = [seg.lo] + starts + [seg.hi]
         chapters: list[tuple[int, int, str]] = []  # (lo, hi, 标题)
         pre_lo, pre_hi = bounds[0], bounds[1]
@@ -318,7 +367,10 @@ def _split_seg(units: list[_Unit], seg: _Seg, min_level: int) -> list[_Seg]:
                     path = seg.path + [g.label]
                 child = _Seg(g.lo, g.hi, path, names, "chapter")
                 if _chars(units, g.lo, g.hi) > PART_MAX:
-                    leaves.extend(_split_seg(units, child, level + 1))
+                    if by_shape is None:
+                        leaves.extend(_split_seg(units, child, level + 1, skip))
+                    else:  # 按形状切的层级不整齐：下一层从 1 级起找，跳过本层切点
+                        leaves.extend(_split_seg(units, child, 1, skip | frozenset(starts)))
                 else:
                     leaves.append(child)
             return leaves
