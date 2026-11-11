@@ -689,17 +689,16 @@ def create_app(
             tmp, size, head = await anyio.to_thread.run_sync(spool_upload, file.file, target.parent)
         except OSError as exc:  # 建目录 / 临时文件失败（磁盘满、无权限）
             raise HTTPException(status_code=500, detail=f"写盘失败：{exc}") from None
-        busy = await upload_in_use(target)
-        # 以下在事件循环线程上同步完成，中间没有 await：与 `POST /api/oneclick` 登记准备作业互不穿插。
         try:
+            busy = await upload_in_use(target)
+            # 以下在事件循环线程上同步完成，中间没有 await：与 `POST /api/oneclick` 登记准备作业互不穿插。
             # 分块写盘可能要好几秒：期间开始的可写 turn 同样要挡（层③），不能在它读写 workspace/ 时换掉文件。
             _reject_if_writable_active()
-        except HTTPException:
+            if busy is not None:
+                raise HTTPException(status_code=409, detail=busy)
+        except BaseException:  # 含客户端断开 / 关停时的取消：不留上百 MiB 的隐藏临时文件等下次启动才清
             discard_upload(tmp)
             raise
-        if busy is not None:
-            discard_upload(tmp)
-            raise HTTPException(status_code=409, detail=busy)
         try:
             commit_upload(tmp, target)
         except OSError as exc:

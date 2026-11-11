@@ -40,6 +40,15 @@ LOG_TAIL_LINES = 200
 _LOG_TAIL_BYTES = 256 * 1024  # 每 2 秒轮询只读日志末尾这么多字节，不随长任务的日志整读
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    """两路径是否同一文件。大小写 / Unicode 规范化不敏感的文件系统（macOS 默认 APFS）上，上传规范化后的
+    `书.pdf` 与盘上的 `书.PDF`（或 NFD 名）字符串不等、却是同一个文件，只比 resolve 后的字符串会放过覆盖。"""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:  # 任一不存在：退回比路径
+        return a.resolve() == b.resolve()
+
+
 class OneClickBody(BaseModel):
     """`POST /api/oneclick`：`upload` = `workspace/uploads/<名>`；`backend` 透传转换后端。"""
 
@@ -368,7 +377,7 @@ def register(
         task = active_task(root)
         if task is None or task.get("state") != "preparing" or not task.get("upload"):
             return None
-        if (root / task["upload"]).resolve() != resolved:
+        if not _same_file(root / task["upload"], resolved):
             return None
         holder = read_holder(root)
         if not holder_alive(holder):
@@ -388,7 +397,8 @@ def register(
         resolved = target.resolve()
         task = await anyio.to_thread.run_sync(_preparing_on_disk, resolved)
         job_id = pending_prepare.get("job_id")
-        if job_id is not None and pending_prepare.get("upload") == str(resolved):
+        pending_upload = pending_prepare.get("upload")
+        if job_id is not None and pending_upload is not None and _same_file(Path(pending_upload), resolved):
             job = jobs.get_job(job_id)
             if job is not None and job.state != "done":
                 return f"{target.name} 正在一键入库的准备阶段（解析 · 整理 · 拆分）中被读取；等准备完成后再上传同名文件。"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -329,3 +330,13 @@ def test_upload_ignores_stale_preparing_task(kb):
         r = client.post("/api/upload", files={"file": ("书.pdf", b"%PDF new", "application/pdf")})
         assert r.status_code == 200, r.text
     assert (kb / "workspace" / "uploads" / "书.pdf").read_bytes() == b"%PDF new"
+
+
+def test_same_file_matches_by_identity_not_spelling(tmp_path):
+    """同一文件的另一个名字（大小写不敏感 FS 上的 `X.PDF`/`x.pdf`，这里用硬链接模拟）也算同一份原件。"""
+    a = tmp_path / "书.PDF"
+    a.write_bytes(b"x")
+    b = tmp_path / "书.pdf.link"
+    os.link(a, b)
+    assert oneclick_routes._same_file(a, b)
+    assert not oneclick_routes._same_file(a, tmp_path / "另一本.pdf")  # 不存在：退回比路径

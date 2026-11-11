@@ -66,8 +66,7 @@ def spool_upload(src: BinaryIO, target_dir: Path) -> tuple[Path, int, bytes]:
         if size == 0:
             raise HTTPException(status_code=400, detail="空文件。")
     except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
+        discard_upload(tmp)
         raise
     return tmp, size, head
 
@@ -77,8 +76,7 @@ def commit_upload(tmp: Path, target: Path) -> None:
     try:
         os.replace(tmp, target)
     except OSError:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
+        discard_upload(tmp)
         raise
 
 
