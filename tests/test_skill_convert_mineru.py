@@ -241,3 +241,32 @@ def test_status_command_failure_is_not_ready(conv, monkeypatch):
 
     monkeypatch.setattr(conv.subprocess, "run", boom)
     assert conv.local_engine_state(conv.mineru_server_status())[0] == "starting"
+
+
+def test_mineru_pipes_decode_as_utf8(conv, monkeypatch, tmp_path):
+    """MinerU 4 的 std 流固定 UTF-8（与 locale 无关）：skill 读它的 stdout 必须按 UTF-8 解，
+    否则 Windows（cp1252 / cp936）上 --json 里的中文产物路径解成乱码，被误判「没有产出」而悄悄降级。"""
+    seen: list[dict] = []
+    fake = FakeMineru([_ok("standard")], statuses=[READY])
+
+    def run(cmd, *a, **k):
+        seen.append(k)
+        if cmd[1] == "--version":
+            return SimpleNamespace(returncode=0, stdout="MinerU version: 4.0.12\n")
+        return fake.run(cmd, *a, **k)
+
+    monkeypatch.setattr(conv.subprocess, "run", run)
+    src = tmp_path / "书.pdf"
+    src.write_bytes(b"%PDF-1.4")
+    conv.run_mineru_v4(src, tmp_path, _args())
+    conv.mineru_server_status()
+    assert conv.mineru_major_version() == 4
+    assert len(seen) == 3
+    assert all(k.get("encoding") == "utf-8" and k.get("errors") == "replace" for k in seen), seen
+    assert not any(k.get("text") for k in seen)
+
+
+def test_load_dotenv_reads_utf8_regardless_of_locale(conv, tmp_path):
+    p = tmp_path / ".env"
+    p.write_bytes("﻿# 中文注释\nKEY=值\n".encode("utf-8"))  # 带 BOM 也认
+    assert conv.load_dotenv(p) == {"KEY": "值"}

@@ -109,7 +109,9 @@ def find_dotenv() -> Path | None:
 def load_dotenv(path: Path) -> dict[str, str]:
     """Parse a .env file and return key/value pairs."""
     env: dict[str, str] = {}
-    with open(path) as f:
+    # Explicit UTF-8: on Windows open() defaults to the ANSI code page (cp1252 / cp936),
+    # and one non-ASCII comment would crash the script before any backend runs.
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -156,8 +158,8 @@ _MINERU_NO_QUALITY_ENGINE = {"quality_tier_unavailable", "no_engine", "engine_un
 def mineru_major_version() -> int | None:
     """Return the installed MinerU major version, or None if it can't be read."""
     try:
-        out = subprocess.run(["mineru", "--version"], capture_output=True, text=True,
-                             timeout=60).stdout
+        out = subprocess.run(["mineru", "--version"], capture_output=True,
+                             encoding="utf-8", errors="replace", timeout=60).stdout
     except (OSError, subprocess.TimeoutExpired):
         return None
     m = re.search(r"(\d+)\.\d+", out)
@@ -176,7 +178,7 @@ def mineru_server_status() -> dict:
     """
     try:
         proc = subprocess.run(["mineru", "server", "status", "--json"],
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, encoding="utf-8", errors="replace", timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return {}
     decoder = json.JSONDecoder()
@@ -301,7 +303,9 @@ def run_mineru_v4(input_path: Path, output_dir: Path, args) -> Path:
     def attempt(tier: str | None) -> tuple[int, dict]:
         cmd = build(tier)
         log(f"[mineru] {redact_cmd(cmd)}")
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+        # MinerU 4 always writes UTF-8 to its std streams, whatever the locale; decoding
+        # with the Windows code page would garble Chinese output paths in the JSON.
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, encoding="utf-8", errors="replace")
         return proc.returncode, parse_json_stdout(proc.stdout)
 
     if args.remote:

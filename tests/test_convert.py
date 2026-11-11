@@ -142,16 +142,22 @@ def test_subprocess_cwd_is_kb_root_not_tmpdir(tmp_path, monkeypatch, kb):
 
 
 def test_subprocess_argv_has_backend_not_model(tmp_path, monkeypatch, kb):
-    """调 skill 的 argv 只含 `--backend`、不含 `--model`（决策P5.2-4③）；env 不改写。"""
+    """调 skill 的 argv 只含 `--backend`、不含 `--model`（决策P5.2-4③）；env 全量继承，只钉管道编码。"""
     src = _src(tmp_path)
     fake = _fake_run("x\n")
     monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setenv("GEMINI_API_KEY", "k-test")
+    monkeypatch.setenv("PYTHONIOENCODING", "cp936")
     convert_to_markdown(src, stem="报告", backend="marker", cwd=kb)
     cmd = fake.captured["cmd"]
     assert "--backend" in cmd and "marker" in cmd
     assert "--model" not in cmd
-    # 透传调用方环境：不传 env=（不剔除/不注入 GEMINI_*）。
-    assert "env" not in fake.captured["kwargs"]
+    # 透传调用方环境（不剔除 / 不注入 GEMINI_*），唯一改动是把管道编码钉成 UTF-8（两端一起，见 _run_converter）。
+    env = fake.captured["kwargs"]["env"]
+    assert env == {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    assert env["GEMINI_API_KEY"] == "k-test"
+    assert fake.captured["kwargs"]["encoding"] == "utf-8"
+    assert fake.captured["kwargs"]["errors"] == "replace"
 
 
 def test_temp_staging_leaves_no_residue(tmp_path, monkeypatch, kb):
