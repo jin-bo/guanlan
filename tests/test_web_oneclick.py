@@ -234,3 +234,82 @@ def test_graph_rebuild_409_while_cli_holds_kb_lock(kb):
         finally:
             lock.release()
         assert client.get("/graph", follow_redirects=False).status_code == 302
+
+
+# ── #172：上传不排在一键入库后面 ─────────────────────────────────────────────────
+
+
+def test_upload_completes_while_oneclick_is_ingesting(kb, fake_convert, monkeypatch):
+    """一键入库作业正在入第一篇（占着写作业队列和写锁）时，上传另一本立即完成，不等整本入完。"""
+    gate = threading.Event()
+    fake = FakeIngest(gate=gate)
+    monkeypatch.setattr(oneclick_routes, "run_ingest", fake)
+    with TestClient(create_app(kb)) as client:
+        task = _prepare(client)
+        job_id = client.post(f"/api/oneclick/{task['task_id']}/confirm", json={}).json()["job_id"]
+        assert fake.started.wait(5)
+        try:
+            r = client.post("/api/upload", files={"file": ("第二本.pdf", b"%PDF two", "application/pdf")})
+            assert r.status_code == 200, r.text
+            assert fake.calls == []  # 第一篇还卡在 gate 上：上传没有排在入库后面
+            assert (kb / "workspace" / "uploads" / "第二本.pdf").read_bytes() == b"%PDF two"
+        finally:
+            gate.set()
+        assert _wait(client, job_id)["exit_code"] == 0
+
+
+def test_upload_ignores_cli_kb_lock(kb):
+    """上传只写 workspace/uploads/，CLI 不写这里：库被 CLI 占着时照样能传（不再 409「知识库正被占用」）。"""
+    lock = acquire(kb, "cli: ingest")
+    try:
+        with TestClient(create_app(kb)) as client:
+            assert _upload(client) == "workspace/uploads/书.pdf"
+    finally:
+        lock.release()
+
+
+def test_upload_refuses_to_replace_original_being_prepared(kb, monkeypatch):
+    """准备作业正在解析的原件不能被同名上传换掉（409）；别的文件照传。准备完成后同名也能传。"""
+    release = threading.Event()
+    started = threading.Event()
+
+    def convert(src, *, stem, backend, cwd, progress=None):
+        started.set()
+        release.wait(5)
+        return ConvertResult(markdown=_book(), backend="mineru")
+
+    monkeypatch.setattr(oneclick, "convert_to_markdown", convert)
+    with TestClient(create_app(kb)) as client:
+        up = _upload(client)
+        job_id = client.post("/api/oneclick", json={"upload": up}).json()["job_id"]
+        assert started.wait(5)
+        try:
+            r = client.post("/api/upload", files={"file": ("书.pdf", b"%PDF new", "application/pdf")})
+            assert r.status_code == 409 and "准备" in r.json()["detail"]
+            assert (kb / "workspace" / "uploads" / "书.pdf").read_bytes() == b"%PDF fake"
+            assert _upload(client, "另一本.pdf") == "workspace/uploads/另一本.pdf"
+        finally:
+            release.set()
+        assert _wait(client, job_id)["exit_code"] == 0
+        assert client.post("/api/upload", files={"file": ("书.pdf", b"%PDF new", "application/pdf")}).status_code == 200
+    leftovers = [p.name for p in (kb / "workspace" / "uploads").iterdir() if p.name.startswith(".")]
+    assert leftovers == []  # 被拒的那次不留临时文件
+
+
+def test_upload_refuses_original_of_preparing_task_on_disk(kb):
+    """盘上「准备中」的任务（如 CLI `guanlan import workspace/uploads/…` 正在解析）同样拦同名覆盖。"""
+    (kb / "workspace" / "uploads").mkdir(parents=True)
+    (kb / "workspace" / "uploads" / "书.pdf").write_bytes(b"%PDF old")
+    oneclick.save_task(
+        kb,
+        {"task_id": "20261111-120000-书", "state": "preparing", "upload": "workspace/uploads/书.pdf", "created": "x"},
+    )
+    lock = acquire(kb, "cli: import")  # 执行者还活着：Web 启动时不会把它恢复成失败
+    try:
+        with TestClient(create_app(kb)) as client:
+            r = client.post("/api/upload", files={"file": ("书.pdf", b"%PDF new", "application/pdf")})
+            assert r.status_code == 409 and "20261111-120000-书" in r.json()["detail"]
+            assert _upload(client, "别的.pdf") == "workspace/uploads/别的.pdf"
+    finally:
+        lock.release()
+    assert (kb / "workspace" / "uploads" / "书.pdf").read_bytes() == b"%PDF old"

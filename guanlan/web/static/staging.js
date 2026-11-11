@@ -230,7 +230,8 @@ function renderSection(box, headerText, base, items, blocked, emptyText, sub, ex
 }
 
 // 「上传文件…」：选原件（可多选）→ 逐个 POST /api/upload 落 workspace/uploads/ → 重拉列表。
-// 与对话框附件共用同一端点（单写者、层③ 423、库被 CLI 占用 409）；这里只上传、不当附件随消息发。
+// 与对话框附件共用同一端点（不排写作业队列，一键入库期间也能传，#172；层③ 423；覆盖正被解析的原件 409）；
+// 这里只上传、不当附件随消息发。
 // 刻意串行（同 attach.js）：避免并发持多份大文件 body。结果提示存 uploadNotice，重拉后仍显示。
 let uploadNotice = null; // { ok, errors: [[文件名, 原因]] }：最近一次上传的结果（渲染时再翻译，切语言跟着变）
 let uploadBusy = false;

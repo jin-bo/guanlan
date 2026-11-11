@@ -91,12 +91,12 @@ from .rawfeed import (
 )
 from .render import render_markdown, render_page
 from .uploads import (
-    MAX_UPLOAD_BYTES,
-    _atomic_write_upload,
     _augment_with_attachments,
     _classify_upload,
     _safe_workspace_target,
-    read_upload_capped,
+    commit_upload,
+    discard_upload,
+    spool_upload,
 )
 from .workspace import (
     _delete_workspace_scratch,
@@ -676,36 +676,29 @@ def create_app(
         return {"saved": f"raw/{target.name}", "bytes": payload_bytes}
 
     # 文件上传（决策P4.6-3）：multipart 文件 → workspace/uploads/<安全名>（多格式、保留原扩展名）。
-    # 网络接收不持锁；收齐后把原子写**提交单写者 JobQueue**，与投喂/ingest/可写 turn 同写者串行。
-    # 层③：可写 turn 活跃 → 423（与 /api/raw 同口径——否则 agent shell `curl /api/upload` 会让本端点
-    # 的写作业排在 turn 的 write_lock 后空等、而 turn 在等这条响应，互相空等死锁）。
+    # **不进单写者 JobQueue、不取库级锁**（#172）：上传只写 workspace/uploads/，CLI 各命令与 wiki 写作业
+    # 都不写这里；以前排在队列里，一键入库整本跑完（数小时）之前传不进来。分块写临时文件（线程池里，
+    # 内存只留一块）→ 回事件循环线程查冲突并原子换名：正被一键入库准备阶段读取的原件不能被同名覆盖（409）。
+    # 层③：可写 turn 活跃 → 423 不变（agent 在可写会话里可能正读写 workspace/）。
     @_writer_only(app.post("/api/upload"))  # reader 下不注册（上传是写，决策P4.9-2）
     async def upload(file: UploadFile = File(...)) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
-        data = await read_upload_capped(file)  # 网络接收不持锁；只读到上限+1，不为超限体全量分配内存
-        if not data:
-            raise HTTPException(status_code=400, detail="空文件。")
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                status_code=400, detail=f"文件超过 {MAX_UPLOAD_BYTES} 字节上限。"
-            )
         target = _safe_workspace_target(root, "uploads", file.filename or "")
-        # 入队写盘 + 同步等完成；阻塞经 to_thread 卸离事件循环（同投喂，决策P4.1-2）。
-        job = await anyio.to_thread.run_sync(
-            jobs.submit_and_wait,
-            "upload",
-            lambda emit: _atomic_write_upload(target, data),  # thunk 收 emit、此处忽略（决策P4.6.1-11）
-            abandon_on_cancel=True,
-        )
-        if job.exit_code == EXIT_USAGE:  # 库被 CLI 占用（P4.30 库级锁）→ 409，不是写盘失败
-            raise HTTPException(status_code=409, detail=job.output or "知识库正被占用。")
-        if job.exit_code != EXIT_OK:  # 落盘 IO 失败 → 归一为 EXIT_AGENT_ERROR
-            raise HTTPException(status_code=500, detail=job.output or "写盘失败。")
+        tmp, size, head = await anyio.to_thread.run_sync(spool_upload, file.file, target.parent)
+        # 以下在事件循环线程上同步完成，中间没有 await：与 `POST /api/oneclick` 登记准备作业互不穿插。
+        busy = upload_in_use(target)
+        if busy is not None:
+            discard_upload(tmp)
+            raise HTTPException(status_code=409, detail=busy)
+        try:
+            commit_upload(tmp, target)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"写盘失败：{exc}") from None
         return {
             "saved": f"workspace/uploads/{target.name}",
             "name": target.name,
-            "bytes": len(data),
-            "kind": _classify_upload(target, data),  # image / text / binary（前端徽章用）
+            "bytes": size,
+            "kind": _classify_upload(target, head),  # image / text / binary（前端徽章用）
         }
 
     # workspace 浏览/预览/删除（决策P4.6-5/11）：浏览/预览只读、path-contained；删除是宿主写、
@@ -785,7 +778,7 @@ def create_app(
 
     # P4.30 一键入库（替代 P4.6.1 的解析 / 断链检查 / 重整 / 晋级四个端点）：端点与作业 thunk 在
     # `oneclick_routes`，内核在 `guanlan/oneclick.py`（与 CLI `guanlan import` 共用任务清单）。
-    oneclick_routes.register(
+    upload_in_use = oneclick_routes.register(
         app,
         root=root,
         jobs=jobs,
