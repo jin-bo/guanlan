@@ -105,6 +105,33 @@ def test_no_join_when_next_page_opens_field_or_clause():
         assert _page_of(r.body, head) == 9
 
 
+def test_url_on_next_page_is_not_a_field():
+    """下一页以 URL 起头不是「标签：」字段，照常接句（#171）。"""
+    src = "更多信息请访问本局官方网站，网址为\n\n<!-- page 3 -->\n\nhttps://example.com 获取。\n"
+    r = normalize(src, title_hint="t")
+    assert [o for o in r.ops if o.kind == "join"]
+
+
+def test_short_body_fragment_and_mid_sentence_refs_still_join():
+    """页末只有一小段正文残句、句中引文号、续句以「附件」起头：都照接（#171 不能矫枉过正）。"""
+    cases = [
+        ("所谓单位是指依法设立并从事", "相关活动的组织。", "所谓单位是指依法设立并从事相关活动的组织。"),
+        ("各地应当依据国发〔2023〕1号", "文件要求，落实相关工作。", "依据国发〔2023〕1号文件要求，"),
+        ("具体名单详见", "附件所列清单中的单位。", "具体名单详见附件所列清单中的单位。"),
+        ("资料可以从网址", "https://example.com 获取。", "资料可以从网址https://example.com 获取。"),
+    ]
+    for tail, head, joined in cases:
+        r = normalize(f"{tail}\n\n<!-- page 2 -->\n\n{head}\n", title_hint="t")
+        assert [o.kind for o in r.ops] == ["join"], tail
+        assert joined in r.body, tail
+
+
+def test_no_join_page_end_signature():
+    """页末孤立一行是机关落款：不接（#171）。"""
+    r = normalize("以上意见请认真贯彻执行。\n\n某某市人民政府\n\n<!-- page 2 -->\n\n抄送本市各区教育局\n", title_hint="t")
+    assert not [o for o in r.ops if o.kind == "join"]
+
+
 def test_body_continuation_still_joins_with_page_attribution():
     """正常正文续句照接：挪动的片段按规则归到对应页（#171 回归）。"""
     src = "本办法所称的单位，是指依法设立并从事\n\n<!-- page 5 -->\n\n相关经营活动的组织，包括分支机构。\n"

@@ -262,3 +262,16 @@ def test_unrecognized_heading_shapes_keep_level_behavior():
     parts = split_document(body, sample="s")
     _assert_lossless(body, parts)
     assert [p.path for p in parts] == [["引言"], ["研究背景"]]
+
+
+def test_nested_doc_shaped_subsections_are_not_promoted():
+    """章下的「一般规定」「审查意见」形状像文档标题，却嵌在本篇章节之下：不能提升成文档切点（#171）。"""
+    body = ""
+    for title, tag in (("甲市物业管理条例", "甲"), ("乙省消防安全办法", "乙")):
+        body += f"# {title}\n\n"
+        for c in range(1, 4):
+            body += f"## 第{c}章 章名{c}\n\n{_para(4_000, tag)}\n\n### 一般规定\n\n{_para(4_000, tag)}\n\n"
+            body += f"### 审查意见\n\n{_para(4_000, tag)}\n\n"
+    parts = split_document(body, sample="s")
+    _assert_lossless(body, parts)
+    assert [p.path for p in parts] == [["甲市物业管理条例"], ["乙省消防安全办法"]]

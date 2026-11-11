@@ -89,8 +89,9 @@ _SENTENCE_END = set("。！？；…」』”）】.!?;:：\"')]")
 _BREAK_PUNCT = set("，。；：！？,;:!?")
 _CLAUSE_PUNCT = _BREAK_PUNCT | set("、")
 
-# 接句否决（#171）：页末 / 页首是独立文本时不接——漏接只留一处断句，误拼会改坏原文与页码归属。
-# 孤立短行：前面是空行 / 锚点 / 文首，且无句读标点、不超过这么多字（落款、日期、未标 # 的标题行）。
+# 接句否决（#171）：页末 / 页首是独立文本时不接——误拼会改坏原文与页码归属。规则都要求文本**本身**
+# 像独立文本：页末恰好只有一小段的正文残句很常见，不能仅凭「短、无标点」就不接。
+# 孤立短行：前面是空行 / 锚点 / 文首，且无句读标点、不超过这么多字。
 _STANDALONE_MAX_CHARS = 30
 _CN_NUM = "一二三四五六七八九十百千零〇○"
 # 整行是日期：2023年5月1日 / 二〇二三年五月一日 / 2023-05-01 / 2023.5.1
@@ -98,14 +99,28 @@ _DATE_LINE_RE = re.compile(
     rf"^\s*(?:[\d{_CN_NUM}]{{2,4}}\s*年\s*[\d{_CN_NUM}]{{1,2}}\s*月(?:\s*[\d{_CN_NUM}]{{1,3}}\s*日)?"
     r"|\d{4}\s*[-./]\s*\d{1,2}\s*[-./]\s*\d{1,2})\s*$"
 )
-# 行尾是文号：某发〔2023〕1号 / [2023] 第 12 号
-_DOCNO_TAIL_RE = re.compile(r"[〔\[［(（]\s*\d{4}\s*[〕\]］)）]\s*第?\s*\d+\s*号\s*$")
-# 下一页首段以结构标记开头：第X条/章/节/编、一、、（一）、1.、附件
+# 整行是文号：某发〔2023〕1号 / 文件编号 某发〔2023〕1号（机关代字 ≤6 字；「依据国发〔2023〕1号」是句中引用）
+_DOCNO_LINE_RE = re.compile(
+    r"^(?:(?:文件)?编号|文号)?[:：\s]*\S{0,6}[〔\[［(（]\s*\d{4}\s*[〕\]］)）]\s*第?\s*\d+\s*号\s*$"
+)
+# 下一页首段以结构标记开头：第X条/章/节/编、一、、（一）、1.、附件（后跟编号 / 冒号 / 空白 / 行尾，
+# 「附件所列清单」这类续句不算）
 _STRUCT_START_RE = re.compile(
-    rf"^(?:第[\d{_CN_NUM}]+[条章节编款]|[{_CN_NUM}]+、|[（(][\d{_CN_NUM}]+[)）]|\d+[.．、](?!\d)|附件|附表|附[:：])"
+    rf"^(?:第[\d{_CN_NUM}]+[条章节编款]|[{_CN_NUM}]+、|[（(][\d{_CN_NUM}]+[)）]|\d+[.．、](?!\d)"
+    rf"|附[件表]\s*[\d{_CN_NUM}]*\s*(?:[:：\s]|$)|附[:：])"
+)
+# 孤立短行像标题 / 落款：第X编/章/节起头、文档标题、机关名结尾
+_HEADING_LIKE_RE = re.compile(rf"^第\s*[\d{_CN_NUM}]+\s*[编章节部]")
+_ORG_TAIL_RE = re.compile(
+    r"(?:局|部|委员会|办公厅|办公室|人民政府|政府|人民法院|法院|人民检察院|检察院|厅|署|银行|公司|中心|协会|学会|研究院|研究所|大学)$"
+)
+# 文档标题（splitdoc 的标题形状也用它）：以 条例/规定/办法/… 或「法」结尾、不以「第」开头
+DOC_TITLE_RE = re.compile(
+    r"^(?!第).{2,58}?(?:条例|规定|办法|细则|决定|规则|解释|通知|意见|批复|章程|准则|纲要|公告|通告|决议|(?<![方做说用手想写算语文书兵句章技看司立执守办])法)"
+    r"(?:[（(][^）)]{1,30}[）)])?$"
 )
 # 下一页首段是「标签：」字段（标签短、不含句读）：发布日期：… / 文号：…
-_FIELD_START_RE = re.compile(r"^[^\s，。、；：,;:！？!?]{1,10}[：:]")
+_FIELD_START_RE = re.compile(r"^[^\s，。、；：,;:！？!?]{1,10}[：:](?!//)")  # (?!//)：https:// 不是字段
 
 _URL_PART_RE = re.compile(r"(!?\[[^\]]*\])\([^)]*\)")
 _WS_RE = re.compile(r"\s+")
@@ -441,14 +456,15 @@ def _standalone_short(lines: list[str], kinds: list[str], j: int) -> bool:
 
 def _join_vetoed(lines: list[str], kinds: list[str], j: int, prev: str, nxt: str) -> bool:
     """页末 / 页首是独立文本（落款、日期、文号、标题行、条款起头、字段）→ 不接（#171）。"""
-    if _DATE_LINE_RE.match(prev) or _DATE_LINE_RE.match(nxt) or _DOCNO_TAIL_RE.search(prev):
+    if _DATE_LINE_RE.match(prev) or _DATE_LINE_RE.match(nxt):
         return True
     if _STRUCT_START_RE.match(nxt) or _FIELD_START_RE.match(nxt):
         return True
-    # 拉丁文有明确的续句信号（下页小写开头 / 上页连字符断词）：孤立短行也照接。
-    if (nxt[0].isascii() and nxt[0].islower()) or prev.endswith("-"):
+    if kinds[j] != "text" or not _standalone_short(lines, kinds, j):
         return False
-    return kinds[j] == "text" and _standalone_short(lines, kinds, j)
+    # 页末孤立短行：本身像标题 / 落款 / 文号才不接；正文残句（「所谓单位是指依法设立并从事」）照接
+    s = prev.strip().replace("《", "").replace("》", "")
+    return bool(_HEADING_LIKE_RE.match(s) or _ORG_TAIL_RE.search(s) or DOC_TITLE_RE.match(s) or _DOCNO_LINE_RE.match(s))
 
 
 def _join_sentences(lines: list[str]) -> tuple[list[str], list[Op]]:
@@ -477,7 +493,8 @@ def _join_sentences(lines: list[str]) -> tuple[list[str], list[Op]]:
         m = PAGE_ANCHOR_RE.match(lines[a])
         page_no = int(m.group(1)) if m else None
         # head = 锚点后第一段到第一个断点标点为止；找不到 → 整段。
-        cut = next((n for n, ch in enumerate(nxt) if ch in _BREAK_PUNCT), None)
+        # `https://` 的冒号不是断点
+        cut = next((n for n, ch in enumerate(nxt) if ch in _BREAK_PUNCT and not (ch == ":" and nxt.startswith("//", n + 1))), None)
         if cut is None:
             head, rest = nxt, ""
         else:
