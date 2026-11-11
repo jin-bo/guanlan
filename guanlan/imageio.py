@@ -85,6 +85,7 @@ class PromotionCollection:
     markdown: str  # 引用已按 target_stem 归一重写为 images/<target_stem>/…
     images: tuple[PromotionImage, ...] = ()
     skipped: int = 0  # 原样保留的外链引用数（带 scheme/绝对/~，不搬不报错）
+    missing: tuple[str, ...] = ()  # strict=False 时原样保留的悬空相对引用（P4.30 一键入库）
 
 
 def _is_external_ref(url: str) -> bool:
@@ -173,7 +174,7 @@ def collect_and_rewrite(
 
 
 def collect_for_promotion(
-    markdown: str, *, source_md: Path, root: Path, stem: str
+    markdown: str, *, source_md: Path, root: Path, stem: str, strict: bool = True
 ) -> PromotionCollection:
     """**严格**收集（晋级用，决策P4.6.1-15/16）：相对引用必须准入 + 存在，否则 `ValueError`（端点 400）。
 
@@ -183,11 +184,15 @@ def collect_for_promotion(
     3. 额外记每图 **realpath + SHA256**（入队前字节哈希），供写锁内 TOCTOU 复检（决策P4.6.1-16）。
 
     `root` = `workspace/parsed/`（含越界/symlink 防御）；`stem` = 目标 raw slug（target_stem，决策P4.6.1-13）。
+
+    `strict=False`（P4.30 一键入库）：相对引用解析不到时**原样保留**、记入 `missing`，不抛——转换器本身
+    漏掉的图在确认页作警告，不阻止入库（拆分改写引用造成的断链由调用方另行判失败）。
     """
     md_parent = source_md.parent
     collected: dict[str, PromotionImage] = {}  # realpath -> 已收集图（去重）
     order: list[PromotionImage] = []
     stats = {"skipped": 0, "total_bytes": 0}
+    missing: list[str] = []
 
     def repl(m: re.Match[str]) -> str:
         url = m.group("url")
@@ -195,6 +200,9 @@ def collect_for_promotion(
             stats["skipped"] += 1
             return m.group(0)
         resolved = _admit_image_ref(url, md_parent, root)
+        if resolved is None and not strict:  # 一键入库：悬空引用原样保留、记账
+            missing.append(url)
+            return m.group(0)
         if resolved is None:  # 相对但未准入（越界/symlink/非白名单/悬空）→ 硬错
             raise ValueError(
                 f"图片引用无法解析或越界：{url}（请先在暂存区「重整」修复断链后再晋级）。"
@@ -220,7 +228,7 @@ def collect_for_promotion(
 
     rewritten = _MD_IMAGE.sub(repl, markdown)
     return PromotionCollection(
-        markdown=rewritten, images=tuple(order), skipped=stats["skipped"]
+        markdown=rewritten, images=tuple(order), skipped=stats["skipped"], missing=tuple(missing)
     )
 
 

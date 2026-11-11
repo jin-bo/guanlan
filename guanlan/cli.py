@@ -22,7 +22,10 @@ from .heal import DEFAULT_LIMIT, heal_entrypoint, positive_int
 from .health import health_entrypoint
 from .ingest import run_ingest
 from .init import run_init
+from .kblock import KBLockBusy
+from .kblock import acquire as _acquire_kb_lock
 from .lint import MISSING_ENTITY_MIN_REFS, lint_entrypoint
+from .paths import require_kb_root
 from .query import run_query
 from .quotes import add_quotes_arguments, quotes_entrypoint
 from .reindex import reindex_entrypoint
@@ -134,6 +137,25 @@ def _cmd_convert(args: argparse.Namespace) -> int:
         overwrite=args.overwrite,
         dry_run=args.dry_run,
         do_ingest=args.ingest,
+        backend=args.backend,
+    )
+
+
+def _cmd_import(args: argparse.Namespace) -> int:
+    from .oneclick import import_entrypoint
+
+    return import_entrypoint(
+        args.dir,
+        src=args.src,
+        dry_run=args.dry_run,
+        yes=args.yes,
+        overwrite=args.overwrite,
+        do_resume=args.resume,
+        status=args.status,
+        do_cancel=args.cancel,
+        json_output=args.json,
+        model=args.model,
+        thinking=args.thinking,
         backend=args.backend,
     )
 
@@ -515,6 +537,33 @@ def _add_convert_parser(sub, dir_parent) -> None:
     p.set_defaults(func=_cmd_convert)
 
 
+def _add_import_parser(sub, dir_parent) -> None:
+    """P4.30：一键入库（解析 → 整理 → 拆分 → 确认 → 落 raw/ → 依次 ingest）。"""
+    p = sub.add_parser(
+        "import",
+        parents=[dir_parent],
+        help="一键入库：解析、整理、拆分后落 raw/ 并依次 ingest（确认后执行；可暂停、可续跑）",
+    )
+    p.add_argument("src", nargs="?", default=None, help="待导入的文件（PDF/DOCX/…/.md）")
+    p.add_argument("--dry-run", action="store_true", help="只跑解析/整理/拆分并打印确认摘要；不写 raw/、不建任务（零 LLM）")
+    p.add_argument("--yes", action="store_true", help="跳过交互确认（非交互终端必须给）")
+    p.add_argument("--overwrite", action="store_true", help="允许覆盖旧一键入库任务写入的同一组 raw/ 文件")
+    p.add_argument("--resume", action="store_true", help="继续本库未完成的入库任务（Web 发起的也可以）")
+    p.add_argument("--status", action="store_true", help="打印未完成任务的清单与进度（零 LLM）")
+    p.add_argument("--cancel", action="store_true", help="放弃本库等待确认或已暂停的入库任务（parsed/ 产物保留）")
+    p.add_argument("--json", action="store_true", help="结构化输出确认摘要/回执")
+    p.add_argument("--model", default=None, help="覆盖 Agentao 模型（透传每篇 ingest）")
+    p.add_argument(
+        "--thinking",
+        type=_thinking_level,
+        default=None,
+        metavar="LEVEL",
+        help="推理档位（透传每篇 ingest）",
+    )
+    p.add_argument("--backend", choices=_CONVERT_BACKENDS, default="auto", help="转换后端（透传 skill，默认 auto）")
+    p.set_defaults(func=_cmd_import)
+
+
 def _add_web_parser(sub, dir_parent) -> None:
     # 默认值与合法取值一律取 `guanlan/web/defaults.py`（零依赖叶子，**不会**拉起 fastapi——
     # 缺 `[web]` extra 时 `guanlan web --help` 仍须可用）。同 heal/audit 的既有惯例：
@@ -827,6 +876,7 @@ _SUBCOMMAND_BUILDERS = (
     _add_search_parser,
     _add_zip_parser,
     _add_convert_parser,
+    _add_import_parser,
     _add_web_parser,
     _add_mcp_parser,
     _add_im_parser,
@@ -868,13 +918,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _needs_kb_lock(args: argparse.Namespace) -> bool:
+    """库级写锁覆盖的写入口（P4.30 §6.4，决策P4.30-15）。只读预览（`--dry-run`、`remove` 不带 `--yes`、
+    普通 `query`）不取锁。`import` 自己管锁（`--status` 拿不到锁也要能看），不在这里取。"""
+    cmd = args.command
+    if cmd == "ingest":
+        return True
+    if cmd == "query":
+        return bool(args.backfill)
+    if cmd in ("heal", "audit", "reindex", "convert"):
+        return not args.dry_run
+    if cmd == "remove":
+        return bool(args.yes)
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     # -C/--dir 用 SUPPRESS 默认（顶层与子命令共享），未给时统一回落到当前目录。
     if not hasattr(args, "dir"):
         args.dir = "."
-    return args.func(args)
+    if not _needs_kb_lock(args):
+        return args.func(args)
+    # 只由最外层入口取锁（决策P4.30-15）：内核函数（run_ingest 等）一律不取。库根无效 / 不可写时
+    # 不取锁，交给命令自己报错（它们都会先 require_kb_root）。
+    try:
+        root = require_kb_root(args.dir, writable=True)
+        lock = _acquire_kb_lock(root, f"cli: {args.command}")
+    except KBLockBusy as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
+    except (GuanlanError, OSError):
+        return args.func(args)
+    try:
+        return args.func(args)
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":
