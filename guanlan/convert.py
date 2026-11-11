@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import re
 import shutil
 import subprocess
@@ -64,6 +65,9 @@ _BACKENDS = ("auto", "mineru", "marker", "python")
 
 # 同名已存在文案归口（早预检 + atomic_write_raw TOCTOU 回退两处共用，免改一处漏一处）。
 _RAW_EXISTS_MSG = "raw/{name} 已存在；改名（`--name`）或加 `--overwrite` 覆盖。"
+
+# skill 子进程管道的编码：两端一起钉死（见 `_run_converter`）。
+_PIPE_ENCODING = "utf-8"
 
 # skill `convert.py` 成功收尾时打在 **stderr** 的后端标记（`log(f"[done] backend={name}")`）。
 _DONE_BACKEND_RE = re.compile(r"^\[done\] backend=(\S+)[ \t]*$", re.MULTILINE)
@@ -138,17 +142,31 @@ def _run_converter(
     mineru 分级回退日志在 stderr）、同时整体累计，stdout 累计到末行取产物路径。stdout 不回调
     （只末行有用），但仍 drain 以防满管道阻塞。
     """
-    # `text=True`（不指定 `encoding=`）按 **locale** 解码子进程管道——刻意与 skill 子进程 `print(out)`
-    # 的 locale 编码**对齐**：matched-locale（含非 UTF-8 如 `LANG=zh_CN.GBK`）下中文产物路径逐字往返。
-    # 注：曾试图强制 `encoding="utf-8"` 修「非 UTF-8 locale」，反而打断这条 matched-locale 往返
-    # （skill 裸 print 发 GBK 字节、父强解 UTF-8 → 乱码 → ConvertError），且 stderr surrogateescape 会
-    # 漏出孤 surrogate 把 Web 解析端点 500（反向评审 code-review 抓出）——已回退。真正的「子进程两端
-    # 协同强制 UTF-8 + stderr errors=replace + pypdf/LANG parity 测试」见 backlog 审计 note。
+    # 管道编码**两端一起钉死 UTF-8**（#171 后续 / backlog 审计 note §2.4b，与 `runtime.envelope_child_env` 同理）：
+    # 子进程 env 设 `PYTHONIOENCODING=utf-8`，skill 的 `print(产物路径)` 与 stderr 日志都发 UTF-8；mineru 4
+    # 本就把自己的 std 流固定成 UTF-8（`configure_standard_streams`）。父端按 UTF-8 解。
+    # 以前跟 locale 走，只在父子 locale 一致且编得出文件名时成立：英文版 Windows（cp1252）上任何中文文件名、
+    # 中文版（cp936）上 emoji / 生僻字，skill 都在 print 处抛 UnicodeEncodeError，已转好的文件被判失败。
+    # 只钉父端会打断 POSIX `LANG=zh_CN.GBK` 那格（曾经回退过一次），所以必须两端一起。
+    # `errors="replace"`：钉死后管道里只该有合法 UTF-8，兜的是第三方混入的杂散字节；strict 的解码异常会死在
+    # 读管道的线程里（Web 解析会挂住），surrogateescape 会把孤 surrogate 带进 job.output 让端点 500。
+    # 产物路径若真被替换坏了，`produced.is_file()` 为假 → ConvertError，照样 fail-closed。
+    # env 继承全量环境、只覆盖这一项（决策P5.2-4 不擦环境）；用户手设的 PYTHONIOENCODING 会被覆盖——这条
+    # 管道是机器协议，编码不可协商。不用 PYTHONUTF8=1：它还改文件名口径，波及后端对磁盘的读写。
+    env = {**os.environ, "PYTHONIOENCODING": _PIPE_ENCODING}
     if progress is None:
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+        proc = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, encoding=_PIPE_ENCODING, errors="replace", env=env
+        )
         return proc.returncode, proc.stdout, proc.stderr
     proc = subprocess.Popen(
-        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding=_PIPE_ENCODING,
+        errors="replace",
+        env=env,
     )
     out_lines: list[str] = []
     err_lines: list[str] = []

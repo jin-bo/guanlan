@@ -69,6 +69,42 @@ jobs:
             exit 1
           fi
 
+  # Windows 编码回归：windows-latest 的 Python 默认按 cp1252 编解码管道和 open()，正是英文版 Windows 用户的环境。
+  # 只跑编码相关的几个文件（真子进程 + 真 pypdf 后端转中文文件名、.env 中文注释、mineru 管道按 UTF-8 解），
+  # 不跑全量——全量套件从未在 Windows 上验证过，那是另一件事。同样不许静默跳过（pypdf 在 dev 组里）。
+  windows-encoding:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: 装 uv（带依赖缓存）
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: 装 Python 3.12
+        run: uv python install 3.12
+
+      - name: 装依赖
+        run: uv sync --python 3.12
+
+      - name: 编码测试（原生 cp1252，不许静默跳过）
+        run: |
+          set -o pipefail
+          uv run --python 3.12 python -c "import locale, sys; print('locale:', locale.getpreferredencoding(False), 'stdout:', sys.stdout.encoding)"
+          uv run --python 3.12 pytest -q -rs --color=no \
+            tests/test_convert_encoding.py tests/test_skill_convert_mineru.py | tee pytest.out
+          if grep -qE '[0-9]+ skipped' pytest.out; then
+            echo "::error::Windows 编码测试有用例被跳过"
+            grep '^SKIPPED' pytest.out || true
+            exit 1
+          fi
+
   # 改 workflow 时校验：YAML 语法 / action input / ${{ }} 表达式，并对 run: 里的内联 shell 跑 shellcheck
   # （release.yml 那段抽 CHANGELOG 的 awk/bash 由此受检）。单跑一次、不进 Python 矩阵。
   # 钉到 actionlint v1.7.12 的镜像 digest（SHA 钉版、可复现，非浮动 :latest）；镜像自带 shellcheck。

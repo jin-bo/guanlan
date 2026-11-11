@@ -36,6 +36,11 @@
   - 子 Agent 调用 `complete_task` 即结束本轮，父 Agent 拿到的是那份答案，不再是之后的一句「见上文」。
   - 同版删除 `[PIN]` 消息前缀，0.5.19 起默认上下文窗口改为 256K；观澜都不涉及。
 
+### 修复
+
+- **Windows 上转换中文文件名失败**（`guanlan convert` / `import` / Web 解析）：转换子进程的管道以前跟系统编码走，英文版 Windows（cp1252）上任何中文文件名、中文版（cp936）上 emoji 与生僻字，skill 都在打印产物路径时崩溃，已转好的文件被判失败。现在两端一起固定 UTF-8：子进程环境设 `PYTHONIOENCODING=utf-8`（其余环境照传），观澜按 UTF-8 读。同时修了两处：skill 按 UTF-8 读 `.env`（以前一行中文注释就能让所有后端都跑不起来）；skill 按 UTF-8 读 MinerU 4 的输出（它固定输出 UTF-8，按系统编码解会把中文产物路径解成乱码、悄悄降级到 marker / pypdf）。新增真子进程测试（pypdf 进 dev 依赖组），CI 加 `windows-latest` 任务在原生 cp1252 下跑编码测试。
+
+
 ## [0.1.34] - 2026-11-08
 
 ### 新增

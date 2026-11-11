@@ -104,7 +104,13 @@
 - **落法**：给 `subprocess.run` 加 `timeout=`、给 Popen 路径用 `proc.wait(timeout=...)`，捕 `TimeoutExpired` →
   `ConvertError`（`with tempfile.TemporaryDirectory` 块仍保证 tmp 清理）。超时值可给保守默认 + 可配。
 
-### ④b convert 编码的**正确**修法（接替已回退的 ③）
+### ④b convert 编码的**正确**修法（接替已回退的 ③）—— ✅ 已修（Windows 编码修复）
+
+> 按本节修法落地：`_run_converter` 子进程 env 加 `PYTHONIOENCODING=utf-8`、父端 `encoding="utf-8", errors="replace"`
+> （两条管道同用 replace：产物路径被替换坏 → `is_file()` 假 → ConvertError，照样 fail-closed，不必拆 Popen）。
+> 另修两处本节没列的：skill `load_dotenv` 显式 UTF-8 读 `.env`；skill 读 mineru 管道按 UTF-8 解（MinerU 4 的
+> std 流固定 UTF-8，与 locale 无关）。验证见 ⑥。
+
 
 - **真实缺陷范围**（比原 ③ 窄）：仅当**文件名含当前 locale 编码无法表示的字符**（emoji / 生僻字，GBK 下）时，
   skill 子进程 `print(out)` 在 **encode 端**抛 `UnicodeEncodeError` → 子进程崩 → `ConvertError`（fail-closed
@@ -128,7 +134,13 @@
 - **落法**：`except Exception` 里先 `with self._goal_lock: g.time_used_seconds += self._clock()-t0` 再
   `_pause_active_goal()`，与 B/C 对齐。次要（默认 120min 时间轴仍兜底），但口径应一致。
 
-### ⑥ convert 真后端 parity 测试（③ 的真验证 + 一网打尽 mock 盲区）
+### ⑥ convert 真后端 parity 测试（③ 的真验证 + 一网打尽 mock 盲区）—— ✅ 已落
+
+> `tests/test_convert_encoding.py`：真子进程 + 真 pypdf（入 dev 组），中文 / emoji 文件名 × 本机原样 /
+> `PYTHONIOENCODING=latin-1`（模拟 cp1252，可在任何平台复现；修复前 3 条失败于 skill `print` 的
+> UnicodeEncodeError）。`LANG=zh_CN.GBK` 变体没做：Python 3.7+ 对 C/POSIX locale 自动转 UTF-8 模式，而 GBK
+> locale 多数 runner 没装；改为 CI 加 `windows-latest` 任务在原生 cp1252 下跑本文件。
+
 
 - gbrain v0.42.53 的标准回应是「`DATABASE_URL` 门控的真后端 parity 测试 + 专门 CI job」。观澜对应物：一个
   `pytest.importorskip("pypdf")` 的**真子进程**测试（pypdf 是 CI 唯一可装的确定性后端），转一个**中文文件名**
