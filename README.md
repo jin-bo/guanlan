@@ -27,6 +27,7 @@
 |---|---|---|
 | `guanlan init` | 初始化一个知识库(确定性模板) | 否 |
 | `guanlan ingest` | 投喂一篇资料,Agent 生成/更新 wiki 页 | 是 |
+| `guanlan import` | 一键入库整本书/长报告:解析 · 整理 · 拆分 → 确认 → 逐份 ingest,可暂停续跑 | 是 |
 | `guanlan query` | 对知识库提问(`--backfill` 可把答案沉淀回 wiki) | 是 |
 | `guanlan search` | 整页全文检索(BM25 + 中文分词) | 否 |
 | `guanlan check` / `health` / `lint` | 校验 / 体检 / 结构 lint | 否 |
@@ -66,6 +67,7 @@ guanlan init my-wiki
 
 # 2. 投喂资料 / 提问(需配置模型)
 guanlan -C my-wiki ingest path/to/source.md
+guanlan -C my-wiki import path/to/书.pdf      # 整本书:去页眉页码、按章拆分,确认后逐份 ingest
 guanlan -C my-wiki query "你的问题"
 
 # 3. 维护(零 LLM、可离线)
@@ -82,7 +84,7 @@ pip install 'guanlan-wiki[web]'
 guanlan -C my-wiki web       # 起本地 Web 宿主,仅监听 127.0.0.1,默认开浏览器
 ```
 
-浏览器里可:浏览 wiki 并跟随 `[[wikilink]]` 导航、跑 check·health·lint 看报告、看 graph、从 `raw/` 触发 ingest 等写作业(含 heal 补全、audit 漂移复核、backfill 回填)、与 agent 只读多轮对话。**仅供本机单用户——绝不要把端口暴露到网络。**
+浏览器里可:浏览 wiki 并跟随 `[[wikilink]]` 导航、跑 check·health·lint 看报告、看 graph、上传 PDF/DOCX 等原件一键入库(与 CLI `import` 共用任务,可互相续跑)、从 `raw/` 补录 ingest 等写作业(含 heal 补全、audit 漂移复核、backfill 回填)、与 agent 只读多轮对话。**仅供本机单用户——绝不要把端口暴露到网络。**
 
 在微信 / 飞书里用(可选):
 

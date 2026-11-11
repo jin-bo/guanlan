@@ -42,7 +42,7 @@ guanlan -C my-wiki ingest raw/source.md --model <model-id>   # override the defa
 
 Notes:
 
-- **`.md` only.** Convert non-`.md` (PDF/DOCX/…) into `raw/<slug>.md` with [`guanlan convert`](07-convert.md) first.
+- **`.md` only.** Convert non-`.md` (PDF/DOCX/…) into `raw/<slug>.md` with [`guanlan convert`](07-convert.md) first; for a whole book or long report, [`guanlan import`](#guanlan-import-src) does it in one step.
 - **`raw/` is read-only and immutable**: the write gate snapshots `raw/` (name + size + mtime, SHA256 if needed) around the Agentao call. If the Agent mutates/deletes `raw/`, exit code `4` (`EXIT_RAW_MUTATED`).
 - This is a governed write: Agentao subprocess + single-writer gate.
 
@@ -101,10 +101,57 @@ It is the recall front-end for `query`/skill, and is reused by the Web `/api/sea
 
 ---
 
+## `guanlan import [src]`
+
+One-click import: take one original (PDF/DOCX/…, or already `.md`) all the way from parsing to ingest. Meant for whole books and long reports — after conversion they carry running headers, page numbers and sentences cut at page breaks, and they are far longer than one `ingest` should handle. **Needs a model** (each part is ingested; a book with a table of contents also gets one TOC review).
+
+```bash
+guanlan -C my-wiki import book.pdf --dry-run   # parse, normalize, split and print the summary; no raw/ writes, no ingest
+guanlan -C my-wiki import book.pdf             # summary → interactive confirm → land in raw/ → ingest part by part
+guanlan -C my-wiki import --status             # progress of the unfinished task (zero-LLM)
+guanlan -C my-wiki import --resume             # continue from where it stopped
+guanlan -C my-wiki import --cancel             # abandon a task that is awaiting confirmation or paused
+```
+
+Steps:
+
+1. **Parse**: the same backends as `convert` (`.docx` tries pandoc first; everything else falls back MinerU → marker → pypdf). The raw result stays untouched in `workspace/parsed/<name>.origin.md`.
+2. **Normalize** (zero-LLM): remove running headers, footers, page numbers and clear-pattern watermarks, and rejoin sentences cut at page breaks. If the book has a table of contents, heading levels follow it.
+3. **Split** (zero-LLM): up to about 40,000 characters stays whole; longer text is split at chapter headings into parts of at most about 40,000 characters, and small neighboring chapters are merged.
+4. **Confirm**: print the number of parts, each part's length, the estimated time and the `raw/` conflict pre-check.
+5. **Land in `raw/` and ingest**: an unsplit document lands as `raw/<name>.md`; a split one as `raw/<name>/<name>-NN-<chapter>.md`, without a whole-book copy. Then each part is ingested in turn.
+
+**If any step before confirmation fails, `raw/` is not touched.**
+
+| Arg | Meaning |
+|---|---|
+| `src` | The file to import; any path (it need not be inside the KB) |
+| `--dry-run` | Parse, normalize, split and print the summary only; no task, no `raw/` writes, no ingest. A TOC is still reviewed once by the model |
+| `--yes` | Skip the interactive confirmation (required on a non-interactive terminal) |
+| `--overwrite` | Allow overwriting **the same set of** `raw/` files that an earlier one-click import wrote |
+| `--resume` / `--status` / `--cancel` | Continue / show / abandon this KB's unfinished task (including one started from the Web) |
+| `--json` | Structured confirmation summary / receipt |
+| `--model` / `--thinking` | Passed through to each ingest |
+| `--backend` | Conversion backend (as in `convert`; default `auto`) |
+| `--no-toc-review` | Parse the TOC by rules only, without the model review (this makes `--dry-run` zero-LLM) |
+
+Notes:
+
+- **Pause and resume**: the first Ctrl+C pauses after the current part finishes; the second aborts at once (that part may be half-written — run `guanlan check` afterwards). A failed ingest also pauses the task; fix the cause and `--resume` retries that part. Progress and logs live in `workspace/tasks/`, so a task survives a restart.
+- **One import task per KB at a time**; finish or abandon the old one before starting a new one. The CLI and the Web "Import" panel share task manifests and can resume each other's tasks.
+- **KB write lock**: during preparation and during landing/ingest the task holds `.guanlan.lock` at the KB root (an OS file lock, released automatically when the process exits). Other writes (`ingest`, `heal`, Web write jobs, …) fail at once and show who is writing. No lock is held while a task awaits confirmation or is paused.
+- **Overwrite rules**: `raw/<name>.md` and `raw/<name>/` are checked together. `--overwrite` works only when an earlier one-click import wrote exactly the same set of files. A different set, or files that no import task wrote, is a conflict: the only option is to abandon and clean up `raw/` yourself.
+- When everything is done, the change in the wiki's broken-link count is reported; if it is high, `guanlan heal --dry-run` shows the pages worth filling. **Heal is never run automatically.**
+- Exit codes: `0` when all parts succeed; `1` for usage errors, conflicts or a busy KB; the failed part's exit code when a failure pauses the task; a user pause via Ctrl+C counts as success (`0`).
+
+Design detail: [`P4.30-一键入库.md`](../../P4.30-一键入库.md) (Chinese).
+
+---
+
 ## Other commands
 
 - **Maintenance** `health` / `lint` / `graph` / `reindex` / `heal` → [Maintenance](04-maintenance.md)
-- **Multi-format** `convert` → [Convert](07-convert.md)
+- **Multi-format** `convert` → [Convert](07-convert.md) (for whole-book import see [`guanlan import`](#guanlan-import-src) above)
 - **Hosts** `web` / `mcp` / `im` (plus `im-login` / `im-identify`) → [Web host](05-web-host.md) / [MCP host](06-mcp-host.md) / [IM host](08-im-host.md)
 - **`install-skill`**: install the three bundled skills into `~/.agentao/skills/` (for external real bases; not needed in dev mode, see [Installation](01-installation.md#develop-from-source)). `--force` reinstalls over an existing copy.
   - `guanlan-wiki` — the maintenance engine (`ingest` / `query` / Web chat all activate it).

@@ -115,6 +115,13 @@ guanlan -C my-wiki ingest path/to/source.md
 
 > Non-`.md` files (PDF / DOCX / PPTX / …) must first be turned into `raw/<slug>.md` with [`guanlan convert`](07-convert.md), then ingested.
 >
+> For a whole book or long report, one-click import does parse · normalize · split → confirm → land in `raw/` → ingest part by part in one command (see [`guanlan import`](03-cli-commands.md#guanlan-import-src)):
+>
+> ```bash
+> guanlan -C my-wiki import path/to/book.pdf --dry-run   # see how many parts and how long first
+> guanlan -C my-wiki import path/to/book.pdf
+> ```
+>
 > **`raw/` is read-only and immutable**: the Agent only reads sources, never modifies them; the write gate snapshots `raw/` before and after every write.
 
 ## 3. Ask questions
@@ -154,7 +161,7 @@ guanlan -C my-wiki web                 # local Web host, 127.0.0.1 only, opens a
 guanlan -C my-wiki web --port 9000 --no-browser
 ```
 
-In the browser: browse the wiki and follow `[[wikilink]]` navigation, run check·health·lint, view the graph, trigger ingest from `raw/`, and chat read-only with the agent. **Single-user, local only — never expose the port to a network.** See [Web host](05-web-host.md).
+In the browser: browse the wiki and follow `[[wikilink]]` navigation, run check·health·lint, view the graph, and chat read-only with the agent; the top bar has three intake buttons — "Feed" pastes one source, "Import" uploads PDF/DOCX/… originals for one-click import, and "Ingest" picks an existing source from `raw/`. **Single-user, local only — never expose the port to a network.** See [Web host](05-web-host.md).
 
 ## Optional: expose to MCP clients
 
