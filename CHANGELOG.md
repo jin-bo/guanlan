@@ -8,6 +8,7 @@
 ### 文档
 
 - **README 与用户指南补上一键入库**：README（中英）的命令表与快速开始加 `guanlan import`，Web 一段改为「上传原件一键入库 / 从 `raw/` 补录」；用户指南 `03` 新增 `guanlan import` 一节（步骤、参数、暂停与续跑、单任务与库级写锁、`--overwrite` 适用范围、退出码），`02` 快速上手的投喂与 Web 段同步。此前这些用法只写在 `docs/P4.30-一键入库.md`。
+- **英文用户指南补 `guanlan zip`**：`docs/guide/en/03-cli-commands.md` 新增 `guanlan zip` 一节，与中文版对齐（此前英文版缺这一节）；README（中英）的「还有」列表补上 `zip`。
 
 ## [0.1.35] - 2026-11-11
 

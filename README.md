@@ -36,7 +36,7 @@
 | `guanlan mcp` | 把 wiki 只读暴露给 MCP 客户端(可选叠加层) | 部分 |
 | `guanlan im` | 在微信 / 飞书的聊天窗口里问知识库(可选叠加层,只读) | 部分 |
 
-> 还有 `reindex`(索引回填)、`heal`(缺失实体物化)、`audit`(语义审计:复核 `raw/` 已变但 wiki 未重综合的漂移源)、`remove`(源撤回:把误摄/已撤稿源移入 `.trash/`)、`convert`(PDF/DOCX/… 转 markdown)等。逐命令细节见 **[用户指南](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)**。
+> 还有 `reindex`(索引回填)、`heal`(缺失实体物化)、`audit`(语义审计:复核 `raw/` 已变但 wiki 未重综合的漂移源)、`remove`(源撤回:把误摄/已撤稿源移入 `.trash/`)、`convert`(PDF/DOCX/… 转 markdown)、`zip`(把知识库打包成可分享的 zip,不收 `.env` 等私有文件)等。逐命令细节见 **[用户指南](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)**。
 
 ## 安装
 
