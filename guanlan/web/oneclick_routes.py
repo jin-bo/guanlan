@@ -21,6 +21,7 @@ from ..convert import _BACKENDS
 from ..errors import EXIT_OK, EXIT_USAGE
 from ..ingest import run_ingest
 from ..kblock import KBLockBusy, acquire, describe_holder, holder_alive, read_holder
+from ..tocreview import make_toc_reviewer
 from ..oneclick import (
     OneClickError,
     active_task,
@@ -259,7 +260,15 @@ def register(
 
         def _prepare(emit) -> int:
             _recover_in_job()
-            prepare(root, upload_path, origin_kind="web", backend=backend, emit=emit)
+            # 目录审校默认开启（#175）：与 CLI 同口径，经 Agentao 只读调用，失败退回规则解析
+            prepare(
+                root,
+                upload_path,
+                origin_kind="web",
+                backend=backend,
+                emit=emit,
+                toc_reviewer=make_toc_reviewer(root, model=model, runner=runner),
+            )
             return EXIT_OK
 
         job_id = jobs.enqueue("oneclick-prepare", _wrap(_prepare))

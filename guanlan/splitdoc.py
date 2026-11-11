@@ -331,16 +331,19 @@ def _pack(units: list[_Unit], pieces: list[tuple[int, int, str | None]]) -> list
     return groups
 
 
-def _split_seg(units: list[_Unit], seg: _Seg, min_level: int, skip: frozenset[int] = frozenset()) -> list[_Seg]:
+def _split_seg(
+    units: list[_Unit], seg: _Seg, min_level: int, skip: frozenset[int] = frozenset(), trust: bool = False
+) -> list[_Seg]:
     """§4.2 递归：返回叶子段列表（names 尚未编号，(0, 0, 名) 占位由调用方补）。
 
     skip = 上层已用作切点的标题下标：按形状切时下一层从 1 级起找，须跳过它们（否则段首标题自成一章）。
+    trust = 标题层级已按目录规范化（#175）：不做形状修正；章全都很小也按章装箱，不退回按大小拆。
     """
     levels = _headings_by_level(units, seg.lo, seg.hi, min_level, skip)
     level = next((lv for lv in sorted(levels) if len(levels[lv]) >= 2), None)
     if level is not None:
         starts = levels[level]
-        by_shape = _shape_starts(units, seg.lo, seg.hi, starts, skip)
+        by_shape = None if trust else _shape_starts(units, seg.lo, seg.hi, starts, skip)
         if by_shape is not None:
             starts = by_shape
         bounds = [seg.lo] + starts + [seg.hi]
@@ -348,7 +351,7 @@ def _split_seg(units: list[_Unit], seg: _Seg, min_level: int, skip: frozenset[in
         pre_lo, pre_hi = bounds[0], bounds[1]
         for k in range(1, len(bounds) - 1):
             chapters.append((bounds[k], bounds[k + 1], units[bounds[k]].title))
-        if all(_chars(units, lo, hi) < CHAPTER_FLOOR for lo, hi, _ in chapters):
+        if not trust and all(_chars(units, lo, hi) < CHAPTER_FLOOR for lo, hi, _ in chapters):
             level = None
         else:
             pieces: list[tuple[int, int, str | None]] = []
@@ -377,7 +380,7 @@ def _split_seg(units: list[_Unit], seg: _Seg, min_level: int, skip: frozenset[in
                 child = _Seg(g.lo, g.hi, path, names, "chapter")
                 if _chars(units, g.lo, g.hi) > PART_MAX:
                     if by_shape is None:
-                        leaves.extend(_split_seg(units, child, level + 1, skip))
+                        leaves.extend(_split_seg(units, child, level + 1, skip, trust))
                     else:  # 按形状切的层级不整齐：下一层从 1 级起找，跳过本层切点
                         leaves.extend(_split_seg(units, child, 1, skip | frozenset(starts)))
                 else:
@@ -422,12 +425,12 @@ def _fit_stem(sample: str, names: list[tuple[int, int, str]]) -> str:
     return stem
 
 
-def split_document(body: str, *, sample: str) -> list[Part]:
+def split_document(body: str, *, sample: str, trust_levels: bool = False) -> list[Part]:
     """拆分正文。返回空列表 = 不拆（字数 ≤ SPLIT_MIN）。"""
     if count_chars(body) <= SPLIT_MIN:
         return []
     units = _units(body)
-    leaves = _split_seg(units, _Seg(0, len(units), [], []), 1)
+    leaves = _split_seg(units, _Seg(0, len(units), [], []), 1, trust=trust_levels)
     if len(leaves) <= 1:
         return []
     # 每个单元起始时所在页（锚点之前的内容属于上一页）
