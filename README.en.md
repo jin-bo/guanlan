@@ -36,7 +36,7 @@ This is an implementation of the [Karpathy LLM Wiki pattern](https://gist.github
 | `guanlan mcp` | Expose the wiki read-only to MCP clients (optional add-on) | partly |
 | `guanlan im` | Ask the wiki from a WeChat / Feishu chat window (optional add-on, read-only) | partly |
 
-> There are also `reindex` (index backfill), `heal` (missing-entity materialization), `audit` (semantic audit: re-review drifted sources whose `raw/` changed but the wiki wasn't re-synthesized), `remove` (source retraction: move a mis-ingested/retracted source into `.trash/`), `convert` (PDF/DOCX/… → markdown), etc. Per-command detail is in the **[User Guide](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)**.
+> There are also `reindex` (index backfill), `heal` (missing-entity materialization), `audit` (semantic audit: re-review drifted sources whose `raw/` changed but the wiki wasn't re-synthesized), `remove` (source retraction: move a mis-ingested/retracted source into `.trash/`), `convert` (PDF/DOCX/… → markdown), `zip` (pack the KB into a shareable zip, leaving out `.env` and other private files), etc. Per-command detail is in the **[User Guide](https://github.com/jin-bo/guanlan/tree/main/docs/guide/)**.
 
 ## Installation
 

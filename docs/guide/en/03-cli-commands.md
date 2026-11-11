@@ -101,6 +101,33 @@ It is the recall front-end for `query`/skill, and is reused by the Web `/api/sea
 
 ---
 
+## `guanlan zip`
+
+Pack the knowledge base into a zip you can hand to someone else. **Zero-LLM, read-only on the KB**; private data and hidden files are excluded by default.
+
+```bash
+guanlan -C my-wiki zip                    # writes ./my-wiki-YYYYMMDD.zip (run inside the KB, it goes to the KB's parent directory)
+guanlan -C my-wiki zip -o share/kb.zip    # choose the output path
+guanlan -C my-wiki zip --dry-run          # only show what would be included and excluded
+```
+
+| Arg | Meaning |
+|---|---|
+| `-o` / `--output` | Output path (must not be inside the KB) |
+| `--no-raw` | Leave out `raw/` and share only the wiki (e.g. when the sources have copyright concerns) |
+| `--with-graph` | Also include `graph/` (left out by default; the recipient can rebuild it with `guanlan graph`) |
+| `--dry-run` | Preview only, no zip is written |
+| `--force` | Overwrite the output file if it exists |
+| `--json` | JSON contract (with the full file list) |
+
+Only `AGENTAO.md`, `SCHEMA.md`, `wiki/` and `raw/` (optionally `graph/`) go in; `.env`, `agentao.log*`, `.agentao/` (sessions etc.),
+`workspace/`, `.trash/` and any other file at the KB root are always left out. Hidden files, system clutter such as `Thumbs.db`, and symlinks
+inside the allowlisted directories are skipped too. The zip's top level is a directory named after the KB, so the recipient just unzips it into a parent directory.
+**It filters by path only and does not inspect content** — before sharing, check yourself that the config and pages hold nothing that should not leave your hands.
+Design detail: [`P3.12-知识库打包分享.md`](../../P3.12-知识库打包分享.md) (Chinese).
+
+---
+
 ## `guanlan import [src]`
 
 One-click import: take one original (PDF/DOCX/…, or already `.md`) all the way from parsing to ingest. Meant for whole books and long reports — after conversion they carry running headers, page numbers and sentences cut at page breaks, and they are far longer than one `ingest` should handle. **Needs a model** (each part is ingested; a book with a table of contents also gets one TOC review).
