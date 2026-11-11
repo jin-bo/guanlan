@@ -3,6 +3,12 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [Unreleased]
+
+### 文档
+
+- **README 与用户指南补上一键入库**：README（中英）的命令表与快速开始加 `guanlan import`，Web 一段改为「上传原件一键入库 / 从 `raw/` 补录」；用户指南 `03` 新增 `guanlan import` 一节（步骤、参数、暂停与续跑、单任务与库级写锁、`--overwrite` 适用范围、退出码），`02` 快速上手的投喂与 Web 段同步。此前这些用法只写在 `docs/P4.30-一键入库.md`。
+
 ## [0.1.35] - 2026-11-11
 
 ### 新增

@@ -27,6 +27,7 @@ This is an implementation of the [Karpathy LLM Wiki pattern](https://gist.github
 |---|---|---|
 | `guanlan init` | Initialize a knowledge base (deterministic template) | no |
 | `guanlan ingest` | Feed a source; the Agent creates/updates wiki pages | yes |
+| `guanlan import` | One-click import of a whole book/long report: parse · normalize · split → confirm → ingest part by part, pausable and resumable | yes |
 | `guanlan query` | Ask the KB (`--backfill` persists the answer back into the wiki) | yes |
 | `guanlan search` | Full-page full-text search (BM25 + CJK tokenization) | no |
 | `guanlan check` / `health` / `lint` | Validate / health-check / structural lint | no |
@@ -66,6 +67,7 @@ guanlan init my-wiki
 
 # 2. Feed sources / ask questions (needs a model)
 guanlan -C my-wiki ingest path/to/source.md
+guanlan -C my-wiki import path/to/book.pdf   # whole book: strip headers/page numbers, split by chapter, confirm, ingest each part
 guanlan -C my-wiki query "your question"
 
 # 3. Maintain (zero-LLM, offline)
@@ -82,7 +84,7 @@ pip install 'guanlan-wiki[web]'
 guanlan -C my-wiki web       # local Web host, 127.0.0.1 only, opens a browser by default
 ```
 
-In the browser: browse the wiki and follow `[[wikilink]]` navigation, run check·health·lint reports, view the graph, trigger ingest and other write jobs from `raw/` (incl. heal, audit drift-review, backfill), and chat read-only with the agent. **Single-user, local only — never expose the port to a network.**
+In the browser: browse the wiki and follow `[[wikilink]]` navigation, run check·health·lint reports, view the graph, upload PDF/DOCX/… originals for one-click import (sharing tasks with the CLI `import`, so either side can resume), trigger ingest and other write jobs from `raw/` (incl. heal, audit drift-review, backfill), and chat read-only with the agent. **Single-user, local only — never expose the port to a network.**
 
 Use it from WeChat / Feishu (optional):
 
