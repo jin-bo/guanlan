@@ -48,6 +48,13 @@ MARKER_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".gif",
 }
 
+# pandoc reads the document structure directly (Word heading styles, tables, footnotes),
+# so for .docx it beats the layout-based engines and needs no models.
+PANDOC_EXTENSIONS = {".docx"}
+
+# Image formats a browser can show; pandoc may extract others (EMF/WMF/WDP) from Office files.
+WEB_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg"}
+
 # The pure-python last-resort tier only understands a text-layer PDF.
 PYTHON_FALLBACK_EXTENSIONS = {".pdf"}
 
@@ -365,14 +372,45 @@ def run_mineru_v4(input_path: Path, output_dir: Path, args) -> Path:
         detail = f"{err.get('code')}: {err.get('message')}" if err else f"exit {rc}"
         raise BackendFailed(f"mineru parse failed ({detail})")
 
+    def produced() -> Path:
+        written = (payload.get("output") or {}).get("path")
+        out = Path(written) if written else out_md
+        if not out.is_file() or out.stat().st_size == 0:
+            raise BackendFailed("mineru produced no markdown output")
+        return out
+
+    out = produced()
+    # MinerU 4.0.12: the first parse of a document it has not seen before covers only page 1
+    # for Office files (it learns the page count during that parse), although the page
+    # markers already say "page 1 of N". A second call is served from the cache and covers
+    # every page. PDFs get an explicit --pages, so only check the other formats.
+    if input_path.suffix.lower() != ".pdf":
+        seen, total = page_coverage(out.read_text(encoding="utf-8", errors="replace"))
+        if total and seen < total:
+            log(f"[mineru] output covers {seen} of {total} pages; asking again for the full result")
+            rc, payload = attempt((payload.get("parse") or {}).get("tier") or args.tier)
+            if rc != 0:
+                raise BackendFailed(f"mineru parse failed on retry (exit {rc})")
+            out = produced()
+            seen, total = page_coverage(out.read_text(encoding="utf-8", errors="replace"))
+            if total and seen < total:
+                raise BackendFailed(f"mineru output still covers only {seen} of {total} pages")
+
     tier = (payload.get("parse") or {}).get("tier")
     if tier:
         log(f"[mineru] tier={tier}")
-    written = (payload.get("output") or {}).get("path")
-    out = Path(written) if written else out_md
-    if not out.is_file() or out.stat().st_size == 0:
-        raise BackendFailed("mineru produced no markdown output")
     return out
+
+
+_PAGE_MARKER = re.compile(r"<!-- page (\d+) of (\d+) -->")
+
+
+def page_coverage(markdown: str) -> tuple[int, int]:
+    """(highest page seen, total pages) from MinerU 4 page markers; (0, 0) if there are none."""
+    marks = [(int(a), int(b)) for a, b in _PAGE_MARKER.findall(markdown)]
+    if not marks:
+        return 0, 0
+    return max(a for a, _ in marks), max(b for _, b in marks)
 
 
 def run_mineru_legacy(input_path: Path, output_dir: Path, args) -> Path:
@@ -397,6 +435,65 @@ def run_mineru_legacy(input_path: Path, output_dir: Path, args) -> Path:
     if out is None:
         raise BackendFailed("mineru produced no markdown output")
     return out
+
+
+# --------------------------------------------------------------------------- #
+# pandoc — structured formats (.docx)
+# --------------------------------------------------------------------------- #
+# Lua filter: drop image attributes and unwrap figures so the gfm writer emits
+# ![alt](src) instead of <img style=...> / <figure> (guanlan only collects markdown image
+# references), and replace images a browser cannot show (EMF/WMF/WDP) with their alt text.
+PANDOC_IMAGE_FILTER = """
+local web = {%s}
+function Image(el)
+  local ext = (el.src:match("%%.([%%w]+)$") or ""):lower()
+  if not web[ext] then
+    return el.caption
+  end
+  el.attr = pandoc.Attr()
+  el.title = ""
+  return el
+end
+-- pandoc 3 wraps a captioned standalone image in a Figure, which gfm writes as
+-- <figure><img>; unwrap it to the image paragraph (the caption is the alt text).
+function Figure(el)
+  return el.content
+end
+""" % ", ".join(f'["{e[1:]}"]=true' for e in sorted(WEB_IMAGE_EXTENSIONS))
+
+
+def run_pandoc(input_path: Path, output_dir: Path, args, env_vars: dict[str, str]) -> Path:
+    if input_path.suffix.lower() not in PANDOC_EXTENSIONS:
+        raise BackendUnavailable(
+            f"pandoc tier only handles {', '.join(sorted(PANDOC_EXTENSIONS))}, not '{input_path.suffix}'")
+    if shutil.which("pandoc") is None:
+        raise BackendUnavailable("'pandoc' not found on PATH (https://pandoc.org/installing.html)")
+    if args.start is not None or args.end is not None:
+        log("[pandoc] --start/--end ignored: a .docx has no fixed pages")
+
+    out_subdir = output_dir / input_path.stem
+    out_subdir.mkdir(parents=True, exist_ok=True)
+    out_md = out_subdir / f"{input_path.stem}.md"
+    lua = out_subdir / ".guanlan-images.lua"
+    lua.write_text(PANDOC_IMAGE_FILTER, encoding="utf-8")
+    # gfm keeps tables with merged cells as HTML tables instead of dropping the merge;
+    # --extract-media with a relative path (run from out_subdir) gives image links
+    # relative to the markdown file, as the other backends do.
+    cmd = ["pandoc", str(input_path), "-t", "gfm", "--wrap=none",
+           "--extract-media=media", "--lua-filter", lua.name, "-o", out_md.name]
+    log(f"[pandoc] {redact_cmd(cmd)}")
+    try:
+        proc = subprocess.run(cmd, cwd=out_subdir, stdout=sys.stderr, stderr=subprocess.PIPE,
+                              encoding="utf-8", errors="replace")
+    finally:
+        lua.unlink(missing_ok=True)
+    if proc.stderr.strip():
+        log(proc.stderr.rstrip())
+    if proc.returncode != 0:
+        raise BackendFailed(f"pandoc exited {proc.returncode}")
+    if not out_md.is_file() or not out_md.read_text(encoding="utf-8", errors="replace").strip():
+        raise BackendFailed("pandoc produced no markdown output")
+    return out_md
 
 
 # --------------------------------------------------------------------------- #
@@ -511,17 +608,27 @@ def run_python(input_path: Path, output_dir: Path, args, env_vars: dict[str, str
 
 # --------------------------------------------------------------------------- #
 BACKENDS = {
+    "pandoc": run_pandoc,
     "mineru": run_mineru,
     "marker": run_marker,
     "python": run_python,
 }
-AUTO_ORDER = ["mineru", "marker", "python"]
+AUTO_ORDER = ["pandoc", "mineru", "marker", "python"]
+
+
+def backend_order(backend: str, suffix: str) -> list[str]:
+    """Backends to try. In auto mode pandoc is tried only for the formats it reads
+    structurally (elsewhere it would only add an "unavailable" line to every log)."""
+    if backend != "auto":
+        return [backend]
+    suffix = suffix.lower()
+    return [n for n in AUTO_ORDER if n != "pandoc" or suffix in PANDOC_EXTENSIONS]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert a document to Markdown via a tiered backend strategy "
-        "(MinerU -> marker-pdf -> pure-python).",
+        "(pandoc for .docx -> MinerU -> marker-pdf -> pure-python).",
     )
     parser.add_argument(
         "input",
@@ -531,8 +638,8 @@ def main() -> None:
         "--backend",
         choices=["auto", *BACKENDS],
         default="auto",
-        help="Backend to use. 'auto' (default) tries mineru -> marker -> python, "
-        "falling back when one is missing or fails.",
+        help="Backend to use. 'auto' (default) tries pandoc (.docx only) -> mineru -> "
+        "marker -> python, falling back when one is missing or fails.",
     )
     # Page range (backend-agnostic, 0-based inclusive).
     parser.add_argument("--start", type=int, default=None, help="First page (0-based)")
@@ -583,7 +690,7 @@ def main() -> None:
         env_vars = load_dotenv(dotenv_path)
 
     output_dir = input_path.parent
-    order = AUTO_ORDER if args.backend == "auto" else [args.backend]
+    order = backend_order(args.backend, input_path.suffix)
 
     errors: list[str] = []
     for name in order:

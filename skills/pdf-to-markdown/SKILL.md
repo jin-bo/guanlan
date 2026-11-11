@@ -2,8 +2,8 @@
 name: pdf-to-markdown
 description: >
   Convert documents (PDF, DOCX, PPTX, XLSX, EPUB, HTML, images) to Markdown using a
-  tiered backend strategy: MinerU first, then marker-pdf, then a pure-python pypdf
-  fallback. Trigger on: "convert PDF to markdown", "PDF to markdown", "DOCX/Word to
+  tiered backend strategy: pandoc for .docx, then MinerU, then marker-pdf, then a
+  pure-python pypdf fallback. Trigger on: "convert PDF to markdown", "PDF to markdown", "DOCX/Word to
   markdown", "PPTX to markdown", "XLSX/Excel to markdown", "convert document to
   markdown", "transform to text", "mineru", "marker-pdf", "extract markdown from
   PDF", or any mention of a .pdf/.docx/.pptx/.xlsx/.epub/.html/image file when
@@ -20,30 +20,31 @@ fails:
 
 | Tier | Backend | Command | When it runs | Strength |
 |---|---|---|---|---|
+| 0 | **pandoc** | `pandoc -t gfm` | `.docx` only, whenever on `PATH` | Reads the document structure: Word heading styles, tables, footnotes, images. Fast, no models |
 | 1 | **MinerU** (4.x preferred, 3.x supported) | `mineru parse` / `mineru -p` | Used first whenever on `PATH` | Highest-fidelity layout, tables, formulas, OCR |
 | 2 | **marker-pdf** | `marker_single` | Fallback if MinerU missing/fails | Strong layout + optional Gemini LLM cleanup |
 | 3 | **pure-python** | `pypdf` | Last resort | Plain text-layer extraction (PDF only, no OCR) |
 
-With the default `--backend auto`, the script tries tiers **1 → 2 → 3** in order,
+With the default `--backend auto`, the script tries tiers **0 (`.docx` only) → 1 → 2 → 3** in order,
 moving to the next one when a backend is **unavailable** (not installed) *or*
 **fails** (non-zero exit / no output). It prints which backend produced the result on
 `stderr` (`[done] backend=...`) and the output `.md` path on `stdout`.
 
-Force a single tier with `--backend mineru|marker|python`.
+Force a single tier with `--backend pandoc|mineru|marker|python`.
 
 ## Supported Input Formats
 
-| Category | Extensions | MinerU | marker | python |
-|---|---|:--:|:--:|:--:|
-| PDF | `.pdf` | ✅ | ✅ | ✅ |
-| Legacy Office / ODF / RTF | `.doc`, `.ppt`, `.xls`, `.rtf`, `.odt`, `.ods`, `.odp` | ✅ (4.x) | — | — |
-| Other (4.x only) | `.ofd`, `.csv`, `.tsv`, `.mhtml`, `.mht` | ✅ (4.x) | — | — |
-| Word | `.docx` | ✅ | ✅ | — |
-| PowerPoint | `.pptx` | ✅ | ✅ | — |
-| Excel | `.xlsx` | ✅ | ✅ | — |
-| E-book | `.epub` | ✅ | ✅ | — |
-| Web | `.html`, `.htm` | ✅ | ✅ | — |
-| Images | `.png`, `.jpg`, `.jpeg`, `.webp`, `.tif`, `.tiff`, `.bmp`, `.gif` | ✅ | ✅ | — |
+| Category | Extensions | pandoc | MinerU | marker | python |
+|---|---|:--:|:--:|:--:|:--:|
+| PDF | `.pdf` | — | ✅ | ✅ | ✅ |
+| Legacy Office / ODF / RTF | `.doc`, `.ppt`, `.xls`, `.rtf`, `.odt`, `.ods`, `.odp` | — | ✅ (4.x) | — | — |
+| Other (4.x only) | `.ofd`, `.csv`, `.tsv`, `.mhtml`, `.mht` | — | ✅ (4.x) | — | — |
+| Word | `.docx` | ✅ | ✅ | ✅ | — |
+| PowerPoint | `.pptx` | — | ✅ | ✅ | — |
+| Excel | `.xlsx` | — | ✅ | ✅ | — |
+| E-book | `.epub` | — | ✅ | ✅ | — |
+| Web | `.html`, `.htm` | — | ✅ | ✅ | — |
+| Images | `.png`, `.jpg`, `.jpeg`, `.webp`, `.tif`, `.tiff`, `.bmp`, `.gif` | — | ✅ | ✅ | — |
 
 The pure-python tier only handles PDFs **with a text layer** (no OCR). A scanned PDF
 with no text layer fails the python tier and requires MinerU or marker.
@@ -52,7 +53,7 @@ with no text layer fails the python tier and requires MinerU or marker.
 
 ```bash
 python scripts/convert.py /path/to/document.pdf      # auto: mineru -> marker -> python
-python scripts/convert.py /path/to/report.docx
+python scripts/convert.py /path/to/report.docx       # auto: pandoc -> mineru -> marker
 python scripts/convert.py /path/to/slides.pptx
 ```
 
@@ -60,7 +61,19 @@ The output `.md` path is printed on `stdout`; progress/backend logs go to `stder
 
 ## Setup
 
-### Tier 1 — MinerU (preferred)
+### Tier 0 — pandoc (`.docx`)
+
+Install from https://pandoc.org/installing.html (`brew install pandoc`, `apt install pandoc`).
+
+A `.docx` is structured XML, so pandoc reads headings (from Word heading styles), tables,
+footnotes and images directly, with no layout analysis. Output is GitHub-flavored
+Markdown: tables with merged cells stay HTML tables; images are extracted next to the
+`.md` and linked as `![alt](media/...)` (a Lua filter drops size attributes and
+replaces images a browser cannot show, such as EMF/WMF, with their alt text).
+`--start/--end` are ignored. If pandoc is missing or fails, `auto` falls through to
+MinerU.
+
+### Tier 1 — MinerU
 
 ```bash
 uv tool install -U mineru        # or: uv add mineru  (MinerU 4.x)
@@ -80,6 +93,13 @@ The script reads `mineru --version` and picks the matching CLI:
   - **`--pages all` is always passed for PDFs.** Without it MinerU 4 parses only the
     first 10 pages. `--start/--end` (0-based) become 4.x's 1-based syntax (`3-r1`, where
     `r1` = last page).
+  - **Truncated Office output is asked for again.** MinerU 4.0.12 parses only page 1 of
+    an Office file it has not seen before, while its page markers already say
+    `page 1 of N`. For non-PDF input the script compares the highest page marker with
+    `N`; if pages are missing it logs `[mineru] output covers k of N pages; asking again`
+    and runs the same parse once more (served from the cache, which covers every page).
+    If the output is still incomplete, the mineru tier fails instead of returning part
+    of the document.
   - **`--wait` defaults to 1800 s** (MinerU's own default is 60 s). On timeout the parse
     keeps running in the background; re-running the same command picks up the cached
     result.
@@ -134,7 +154,7 @@ Arguments:
   input_path              Path to the input document
 
 Backend selection:
-  --backend CHOICE        auto (default) | mineru | marker | python
+  --backend CHOICE        auto (default) | pandoc | mineru | marker | python
 
 Page range (backend-agnostic, 0-based inclusive):
   --start N               First page (0-based)

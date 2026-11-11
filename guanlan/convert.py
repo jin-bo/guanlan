@@ -61,7 +61,7 @@ from .rawio import (
 from .skill import bundled_skill_dir
 
 # skill `convert.py` 支持的后端（透传给 skill；格式白名单归口在 skill，不在此重复，决策P5.2-2/5）。
-_BACKENDS = ("auto", "mineru", "marker", "python")
+_BACKENDS = ("auto", "pandoc", "mineru", "marker", "python")
 
 # 同名已存在文案归口（早预检 + atomic_write_raw TOCTOU 回退两处共用，免改一处漏一处）。
 _RAW_EXISTS_MSG = "raw/{name} 已存在；改名（`--name`）或加 `--overwrite` 覆盖。"

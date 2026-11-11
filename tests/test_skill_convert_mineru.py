@@ -128,7 +128,7 @@ class FakeMineru:
         if "error" not in result:
             out = Path(cmd[cmd.index("-o") + 1])
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text("# 正文\n", encoding="utf-8")
+            out.write_text(result.get("_md", "# 正文\n"), encoding="utf-8")
         return SimpleNamespace(returncode=0 if "error" not in result else 1, stdout=json.dumps(result))
 
     def parse_tiers(self):
@@ -270,3 +270,62 @@ def test_load_dotenv_reads_utf8_regardless_of_locale(conv, tmp_path):
     p = tmp_path / ".env"
     p.write_bytes("﻿# 中文注释\nKEY=值\n".encode("utf-8"))  # 带 BOM 也认
     assert conv.load_dotenv(p) == {"KEY": "值"}
+
+
+# --------------------------------------------------------------------------- #
+# MinerU 4.0.12：第一次见到的 Office 文档只出第 1 页（页标记却写「page 1 of N」），再问一次走缓存才全
+# --------------------------------------------------------------------------- #
+
+P1 = "<!-- page 1 of 2 -->\n\n甲\n"
+FULL = P1 + "\n<!-- page 2 of 2 -->\n\n乙\n"
+
+
+def _ok_md(md, tier="flash"):
+    return {"parse": {"status": "done", "tier": tier}, "_md": md}
+
+
+@pytest.mark.parametrize(
+    ("md", "cov"),
+    [("无页标记", (0, 0)), (P1, (1, 2)), (FULL, (2, 2)),
+     ("<!-- page 3 of 5 -->\n<!-- page 1 of 5 -->", (3, 5))],
+)
+def test_page_coverage(conv, md, cov):
+    assert conv.page_coverage(md) == cov
+
+
+def _run_doc(conv, monkeypatch, tmp_path, capsys, fake, suffix):
+    monkeypatch.setattr(conv.subprocess, "run", fake.run)
+    src = tmp_path / f"文档{suffix}"
+    src.write_bytes(b"PK")
+    out = conv.run_mineru_v4(src, tmp_path, _args())
+    return out, capsys.readouterr().err
+
+
+def test_truncated_office_output_is_asked_again(conv, monkeypatch, tmp_path, capsys):
+    fake = FakeMineru([_ok_md(P1), _ok_md(FULL)])
+    out, log = _run_doc(conv, monkeypatch, tmp_path, capsys, fake, ".docx")
+    assert len(fake.parse_tiers()) == 2
+    assert "--force" not in fake.calls[1]  # 第二次靠缓存，不强制重解析
+    assert out.read_text(encoding="utf-8") == FULL
+    assert "output covers 1 of 2 pages; asking again" in log
+    assert "[mineru] tier=flash" in log.splitlines()
+
+
+def test_still_truncated_after_retry_fails(conv, monkeypatch, tmp_path, capsys):
+    fake = FakeMineru([_ok_md(P1), _ok_md(P1)])
+    with pytest.raises(conv.BackendFailed, match="still covers only 1 of 2 pages"):
+        _run_doc(conv, monkeypatch, tmp_path, capsys, fake, ".pptx")
+
+
+@pytest.mark.parametrize("md", [FULL, "# 无页标记\n"])
+def test_complete_office_output_parsed_once(conv, monkeypatch, tmp_path, capsys, md):
+    fake = FakeMineru([_ok_md(md)])
+    _run_doc(conv, monkeypatch, tmp_path, capsys, fake, ".docx")
+    assert len(fake.parse_tiers()) == 1
+
+
+def test_pdf_page_markers_not_checked(conv, monkeypatch, tmp_path, capsys):
+    """PDF 显式传了 --pages（--start/--end 时只取一段本属正常），不做覆盖检查。"""
+    fake = FakeMineru([_ok_md(P1, tier="standard")])
+    _run_doc(conv, monkeypatch, tmp_path, capsys, fake, ".pdf")
+    assert len(fake.parse_tiers()) == 1
