@@ -44,6 +44,11 @@ jobs:
       # --extra im-weixin / im-feishu（P4.21 决策P4.21-45，**不可省**）：不装的话
       # tests/test_im_feishu.py 里那条**真 SDK 签名探针**永远 skip，于是「lark-oapi 缺
       # extra_ua_tags 就收不到群 @ 事件」这条最关键的回归**永远不跑**——而它正是这组测试存在的理由。
+      # pandoc：pdf-to-markdown 技能对 .docx 的首选后端；tests/test_skill_convert_pandoc.py 真跑它，
+      # 没装就 skip，下面的「不许跳过」闸会让 CI 失败。
+      - name: 装 pandoc
+        run: sudo apt-get update && sudo apt-get install -y pandoc
+
       - name: 装依赖
         run: uv sync --extra web --extra mcp --extra im-weixin --extra im-feishu --python ${{ matrix.python-version }}
 

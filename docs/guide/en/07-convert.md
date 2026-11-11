@@ -1,6 +1,6 @@
 # Convert
 
-`guanlan convert` fills a CLI gap: `ingest` accepts `.md` only, but many sources are PDF/DOCX/PPTX/XLSX/HTML/images. `convert` turns them — via the **`pdf-to-markdown` skill** (MinerU → marker → pypdf tiered fallback) — into a `raw/<slug>.md` source, then the unchanged `.md` ingest takes over.
+`guanlan convert` fills a CLI gap: `ingest` accepts `.md` only, but many sources are PDF/DOCX/PPTX/XLSX/HTML/images. `convert` turns them — via the **`pdf-to-markdown` skill** (MinerU → marker → pypdf tiered fallback; `.docx` tries pandoc first) — into a `raw/<slug>.md` source, then the unchanged `.md` ingest takes over.
 
 > It is **not a new main flow** and **not a replacement** for the Web upload → parse → review → promote path (which is stronger). It fills the CLI user's official "PDF/DOCX → raw → ingest" entry.
 
@@ -22,17 +22,25 @@ guanlan -C my-wiki convert a.pdf --backend marker      # pick a backend
 | `--overwrite` | off | Explicitly overwrite an existing same-name `raw/` file (off by default) |
 | `--dry-run` | off | Print the result to stdout only; zero `raw/` write |
 | `--ingest` | off | Chain `ingest raw/<slug>.md` after a successful convert |
-| `--backend` | `auto` | Conversion backend: `auto`/`mineru`/`marker`/`python` (passed through to the skill's `convert.py`) |
+| `--backend` | `auto` | Conversion backend: `auto`/`pandoc`/`mineru`/`marker`/`python` (passed through to the skill's `convert.py`) |
 
 ## Behavior contract
 
 - **Two-step by default, no auto-ingest**: `convert` only does "convert + land source" (deterministic host write to `raw/`, no Agentao, no gate, no snapshot, no `log.md`). Page building is a separate `guanlan ingest` (or chain with `--ingest`).
 - **Script is zero-LLM**: GuānLán carries no LLM client/key, only shells out to the converter. Whether marker uses Gemini is the **user environment's** choice (no `--model`, no env scrub, no model pass-through).
-- **Records which backend parsed it** (decision P5.2-13): landing a source adds a `parsed_by` frontmatter key holding the backend that **actually ran** (`mineru` / `marker` / `python`; MinerU 4 adds the tier actually used, e.g. `mineru/standard` — see "Checking the tier actually used" below). `--backend auto` is a tiered fallback whose three tiers differ by an order of magnitude in quality, and since `raw/` is immutable and the wiki layer grows out of it, without this there is no field that can answer "which pages in this base were built on degraded text". It sits alongside `origin` (which file it came from) as provenance: one records where from, the other how. Only the final backend is recorded (not the fallback chain), and if no backend marker can be read the key is simply omitted. The Web "parse → promote" path records it too, and it survives promotion.
+- **Records which backend parsed it** (decision P5.2-13): landing a source adds a `parsed_by` frontmatter key holding the backend that **actually ran** (`pandoc` / `mineru` / `marker` / `python`; MinerU 4 adds the tier actually used, e.g. `mineru/standard` — see "Checking the tier actually used" below). `--backend auto` is a tiered fallback whose three tiers differ by an order of magnitude in quality, and since `raw/` is immutable and the wiki layer grows out of it, without this there is no field that can answer "which pages in this base were built on degraded text". It sits alongside `origin` (which file it came from) as provenance: one records where from, the other how. Only the final backend is recorded (not the fallback chain), and if no backend marker can be read the key is simply omitted. The Web "parse → promote" path records it too, and it survives promotion.
 - **Images land with the source** (P5.2.1): images extracted by the converter land at `raw/images/<slug>/<slug>-N.ext`, and markdown image references are rewritten to the new relative paths so `raw/<slug>.md` is **self-consistent**. Three capacity gates: 20 MiB per image / 200 MiB cumulative / 500 images — exceeding any errors out (no silent image dropping). `--dry-run` writes zero images too.
 - **No new runtime deps, no new extra**: reuses the skill's tiered backends; any one available is enough; if all are unavailable it degrades gracefully with an error (exit code `1`).
 
 > A real conversion needs at least one backend installed (MinerU / marker / pypdf). MCP **does not do convert** (writing `raw/` conflicts with the read-only posture).
+
+## Word documents (.docx) use pandoc
+
+A `.docx` is structured XML and needs no layout analysis, so `--backend auto` **tries pandoc first** for it: Word heading styles become `#`/`##`/`###` (splitting cuts chapters at these headings), and tables, footnotes and images are kept. It takes seconds and needs no models. `parsed_by` records `pandoc`.
+
+- Install pandoc yourself (`brew install pandoc` / `apt install pandoc`, or see [pandoc.org](https://pandoc.org/installing.html)); if it is missing or fails, conversion falls back to MinerU.
+- Tables with merged cells stay HTML tables; images a browser cannot show (EMF/WMF and the like) become their alt text.
+- Only `.docx` goes this way. Legacy `.doc`, `.pptx`, `.xlsx` and the rest still use MinerU.
 
 ## MinerU parse tiers
 
@@ -95,5 +103,9 @@ If you already run your own parse service, use `parse_server.local.mode self_hos
 - After a successful parse the script logs `[mineru] tier=<tier>`; it shows in the `import` task log and in the Web parse progress.
 - The landed source records `parsed_by: mineru/<tier>`, e.g. `mineru/standard` or `mineru/flash`. Sources landed by older versions say just `mineru`. To find flash-parsed sources: `grep -l "parsed_by: mineru/flash" raw/*.md`.
 - MinerU's own view: `mineru server status` (human) or `mineru server status --json` (machine).
+
+### Office files that come back with page 1 only
+
+The first time MinerU 4.0.12 parses an Office file it has not seen before, it returns page 1 only, although the page markers already say `page 1 of N`; a second parse of the same file is served from the cache and covers every page. For formats other than PDF the script compares the page markers: when pages are missing it logs `[mineru] output covers k of N pages; asking again` and parses once more; if the output is still incomplete, the MinerU tier fails rather than returning half a document. `.docx` now goes to pandoc by default, so this mainly protects `.pptx` and the other formats.
 
 See: repo [`docs/P5.2-多格式摄入.md`](../../P5.2-多格式摄入.md), [`docs/P5.2.1-图片落盘.md`](../../P5.2.1-图片落盘.md), [CLI commands → ingest](03-cli-commands.md#guanlan-ingest-target).

@@ -531,7 +531,7 @@ def _add_convert_parser(sub, dir_parent) -> None:
         "--backend",
         choices=_CONVERT_BACKENDS,
         default="auto",
-        help="转换后端（透传 skill convert.py：auto/mineru/marker/python，默认 auto）",
+        help="转换后端（透传 skill convert.py：auto/pandoc/mineru/marker/python，默认 auto；auto 对 .docx 先用 pandoc）",
     )
     p.set_defaults(func=_cmd_convert)
 
