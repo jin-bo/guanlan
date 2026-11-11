@@ -36,12 +36,12 @@ from .imageio import (
     collect_for_promotion,
     commit_md_with_images,
 )
-from .kblock import KBLockBusy, acquire, describe_holder, read_holder
+from .kblock import KBLockBusy, acquire, describe_holder, inside_write_run, read_holder
 from .normalize import normalize
 from .pages import load_page
 from .paths import require_kb_root
-from .provenance import compute_raw_digest, parse_digest_value
-from .rawio import atomic_write_text, raw_slug
+from .provenance import parse_digest_value
+from .rawio import atomic_write_text, check_text_admission, raw_slug
 from .sourcepage import locate_source_page
 from .splitdoc import index_name, render_index, render_part, split_document
 
@@ -100,10 +100,15 @@ def _sha_bytes(data: bytes) -> str:
 
 
 def _sha_file(path: Path) -> str | None:
+    """分块读、流式哈希：上传件可达 256 MiB，不整读进内存。读不到 → None。"""
+    h = hashlib.sha256()
     try:
-        return _sha_bytes(path.read_bytes())
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
     except OSError:
         return None
+    return h.hexdigest()
 
 
 def save_task(root: Path, task: dict) -> None:
@@ -169,6 +174,12 @@ class TaskLog:
                 self.emit(line)
 
 
+def _recover_if_owner(root: Path, lock) -> None:
+    """持**真锁**才恢复：嵌套放行的锁（祖先写运行持锁，`lock.nested`）说明原执行者还活着，不能改清单。"""
+    if lock is not None and not lock.nested:
+        recover_stale(root)
+
+
 def recover_stale(root: Path) -> list[str]:
     """**持锁时调用**：原执行者已退出 → preparing 改 failed、running 改 paused。返回被改动的任务号。"""
     changed: list[str] = []
@@ -180,6 +191,9 @@ def recover_stale(root: Path) -> list[str]:
         elif state == "running":
             task["state"] = "paused"
             task["reason"] = "执行中断（原执行者已退出）；继续后从未完成的那一篇重试。"
+            for it in task.get("items", []):  # 中断在途的那一篇不能继续显示「入库中」
+                if it.get("state") == "running":
+                    it["state"] = "pending"
         else:
             continue
         save_task(root, task)
@@ -195,17 +209,28 @@ def _rel(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def _owned_by_other_tasks(root: Path, exclude: str) -> set[str]:
-    """旧任务清单记录为已写入（`written`）的 raw/ 文件（md 与图片）。归属只认清单，不凭路径推断。"""
-    owned: set[str] = set()
+def _owned_by_other_tasks(root: Path, exclude: str) -> dict[str, set[str | None]]:
+    """旧任务清单记录为已写入的 raw/ 文件（md 与图片）→ 当时写入的哈希。归属只认清单，不凭路径推断。"""
+    owned: dict[str, set[str | None]] = {}
     for task in iter_tasks(root):
         if task["task_id"] == exclude:
             continue
         for it in task.get("items", []):
             if it.get("land") in ("written", "writing"):
-                owned.add(it["raw"])
-                owned.update((it.get("images") or {}).keys())
+                owned.setdefault(it["raw"], set()).add(it.get("sha256"))
+                for rel, sha in (it.get("images") or {}).items():
+                    owned.setdefault(rel, set()).add(sha)
     return owned
+
+
+def _modified_since_written(root: Path, files: list[str], owned: dict[str, set[str | None]]) -> list[str]:
+    """旧任务写下、但盘上内容已与当时记录不同的文件（`raw/` 本应不可变：哈希变了说明有人手工改过）。"""
+    out: list[str] = []
+    for rel in files:
+        shas = owned.get(rel)
+        if shas and None not in shas and _sha_file(root / rel) not in shas:
+            out.append(rel)
+    return out
 
 
 def _self_owned(root: Path, task: dict) -> tuple[set[str], list[str]]:
@@ -246,13 +271,21 @@ def precheck(root: Path, task: dict) -> dict:
     whole = raw / f"{sample}.md"
     if whole.is_file():
         existing.append(_rel(root, whole))
+    def _visible_files(d: Path) -> list[str]:
+        # 隐藏文件（macOS Finder 的 `.DS_Store` 等）不是库内容、不属于任何任务：算进来会让覆盖 / 续跑永远判「冲突」。
+        return [
+            _rel(root, p)
+            for p in sorted(d.rglob("*"))
+            if p.is_file() and not any(part.startswith(".") for part in p.relative_to(d).parts)
+        ]
+
     folder = raw / sample
     if folder.is_dir():
-        existing += [_rel(root, p) for p in sorted(folder.rglob("*")) if p.is_file()]
+        existing += _visible_files(folder)
     if not split:  # 未拆分的图片落 raw/images/<sample>/，覆盖时会被整盘替换
         img = raw / "images" / sample
         if img.is_dir():
-            existing += [_rel(root, p) for p in sorted(img.rglob("*")) if p.is_file()]
+            existing += _visible_files(img)
 
     details: list[str] = []
     self_ok, self_diffs = _self_owned(root, task)
@@ -261,7 +294,9 @@ def precheck(root: Path, task: dict) -> dict:
     # slug 冲突（沿 ingest._reject_source_slug_collision）：在预检阶段就查，不留到 ⑥ 才炸。
     target_slugs = {raw_slug(Path(t).stem): t for t in targets}
     if raw.is_dir():
-        for p in raw.rglob("*.md"):
+        for p in sorted(raw.rglob("*")):  # 排序：明细进 `_precheck_signature`，次序须稳定；后缀不分大小写：与 ingest 的 slug 冲突检查同口径（`X.MD` 同样建 source 页）
+            if p.suffix.lower() != ".md":
+                continue
             rel = _rel(root, p)
             if rel in targets or not p.is_file():
                 continue
@@ -277,7 +312,8 @@ def precheck(root: Path, task: dict) -> dict:
     owned = _owned_by_other_tasks(root, task["task_id"])
     md_existing = {e for e in existing if e.endswith(".md") and "/images/" not in e}
     unowned = [e for e in remaining if e not in owned]
-    if md_existing == targets and not unowned:
+    modified = _modified_since_written(root, [e for e in remaining if e in owned], owned)
+    if md_existing == targets and not unowned and not modified:
         return {
             "status": "overwritable",
             "details": [f"{len(remaining)} 个文件已由旧的一键入库任务写入，目标集合与本次相同，可覆盖"],
@@ -289,6 +325,8 @@ def precheck(root: Path, task: dict) -> dict:
         details.append("本次新增：" + "、".join(sorted(targets - md_existing)[:10]))
     if unowned:
         details.append("不属于任何一键入库任务：" + "、".join(unowned[:10]) + ("…" if len(unowned) > 10 else ""))
+    if modified:  # 覆盖会悄悄冲掉手工改动：判冲突，交给用户处理
+        details.append("写入后被改动过：" + "、".join(modified[:10]) + ("…" if len(modified) > 10 else ""))
     details.append("首版不做整书替换：请先自行清理 raw/ 中的相关文件后再导入。")
     return {"status": "conflict", "details": details, "existing": existing}
 
@@ -335,11 +373,8 @@ def _clear_part_dir(folder: Path) -> None:
 
 
 def _origin_label(root: Path, src: Path) -> str:
-    resolved = src.expanduser().resolve()
-    try:
-        return resolved.relative_to(_ws(root).resolve()).as_posix()
-    except ValueError:
-        return _default_origin(src, root)
+    """`origin` 沿决策P5.2-11（与 `guanlan convert` 同口径）：库内 → 相对库根，库外 → 绝对路径。"""
+    return _default_origin(src.expanduser(), root)
 
 
 def _check_images(root: Path, items: list[dict], split: bool, sample: str) -> list[str]:
@@ -350,13 +385,34 @@ def _check_images(root: Path, items: list[dict], split: bool, sample: str) -> li
     for it in items:
         md = ws / it["parsed"]
         text = md.read_text(encoding="utf-8")
-        col = collect_for_promotion(text, source_md=md, root=ws, stem=Path(it["raw"]).stem, strict=False)
+        try:  # 与投喂 / convert 同一道文本闸（空 / 超限 / NUL / 控制字符）：准备阶段就挡下，不让它进 raw/
+            check_text_admission(text)
+        except ValueError as exc:
+            raise OneClickError(f"{it['parsed']}：{exc}") from None
+        try:
+            col = collect_for_promotion(text, source_md=md, root=parsed, stem=Path(it["raw"]).stem, strict=False)
+        except ConvertError as exc:  # 单份图片超容量：准备阶段就挡下，别留到 ⑤ 才炸
+            raise OneClickError(f"{it['parsed']}：{exc}") from None
         for url in col.missing:
-            if split and url.startswith("../") and _admit_image_ref(url[3:], parsed, ws) is not None:
+            # 分卷在 parsed/<sample>/ 下：同一个引用若按整本所在的 parsed/ 解析得到、按分卷位置却找不到，
+            # 说明拆分漏改写了它（`../` 前缀没加上）。加过前缀的引用与整本指向同一个文件，不会落进这里。
+            if split and _admit_image_ref(url, parsed, parsed) is not None:
                 raise OneClickError(f"拆分改写图片引用出错：{it['parsed']} 中的 {url} 找不到（这是一键入库的缺陷，请报告）。")
             warnings.append(f"{Path(it['parsed']).name}：图片 {url} 找不到，原样保留")
         it["image_count"] = len(col.images)
+        it["prepared_images"] = {img.name: img.sha256 for img in col.images}  # ⑤ 落盘前复检（图同 md 一样须是确认时的内容）
     return warnings
+
+
+_SAMPLE_MAX_BYTES = 180  # 留出 `<时间戳>-…json` / `….origin.md` 的余量：Linux 文件名按字节计 255
+
+
+def _cap_sample(sample: str) -> str:
+    """sample 会拼进任务清单 / 日志 / `parsed/<sample>.origin.md` 等文件名，按 UTF-8 字节截短（不切坏字符）。"""
+    data = sample.encode("utf-8")
+    if len(data) <= _SAMPLE_MAX_BYTES:
+        return sample
+    return data[:_SAMPLE_MAX_BYTES].decode("utf-8", errors="ignore").rstrip("-.")
 
 
 def prepare(
@@ -381,18 +437,22 @@ def prepare(
             f"已有未完成的入库任务 {existing['task_id']}（{_STATE_LABEL.get(existing['state'], existing['state'])}）；"
             "请先继续（--resume）或放弃（--cancel）它。"
         )
-    sample = raw_slug(src.stem) or "import"
+    sample = _cap_sample(raw_slug(src.stem)) or "import"
+    if sample.lower() == "images":  # raw/images/ 是所有未拆文档共用的图片根，不能当本任务的分卷目录
+        sample = f"{sample}-doc"
     base = f"{time.strftime('%Y%m%d-%H%M%S')}-{sample}"
     task_id, n = base, 1
     while _task_file(root, task_id).exists():  # 同一秒内的第二个任务不能覆盖第一个的清单
         n += 1
         task_id = f"{base}-{n}"
-    data = src.read_bytes()
+    upload_sha = _sha_file(src)
+    if upload_sha is None:
+        raise OneClickError(f"输入文件读不出：{src}")
     task: dict = {
         "task_id": task_id,
         "sample": sample,
         "upload": _origin_label(root, src),
-        "upload_sha256": _sha_bytes(data),
+        "upload_sha256": upload_sha,
         "origin": origin_kind,
         "state": "preparing",
         "created": _now(),
@@ -430,11 +490,14 @@ def _prepare_steps(root: Path, src: Path, task: dict, *, backend: str, log: Task
     log(f"① 解析 {src.name} …")
     if src.suffix.lower() == ".md":
         text = src.read_text(encoding="utf-8", errors="replace")
-        res = collect_and_rewrite(text, produced_md=src.resolve(), root=src.resolve().parent, stem=sample)
+        try:  # 图片超容量同样是 ConvertError：与转换分支同口径归一为用法错误，不让 CLI 抛 traceback
+            res = collect_and_rewrite(text, produced_md=src.resolve(), root=src.resolve().parent, stem=sample)
+        except ConvertError as exc:
+            raise OneClickError(f"解析失败：{exc}") from None
         backend_used = None
     else:
         try:
-            res = convert_to_markdown(src, stem=sample, backend=backend, cwd=root, progress=lambda ln: log(ln, detail=True))
+            res = convert_to_markdown(src, stem=sample, backend=backend, cwd=root, progress=lambda ln: log("  " + ln))
         except ConvertError as exc:
             raise OneClickError(f"解析失败：{exc}") from None
         backend_used = res.backend
@@ -573,7 +636,8 @@ def confirm(
     task["confirmed"] = _now()
     save_task(root, task)
     log(f"✓ 已确认，开始入库（{len(task['items'])} 份）")
-    return _execute(root, task, log=log, ingest=ingest, should_pause=should_pause)
+    # 刚复检过、其间 raw/ 未动：把结果交给 ⑤，不再整扫 raw/、重哈希本任务已写文件一遍
+    return _execute(root, task, log=log, ingest=ingest, should_pause=should_pause, pc=pc)
 
 
 def resume(
@@ -583,17 +647,32 @@ def resume(
     emit: Emit | None = None,
     ingest: IngestFn,
     should_pause: Callable[[], bool] = lambda: False,
+    overwrite: bool = False,
 ) -> tuple[int, dict]:
-    """继续（**调用方持锁**）：从清单读出断点，逐项判定跳过/重入/停下。"""
+    """继续（**调用方持锁**）：从清单读出断点，逐项判定跳过/重入/停下。
+
+    `overwrite=True`：暂停后复检发现其余目标变成「可覆盖」（只可能是旧一键入库任务写下的同一组文件）时，
+    继续可以补给覆盖确认；它只放宽 overwritable，「冲突」照样拒绝。
+    """
     task = load_task(root, task_id)
     log = TaskLog(root, task_id, emit)
     if task.get("state") != "paused":
         raise OneClickError(f"任务 {task_id} 当前状态为 {task.get('state')}，不能继续。")
+    pc = None
+    if overwrite and not task.get("overwrite"):
+        pc = precheck(root, task)
+        if pc["status"] == "overwritable":  # 只在此刻确实「可覆盖」时生效，不留宽于需要的授权
+            task["overwrite"] = True
+            log("已确认覆盖 raw/ 中本任务的旧文件")
+        else:
+            log("当前没有需要覆盖的旧文件，忽略 --overwrite")
     task["state"] = "running"
     task.pop("reason", None)
+    task.pop("paused_by_user", None)  # 继续后不再是「用户暂停」状态，别让旧标志留在清单里
     save_task(root, task)
     log("▶ 继续入库")
-    return _execute(root, task, log=log, ingest=ingest, should_pause=should_pause)
+    # 刚复检过（持锁、其间 raw/ 未动）就交给 ⑤，不再整扫 raw/、重哈希一遍
+    return _execute(root, task, log=log, ingest=ingest, should_pause=should_pause, pc=pc)
 
 
 def _pause(root: Path, task: dict, log: TaskLog, reason: str) -> None:
@@ -606,13 +685,17 @@ def _pause(root: Path, task: dict, log: TaskLog, reason: str) -> None:
 # ── ⑤ 落 raw/ ───────────────────────────────────────────────────────────────
 
 
-def _land(root: Path, task: dict, log: TaskLog) -> int:
+def _land(root: Path, task: dict, log: TaskLog, pc: dict | None = None) -> int:
     ws = _ws(root).resolve()
     if task["stages"].get("land") == "done":
         return EXIT_OK
-    pc = precheck(root, task)
+    if pc is None:
+        pc = precheck(root, task)
     if pc["status"] == "conflict" or (pc["status"] == "overwritable" and not task.get("overwrite")):
         task["state"] = "awaiting_confirm" if not any(it.get("land") != "pending" for it in task["items"]) else "paused"
+        if task["state"] == "awaiting_confirm":  # 退回等待确认：上一次确认作废，别留「已确认」的痕迹
+            task["stages"]["confirm"] = "pending"
+            task.pop("confirmed", None)
         task["precheck"] = pc
         task["reason"] = "写入前复检发现 raw/ 有变化：" + "；".join(pc["details"])
         save_task(root, task)
@@ -632,20 +715,33 @@ def _land(root: Path, task: dict, log: TaskLog) -> int:
                 save_task(root, task)
                 log(f"  [{k}/{n}] {it['raw']} 已在盘上（上次写入后未及更新清单），补记为已写入", detail=True)
                 continue
-            if any(v is not None for v in state.values()):
+            # md 是末步提交：md 不在盘上 = 上次停在「图已换、md 未写」之间，照常重写即可（图会整盘再换）；
+            # md 已在盘上却与记录不符 → 写入后被改动，停下报差异。
+            if state[it["raw"]] is not None:
                 diffs = [rel for rel, sha in files.items() if state[rel] != sha]
                 _pause(root, task, log, f"{it['raw']} 上次写到一半，盘上与记录不符：" + "、".join(diffs[:5]))
                 return EXIT_USAGE
         md = ws / it["parsed"]
+        expected = (task.get("prepared_sha256") or {}).get(it["parsed"])
+        if expected is not None and _sha_file(md) != expected:  # 暂停期间 parsed/ 被改：不能落未经确认的内容
+            _pause(root, task, log, f"{it['parsed']} 在确认后被改动或删除，与确认时的内容不符；请放弃后重新导入")
+            return EXIT_USAGE
         text = md.read_text(encoding="utf-8")
-        col = collect_for_promotion(text, source_md=md, root=ws, stem=target.stem, strict=False)
+        col = collect_for_promotion(text, source_md=md, root=ws / "parsed", stem=target.stem, strict=False)  # 准入边界 = parsed/
+        expected_imgs = it.get("prepared_images")
+        if expected_imgs is not None and {img.name: img.sha256 for img in col.images} != expected_imgs:
+            _pause(root, task, log, f"{it['parsed']} 引用的图片在确认后被改动或删除；请放弃后重新导入")
+            return EXIT_USAGE
         img_dir = _images_dir(target)
         it["sha256"] = _sha_bytes(col.markdown.encode("utf-8"))
         it["images"] = {_rel(root, img_dir / img.name): img.sha256 for img in col.images}
         it["land"] = "writing"
         save_task(root, task)
         overwrite = bool(task.get("overwrite")) or target.exists() and _sha_file(target) == it["sha256"]
-        code = commit_md_with_images(target, col.markdown, col.images, overwrite=overwrite)
+        # `atomic_write_raw` 同名冲突时把提示 print 到 stdout：`import --json` 的 stdout 只能有一份 JSON，
+        # 故改道 stderr（Web worker 下 stderr 同样被重定向进 job.output，提示不丢）。
+        with contextlib.redirect_stdout(sys.stderr):
+            code = commit_md_with_images(target, col.markdown, col.images, overwrite=overwrite)
         if code != EXIT_OK:
             _pause(root, task, log, f"写入 {it['raw']} 失败（退出码 {code}）")
             return code
@@ -672,19 +768,15 @@ def _wiki_state(root: Path) -> dict[str, tuple[int, int]]:
     return out
 
 
-def _digest_matches(root: Path, raw_rel: str) -> bool:
+def _digest_matches(root: Path, raw_rel: str, raw_sha: str) -> bool:
+    """source 页的 `raw_digest` 是否指向本篇的现字节。`raw_sha` 由调用方刚算过（与
+    `compute_raw_digest` 同口径：整文件 sha256 十六进制），不再整读一遍 raw 文件。"""
     rel = raw_rel.removeprefix("raw/")
     loc = locate_source_page(root, rel)
     if loc.page is None:
         return False
     meta, _ = load_page(loc.page)
-    parsed = parse_digest_value((meta or {}).get("raw_digest"))
-    if parsed is None:
-        return False
-    try:
-        return parsed == (raw_rel, compute_raw_digest(root / raw_rel))
-    except OSError:
-        return False
+    return parse_digest_value((meta or {}).get("raw_digest")) == (raw_rel, raw_sha)
 
 
 def _broken_links(root: Path) -> int | None:
@@ -705,10 +797,43 @@ def _fmt_duration(seconds: float) -> str:
     return f"{h} 小时 {m} 分"
 
 
-def _execute(root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_pause: Callable[[], bool]) -> tuple[int, dict]:
-    code = _land(root, task, log)
+def _execute(
+    root: Path,
+    task: dict,
+    *,
+    log: TaskLog,
+    ingest: IngestFn,
+    should_pause: Callable[[], bool],
+    pc: dict | None = None,
+) -> tuple[int, dict]:
+    try:
+        code = _land(root, task, log, pc)
+    except KeyboardInterrupt:  # 第二次 Ctrl+C / SIGTERM：同样不留 running（`writing` 项续跑时由 ⑤ 自行补记或重写）
+        _pause(root, task, log, "落 raw/ 时被中止，已暂停；继续会从未写完的那一份重试")
+        raise
+    except Exception as exc:  # 与 ⑥ 同口径：不留 running（否则放弃被拒、只能等下次取锁恢复）
+        _pause(root, task, log, f"落 raw/ 异常（{type(exc).__name__}: {exc}），已暂停；处理后继续会从未写完的那一份重试")
+        raise
     if code != EXIT_OK:
         return code, task
+    try:
+        return _ingest_items(root, task, log=log, ingest=ingest, should_pause=should_pause)
+    except BaseException as exc:
+        # 逐篇 ingest 之外的地方被中断（第二次 Ctrl+C / SIGTERM 落在统计、落清单等处）或异常：同样不留 running，
+        # 否则 Web 一直显示「入库中」、只能等下次取锁恢复。ingest 本身的中断/异常已就地暂停，这里不重复。
+        if task.get("state") == "running":
+            for x in task["items"]:
+                if x.get("state") == "running":
+                    x["state"] = "pending"
+            with contextlib.suppress(Exception):
+                _pause(root, task, log, f"入库被中断（{type(exc).__name__}），已暂停；继续会从未完成的那一篇重试")
+        raise
+
+
+def _ingest_items(
+    root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_pause: Callable[[], bool]
+) -> tuple[int, dict]:
+    """⑥ 依次入库（⑤ 已落盘之后）。"""
     items = task["items"]
     n = len(items)
     if task.get("links_before") is None:
@@ -716,26 +841,26 @@ def _execute(root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_p
         save_task(root, task)
     started = time.monotonic()
     done_now: list[float] = []
+    wiki_now: dict[str, tuple[int, int]] | None = None  # 上一篇入库后的 wiki/ 状态（持锁、篇间无人写）
     for k, it in enumerate(items, 1):
-        if should_pause():
-            _pause(root, task, log, f"已按要求暂停（{k - 1}/{n} 篇已处理）")
-            task["paused_by_user"] = True
-            save_task(root, task)
-            return EXIT_OK, task
         raw_path = root / it["raw"]
         cur = _sha_file(raw_path)
         if cur != it.get("sha256"):
             _pause(root, task, log, f"{it['raw']} 与任务记录不一致（被改动或删除），请核对后再继续")
             return EXIT_USAGE, task
-        if it.get("state") == "done" and _digest_matches(root, it["raw"]):
+        if it.get("state") == "done" and _digest_matches(root, it["raw"], cur):
             log(f"[{k}/{n}] 跳过 {it['raw']}（本任务已入库且指纹一致）")
             continue
+        if should_pause():  # 放在跳过判定之后：剩下的都已入库时，暂停请求不必把任务停在「已暂停」
+            task["paused_by_user"] = True  # 先置位，`_pause` 一次落盘
+            _pause(root, task, log, f"已按要求暂停（{k - 1}/{n} 篇已处理）")
+            return EXIT_OK, task
         it["state"] = "running"
         it["started"] = _now()
         it.pop("exit_code", None)
         save_task(root, task)
         log(f"[{k}/{n}] 入库 {it['raw']} …")
-        before = _wiki_state(root)
+        before = wiki_now if wiki_now is not None else _wiki_state(root)
         t0 = time.monotonic()
         try:
             rc = ingest(it["raw"], root)
@@ -743,17 +868,21 @@ def _execute(root: Path, task: dict, *, log: TaskLog, ingest: IngestFn, should_p
             it["state"] = "pending"
             _pause(root, task, log, f"已立即中止；{it['raw']} 的 wiki 写入可能未经门禁收尾，请先运行 `guanlan check`")
             raise
+        except Exception as exc:  # 不留 running：否则 Web 卡在「入库中」、放弃也被拒，只能等重启恢复
+            it["state"] = "failed"
+            _pause(root, task, log, f"[{k}/{n}] {it['raw']} 入库异常（{type(exc).__name__}: {exc}），已暂停；处理后继续会从这一篇重试")
+            raise
         took = time.monotonic() - t0
-        after = _wiki_state(root)
-        created = sum(1 for p in after if p not in before)
-        updated = sum(1 for p, v in after.items() if p in before and before[p] != v)
         it.update(finished=_now(), seconds=round(took, 1), exit_code=rc)
         if rc != EXIT_OK:
             it["state"] = "failed"
             _pause(root, task, log, f"[{k}/{n}] {it['raw']} 入库失败（退出码 {rc}），已暂停；处理后继续会从这一篇重试")
             return rc, task
         it["state"] = "done"
-        save_task(root, task)
+        save_task(root, task)  # 先记完成再做统计：统计期间被中断不至于把已入库的这篇打回重跑
+        after = wiki_now = _wiki_state(root)
+        created = sum(1 for p in after if p not in before)
+        updated = sum(1 for p, v in after.items() if p in before and before[p] != v)
         done_now.append(took)
         log(f"[{k}/{n}] 入库 {it['raw']} … 完成（{_fmt_duration(took)}，wiki 新建 {created} 页、更新 {updated} 页）")
         left = sum(1 for x in items[k:] if x.get("state") != "done")
@@ -824,12 +953,21 @@ def summary_lines(task: dict, *, detail: bool = False) -> list[str]:
 # ── CLI：guanlan import ──────────────────────────────────────────────────────
 
 
+_ABORT_SIGNALS = tuple(getattr(signal, n) for n in ("SIGHUP", "SIGTERM") if hasattr(signal, n))
+
+
 class _PauseFlag:
-    """CLI Ctrl+C：第一次 = 本篇入完后暂停；第二次 = 立即中止（抛 KeyboardInterrupt）。"""
+    """CLI Ctrl+C：第一次 = 本篇入完后暂停；第二次 = 立即中止（抛 KeyboardInterrupt）。
+
+    ingest 子进程在新会话里（`start_new_session`），关终端的 SIGHUP、外部 SIGTERM 都到不了它；
+    这两个信号在父进程里一律按「立即中止」处理，`runtime._run_in_new_session` 随之整组杀掉子进程——否则父进程一死，
+    agentao 会在没有门禁收尾、库级锁已释放的情况下继续写 wiki/。
+    """
 
     def __init__(self) -> None:
         self.event = threading.Event()
         self._old = None
+        self._old_abort: dict[int, object] = {}
 
     def __call__(self) -> bool:
         return self.event.is_set()
@@ -842,14 +980,26 @@ class _PauseFlag:
         signal.signal(signal.SIGINT, signal.default_int_handler)
         raise KeyboardInterrupt
 
+    @staticmethod
+    def _abort(signum, frame) -> None:  # noqa: ARG004
+        raise KeyboardInterrupt
+
     def __enter__(self) -> _PauseFlag:
         if threading.current_thread() is threading.main_thread():
             self._old = signal.signal(signal.SIGINT, self._handler)
+            for sig in _ABORT_SIGNALS:
+                # 继承来的「忽略」（如 `nohup guanlan import` 对 SIGHUP）照旧忽略：不能把关终端变成立即中止。
+                if signal.getsignal(sig) is signal.SIG_IGN:
+                    continue
+                self._old_abort[sig] = signal.signal(sig, self._abort)
         return self
 
     def __exit__(self, *exc: object) -> None:
         if self._old is not None:
             signal.signal(signal.SIGINT, self._old)
+        for sig, old in self._old_abort.items():
+            signal.signal(sig, old)
+        self._old_abort.clear()
 
 
 def _default_ingest(model: str | None, thinking: str | None) -> IngestFn:
@@ -867,7 +1017,13 @@ def _default_ingest(model: str | None, thinking: str | None) -> IngestFn:
     return run
 
 
+# `--json` 契约：每条出口在 stdout 恰好给一份 JSON。回执路径置 `emitted`；其余（用法错误、找不到任务等）
+# 由 `import_entrypoint` 末尾补一份 `{"ok": false, ...}`，错误文本取最后一条 stderr 消息。
+_JSON_OUT = {"emitted": False, "last_error": None}
+
+
 def _stderr(line: str) -> None:
+    _JSON_OUT["last_error"] = line
     print(line, file=sys.stderr, flush=True)
 
 
@@ -880,6 +1036,7 @@ def _receipt(task: dict, json_output: bool) -> None:
             for it in task.get("items", [])
         ]
         print(json.dumps(out, ensure_ascii=False, indent=2))
+        _JSON_OUT["emitted"] = True
     else:
         print("\n".join(summary_lines(task)))
 
@@ -902,15 +1059,68 @@ def import_entrypoint(
     interactive: bool | None = None,
 ) -> int:
     """`guanlan import` 的单一落地。`ingest` / `interactive` 供测试注入。"""
+    _JSON_OUT.update(emitted=False, last_error=None)
+    try:
+        code = _import_main(
+            root_dir,
+            src=src,
+            dry_run=dry_run,
+            yes=yes,
+            overwrite=overwrite,
+            do_resume=do_resume,
+            status=status,
+            do_cancel=do_cancel,
+            json_output=json_output,
+            model=model,
+            thinking=thinking,
+            backend=backend,
+            ingest=ingest,
+            interactive=interactive,
+        )
+    except Exception as exc:  # 意外异常（任务已就地暂停）：--json 照样给一份 JSON，再原样上抛
+        if json_output and not _JSON_OUT["emitted"]:
+            err = f"{type(exc).__name__}: {exc}"
+            print(json.dumps({"ok": False, "exit_code": None, "error": err}, ensure_ascii=False))
+        raise
+    if json_output and not _JSON_OUT["emitted"]:
+        print(json.dumps({"ok": False, "exit_code": code, "error": _JSON_OUT["last_error"]}, ensure_ascii=False))
+    return code
+
+
+def _import_main(
+    root_dir: str | Path,
+    *,
+    src: str | None,
+    dry_run: bool,
+    yes: bool,
+    overwrite: bool,
+    do_resume: bool,
+    status: bool,
+    do_cancel: bool,
+    json_output: bool,
+    model: str | None,
+    thinking: str | None,
+    backend: str,
+    ingest: IngestFn | None,
+    interactive: bool | None,
+) -> int:
     modes = sum(bool(x) for x in (src, do_resume, status, do_cancel))
     if modes != 1:
         _stderr("用法：guanlan import <file> | --resume | --status | --cancel（四选一）。")
+        return EXIT_USAGE
+    if dry_run and not src:  # --dry-run 只对 `import <file>` 有意义：别让 `--resume --dry-run` 悄悄真跑入库 / 真放弃
+        _stderr("--dry-run 只能与 `import <file>` 同用（--resume / --status / --cancel 不支持预演）。")
         return EXIT_USAGE
     try:
         root = require_kb_root(root_dir, writable=not status)
     except GuanlanError as exc:
         _stderr(str(exc))
         return exc.exit_code
+    if not status and inside_write_run(root):
+        # Agent 在 ingest / 可写 turn 里照技能说明跑 `guanlan import`：嵌套放行会让它在外层写门禁与快照里
+        # 连续入库多篇。一键入库只由用户直接发起。
+        _stderr("一键入库不能在另一个写运行（ingest / 可写对话 / 一键入库作业）里嵌套执行；请由用户在外层结束后直接运行。")
+        return EXIT_USAGE
     if interactive is None:
         interactive = sys.stdin.isatty()
     if src and not dry_run and not yes and not interactive:
@@ -923,7 +1133,9 @@ def import_entrypoint(
         if do_cancel:
             return _cli_cancel(root, json_output)
         if do_resume:
-            return _cli_resume(root, json_output, run_ingest_fn)
+            return _cli_resume(
+                root, json_output, run_ingest_fn, overwrite=overwrite, yes=yes, interactive=interactive
+            )
         return _cli_import(
             root,
             Path(src),  # type: ignore[arg-type]
@@ -935,36 +1147,41 @@ def import_entrypoint(
             ingest=run_ingest_fn,
             interactive=interactive,
         )
-    except KBLockBusy as exc:
+    except GuanlanError as exc:  # 含 KBLockBusy
         _stderr(str(exc))
         return exc.exit_code
-    except GuanlanError as exc:
-        _stderr(str(exc))
-        return exc.exit_code
+    except (ConvertError, OSError) as exc:  # 图片超容量 / 落盘 IO 失败：任务已记失败或暂停，不抛 traceback
+        _stderr(f"一键入库中止：{exc}")
+        return EXIT_USAGE
     except KeyboardInterrupt:
         _stderr("已中止。")
         return EXIT_USAGE
 
 
 def _cli_status(root: Path, json_output: bool) -> int:
-    try:
-        lock = acquire(root, "cli: import --status")
-    except KBLockBusy:
-        lock = None
-    except OSError:
-        lock = None
-    try:
-        if lock is not None:
-            recover_stale(root)
-        task = active_task(root)
-    finally:
-        if lock is not None:
-            lock.release()
-    if lock is None:
+    busy = False
+    task = active_task(root)
+    # 只有可能需要恢复（preparing / running）时才去取写锁：库级锁不排队，--status 这种只读查询白占一下锁，
+    # 恰好此刻起步的 Web 作业 / CLI 写命令就会被误报「库被占用」。
+    if task is not None and task.get("state") in ("preparing", "running"):
+        try:
+            lock = acquire(root, "cli: import --status")
+        except KBLockBusy:
+            lock, busy = None, True
+        except OSError:  # 只读库等：建不出锁文件，不是「有人在写」
+            lock = None
+        try:
+            _recover_if_owner(root, lock)
+            task = active_task(root)
+        finally:
+            if lock is not None:
+                lock.release()
+    if busy:
         _stderr(f"库正在被写（{describe_holder(read_holder(root))}）；以下为清单原样，未做恢复。")
     if task is None:
         if json_output:
             print("null")
+            _JSON_OUT["emitted"] = True
         else:
             print("没有未完成的一键入库任务。")
         return EXIT_OK
@@ -977,8 +1194,8 @@ def _cli_status(root: Path, json_output: bool) -> int:
 
 
 def _cli_cancel(root: Path, json_output: bool) -> int:
-    with acquire(root, "cli: import --cancel"):
-        recover_stale(root)
+    with acquire(root, "cli: import --cancel") as lock:
+        _recover_if_owner(root, lock)
         task = active_task(root)
         if task is None:
             _stderr("没有未完成的一键入库任务。")
@@ -988,23 +1205,94 @@ def _cli_cancel(root: Path, json_output: bool) -> int:
     return EXIT_OK
 
 
+def _cancel_locked(root: Path, task_id: str) -> dict:
+    """放弃本次刚准备好的任务。锁恰好被别的写者拿着 → 不抛：任务留在等待确认，提示稍后 --cancel。"""
+    try:
+        with acquire(root, "cli: import --cancel"):
+            return cancel(root, task_id)
+    except KBLockBusy as exc:
+        _stderr(f"{exc}\n任务 {task_id} 仍在等待确认；等它结束后运行 `guanlan import --cancel` 放弃。")
+        return load_task(root, task_id)
+    except OneClickError:  # 提示期间任务已在别处（Web）确认 / 跑完：不能放弃，如实报告它现在的状态
+        task = load_task(root, task_id)
+        _stderr(f"任务 {task_id} 已在别处推进（{_STATE_LABEL.get(task['state'], task['state'])}），未放弃。")
+        return task
+
+
+def _ask_start() -> bool:
+    try:
+        print("开始入库？[y/N] ", end="", file=sys.stderr, flush=True)
+        answer = input().strip().lower()
+    except EOFError:
+        answer = ""
+    return answer in ("y", "yes")
+
+
 def _run_with_pause(fn: Callable[..., tuple[int, dict]], *args, **kwargs) -> tuple[int, dict]:
     with _PauseFlag() as flag:
         return fn(*args, should_pause=flag, **kwargs)
 
 
-def _cli_resume(root: Path, json_output: bool, ingest: IngestFn) -> int:
-    with acquire(root, "cli: import --resume"):
-        recover_stale(root)
+def _cli_resume(
+    root: Path,
+    json_output: bool,
+    ingest: IngestFn,
+    *,
+    overwrite: bool = False,
+    yes: bool = False,
+    interactive: bool = False,
+) -> int:
+    with acquire(root, "cli: import --resume") as lock:
+        _recover_if_owner(root, lock)
         task = active_task(root)
         if task is None:
             _stderr("没有未完成的一键入库任务。")
             return EXIT_USAGE
-        if task["state"] != "paused":
+        state = task["state"]
+        if state == "paused":
+            code, task = _run_with_pause(resume, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)
+            _receipt(task, json_output)
+            return code
+        if state != "awaiting_confirm":
             _stderr("\n".join(summary_lines(task)))
-            _stderr("该任务不是「已暂停」状态，无法继续。")
+            _stderr("该任务不是「等待确认」或「已暂停」状态，无法继续。")
             return EXIT_USAGE
-        code, task = _run_with_pause(resume, root, task["task_id"], emit=_stderr, ingest=ingest)
+    # 等待确认：与 `import <file>` 的确认同一口径（问答期间不持锁；确认本身在锁内复检）
+    pc = precheck(root, task)  # 现查（只读、不落清单）：存下的预检可能已过时；确认时仍在锁内复检
+    # 摘要与回执（--json）都报现查结果：别让摘要/stdout 仍是过时的预检、结论却说冲突。只改内存。
+    task = {**task, "precheck": pc}
+    _stderr("\n".join(summary_lines(task, detail=False)))  # 冲突/可覆盖的明细已在摘要里
+    # 与 `import <file>` 同口径：明知会被 confirm 拒的情形先说清，别等用户答了「y」再拒。
+    if pc.get("status") == "conflict":
+        _stderr("存在不可覆盖的冲突，只能放弃（--cancel）。")
+        if json_output:
+            _receipt(task, True)
+        return EXIT_USAGE
+    if pc.get("status") == "overwritable" and not overwrite:
+        _stderr("raw/ 中已有本次的目标文件；如确认覆盖，请加 --overwrite 再 --resume。")
+        if json_output:
+            _receipt(task, True)
+        return EXIT_USAGE
+    if not yes and not interactive:
+        _stderr("非交互终端须加 --yes 才能确认开始入库。")
+        return EXIT_USAGE
+    try:
+        start = yes or _ask_start()
+    except KeyboardInterrupt:  # 在确认提示处 Ctrl+C = 回答「否」（同 `_cli_import`）
+        start = False
+    if not start:
+        _stderr("未开始；任务仍在等待确认（可再 --resume，或 --cancel 放弃）。")
+        if json_output:  # --json 契约：正常结局给回执，不落到兜底的 {"ok": false, "exit_code": 0}
+            _receipt(task, True)
+        return EXIT_OK
+    with acquire(root, "cli: import --resume"):
+        # 用户确认的是上面现查的预检：落进清单作为 confirm 的比对基线，否则存下的旧预检（如准备时的冲突、
+        # 用户已清理）会让 confirm 判「raw/ 有变化」而拒绝这次确认。confirm 仍在锁内再复检一次。
+        cur = load_task(root, task["task_id"])
+        if cur.get("state") == "awaiting_confirm" and cur.get("precheck") != pc:
+            cur["precheck"] = pc
+            save_task(root, cur)
+        code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)
     _receipt(task, json_output)
     return code
 
@@ -1022,8 +1310,8 @@ def _cli_import(
     interactive: bool,
 ) -> int:
     origin = "cli: import --dry-run" if dry_run else "cli: import"
-    with acquire(root, origin):
-        recover_stale(root)
+    with acquire(root, origin) as lock:
+        _recover_if_owner(root, lock)
         task = prepare(root, src, origin_kind="cli", backend=backend, emit=_stderr, dry_run=dry_run)
     # 进入 awaiting_confirm：释放锁（等待确认期间不妨碍其它写操作）
     if dry_run:
@@ -1036,23 +1324,27 @@ def _cli_import(
     _stderr("\n".join(summary_lines(task, detail=False)))
     pc = task["precheck"]
     if pc["status"] == "conflict":
-        cancel(root, task["task_id"])
+        task = _cancel_locked(root, task["task_id"])
         _stderr("存在不可覆盖的冲突，任务已放弃。")
+        if json_output:  # --json 的 stdout 契约：任何结局都给一份 JSON 回执，不留空 stdout
+            _receipt(task, True)
         return EXIT_USAGE
     if pc["status"] == "overwritable" and not overwrite:
-        cancel(root, task["task_id"])
+        task = _cancel_locked(root, task["task_id"])
         _stderr("raw/ 中已有本次的目标文件；如确认覆盖，请加 --overwrite 重新导入。任务已放弃。")
+        if json_output:
+            _receipt(task, True)
         return EXIT_USAGE
-    if not yes:
-        try:
-            print("开始入库？[y/N] ", end="", file=sys.stderr, flush=True)
-            answer = input().strip().lower()
-        except EOFError:
-            answer = ""
-        if answer not in ("y", "yes"):
-            cancel(root, task["task_id"])
-            _stderr("已放弃；parsed/ 中的产物保留。")
-            return EXIT_OK
+    try:
+        start = yes or _ask_start()
+    except KeyboardInterrupt:  # 在确认提示处 Ctrl+C = 回答「否」：不留一个挡住下次导入的等待确认任务
+        start = False
+    if not start:
+        task = _cancel_locked(root, task["task_id"])
+        _stderr("已放弃；parsed/ 中的产物保留。")
+        if json_output:
+            _receipt(task, True)
+        return EXIT_OK
     with acquire(root, "cli: import"):
         code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)
     _receipt(task, json_output)

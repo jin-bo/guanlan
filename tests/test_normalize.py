@@ -87,13 +87,28 @@ def test_join_after_noise_removed():
 # ── 页码 ─────────────────────────────────────────────────────────────────────
 
 
+_ROMAN = ["", "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii", "xiii", "xiv", "xv"]
+
+
 def test_page_number_forms_removed():
-    forms = ["15", "- 15 -", "第 15 页", "15/20", "xii"]
-    pages = {no: f"{_filler(no)}\n\n{forms[no % len(forms)]}" for no in range(1, 11)}
+    forms = ["{n}", "- {n} -", "第 {n} 页", "{n}/20", "{r}"]
+    pages = {
+        no: f"{_filler(no)}\n\n{forms[no % len(forms)].format(n=no + 4, r=_ROMAN[no + 4])}" for no in range(1, 11)
+    }
     r = normalize(_book(pages, 20), title_hint="t")
     assert r.meta["normalized"]["page_numbers_removed"] == 10
-    for f in ("- 15 -", "第 15 页", "15/20"):
+    for f in ("- 10 -", "第 11 页", "12/20"):
         assert f not in r.body
+
+
+def test_lone_edge_numbers_without_cross_page_evidence_kept():
+    """页尾孤立的一个数字、列表项「- 12」凑不出跨页一致的偏移：证据不足，保留。"""
+    pages = {no: _filler(no) for no in range(1, 11)}
+    pages[4] += "\n\n42"
+    pages[7] += "\n\n- 12"
+    r = normalize(_book(pages, 300), title_hint="t")
+    assert r.meta["normalized"]["page_numbers_removed"] == 0
+    assert "42" in r.body and "- 12" in r.body  # 可能被跨页接句挪位，但内容不丢
 
 
 def test_numbers_in_body_not_removed():
@@ -253,3 +268,34 @@ def test_chapter_run_rule_only_at_page_top():
         pages[no] = _middle(no, pages[no]) + "\n\n年月日"  # 只落在页尾窗口
     r = normalize(_book(pages, 30), title_hint="t")
     assert r.body.count("年月日") == 3
+
+
+def test_option_letters_and_roman_like_words_not_page_numbers():
+    """试卷选项行「C」「D」、单个大写字母、像罗马数字的单词不当页码删；小写前言页码照删。"""
+    from guanlan.normalize import _page_number_value
+
+    for kept in ("C", "D", "M", "L", "I", "V", "X", "Mix", "DL", "CD"):
+        assert _page_number_value(kept) is None, kept
+    for form, value in (("i", 1), ("iv", 4), ("xii", 12), ("XII", 12), ("IV", 4), ("xxxix", 39), ("ix", 9)):
+        assert _page_number_value(form) == value, form
+
+
+def test_control_chars_cleaned_so_raw_admission_passes():
+    from guanlan.rawio import check_text_admission
+
+    text = "# 读本\n\n第一段\x0c第二段\x00。\x07\n"
+    r = normalize(text, title_hint="t")
+    check_text_admission(r.text)
+    assert "第一段\n第二段。" in r.body
+    assert r.meta["normalized"]["control_chars_removed"] == 3
+
+
+def test_four_backtick_fence_not_closed_by_inner_three_backticks():
+    """CommonMark：四反引号块里的 ``` 示例不闭合围栏，其后的 `# 注释` 仍在代码块里，不当标题。"""
+    from guanlan.normalize import _classify, _first_h1, fence_closes
+
+    body = "````md\n```python\n# 注释\n```\n````\n\n# 真标题\n"
+    assert _first_h1(body) == "真标题"
+    kinds = _classify(body.split("\n"))
+    assert kinds[:5] == ["fence"] * 5 and kinds[6] == "heading"
+    assert not fence_closes("```", "```python") and fence_closes("```", "````  ")

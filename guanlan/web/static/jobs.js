@@ -126,54 +126,6 @@ async function triggerIngest(target) {
   }
 }
 
-// 确定性解析（P4.6.1，决策P4.6.1-1/7）：上传文件 → POST /api/parse → 进度窗口（pollJob running 态渲染
-// emit 推上的 backend 分级日志）→ 完成显回执 + 返回暂存区。区别于旧「问 agent 解析」（不再回填 composer）。
-async function triggerParse(uploadPath) {
-  showOverlay("overlay.parse", `<p class="muted">${escapeHtml(t("staging.parseSubmitted", uploadPath))}</p>`);
-  stagingOpen = false; // 进度窗期间暂停自动刷新（避免并发 turn 收尾把进度刷掉）
-  try {
-    // 裸 fetch 以特判 423（可写 turn 活跃）；其余非 2xx → parseFail。
-    const res = await fetch("/api/parse", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ upload: uploadPath }),
-    });
-    if (res.status === 423) {
-      $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.writableRetryDot"))}</p>`;
-      return;
-    }
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({}));
-      throw new Error(d.detail || `HTTP ${res.status}`);
-    }
-    const { job_id } = await res.json();
-    await pollJob(job_id, t("staging.parsing"), renderParseDone);
-  } catch (e) {
-    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.parseFail", e.message))}</p>`;
-  }
-}
-
-function renderParseDone(job) {
-  const box = $("#overlay-body");
-  box.innerHTML = "";
-  const ok = job.exit_code === 0;
-  const badge = document.createElement("p");
-  badge.innerHTML = ok
-    ? `<span class="report-ok">${escapeHtml(t("common.passed"))}</span>`
-    : `<span class="report-bad">${escapeHtml(t("common.exitCode", job.exit_code))}</span>`;
-  box.appendChild(badge);
-  if (job.output) {
-    const pre = document.createElement("pre");
-    pre.textContent = collapseCR(job.output); // backend 分级日志 + 回执（折叠 \r 进度条，纯 textContent 无注入）
-    box.appendChild(pre);
-  }
-  const back = document.createElement("button");
-  back.className = "stage-act";
-  back.textContent = t("staging.backToStaging");
-  back.addEventListener("click", () => { stagingPath = null; stagingOpen = true; loadStaging(); });
-  box.appendChild(back);
-}
-
 // 通用作业轮询骨架（ingest / heal 共用）。`renderDone(job)` 可选：heal 有结构化 result，传入
 // 自定义渲染；省略则走 ingest 默认（退出码徽标 + output 文本）。完成后统一 loadPages 刷新。
 async function pollJob(jobId, label, renderDone) {

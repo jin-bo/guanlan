@@ -246,6 +246,31 @@ def run_spec_text(prompt: str) -> str:
     return _YAML_UNSAFE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
 
 
+def _run_in_new_session(cmd: list[str], *, input: str, capture_output: bool, **kwargs) -> subprocess.CompletedProcess:
+    """`subprocess.run` 的新会话版：中断（第二次 Ctrl+C / SIGHUP / SIGTERM 转成的 KeyboardInterrupt）时**整组**杀掉。
+
+    `subprocess.run` 被中断只 kill 直接子进程；子进程在新会话里，agentao 派生的 shell 工具等孙进程
+    收不到终端信号，会在父进程退出、库级锁释放之后继续写 wiki/。会话首进程的 pid 即进程组号。
+    """
+    pipe = subprocess.PIPE if capture_output else None
+    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=pipe, stderr=pipe, **kwargs) as proc:
+        try:
+            stdout, stderr = proc.communicate(input)
+        except BaseException:
+            try:
+                if sys.platform == "win32":  # pragma: no cover - CI 跑 POSIX
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
+                else:
+                    import signal
+
+                    os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            proc.wait()
+            raise
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
 def _subprocess_runner(
     prompt: str,
     *,
@@ -259,7 +284,7 @@ def _subprocess_runner(
 ) -> AgentRunResult:
     # `new_session=True`（P4.30 `guanlan import`）：子进程放进新会话，终端 Ctrl+C 只送到观澜自己——
     # 第一次 Ctrl+C 表示「本篇入完后暂停」，不能连带打断正在跑的 agentao；第二次 Ctrl+C 在父进程抛
-    # KeyboardInterrupt，`subprocess.run` 照常 kill 子进程。默认 False，其余命令行为不变。
+    # KeyboardInterrupt，`_run_in_new_session` 整组 kill 子进程。默认 False，其余命令行为不变。
     # 安装态下用户库的发现路径里没有 guanlan-wiki skill，首次需要时幂等装到全局
     # （best-effort；放在默认 runner 而非 run_agent_task，注入 runner 的测试不碰全局目录）。
     from .skill import SKILL_NAME, ensure_skill_available
@@ -290,7 +315,7 @@ def _subprocess_runner(
         # capture_output 仍把子进程 stdout（JSON 信封）缓冲到结束；心跳是父进程旁路打到 stderr，
         # 二者互不干扰——既保住信封解析，又在交互式终端给出「还活着」的进展信号。
         with _progress_heartbeat(working_directory):
-            proc = subprocess.run(
+            proc = (_run_in_new_session if new_session else subprocess.run)(
                 cmd,
                 cwd=str(working_directory),
                 capture_output=True,
@@ -308,6 +333,13 @@ def _subprocess_runner(
                 # std 流编码（见 envelope_child_env），其余逐项照传。
                 env=envelope_child_env(),
                 start_new_session=new_session,
+                # Windows 上 start_new_session 不生效（控制台 Ctrl+C 会送到同一控制台的全部进程）：
+                # 改用新进程组，子进程收不到 CTRL_C_EVENT，「第一次 Ctrl+C = 本篇后暂停」才成立。
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+                    if new_session and sys.platform == "win32"
+                    else 0
+                ),
             )
     except OSError as exc:
         # agentao 不在 PATH（或无法启动子进程）：归一为运行时错误，遵守退出码契约，

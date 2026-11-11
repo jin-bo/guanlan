@@ -28,7 +28,7 @@ from .rawfeed import _normalize_basename, _raw_slug
 # 落点 `workspace/uploads/`（P4.5 可写会话里 agent 可读、可解析），落盘经单写者 JobQueue 串行。
 # 上传后该文件可作 chat **附件**（见 ChatBody.attachments / _augment_with_attachments）。
 
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 上传单文件大小上限（默认 50 MiB，> 投喂的 5 MiB；PDF 体量大）。
+MAX_UPLOAD_BYTES = 256 * 1024 * 1024  # 上传单文件大小上限（默认 256 MiB，> 投喂的 5 MiB；扫描版 PDF 体量大）。
 
 
 async def read_upload_capped(file: UploadFile) -> bytes:

@@ -8,17 +8,20 @@
 ### 新增
 
 - **一键入库（P4.30，进行中）：整理与拆分内核**（`docs/P4.30-一键入库.md` §3–§4）。两个零 LLM、不写盘的纯函数，供后续 `guanlan import` 与 Web 暂存区调用：
-  - `guanlan/normalize.py`：按分页锚点切页，删除页码、页眉页脚（全书 ≥30% 或奇偶页分计；同行页码只在等于锚点页号时剥离；页首连续 ≥3 次的章节页眉）与明确模式的扫描水印；其余重复短句只记「疑似」、原样保留；去噪后把被分页切开的句子接回较长的一侧；写入 title / origin / parsed_by / source_sha256 / pages / chars / normalized 元数据。
+  - `guanlan/normalize.py`：先清掉转换器带出的 C0 控制字符（换页符改为换行，否则过不了 `raw/` 的文本闸）；按分页锚点切页，删除页码、页眉页脚（全书 ≥30% 或奇偶页分计；同行页码只在等于锚点页号时剥离；页首连续 ≥3 次的章节页眉）与明确模式的扫描水印；其余重复短句只记「疑似」、原样保留；去噪后把被分页切开的句子接回较长的一侧；写入 title / origin / parsed_by / source_sha256 / pages / chars / normalized 元数据。
   - `guanlan/splitdoc.py`：≤4 万字不拆；按出现 ≥2 次的最高级标题切章，超长章递归、无下级标题时按大小拆（切点：标题前 > 分页锚点前 > 段落边界，单段超长才切在句末）；相邻小章合并，避免几十字的碎片；文件名按 UTF-8 字节限长；每份带 `split:` 前后链元数据，另生成目录索引。各份正文按序拼接与拆前完全一致。
 - **`guanlan import`：一键入库命令行**（P4.30 §5–§6）。`guanlan -C <kb> import <file>` 依次解析、整理、拆分，打印确认摘要（份数、预计耗时、冲突），确认后逐篇原子落 `raw/` 并串行 ingest：
   - 任务清单落 `workspace/tasks/<id>.json`，进展日志落同名 `.log`；任意一篇失败即暂停，`--resume` 从该篇重试；第一次 Ctrl+C 在本篇入完后暂停，第二次立即中止。
   - 写入前整批预检：`raw/<sample>.md` 与 `raw/<sample>/` 一起查，只有旧一键入库任务写下的同一组文件可加 `--overwrite` 覆盖，其余一律报冲突；slug 冲突也在这一步发现。
   - 拆分改写图片引用造成的断链判失败，解析时就断的图片链接只作警告；入库前后各统计一次 wiki 断链数，不自动跑 heal。
   - 另有 `--dry-run`（只看摘要，不建任务、不写 `raw/`）、`--status`、`--cancel`、`--json`、`--yes`。
-- **库级写锁**（决策P4.30-15）：`ingest`、`query --backfill`、`heal`/`audit`/`reindex`/`convert`（非 `--dry-run`）、`remove --yes`、`import` 在库根 `.guanlan.lock` 上取操作系统文件锁；库正被写时立即失败并显示执行者，不排队。只读预览不受影响。
+- **Web 暂存区改为一键入库**（P4.30 §1、§7）。「上传文件」里每个文件只有「一键入库」和删除；点一键入库后自动解析、整理、拆分，暂存区顶部出现任务卡：显示份数和预计耗时，确认后开始，可暂停、继续、放弃，进展日志实时刷新，页面刷新或服务重启后仍能接着看。「已解析」只保留只读预览和删除。Web 与 CLI 共用任务清单，可以互相续跑。
+  - **下线**：`POST /api/parse`、`GET /api/workspace/image-lint`、`POST /api/workspace/relocalize`、`POST /api/raw` 的 `source` 晋级分支（返回 400），以及「让 agent 修订」「合并选中」。粘贴投喂（`POST /api/raw {content}`）不变。
+- **库级写锁**（决策P4.30-15）：`ingest`、`query --backfill`、`heal`/`audit`/`reindex`/`convert`（非 `--dry-run`）、`remove --yes`、`import` 以及 Web 宿主的每个写操作，在库根 `.guanlan.lock` 上取操作系统文件锁（Web 只在写操作期间持有）；库正被写时立即失败并显示执行者，不排队。只读预览不受影响。
 
 ### 变更
 
+- **Web 上传单文件上限从 50 MiB 提到 256 MiB**（`guanlan/web/uploads.py` 的 `MAX_UPLOAD_BYTES`）：一键入库处理整本书，扫描版 PDF 常超过 50 MiB。端点仍只多读 1 字节判超限；未超限的文件会整个读进内存再落盘，最多约 256 MiB。
 - **agentao 下限抬到 0.5.20**（`agentao[cli]>=0.5.20,<0.6`）。观澜真实 `heal` 运行暴露的上下文压缩与 token 估算问题都修在这一版：
   - 本地 token 估算在较新的 OpenAI 模型上不再偏高 20–37%，并计入工具定义；中文按模型族的实测比率计（jin-bo/agentao#630）。
     真实 `heal` 复测：有服务端实测值可参照后，估算与实际 `prompt_tokens` 的误差在 1% 以内，整段压缩不再提前触发。

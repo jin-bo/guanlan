@@ -1541,219 +1541,6 @@ def _split_fm(text):
     return split_frontmatter(text)
 
 
-def test_promote_source_body_preserved_frontmatter_normalized(client, kb) -> None:
-    """晋级 workspace .md → raw/：正文逐字一致、frontmatter 注入 origin（非字节相等）。"""
-    src = _put_workspace(kb, "parsed", "报告.md", "# 标题\n正文段落。\n")
-    resp = client.post(
-        "/api/raw",
-        json={"name": "报告", "source": src, "origin": "workspace/uploads/报告.pdf"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["saved"] == "raw/报告.md"
-    written = (kb / "raw" / "报告.md").read_text(encoding="utf-8")
-    block, body = _split_fm(written)
-    import yaml
-
-    assert yaml.safe_load(block)["origin"] == "workspace/uploads/报告.pdf"
-    assert body == "# 标题\n正文段落。\n"  # 正文（frontmatter 后 body）逐字一致
-
-
-def test_promote_default_no_overwrite_409(client, kb) -> None:
-    """端点默认 409（不自助改名/覆盖），与投喂一致。"""
-    src = _put_workspace(kb, "parsed", "dup.md")
-    assert client.post("/api/raw", json={"name": "dup", "source": src}).status_code == 200
-    r = client.post("/api/raw", json={"name": "dup", "source": src})
-    assert r.status_code == 409
-
-
-def test_promote_overwrite_rewrites(client, kb) -> None:
-    """overwrite:true 才改写已有源（端点不自助改名，决策P4.6-10）。"""
-    src = _put_workspace(kb, "parsed", "ow.md", "旧\n")
-    assert client.post("/api/raw", json={"name": "ow", "source": src}).status_code == 200
-    src2 = _put_workspace(kb, "parsed", "ow.md", "新内容\n")
-    r = client.post("/api/raw", json={"name": "ow", "source": src2, "overwrite": True})
-    assert r.status_code == 200
-    _, body = _split_fm((kb / "raw" / "ow.md").read_text(encoding="utf-8"))
-    assert body == "新内容\n"
-
-
-def test_promote_source_must_be_md(client, kb) -> None:
-    """source 非 .md → 400（raw/ 是 .md 单格式源）。"""
-    src = _put_workspace(kb, "uploads", "report.pdf", "x\n")
-    r = client.post("/api/raw", json={"name": "report", "source": src})
-    assert r.status_code == 400
-
-
-def test_promote_source_out_of_workspace_400(client, kb) -> None:
-    """source 越出 workspace/ → 400。"""
-    (kb / "raw" / "evil.md").write_text("x\n", encoding="utf-8")
-    r = client.post("/api/raw", json={"name": "evil", "source": "raw/evil.md"})
-    assert r.status_code == 400
-    r2 = client.post("/api/raw", json={"name": "p", "source": "workspace/../raw/evil.md"})
-    assert r2.status_code == 400
-
-
-def test_promote_source_missing_404(client, kb) -> None:
-    r = client.post("/api/raw", json={"name": "x", "source": "workspace/parsed/nope.md"})
-    assert r.status_code == 404
-
-
-def test_promote_content_xor_source(client, kb) -> None:
-    """content 与 source 同给 / 都不给 → 400（判别式 body 互斥且必选其一）。"""
-    src = _put_workspace(kb, "parsed", "x.md")
-    assert client.post("/api/raw", json={"name": "x", "content": "a\n", "source": src}).status_code == 400
-    assert client.post("/api/raw", json={"name": "x"}).status_code == 400
-
-
-def test_promote_degenerate_uploads_md(client, kb) -> None:
-    """退化路径：uploads/*.md 也合格（直接晋级）；uploads/*.pdf 仍 400（§6 / §7.2 ①）。"""
-    src = _put_workspace(kb, "uploads", "note.md", "# 笔记\n内容。\n")
-    assert client.post("/api/raw", json={"name": "note", "source": src}).status_code == 200
-    pdf = _put_workspace(kb, "uploads", "doc.pdf", "x\n")
-    assert client.post("/api/raw", json={"name": "doc", "source": pdf}).status_code == 400
-
-
-def test_promote_text_admission_non_utf8_is_400(client, kb) -> None:
-    """source 非 UTF-8（二进制 .md）→ 400（非 500）。"""
-    d = kb / "workspace" / "parsed"
-    d.mkdir(parents=True)
-    (d / "bin.md").write_bytes(b"\xff\xfe\x00\x01 binary")
-    r = client.post("/api/raw", json={"name": "bin", "source": "workspace/parsed/bin.md"})
-    assert r.status_code == 400
-    assert not (kb / "raw" / "bin.md").exists()
-
-
-def test_promote_text_admission_oversize_is_400(client, kb) -> None:
-    from guanlan.web.rawfeed import MAX_RAW_BYTES
-
-    src = _put_workspace(kb, "parsed", "big.md", "a" * (MAX_RAW_BYTES + 1))
-    r = client.post("/api/raw", json={"name": "big", "source": src})
-    assert r.status_code == 400
-    assert not (kb / "raw" / "big.md").exists()
-
-
-def test_promote_text_admission_control_char_is_400(client, kb) -> None:
-    src = _put_workspace(kb, "parsed", "ctl.md", "正常\x07响铃\n")
-    r = client.post("/api/raw", json={"name": "ctl", "source": src})
-    assert r.status_code == 400
-
-
-def test_promote_provenance_no_block_creates_frontmatter(client, kb) -> None:
-    """① 无块 → 新建 ---origin--- 块、原文逐字作 body。"""
-    import yaml
-
-    src = _put_workspace(kb, "parsed", "a.md", "无 frontmatter 的正文。\n")
-    client.post("/api/raw", json={"name": "a", "source": src, "origin": "出处 X"})
-    block, body = _split_fm((kb / "raw" / "a.md").read_text(encoding="utf-8"))
-    assert yaml.safe_load(block) == {"origin": "出处 X"}
-    assert body == "无 frontmatter 的正文。\n"
-
-
-def test_promote_provenance_inserts_into_existing_mapping(client, kb) -> None:
-    """② 有闭合块得 mapping 缺 origin → 插入键、body 逐字保留。"""
-    import yaml
-
-    src = _put_workspace(kb, "parsed", "b.md", "---\ntitle: T\n---\n正文。\n")
-    client.post("/api/raw", json={"name": "b", "source": src, "origin": "src://x"})
-    block, body = _split_fm((kb / "raw" / "b.md").read_text(encoding="utf-8"))
-    meta = yaml.safe_load(block)
-    assert meta == {"title": "T", "origin": "src://x"}
-    assert body == "正文。\n"
-
-
-def test_promote_provenance_keeps_existing_origin(client, kb) -> None:
-    """③ 已有 origin → 永久保留 parsed 自带值、忽略传入 origin（不受 overwrite 影响）。"""
-    import yaml
-
-    src = _put_workspace(kb, "parsed", "c.md", "---\norigin: 原始出处\n---\n正文。\n")
-    client.post("/api/raw", json={"name": "c", "source": src, "origin": "覆盖企图"})
-    block, _ = _split_fm((kb / "raw" / "c.md").read_text(encoding="utf-8"))
-    assert yaml.safe_load(block)["origin"] == "原始出处"
-
-
-@pytest.mark.parametrize("empty", ["---\n---\n正文。\n", "---\n   \n---\n正文。\n"])
-def test_promote_provenance_empty_block_inserts_origin(client, kb, empty) -> None:
-    """空 / 纯空白 frontmatter 块（合法 .md）→ 视作空映射、插入 origin（非坏块 400）。"""
-    import yaml
-
-    src = _put_workspace(kb, "parsed", "ee.md", empty)
-    r = client.post("/api/raw", json={"name": "ee", "source": src, "origin": "出处"})
-    assert r.status_code == 200
-    block, body = _split_fm((kb / "raw" / "ee.md").read_text(encoding="utf-8"))
-    assert yaml.safe_load(block) == {"origin": "出处"}
-    assert body == "正文。\n"
-
-
-@pytest.mark.parametrize("bad", ["---\n- 列表项\n---\n正文\n", "---\n标量\n---\n正文\n", "---\nkey: [\n---\nx\n"])
-def test_promote_provenance_bad_block_is_400(client, kb, bad) -> None:
-    """④ 有闭合块但非 mapping / 不可解析 → 400（不静默当 body、不插坏块）。"""
-    src = _put_workspace(kb, "parsed", "d.md", bad)
-    r = client.post("/api/raw", json={"name": "d", "source": src})
-    assert r.status_code == 400
-    assert not (kb / "raw" / "d.md").exists()
-
-
-@pytest.mark.parametrize("origin", [None, "", "   "])
-def test_promote_provenance_blank_origin_falls_back_to_source(client, kb, origin) -> None:
-    """origin 省略 / strip 后为空 → 回退 source 路径（绝不写空 provenance）。"""
-    import yaml
-
-    src = _put_workspace(kb, "parsed", "e.md", "正文。\n")
-    payload = {"name": "e", "source": src}
-    if origin is not None:
-        payload["origin"] = origin
-    client.post("/api/raw", json=payload)
-    block, _ = _split_fm((kb / "raw" / "e.md").read_text(encoding="utf-8"))
-    assert yaml.safe_load(block)["origin"] == src
-
-
-@pytest.mark.parametrize(
-    "origin",
-    ["https://a.com/x?y=1", "A: B", '带"引号"的书目', "多行\n第二行", "# 注释样", "  前后空白被 strip  "],
-)
-def test_promote_provenance_yaml_safe_serialization(client, kb, origin) -> None:
-    """origin 经 yaml.safe_dump 写入：含 :/引号/换行/# 都生成合法可重解析 frontmatter（绝不裸拼）。"""
-    import yaml
-
-    src = _put_workspace(kb, "parsed", "f.md", "正文。\n")
-    r = client.post("/api/raw", json={"name": "f", "source": src, "origin": origin})
-    assert r.status_code == 200
-    block, body = _split_fm((kb / "raw" / "f.md").read_text(encoding="utf-8"))
-    assert yaml.safe_load(block)["origin"] == origin.strip()  # 可重解析、值（strip 后）一致
-    assert body == "正文。\n"
-
-
-def test_promote_lists_in_raw_after(client, kb) -> None:
-    """晋级复用 P4.1 落盘：晋级后 GET /api/raw 列出新源。"""
-    src = _put_workspace(kb, "parsed", "g.md", "正文。\n")
-    client.post("/api/raw", json={"name": "g", "source": src})
-    names = {f["name"] for f in client.get("/api/raw").json()["files"]}
-    assert "g.md" in names
-
-
-def test_promote_never_writes_wiki(client, kb) -> None:
-    """形态：晋级只写 raw/、绝不写 wiki/（wiki 内容不变）。"""
-    before = {p.name for p in (kb / "wiki").iterdir()}
-    src = _put_workspace(kb, "parsed", "h.md", "正文。\n")
-    client.post("/api/raw", json={"name": "h", "source": src})
-    after = {p.name for p in (kb / "wiki").iterdir()}
-    assert before == after
-
-
-def test_promote_423_during_writable_turn(kb) -> None:
-    """契约回归：可写 turn 活跃期 agent shell curl POST /api/raw {source} 被层③ 423 拒
-    （决策P4.5-10 / P4.6-1：源由人背书、不靠工具不可达单点）。"""
-    src = _put_workspace(kb, "parsed", "x.md", "正文。\n")
-    with TestClient(create_app(kb)) as client:
-        client.app.state.write_gate.enter_writable()
-        try:
-            r = client.post("/api/raw", json={"name": "x", "source": src})
-            assert r.status_code == 423
-        finally:
-            client.app.state.write_gate.exit_writable()
-        assert not (kb / "raw" / "x.md").exists()
-
-
 # ── workspace 浏览/预览/删除 ──
 
 
@@ -1809,18 +1596,6 @@ def test_workspace_browse_out_of_bounds(client, kb) -> None:
     """?path 越出 scratch 白名单 → 400；不存在的目录 → 404。"""
     assert client.get("/api/workspace?path=wiki").status_code == 400
     assert client.get("/api/workspace?path=workspace/uploads/nope").status_code == 404
-
-
-def test_workspace_nested_promote_and_delete(client, kb) -> None:
-    """嵌套路径同样可晋级（source）/ 预览 / 删除（path-contained 容器校验本就允许后代）。"""
-    sub = kb / "workspace" / "parsed" / "sec"
-    sub.mkdir(parents=True)
-    (sub / "a.md").write_text("# A\n正文。\n", encoding="utf-8")
-    rel = "workspace/parsed/sec/a.md"
-    assert client.get(f"/api/workspace/file?path={rel}").status_code == 200  # 预览不报错
-    assert client.post("/api/raw", json={"name": "a", "source": rel}).status_code == 200
-    assert client.delete(f"/api/workspace/file?path={rel}").status_code == 200
-    assert not (sub / "a.md").exists()
 
 
 def test_workspace_delete_dir_recursive(client, kb) -> None:
@@ -5842,7 +5617,6 @@ def test_query_prompt_transport_neutral() -> None:
 # P4.6.1 暂存区确定性解析 + 图片随源晋级 / 断链重整
 #   见 docs/P4.6.1-暂存区确定性解析与图片晋级.md §6
 # ══════════════════════════════════════════════════════════════════════════════
-from guanlan.imageio import ConvertedImage, ConvertResult  # noqa: E402
 
 
 def _put_parsed_image(kb, slug, name, data=b"IMG"):
@@ -5854,178 +5628,15 @@ def _put_parsed_image(kb, slug, name, data=b"IMG"):
 
 
 # ── 解析作业（决策P4.6.1-1/2/7）──────────────────────────────────────────────────
-def test_parse_endpoint_lands_parsed_with_images(kb, monkeypatch) -> None:
-    """POST /api/parse → 宿主确定性解析落 workspace/parsed/<slug>.md + 图片，引用重写、不落 raw/。"""
-    from guanlan.web import parsefeed
-
-    def fake_convert(src, *, stem, backend, cwd, progress=None):
-        if progress:
-            progress("[mineru] 尝试")  # 经 emit 推上 job.output（决策P4.6.1-10/11）
-        return ConvertResult(
-            markdown=f"# 解析\n![](images/{stem}/{stem}-1.png)\n",
-            images=(ConvertedImage(name=f"{stem}-1.png", data=b"IMG1"),),
-        )
-
-    monkeypatch.setattr(parsefeed, "convert_to_markdown", fake_convert)
-    with TestClient(create_app(kb)) as client:
-        client.post("/api/upload", files={"file": ("报告.pdf", b"%PDF fake", "application/pdf")})
-        r = client.post("/api/parse", json={"upload": "workspace/uploads/报告.pdf"})
-        assert r.status_code == 200
-        job = _wait_job(client, r.json()["job_id"])
-        assert job["exit_code"] == 0
-        assert "[mineru] 尝试" in job["output"]  # backend 日志经 emit 进 output
-    parsed = kb / "workspace" / "parsed" / "报告.md"
-    assert parsed.is_file()
-    assert "images/报告/报告-1.png" in parsed.read_text("utf-8")
-    assert (kb / "workspace" / "parsed" / "images" / "报告" / "报告-1.png").read_bytes() == b"IMG1"
-    assert not (kb / "raw" / "报告.md").exists()  # 解析不落 raw/
-
-
-def test_parse_backend_invalid_422(client, kb) -> None:
-    """未知 backend → 422（ParseBody field_validator）。"""
-    r = client.post("/api/parse", json={"upload": "workspace/uploads/x.pdf", "backend": "gpt"})
-    assert r.status_code == 422
-
-
-def test_parse_missing_upload_404(client, kb) -> None:
-    """upload 不存在 → 入队前 404（快反馈）。"""
-    r = client.post("/api/parse", json={"upload": "workspace/uploads/nope.pdf"})
-    assert r.status_code == 404
 
 
 # ── 晋级连图（决策P4.6.1-3/13/15）─────────────────────────────────────────────────
-def test_promote_with_images_lands_raw_images(client, kb) -> None:
-    """晋级 parsed → raw/：连图一起搬到 raw/images/<slug>/，md 引用同形、回执含 images。"""
-    _put_parsed_image(kb, "报告", "报告-1.png", b"IMG1")
-    src = _put_workspace(kb, "parsed", "报告.md", "# 标题\n![](images/报告/报告-1.png)\n")
-    r = client.post("/api/raw", json={"name": "报告", "source": src})
-    assert r.status_code == 200
-    assert r.json()["images"] == 1
-    assert (kb / "raw" / "images" / "报告" / "报告-1.png").read_bytes() == b"IMG1"
-    assert "images/报告/报告-1.png" in (kb / "raw" / "报告.md").read_text("utf-8")
-
-
-def test_promote_rename_normalizes_to_target_stem(client, kb) -> None:
-    """改名晋级（parsed x.md → raw y.md）：图归一为 y-N.ext 落 raw/images/y/，引用重写（决策P4.6.1-13）。"""
-    _put_parsed_image(kb, "x", "x-1.png", b"X1")
-    src = _put_workspace(kb, "parsed", "x.md", "![](images/x/x-1.png)\n")
-    r = client.post("/api/raw", json={"name": "y", "source": src})
-    assert r.status_code == 200
-    assert (kb / "raw" / "images" / "y" / "y-1.png").read_bytes() == b"X1"
-    assert not (kb / "raw" / "images" / "x").exists()  # 不残留 source stem 目录
-    assert "images/y/y-1.png" in (kb / "raw" / "y.md").read_text("utf-8")
-
-
-def test_promote_dangling_image_ref_400(client, kb) -> None:
-    """晋级时相对图片引用悬空（文件缺失）→ 400（先 relocalize），不落 raw/（决策P4.6.1-15）。"""
-    src = _put_workspace(kb, "parsed", "报告.md", "![](images/报告/missing.png)\n")
-    r = client.post("/api/raw", json={"name": "报告", "source": src})
-    assert r.status_code == 400
-    assert not (kb / "raw" / "报告.md").exists()
-
-
-def test_promote_external_image_preserved(client, kb) -> None:
-    """晋级时外链图（https://）原样保留、不报错、不搬（决策P4.6.1-15）。"""
-    src = _put_workspace(kb, "parsed", "报告.md", "# t\n![](https://x/a.png)\n")
-    r = client.post("/api/raw", json={"name": "报告", "source": src})
-    assert r.status_code == 200
-    assert "https://x/a.png" in (kb / "raw" / "报告.md").read_text("utf-8")
-    assert not (kb / "raw" / "images").exists()
 
 
 # ── 晋级 TOCTOU 指纹复检（决策P4.6.1-16，单元级，确定性）─────────────────────────────
-def test_promote_fingerprint_toctou_fail_closed(kb) -> None:
-    """入队后、提交前 source 被改 → commit_promotion 复检 SHA256 不符 → EXIT_USAGE，不提交旧快照。"""
-    from guanlan.errors import EXIT_OK, EXIT_USAGE
-    from guanlan.rawio import safe_raw_target
-    from guanlan.web.promote import commit_promotion, prepare_promotion
-
-    d = kb / "workspace" / "parsed"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "报告.md").write_text("# t\n原始正文\n", encoding="utf-8")
-    target = safe_raw_target(kb, "报告")
-    plan = prepare_promotion(kb, "workspace/parsed/报告.md", target, None)
-    # 模拟入队后、写锁内提交前 source 被改（同尺寸原位替换也须被 SHA256 抓到）。
-    (d / "报告.md").write_text("# t\n改后正文\n", encoding="utf-8")
-    assert commit_promotion(plan, False) == EXIT_USAGE
-    assert not (kb / "raw" / "报告.md").exists()  # fail-closed：不提交旧快照
-    # 未改时正常提交（对照）。
-    (d / "稳.md").write_text("# t\n稳定\n", encoding="utf-8")
-    target2 = safe_raw_target(kb, "稳")
-    plan2 = prepare_promotion(kb, "workspace/parsed/稳.md", target2, None)
-    assert commit_promotion(plan2, False) == EXIT_OK
-    assert (kb / "raw" / "稳.md").is_file()
-
-
-def test_promote_image_fingerprint_toctou_fail_closed(kb) -> None:
-    """入队后某收集图被改 → 复检图 SHA256 不符 → EXIT_USAGE（图字节也绑入一致性，决策P4.6.1-16）。"""
-    from guanlan.errors import EXIT_USAGE
-    from guanlan.rawio import safe_raw_target
-    from guanlan.web.promote import commit_promotion, prepare_promotion
-
-    img = _put_parsed_image(kb, "报告", "报告-1.png", b"IMG1")
-    d = kb / "workspace" / "parsed"
-    (d / "报告.md").write_text("![](images/报告/报告-1.png)\n", encoding="utf-8")
-    target = safe_raw_target(kb, "报告")
-    plan = prepare_promotion(kb, "workspace/parsed/报告.md", target, None)
-    img.write_bytes(b"CHANGED!")  # 图被改
-    assert commit_promotion(plan, False) == EXIT_USAGE
-    assert not (kb / "raw" / "报告.md").exists()
 
 
 # ── 断链检查 + 重整（决策P4.6.1-5/6）─────────────────────────────────────────────────
-def test_image_lint_detects_misplaced_and_dangling(client, kb) -> None:
-    """image-lint：错位引用（指他文件图目录）+ 悬空引用（缺失）正确分类，needs_relocalize 由错位驱动。"""
-    _put_parsed_image(kb, "orig", "a.png", b"A")
-    _put_workspace(
-        kb, "parsed", "x-1.md",
-        "![](images/orig/a.png)\n![](images/x-1/missing.png)\n",
-    )
-    r = client.get("/api/workspace/image-lint", params={"file": "workspace/parsed/x-1.md"})
-    assert r.status_code == 200
-    data = r.json()
-    assert data["misplaced"] == ["images/orig/a.png"]
-    assert data["dangling"] == ["images/x-1/missing.png"]
-    assert data["needs_relocalize"] is True
-
-
-def test_image_lint_clean(client, kb) -> None:
-    """引用本文件名下图目录 → 无错位无悬空，needs_relocalize=False。"""
-    _put_parsed_image(kb, "x", "x-1.png", b"A")
-    _put_workspace(kb, "parsed", "x.md", "![](images/x/x-1.png)\n")
-    data = client.get("/api/workspace/image-lint", params={"file": "workspace/parsed/x.md"}).json()
-    assert data == {"file": "workspace/parsed/x.md", "dangling": [], "misplaced": [], "needs_relocalize": False}
-
-
-def test_image_lint_rejects_non_parsed(client, kb) -> None:
-    """断链检查仅作用于 parsed/：uploads/ 内文件 → 409。"""
-    _put_workspace(kb, "uploads", "x.md", "正文\n")
-    r = client.get("/api/workspace/image-lint", params={"file": "workspace/uploads/x.md"})
-    assert r.status_code == 409
-
-
-def test_relocalize_copies_to_own_dir_and_keeps_shared(client, kb) -> None:
-    """重整 x-1.md：把错位图 copy 到 images/x-1/、改名编号；原图仍被 x.md 引用 → 全局 GC 保留（Q3 安全边界）。"""
-    _put_parsed_image(kb, "orig", "a.png", b"A")
-    _put_workspace(kb, "parsed", "x.md", "![](images/orig/a.png)\n")  # sibling 仍引原图
-    _put_workspace(kb, "parsed", "x-1.md", "![](images/orig/a.png)\n")
-    r = client.post("/api/workspace/relocalize", json={"file": "workspace/parsed/x-1.md"})
-    assert r.status_code == 200
-    d = kb / "workspace" / "parsed"
-    assert (d / "images" / "x-1" / "x-1-1.png").read_bytes() == b"A"  # copy 到本文件目录
-    assert "images/x-1/x-1-1.png" in (d / "x-1.md").read_text("utf-8")  # 引用重写
-    assert (d / "images" / "orig" / "a.png").exists()  # 仍被 x.md 引用 → 不删（copy-first + 全局 GC）
-
-
-def test_relocalize_gc_removes_global_orphan(client, kb) -> None:
-    """重整后某原图全局零引用 → GC 回收（把 move 安全降为 copy + 全局 GC，决策P4.6.1-5）。"""
-    _put_parsed_image(kb, "orig", "a.png", b"A")
-    _put_workspace(kb, "parsed", "x-1.md", "![](images/orig/a.png)\n")  # 唯一引用者
-    r = client.post("/api/workspace/relocalize", json={"file": "workspace/parsed/x-1.md"})
-    assert r.status_code == 200
-    d = kb / "workspace" / "parsed"
-    assert (d / "images" / "x-1" / "x-1-1.png").read_bytes() == b"A"  # copy 成功
-    assert not (d / "images" / "orig" / "a.png").exists()  # 全局零引用 → GC
 
 
 def test_commit_md_with_images_empty_overwrite_clears_stale(kb) -> None:
@@ -6043,21 +5654,6 @@ def test_commit_md_with_images_empty_overwrite_clears_stale(kb) -> None:
     assert code == EXIT_OK
     assert not (base / "images" / "报告").exists()  # 旧图目录整盘清掉、不留空目录
     assert target.read_text("utf-8") == "新正文、无图。\n"
-
-
-def test_relocalize_enforces_image_caps(client, kb, monkeypatch) -> None:
-    """重整按 convert/晋级同口径容量三闸：超大图先 stat 拒收、不整盘读入 Web 进程内存 → 409、不落盘。"""
-    import guanlan.imageio as imgmod
-
-    monkeypatch.setattr(imgmod, "MAX_IMAGE_BYTES", 4)
-    _put_parsed_image(kb, "orig", "a.png", b"toolong")  # 7B > 4B 上限
-    _put_workspace(kb, "parsed", "x-1.md", "![](images/orig/a.png)\n")
-    r = client.post("/api/workspace/relocalize", json={"file": "workspace/parsed/x-1.md"})
-    assert r.status_code == 409
-    assert "单图" in r.json()["detail"]
-    d = kb / "workspace" / "parsed"
-    assert not (d / "images" / "x-1").exists()  # 未落盘
-    assert (d / "images" / "orig" / "a.png").exists()  # 原图未动（copy-first、超限前不碰）
 
 
 # ── JobQueue emit 增量 output（决策P4.6.1-11/14）─────────────────────────────────────
@@ -6089,13 +5685,6 @@ def test_jobqueue_emit_incremental_output() -> None:
 
 
 # ── reader 裁剪解析/重整写端点（沿 P4.9，决策P4.6.1-8 §5）─────────────────────────────
-def test_reader_trims_parse_and_relocalize(kb) -> None:
-    """reader 下不注册 parse / relocalize 写端点（404/405）。"""
-    with TestClient(create_app(kb, reader=True)) as c:
-        assert c.post("/api/parse", json={"upload": "workspace/uploads/x.pdf"}).status_code in (404, 405)
-        assert c.post(
-            "/api/workspace/relocalize", json={"file": "workspace/parsed/x.md"}
-        ).status_code in (404, 405)
 
 
 # ── wiki/parsed 页嵌图渲染改写（修复：../../raw/images 与 images/<slug>/ 相对图裂图）─────────
@@ -6134,50 +5723,6 @@ def test_parsed_preview_rewrites_image_to_endpoint(client, kb) -> None:
 
 
 # ── 拆分断链恢复（按 basename 从源文件图目录唯一恢复，决策P4.6.1-5）─────────────────────
-def test_image_lint_recovers_split_basename(client, kb) -> None:
-    """拆分子文件引用「目录错、basename 对」→ lint 判可重整（非悬空），因源图在原文件图目录唯一可寻。"""
-    _put_parsed_image(kb, "4.示例检验-20240531", "4.示例检验-20240531-7.jpg", b"FIG")
-    _put_workspace(
-        kb, "parsed", "4b.示例检验.md",
-        "正文\n![](images/4b.示例检验/4.示例检验-20240531-7.jpg)\n",  # 目录错、basename 对
-    )
-    data = client.get(
-        "/api/workspace/image-lint", params={"file": "workspace/parsed/4b.示例检验.md"}
-    ).json()
-    assert data["dangling"] == []  # 不再误判悬空（源图可按 basename 唯一恢复）
-    assert data["misplaced"] == ["images/4b.示例检验/4.示例检验-20240531-7.jpg"]
-    assert data["needs_relocalize"] is True
-
-
-def test_relocalize_recovers_split_image(client, kb) -> None:
-    """重整：把拆分子文件引用的源图（basename 唯一）copy 到本文件目录、改名编号、重写引用（用户诉求）。"""
-    _put_parsed_image(kb, "4.示例检验-20240531", "4.示例检验-20240531-7.jpg", b"FIG")
-    _put_workspace(
-        kb, "parsed", "4b.示例检验.md",
-        "正文\n![图](images/4b.示例检验/4.示例检验-20240531-7.jpg)\n",
-    )
-    r = client.post("/api/workspace/relocalize", json={"file": "workspace/parsed/4b.示例检验.md"})
-    assert r.status_code == 200
-    d = kb / "workspace" / "parsed"
-    assert (d / "images" / "4b.示例检验" / "4b.示例检验-1.jpg").read_bytes() == b"FIG"  # 复制到本文件目录
-    assert "images/4b.示例检验/4b.示例检验-1.jpg" in (d / "4b.示例检验.md").read_text("utf-8")  # 链接已更新
-
-
-def test_image_lint_truly_missing_stays_dangling(client, kb) -> None:
-    """basename 在 parsed/images/** 无物理源 → 仍判悬空（重整无法修复，如实上报）。"""
-    _put_workspace(kb, "parsed", "x.md", "![](images/x/真缺失.png)\n")
-    data = client.get("/api/workspace/image-lint", params={"file": "workspace/parsed/x.md"}).json()
-    assert data["dangling"] == ["images/x/真缺失.png"]
-    assert data["needs_relocalize"] is False
-
-
-def test_image_lint_ambiguous_basename_stays_dangling(client, kb) -> None:
-    """basename 在两个目录都有（歧义）→ 不猜、判悬空（绝不复制错图，决策P4.6.1-5）。"""
-    _put_parsed_image(kb, "a", "dup.png", b"A")
-    _put_parsed_image(kb, "b", "dup.png", b"B")
-    _put_workspace(kb, "parsed", "c.md", "![](images/c/dup.png)\n")
-    data = client.get("/api/workspace/image-lint", params={"file": "workspace/parsed/c.md"}).json()
-    assert data["dangling"] == ["images/c/dup.png"]  # 歧义 → 不恢复
 
 
 # ───────────────────────── P4.13 Web mermaid 渲染 ─────────────────────────
@@ -6385,7 +5930,6 @@ def test_copy_button_icon_and_i18n() -> None:
     i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
     for key in ("chat.copy", "chat.copied", "chat.copyFail"):
         assert i18n.count(f'"{key}"') >= 2, f"{key} 须在 zh + en 双语词表各一"
-
 
 
 # ───────────────────────── P4.15 工具确认 / ask_user 人在环（docs/P4.15） ─────────────────────────
@@ -8135,78 +7679,6 @@ def test_known_scanner_renderer_divergences_are_over_report_only(kb, name, src) 
 # P5.2 §B′ 解析后端留痕 + §1.A 上传限读
 #   见 docs/backlog/notes/sag-2026-09-反向评审.md §1.A / §1.B
 # ══════════════════════════════════════════════════════════════════════════════
-def test_parse_stamps_parsed_by_into_parsed_md(kb, monkeypatch) -> None:
-    """解析作业把实际后端写进 parsed 产物 frontmatter（Web 这条写点不能漏，否则只覆盖 CLI）。"""
-    import yaml
-
-    from guanlan.web import parsefeed
-
-    monkeypatch.setattr(
-        parsefeed,
-        "convert_to_markdown",
-        lambda src, *, stem, backend, cwd, progress=None: ConvertResult(
-            markdown="# 解析\n正文。\n", backend="marker"
-        ),
-    )
-    with TestClient(create_app(kb)) as client:
-        client.post("/api/upload", files={"file": ("报告.pdf", b"%PDF fake", "application/pdf")})
-        r = client.post("/api/parse", json={"upload": "workspace/uploads/报告.pdf"})
-        assert _wait_job(client, r.json()["job_id"])["exit_code"] == 0
-
-    block, body = _split_fm((kb / "workspace" / "parsed" / "报告.md").read_text("utf-8"))
-    assert yaml.safe_load(block) == {"parsed_by": "marker"}
-    assert body == "# 解析\n正文。\n"
-
-
-def test_parse_without_backend_marker_writes_no_frontmatter(kb, monkeypatch) -> None:
-    """读不到后端标记 → parsed 产物**一个字节都不多**（保持历史形状，绝不猜）。"""
-    from guanlan.web import parsefeed
-
-    monkeypatch.setattr(
-        parsefeed,
-        "convert_to_markdown",
-        lambda src, *, stem, backend, cwd, progress=None: ConvertResult(markdown="# 解析\n"),
-    )
-    with TestClient(create_app(kb)) as client:
-        client.post("/api/upload", files={"file": ("b.pdf", b"%PDF fake", "application/pdf")})
-        r = client.post("/api/parse", json={"upload": "workspace/uploads/b.pdf"})
-        assert _wait_job(client, r.json()["job_id"])["exit_code"] == 0
-
-    assert (kb / "workspace" / "parsed" / "b.md").read_text("utf-8") == "# 解析\n"
-
-
-def test_parse_survives_non_mapping_frontmatter_in_converted_output(kb, monkeypatch) -> None:
-    """产物以 `---` 开头却非键值映射（文档里的分隔线）→ 放弃留痕，**解析作业照样成功**。"""
-    from guanlan.web import parsefeed
-
-    body = "---\n- 一\n- 二\n---\n正文。\n"
-    monkeypatch.setattr(
-        parsefeed,
-        "convert_to_markdown",
-        lambda src, *, stem, backend, cwd, progress=None: ConvertResult(
-            markdown=body, backend="python"
-        ),
-    )
-    with TestClient(create_app(kb)) as client:
-        client.post("/api/upload", files={"file": ("c.pdf", b"%PDF fake", "application/pdf")})
-        r = client.post("/api/parse", json={"upload": "workspace/uploads/c.pdf"})
-        assert _wait_job(client, r.json()["job_id"])["exit_code"] == 0
-
-    assert (kb / "workspace" / "parsed" / "c.md").read_text("utf-8") == body
-
-
-def test_promote_preserves_parsed_by_and_adds_origin(client, kb) -> None:
-    """**晋级后 `parsed_by` 仍在**（`apply_origin` 只插 origin、其余键逐字保留）。
-
-    这条是 §1.B 的收尾断言：解析期写、晋级期必须带进 `raw/`——否则 Web 那条路径等于没记。
-    """
-    import yaml
-
-    src = _put_workspace(kb, "parsed", "p.md", "---\nparsed_by: mineru\n---\n正文。\n")
-    client.post("/api/raw", json={"name": "p", "source": src, "origin": "src://x"})
-    block, body = _split_fm((kb / "raw" / "p.md").read_text(encoding="utf-8"))
-    assert yaml.safe_load(block) == {"parsed_by": "mineru", "origin": "src://x"}
-    assert body == "正文。\n"
 
 
 # ── 上传限读（§1.A）：断言的是**端点读取尺寸**，不是内存/磁盘峰值 ────────────────────
@@ -8226,8 +7698,8 @@ class _RecordingUpload:
 def test_read_upload_capped_never_reads_more_than_limit_plus_one(monkeypatch) -> None:
     """限读归口只要 `MAX_UPLOAD_BYTES + 1` 字节——多出的一字节只用来判超限。
 
-    上限临时调小（归口在调用时读模块全局）：证明"不为超限体全量分配"的用例自己先分配 50 MiB，
-    未免可笑，且断言与真实 50 MiB 字面值无关——它断的是"要了 上限+1、而不是裸 `read()` 的 -1"。
+    上限临时调小（归口在调用时读模块全局）：证明"不为超限体全量分配"的用例自己先分配 256 MiB，
+    未免可笑，且断言与真实 256 MiB 字面值无关——它断的是"要了 上限+1、而不是裸 `read()` 的 -1"。
     """
     import anyio
 
@@ -8522,3 +7994,25 @@ def test_goal_agent_verdict_wins_over_no_progress_guard(chat_client):
     frames = _drive_goal(client, cid)
     assert _first(frames, "goal_blocked") is None
     assert _first(frames, "goal_done")["status"] == "complete"
+
+
+def test_workspace_nested_preview_and_delete(client, kb) -> None:
+    """嵌套路径可预览 / 删除（path-contained 容器校验本就允许后代）。"""
+    sub = kb / "workspace" / "parsed" / "sec"
+    sub.mkdir(parents=True)
+    (sub / "a.md").write_text("# A\n正文。\n", encoding="utf-8")
+    rel = "workspace/parsed/sec/a.md"
+    assert client.get(f"/api/workspace/file?path={rel}").status_code == 200
+    assert client.delete(f"/api/workspace/file?path={rel}").status_code == 200
+    assert not (sub / "a.md").exists()
+
+
+def test_retired_staging_endpoints_gone(client, kb) -> None:
+    """P4.30 下线：解析 / 断链检查 / 重整端点不存在；`/api/raw` 的 source 晋级分支 → 400。"""
+    assert client.post("/api/parse", json={"upload": "workspace/uploads/x.pdf"}).status_code in (404, 405)
+    assert client.get("/api/workspace/image-lint", params={"file": "workspace/parsed/x.md"}).status_code == 404
+    assert client.post("/api/workspace/relocalize", json={"file": "workspace/parsed/x.md"}).status_code in (404, 405)
+    _put_workspace(kb, "parsed", "a.md", "# A\n")
+    r = client.post("/api/raw", json={"name": "a", "source": "workspace/parsed/a.md"})
+    assert r.status_code == 400 and "一键入库" in r.json()["detail"]
+    assert not (kb / "raw" / "a.md").exists()

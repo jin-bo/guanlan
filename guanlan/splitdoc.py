@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass, field
 
 from .imageio import _MD_IMAGE, _is_external_ref
-from .normalize import PAGE_ANCHOR_RE, count_chars
+from .normalize import _FENCE_RE, PAGE_ANCHOR_RE, count_chars, fence_closes  # 围栏判定与 normalize 同一口径
 from .rawio import dump_frontmatter, raw_slug
 
 __all__ = [
@@ -48,7 +48,6 @@ BASENAME_MAX_BYTES = 200  # 整个 basename（含 .md）字节上限：Linux 按
 INDEX_SUFFIX = "目录"
 
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
-_FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
 _SENTENCE_CUT_RE = re.compile(r"[。！？；!?;]+[”」』）)]*")
 
 # 切点优先级
@@ -89,19 +88,26 @@ class Part:
 
 def _split_long_line(line: str, eol: str) -> list[str]:
     """单行超过 PART_MAX → 在句末标点后切成片段（拼回 == 原行）；连句末标点都没有时按字符硬切。"""
-    pieces: list[str] = []
+    segs: list[str] = []
     start = 0
     last_cut: int | None = None
+    acc = 0  # count_chars(line[start:last_cut])，逐句累加：不每句都从 start 重数（超长行是 O(句数×PART_MAX)）
     for m in _SENTENCE_CUT_RE.finditer(line):
-        if last_cut is not None and last_cut > start and count_chars(line[start : m.end()]) > PART_MAX:
-            pieces.append(line[start:last_cut])
-            start = last_cut
+        prev_end = last_cut if last_cut is not None else start
+        sent = count_chars(line[prev_end : m.end()])
+        if last_cut is not None and last_cut > start and acc + sent > PART_MAX:
+            segs.append(line[start:last_cut])
+            start, acc = last_cut, 0
+        acc += sent
         last_cut = m.end()
-    tail = line[start:]
-    while count_chars(tail) > PART_MAX:
-        pieces.append(tail[:PART_MAX])
-        tail = tail[PART_MAX:]
-    pieces.append(tail + eol)
+    segs.append(line[start:])
+    pieces: list[str] = []
+    for seg in segs:  # 单句本身超限（不只是末段）同样硬切，保证每片 ≤ PART_MAX
+        while count_chars(seg) > PART_MAX:
+            pieces.append(seg[:PART_MAX])
+            seg = seg[PART_MAX:]
+        pieces.append(seg)
+    pieces[-1] += eol
     return pieces
 
 
@@ -110,14 +116,16 @@ def _units(body: str) -> list[_Unit]:
     in_fence = False
     fence_mark = ""
     prev_blank = True
-    raw_lines = body.splitlines(keepends=True)
+    # 只按 "\n" 切行（与 normalize / count_chars 同口径）：`splitlines` 还会在 U+2028 / U+0085 等处切，
+    # 行中间的 `# …` 会被误当标题 / 围栏，切点落进 markdown 的同一行里。
+    raw_lines = re.findall(r"[^\n]*\n|[^\n]+$", body)
     for line in raw_lines:
         content = line.rstrip("\r\n")
         eol = line[len(content) :]
         m_f = _FENCE_RE.match(content)
         if in_fence:
             units.append(_Unit(line, count_chars(content)))
-            if m_f and m_f.group(1) == fence_mark:
+            if fence_closes(fence_mark, content):
                 in_fence = False
             prev_blank = False
             continue
@@ -368,6 +376,21 @@ def split_document(body: str, *, sample: str) -> list[Part]:
         page_at.append(cur)
         if u.page is not None:
             cur = u.page
+    # 每个单元起始时所在的未闭合围栏（"" = 不在围栏内）。超过 PART_MAX 的代码块只能在围栏内硬切，
+    # 渲染时据此给分卷补开 / 补闭围栏，否则代码行（含 `# 注释`）在分卷里会被当正文 / 标题。
+    fence_at: list[str] = []
+    in_fence, mark = False, ""
+    for u in units:
+        fence_at.append(mark if in_fence else "")
+        if u.cut == _P_SENTENCE:  # 超长行切出的后续片段：不是行首，不可能是围栏线（同 `_units`）
+            continue
+        m_f = _FENCE_RE.match(u.text.rstrip("\r\n"))
+        if in_fence:
+            if fence_closes(mark, u.text.rstrip("\r\n")):
+                in_fence = False
+        elif m_f:
+            in_fence, mark = True, m_f.group(1)
+    fence_at.append(mark if in_fence else "")
     parts: list[Part] = []
     for leaf in leaves:
         text = "".join(u.text for u in units[leaf.lo : leaf.hi])
@@ -389,6 +412,7 @@ def split_document(body: str, *, sample: str) -> list[Part]:
                 method=leaf.method,
                 name_segments=list(leaf.names),
                 pages=pages,  # type: ignore[arg-type]
+                extra={"fence_open": fence_at[leaf.lo], "fence_close": fence_at[leaf.hi]},
             )
         )
     total = len(parts)
@@ -446,6 +470,11 @@ def render_part(part: Part, *, sample: str, doc_meta: dict) -> str:
     body = rewrite_image_refs(part.body)
     if not body.endswith("\n"):
         body += "\n"
+    # 切在代码块中间（见 split_document 的 fence_at）：分卷各自补成闭合的围栏，`body` 本身仍是原文精确切片。
+    if part.extra.get("fence_open"):
+        body = f"{part.extra['fence_open']}\n{body}"
+    if part.extra.get("fence_close"):
+        body += f"{part.extra['fence_close']}\n"
     return dump_frontmatter(meta, body)
 
 

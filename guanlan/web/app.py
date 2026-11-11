@@ -42,6 +42,7 @@ from ..audit import (
 from ..check import format_report as _format_check
 from ..check import run_check
 from ..errors import EXIT_OK, EXIT_USAGE, GuanlanError
+from ..kblock import KBLockBusy
 from ..graph import build_and_write_graph
 from ..health import format_report as _format_health
 from ..health import run_health
@@ -82,14 +83,7 @@ from .jobs import JobQueue, WriteGate
 # 整模块导入（不 from-import 具体函数）：端点内经 `mcpdiag.<fn>` 取属性，测试可 monkeypatch
 # 单飞/慢检查而不必真起上游进程。模块本身零 mcp SDK 依赖（只导 agentao.mcp.config）。
 from . import graphview, mcpdiag
-from .parsefeed import (
-    _BACKENDS,
-    image_lint,
-    parse_target,
-    parse_upload,
-    relocalize_commit,
-)
-from .promote import commit_promotion, prepare_promotion
+from . import oneclick_routes
 from .rawfeed import (
     _atomic_write_raw,
     _check_text_admission,
@@ -101,7 +95,6 @@ from .uploads import (
     _atomic_write_upload,
     _augment_with_attachments,
     _classify_upload,
-    _safe_upload_file,
     _safe_workspace_target,
     read_upload_capped,
 )
@@ -240,50 +233,16 @@ class GoalRunBody(BaseModel):
 
 
 class RawBody(BaseModel):
-    """`POST /api/raw` 请求体（判别式 body：`content` XOR `source`，决策P4.6-4）。
+    """`POST /api/raw` 请求体：投喂（P4.1），把粘贴正文 `content` 原样存进 `raw/<安全名>.md`。
 
-    `name` 经 `_safe_raw_target` slug 化 + 强制 `.md`。两种「人投喂源」共用本端点：
-    - **投喂**（P4.1）：给 `content`（粘贴正文，原样存进 raw/）。
-    - **晋级**（P4.6）：给 `source`（指向 `workspace/` 内一个 `.md` 派生物），可选 `origin`
-      （出处，前端预填上传原件路径 / 人手填外部 URL；省略或空白 → 回退 `source`）。宿主读
-      `source` 内容、过文本准入、按 provenance 归一 frontmatter 后晋级为 `raw/<安全名>.md`。
-
-    `content` 与 `source` **互斥且必选其一**（两者同给 / 都不给 → 400）。`origin` 仅
-    `source` 分支有意义（content 分支忽略）。
+    `name` 经 `_safe_raw_target` slug 化 + 强制 `.md`。P4.6 的 `source` 晋级分支已随 P4.30 下线
+    （决策P4.30-2：一键入库取代人审晋级）；仍带 `source` 的旧请求 → 400，提示改用一键入库。
     """
 
     name: str
     content: str | None = None
-    source: str | None = None
-    origin: str | None = None
+    source: str | None = None  # 已下线，只为给旧客户端一个明确的 400
     overwrite: bool = False
-
-
-class ParseBody(BaseModel):
-    """`POST /api/parse` 请求体（P4.6.1，决策P4.6.1-1/7）。
-
-    `upload` = `POST /api/upload` 回传的 `workspace/uploads/<名>` 路径；宿主确定性解析（直调
-    `convert_to_markdown`）成 `workspace/parsed/<slug>.md` + 随源图片。`backend` 透传 skill 转换后端
-    （`auto`/`mineru`/`marker`/`python`），非法值 → 422。"""
-
-    upload: str
-    backend: str = "auto"
-
-    @field_validator("backend")
-    @classmethod
-    def _backend_known(cls, v: str) -> str:
-        if v not in _BACKENDS:
-            raise ValueError(f"未知 backend：{v}（须 ∈ {_BACKENDS}）。")
-        return v
-
-
-class RelocalizeBody(BaseModel):
-    """`POST /api/workspace/relocalize` 请求体（P4.6.1，决策P4.6.1-5/6）。
-
-    `file` = `workspace/parsed/` 内一个 `.md` 路径；把它引用的图 copy 到 `images/<file_stem>/`、
-    改名编号、重写引用、全局零引用 GC 原图。仅作用于 parsed/（拆分/合并断链修复场景）。"""
-
-    file: str
 
 
 class ModeBody(BaseModel):
@@ -472,7 +431,9 @@ def create_app(
     # 进程级单写者协调（P4.5 决策P4.5-6/10）：write_lock（包真正写执行）+ active_writable_turns
     # （层③ 423 时序互斥）。注入 JobQueue（worker 跑 fn() 时持 write_lock）与 ConversationStore
     # （可写 turn 异步取 write_lock + 计数）；写端点经 app.state.write_gate 查计数。
-    write_gate = WriteGate()
+    # P4.30（决策P4.30-15）：可写宿主的 write_lock 同时持库级 OS 文件锁，与 CLI 写命令互斥；只在每个
+    # 写操作期间持有，不在进程生命周期内长期持锁。reader 不写，不接库级锁。
+    write_gate = WriteGate(None if reader else root)
     app.state.write_gate = write_gate
     # 单写者作业队列（ingest/heal/backfill/audit/投喂走它，FIFO 串行；决策P4-5）：worker 跑 fn() 包 write_lock。
     # on_job_done：ingest/heal/backfill/audit 写 wiki/ → bump 代际，使可写会话缓存的 check 基线失效、下轮重拍
@@ -482,7 +443,7 @@ def create_app(
         write_lock=write_gate.write_lock,
         on_job_done=lambda kind: (
             write_gate.bump_wiki_generation()
-            if kind in ("ingest", "heal", "backfill", "audit")
+            if kind in ("ingest", "heal", "backfill", "audit", "oneclick")
             else None
         ),
     )
@@ -684,61 +645,35 @@ def create_app(
     @_writer_only(app.post("/api/raw"))  # reader 下不注册（投喂/晋级是写，决策P4.9-2）
     async def write_raw(body: RawBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
-        # 判别式 body（决策P4.6-4）：content 与 source 互斥且必选其一（同给/都不给 → 400）。
-        if (body.content is None) == (body.source is None):
+        if body.source is not None:  # P4.6 晋级已下线（决策P4.30-2）
             raise HTTPException(
-                status_code=400, detail="content 与 source 二选一（互斥且必选其一）。"
+                status_code=400, detail="「晋级为源」已下线：请在暂存区对上传文件点「一键入库」。"
             )
-        target = _safe_raw_target(root, body.name)  # 400/越界即抛，无需进队列（其 stem = target_stem）
-        # `abandon_on_cancel=True`：等待在**前序写作业**（如在飞 ingest）后排队，可能数十秒甚至——
-        # 若该 ingest 子进程挂死——无限久。设为可取消，使客户端断开 / 服务器关停能立即回收**请求
-        # 协程**（worker 线程仍跑完作业、文件照常落盘，但请求不再被无限期钉死，关停不被拖住）。
-        if body.source is not None:
-            # 晋级（P4.6.1，决策P4.6.1-12）：**入队前**读 source + 引用驱动收图 + 归一重写 +
-            # provenance + 文本准入 + 记 SHA256 指纹（坏处直接 4xx，不进队列）；thunk 在**同一写
-            # 临界区**做指纹复检 + 图 staging-swap + md 末步提交 + 失败回滚（图 + md 原子提交）。
-            plan = await anyio.to_thread.run_sync(
-                prepare_promotion, root, body.source, target, body.origin
+        if body.content is None:
+            raise HTTPException(status_code=400, detail="缺少 content。")
+        target = _safe_raw_target(root, body.name)  # 400/越界即抛，无需进队列
+        content = body.content
+        _check_text_admission(content)
+        if target.exists() and not body.overwrite:
+            raise HTTPException(
+                status_code=409, detail=f"raw/{target.name} 已存在；改名或传 overwrite=true。"
             )
-            if target.exists() and not body.overwrite:
-                raise HTTPException(
-                    status_code=409, detail=f"raw/{target.name} 已存在；改名或传 overwrite=true。"
-                )
-            payload_bytes = len(plan.content.encode("utf-8"))
-            job = await anyio.to_thread.run_sync(
-                jobs.submit_and_wait,
-                "promote",
-                lambda emit: commit_promotion(plan, body.overwrite),
-                abandon_on_cancel=True,
-            )
-            nimg: int | None = len(plan.images)
-        else:
-            # 投喂（P4.1）：粘贴正文过同一道文本闸；worker thunk 仅原子写 md（无图）。
-            content = body.content
-            _check_text_admission(content)
-            if target.exists() and not body.overwrite:
-                raise HTTPException(
-                    status_code=409, detail=f"raw/{target.name} 已存在；改名或传 overwrite=true。"
-                )
-            payload_bytes = len(content.encode("utf-8"))
-            job = await anyio.to_thread.run_sync(
-                jobs.submit_and_wait,
-                "raw_write",
-                lambda emit: _atomic_write_raw(target, content, body.overwrite),
-                abandon_on_cancel=True,
-            )
-            nimg = None  # 投喂无图概念：返回体不带 images 键（保 P4.1 字节）
+        payload_bytes = len(content.encode("utf-8"))
+        # `abandon_on_cancel=True`：等待在**前序写作业**（如在飞 ingest）后排队，可能数十秒；设为可取消，
+        # 使客户端断开 / 服务器关停能立即回收请求协程（worker 线程仍跑完作业、文件照常落盘）。
+        job = await anyio.to_thread.run_sync(
+            jobs.submit_and_wait,
+            "raw_write",
+            lambda emit: _atomic_write_raw(target, content, body.overwrite),
+            abandon_on_cancel=True,
+        )
         # 退出码 → HTTP 分流（对齐 §2，**不可**一律塌缩成 409，否则"磁盘满"被误报"已存在"）。
-        # 晋级的 EXIT_USAGE 含两类 409：同名冲突（atomic_write_raw）或指纹复检失败（source 已变），
-        # 两者 detail 取自 job.output、均为合法 409 冲突（决策P4.6.1-16）。
+        # EXIT_USAGE = 同名冲突或库被 CLI 占用（P4.30 库级锁），detail 取 job.output 区分。
         if job.exit_code == EXIT_USAGE:
             raise HTTPException(status_code=409, detail=job.output or "raw/ 同名文件已存在。")
-        if job.exit_code != EXIT_OK:  # 落盘 IO 失败 → 归一为 EXIT_AGENT_ERROR
+        if job.exit_code != EXIT_OK:  # 落盘 IO 失败 → 500
             raise HTTPException(status_code=500, detail=job.output or "写盘失败。")
-        out = {"saved": f"raw/{target.name}", "bytes": payload_bytes}
-        if nimg is not None:  # 晋级额外回报随源搬的图片数（投喂不带，保 P4.1 字节）
-            out["images"] = nimg
-        return out
+        return {"saved": f"raw/{target.name}", "bytes": payload_bytes}
 
     # 文件上传（决策P4.6-3）：multipart 文件 → workspace/uploads/<安全名>（多格式、保留原扩展名）。
     # 网络接收不持锁；收齐后把原子写**提交单写者 JobQueue**，与投喂/ingest/可写 turn 同写者串行。
@@ -762,6 +697,8 @@ def create_app(
             lambda emit: _atomic_write_upload(target, data),  # thunk 收 emit、此处忽略（决策P4.6.1-11）
             abandon_on_cancel=True,
         )
+        if job.exit_code == EXIT_USAGE:  # 库被 CLI 占用（P4.30 库级锁）→ 409，不是写盘失败
+            raise HTTPException(status_code=409, detail=job.output or "知识库正被占用。")
         if job.exit_code != EXIT_OK:  # 落盘 IO 失败 → 归一为 EXIT_AGENT_ERROR
             raise HTTPException(status_code=500, detail=job.output or "写盘失败。")
         return {
@@ -820,6 +757,8 @@ def create_app(
             lambda emit: _delete_workspace_scratch(target),  # thunk 收 emit、此处忽略
             abandon_on_cancel=True,
         )
+        if job.exit_code == EXIT_USAGE:  # 库被 CLI 占用（P4.30 库级锁）→ 409
+            raise HTTPException(status_code=409, detail=job.output or "知识库正被占用。")
         if job.exit_code != EXIT_OK:  # 删除 IO 失败 → 归一为 EXIT_AGENT_ERROR
             raise HTTPException(status_code=500, detail=job.output or "删除失败。")
         return {"deleted": path}
@@ -838,70 +777,25 @@ def create_app(
             lambda emit: _rmtree_workspace_dir(target),  # thunk 收 emit、此处忽略
             abandon_on_cancel=True,
         )
+        if job.exit_code == EXIT_USAGE:  # 库被 CLI 占用（P4.30 库级锁）→ 409
+            raise HTTPException(status_code=409, detail=job.output or "知识库正被占用。")
         if job.exit_code != EXIT_OK:
             raise HTTPException(status_code=500, detail=job.output or "删除失败。")
         return {"deleted": path}
 
-    # 确定性解析（P4.6.1，决策P4.6.1-1/2/7）：把 workspace/uploads/<名> 直调 convert_to_markdown 内核
-    # 转成 workspace/parsed/<slug>.md + 随源图片（**不落 raw/**）。慢（marker/mineru 分钟级）→ 入单写者
-    # FIFO 异步队列、即时返回 job_id、前端轮询 /api/jobs/{id}（running 期即见 emit 推上的 backend 分级
-    # 日志，决策P4.6.1-10/11，不新开 SSE）。upload 路径**入队前**校验（缺失即 404，快反馈）。
-    @_writer_only(app.post("/api/parse"))  # reader 下不注册（解析写 workspace/parsed，决策P4.9-2）
-    async def parse(body: ParseBody) -> dict:
-        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
-        upload_path = _safe_upload_file(root, body.upload)  # 越界 400 / 缺失 404
-        target = parse_target(root, upload_path)
-        backend = body.backend
-        return {
-            "job_id": jobs.enqueue(
-                "parse",
-                lambda emit: parse_upload(
-                    upload_path, target, root=root, backend=backend, emit=emit
-                ),
-            )
-        }
-
-    # 解析根（parsed/）归口：image-lint / relocalize 共用，且强制目标落在 parsed/ 子树内。
-    parsed_root = (root / "workspace" / "parsed").resolve()
-
-    def _require_parsed_md(file_rel: str) -> Path:
-        """把 `file` 解析为 parsed/ 内存在的 `.md`；越界/非 parsed 409、非 md/缺失 404（断链检查/重整专用）。"""
-        page = _safe_workspace_md(root, file_rel)  # workspace/uploads|parsed 内 .md（越界 409/缺失 404）
-        try:
-            page.relative_to(parsed_root)
-        except ValueError:
-            raise HTTPException(
-                status_code=409, detail=f"断链检查/重整仅作用于 workspace/parsed/：{file_rel}"
-            ) from None
-        return page
-
-    # 图片断链检查（只读，决策P4.6.1-5）：扫一个 parsed .md 的图片引用，分类悬空/错位。reader 下仍
-    # 注册（纯读），但 reader 无 parsed 文件、自然 404/不被触达。阻塞读盘卸到线程（决策P4-2）。
-    @app.get("/api/workspace/image-lint")
-    async def workspace_image_lint(
-        file: str = Query(..., description="workspace/parsed/ 内待检查的 .md 路径"),
-    ) -> dict:
-        page = _require_parsed_md(file)
-        result = await anyio.to_thread.run_sync(image_lint, page, parsed_root)
-        return {"file": page.relative_to(root).as_posix(), **result}
-
-    # 图片重整（写，决策P4.6.1-5/6）：把该文件引用图 copy 到 images/<file_stem>/ + 改名编号 + 重写引用
-    # + 全局零引用 GC。入单写者 FIFO + 层③ 423（与删除/晋级同写者串行）。file 入队前校验落 parsed/。
-    @_writer_only(app.post("/api/workspace/relocalize"))  # reader 下不注册（重整是写，决策P4.9-2）
-    async def workspace_relocalize(body: RelocalizeBody) -> dict:
-        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
-        page = _require_parsed_md(body.file)
-        job = await anyio.to_thread.run_sync(
-            jobs.submit_and_wait,
-            "relocalize",
-            lambda emit: relocalize_commit(page, parsed_root),
-            abandon_on_cancel=True,
-        )
-        if job.exit_code == EXIT_USAGE:  # 罕见 TOCTOU 写冲突 → 409
-            raise HTTPException(status_code=409, detail=job.output or "重整冲突。")
-        if job.exit_code != EXIT_OK:  # 落盘 IO 失败 → 500
-            raise HTTPException(status_code=500, detail=job.output or "重整失败。")
-        return {"file": page.relative_to(root).as_posix(), "output": job.output}
+    # P4.30 一键入库（替代 P4.6.1 的解析 / 断链检查 / 重整 / 晋级四个端点）：端点与作业 thunk 在
+    # `oneclick_routes`，内核在 `guanlan/oneclick.py`（与 CLI `guanlan import` 共用任务清单）。
+    oneclick_routes.register(
+        app,
+        root=root,
+        jobs=jobs,
+        writer_only=_writer_only,
+        reject_if_writable_active=_reject_if_writable_active,
+        model=model,
+        runner=runner,
+        reader=reader,
+        owns_kb_lock=lambda: bool(getattr(write_gate.write_lock, "owns_kb_lock", False)),
+    )
 
     # 零 LLM 报告（决策P4-7）：只序列化既有 *Report，与 CLI `--json` 字节对齐；阻塞跑 to_thread。
     wiki = root / "wiki"
@@ -947,6 +841,8 @@ def create_app(
             await anyio.to_thread.run_sync(
                 functools.partial(build_and_write_graph, root, json_only=json_only)
             )
+        except KBLockBusy as exc:  # 库正被 CLI 写（P4.30 库级锁）
+            raise HTTPException(status_code=409, detail=str(exc)) from None
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"graph 构建失败：{exc}") from exc
         finally:
@@ -1700,6 +1596,8 @@ def create_app(
             try:
                 await anyio.to_thread.run_sync(write_gate.acquire_thunk(held))
                 result = await anyio.to_thread.run_sync(conv.apply_undo, body.token)
+            except KBLockBusy as exc:  # 库正被 CLI 写（P4.30 库级锁）
+                raise HTTPException(status_code=409, detail=str(exc)) from None
             finally:
                 if held[0]:
                     write_gate.write_lock.release()

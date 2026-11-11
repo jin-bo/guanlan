@@ -202,6 +202,69 @@ def test_same_set_owned_by_old_task_is_overwritable(kb: Path, book: Path):
     assert code == EXIT_OK and task2["state"] == "done"
 
 
+def test_hidden_file_in_part_folder_does_not_block_overwrite(kb: Path, book: Path):
+    """Finder 的 `.DS_Store` 不是库内容：不能把「可覆盖」变成「冲突」。"""
+    task = _prepare(kb, book)
+    _confirm(kb, task, FakeIngest())
+    (kb / "raw" / "示例书" / ".DS_Store").write_bytes(b"\0")
+    task2 = _prepare(kb, book)
+    assert task2["precheck"]["status"] == "overwritable"
+
+
+def test_visible_unowned_file_in_part_folder_still_conflicts(kb: Path, book: Path):
+    """过滤隐藏文件后，可见的非任务文件照样报冲突（防过滤吞掉该报的）。"""
+    task = _prepare(kb, book)
+    _confirm(kb, task, FakeIngest())
+    (kb / "raw" / "示例书" / "手工笔记.txt").write_text("x\n", encoding="utf-8")
+    task2 = _prepare(kb, book)
+    assert task2["precheck"]["status"] == "conflict"
+    assert any("手工笔记.txt" in d for d in task2["precheck"]["details"])
+
+
+def test_resume_with_overwrite_unblocks_overwritable_pause(kb: Path, book: Path):
+    """暂停后复检发现可覆盖的旧文件：不带 overwrite 继续仍停下，带上才继续（「冲突」不受影响）。"""
+    from guanlan.oneclick import resume
+
+    _confirm(kb, _prepare(kb, book), FakeIngest())
+    task = _prepare(kb, book)
+    assert task["precheck"]["status"] == "overwritable"
+    # 模拟「确认时尚无旧文件、落了一份后暂停，复检才发现可覆盖」的盘面
+    task.update(state="paused", overwrite=False)
+    task["stages"]["confirm"] = "done"
+    first = task["items"][0]
+    first.update(land="written", sha256=oneclick._sha_file(kb / first["raw"]), images={})
+    oneclick.save_task(kb, task)
+    with acquire(kb, "test"):
+        code, t = resume(kb, task["task_id"], ingest=FakeIngest())
+    assert code != EXIT_OK and t["state"] == "paused"
+    with acquire(kb, "test"):
+        code, t = resume(kb, task["task_id"], ingest=FakeIngest(), overwrite=True)
+    assert code == EXIT_OK and t["state"] == "done"
+
+
+def test_resume_overwrite_ignored_when_nothing_overwritable(kb: Path, book: Path):
+    from guanlan.oneclick import resume
+
+    task = _prepare(kb, book)
+    task.update(state="paused", overwrite=False)
+    task["stages"]["confirm"] = "done"
+    oneclick.save_task(kb, task)
+    with acquire(kb, "test"):
+        code, t = resume(kb, task["task_id"], ingest=FakeIngest(), overwrite=True)
+    assert code == EXIT_OK and t["overwrite"] is False
+
+
+def test_hand_edited_file_from_old_task_is_conflict_not_overwritable(kb: Path, book: Path):
+    """旧任务写下的文件被手工改过：覆盖会悄悄冲掉改动，判冲突。"""
+    task = _prepare(kb, book)
+    _confirm(kb, task, FakeIngest())
+    edited = kb / task["items"][0]["raw"]
+    edited.write_text(edited.read_text(encoding="utf-8") + "\n手工补注。\n", encoding="utf-8")
+    task2 = _prepare(kb, book)
+    assert task2["precheck"]["status"] == "conflict"
+    assert any("被改动" in d for d in task2["precheck"]["details"])
+
+
 def test_changed_part_count_is_conflict(kb: Path, book: Path, tmp_path: Path):
     task = _prepare(kb, book)
     _confirm(kb, task, FakeIngest())
@@ -377,6 +440,149 @@ def test_lock_released_when_holder_process_exits(kb: Path):
     acquire(kb, "after").release()
 
 
+def test_nested_child_of_lock_holder_passes_unrelated_process_refused(kb: Path):
+    """持锁写运行里 Agent 在 shell 跑的 guanlan 子命令（继承令牌）放行；没有令牌的无关进程照常被拒。"""
+    import os
+
+    from guanlan.kblock import TOKEN_ENV
+
+    code = (
+        "from guanlan.kblock import acquire, KBLockBusy\n"
+        f"try:\n    lk = acquire({str(kb)!r}, 'child')\n    print('nested' if lk.nested else 'held')\n"
+        "except KBLockBusy:\n    print('busy')\n"
+    )
+    lock = acquire(kb, "cli: ingest")
+    try:
+        inherit = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+        assert inherit.stdout.strip() == "nested"
+        env = {k: v for k, v in os.environ.items() if k != TOKEN_ENV}
+        stranger = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, env=env)
+        assert stranger.stdout.strip() == "busy"
+        env[TOKEN_ENV] = "someone-else"
+        forged = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, env=env)
+        assert forged.stdout.strip() == "busy"
+        assert read_holder(kb)["origin"] == "cli: ingest"  # 嵌套放行不改写执行者信息
+    finally:
+        lock.release()
+    # 持有者释放后令牌失效、环境还原：之后起的进程走正常取锁
+    assert TOKEN_ENV not in os.environ or os.environ[TOKEN_ENV] != lock.holder["token"]
+    after = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert after.stdout.strip() == "held"
+
+
+def test_token_from_earlier_hold_rejected_on_next_hold(kb: Path):
+    """上一次持锁期间派生、活得更久的进程（后台 shell、长驻 MCP server）拿着旧令牌：下一次持锁时不放行。"""
+    import os
+
+
+    code = (
+        "from guanlan.kblock import acquire, KBLockBusy\n"
+        f"try:\n    acquire({str(kb)!r}, 'child')\n    print('passed')\n"
+        "except KBLockBusy:\n    print('busy')\n"
+    )
+    first = acquire(kb, "web")
+    stale_env = dict(os.environ)  # 第一次持锁期间派生的子进程看到的环境
+    first.release()
+    second = acquire(kb, "web")
+    try:
+        assert second.holder["token"] != first.holder["token"]
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, env=stale_env)
+        assert out.stdout.strip() == "busy"
+    finally:
+        second.release()
+
+
+def test_json_mode_always_prints_one_json_document(kb: Path, capsys):
+    """--json：用法错误 / 找不到任务等提前退出也在 stdout 给一份 JSON。"""
+    import json as _json
+
+    code = oneclick.import_entrypoint(kb, src=None, do_resume=True, json_output=True, interactive=False)
+    assert code == EXIT_USAGE
+    out = _json.loads(capsys.readouterr().out)
+    assert out["ok"] is False and out["exit_code"] == EXIT_USAGE and "没有未完成" in out["error"]
+
+
+def test_dry_run_only_with_import_file(kb: Path):
+    """`--resume --dry-run` / `--cancel --dry-run` 不能悄悄忽略 --dry-run 去真入库 / 真放弃。"""
+
+    def boom(raw_rel: str, root: Path) -> int:  # pragma: no cover - 不应被调用
+        raise AssertionError("dry-run 不得触发 ingest")
+
+    for kw in ({"do_resume": True}, {"do_cancel": True}, {"status": True}):
+        code = oneclick.import_entrypoint(kb, src=None, dry_run=True, ingest=boom, interactive=False, **kw)
+        assert code == EXIT_USAGE
+
+
+def test_cli_graph_takes_kb_lock_like_web_graph():
+    from guanlan.cli import build_parser
+    from guanlan.kblock import needs_kb_lock
+
+    assert needs_kb_lock(build_parser().parse_args(["graph"]))
+    assert not needs_kb_lock(build_parser().parse_args(["check"]))
+
+
+def test_release_keeps_token_key_in_environ(kb: Path):
+    """释放只换值不删键：多线程宿主里别的线程拷贝 os.environ 时不会撞上键数变化。"""
+    import os
+
+    from guanlan.kblock import TOKEN_ENV, reserve_token_slot
+
+    reserve_token_slot()
+    keys = len(os.environ)
+    lock = acquire(kb, "web")
+    assert os.environ[TOKEN_ENV] == lock.holder["token"] and len(os.environ) == keys
+    lock.release()
+    assert TOKEN_ENV in os.environ and os.environ[TOKEN_ENV] != lock.holder["token"] and len(os.environ) == keys
+
+
+def test_sample_named_images_does_not_claim_shared_image_root(kb: Path, tmp_path: Path):
+    (kb / "raw" / "images" / "别的文档").mkdir(parents=True)
+    (kb / "raw" / "images" / "别的文档" / "a.png").write_bytes(b"\x89PNG")
+    src = tmp_path / "images.md"
+    src.write_text("# 图集\n\n正文。\n", encoding="utf-8")
+    task = _prepare(kb, src)
+    assert task["sample"] != "images"
+    assert task["precheck"]["status"] == "ok"
+
+
+def test_readonly_lock_file_still_excludes(kb: Path):
+    """锁文件对本用户只读（共享库里别人建的）：仍用只读描述符取锁、照样互斥，不静默退化成无锁。"""
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root 无视文件权限")
+    lockfile = kb / ".guanlan.lock"
+    lockfile.write_text("", encoding="utf-8")
+    lockfile.chmod(0o444)
+    try:
+        lock = acquire(kb, "cli: ingest")
+        try:
+            assert lock.held and not lock.nested
+            code = f"from guanlan.kblock import acquire, KBLockBusy\ntry:\n    acquire({str(kb)!r}, 'x')\n    print('held')\nexcept KBLockBusy:\n    print('busy')\n"
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+            assert out.stdout.strip() == "busy"
+        finally:
+            lock.release()
+    finally:
+        lockfile.chmod(0o644)
+
+
+def test_import_refused_inside_a_write_run(kb: Path, book: Path):
+    """持锁写运行派生的子进程（Agent 的 shell）跑 `guanlan import`：拒绝，不在外层门禁里连续入库多篇。"""
+    code = (
+        "from guanlan import oneclick\n"
+        f"print(oneclick.import_entrypoint({str(kb)!r}, src={str(book)!r}, yes=True, interactive=False))\n"
+    )
+    lock = acquire(kb, "cli: ingest")
+    try:
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    finally:
+        lock.release()
+    assert out.stdout.strip().splitlines()[-1] == str(EXIT_USAGE)
+    assert "嵌套" in out.stderr
+    assert active_task(kb) is None
+
+
 def test_cli_write_commands_refused_while_locked(kb: Path, capsys, monkeypatch):
     called = []
     monkeypatch.setattr("guanlan.cli.run_ingest", lambda *a, **k: called.append(1) or 0)
@@ -422,6 +628,33 @@ def test_cli_import_failure_exit_code_and_resume(kb: Path, book: Path, capsys):
     assert active_task(kb) is None
 
 
+def test_ingest_exception_pauses_instead_of_leaving_running(kb: Path, book: Path):
+    task = _prepare(kb, book)
+
+    def boom(raw_rel: str, root: Path) -> int:
+        raise RuntimeError("炸了")
+
+    with pytest.raises(RuntimeError):
+        _confirm(kb, task, boom)
+    task = load_task(kb, task["task_id"])
+    assert task["state"] == "paused"
+    assert task["items"][0]["state"] == "failed"
+    code, task = _resume(kb, task, FakeIngest())
+    assert code == EXIT_OK and task["state"] == "done"
+
+
+def test_cli_resume_confirms_awaiting_task(kb: Path, book: Path, capsys):
+    _prepare(kb, book)
+    # 非交互且没给 --yes：不开始，任务仍等待确认
+    assert oneclick.import_entrypoint(kb, src=None, do_resume=True, ingest=FakeIngest(), interactive=False) == EXIT_USAGE
+    assert active_task(kb)["state"] == "awaiting_confirm"
+    ingest = FakeIngest()
+    code = oneclick.import_entrypoint(kb, src=None, do_resume=True, yes=True, ingest=ingest, interactive=False)
+    assert code == EXIT_OK
+    assert active_task(kb) is None
+    assert len(ingest.calls) == 3
+
+
 def test_cli_cancel(kb: Path, book: Path):
     _prepare(kb, book)
     assert oneclick.import_entrypoint(kb, src=None, do_cancel=True, interactive=False) == EXIT_OK
@@ -446,3 +679,19 @@ def test_default_ingest_output_goes_to_stderr(kb: Path, monkeypatch, capsys):
     assert run("raw/x.md", kb) == 0
     out = capsys.readouterr()
     assert out.out == "" and "摄入完成" in out.err
+
+
+def test_holder_info_cleared_on_release(kb: Path):
+    lock = acquire(kb, "cli: heal")
+    assert read_holder(kb)["origin"] == "cli: heal"
+    lock.release()
+    assert read_holder(kb) is None
+
+
+def test_split_long_line_hard_cuts_oversized_middle_sentence():
+    from guanlan.splitdoc import PART_MAX, _split_long_line
+
+    line = "短句。" + "长" * (PART_MAX + 10_000) + "。" + "收尾。"
+    pieces = _split_long_line(line, "\n")
+    assert "".join(pieces) == line + "\n"
+    assert all(len(p.rstrip("\n")) <= PART_MAX for p in pieces)

@@ -870,7 +870,10 @@ class Conversation:
                 # ── 可写 turn 收尾（决策P4.5-3/4，评审 High：还原须早于 error SSE / 计数-- / 释锁）──
                 if guarded:
                     try:
-                        await self._finalize_writable(before_agentao, before_check, meta_out)
+                        # 没拿到写锁（P4.30：库正被 CLI 写，acquire 抛 KBLockBusy）→ 本轮没跑，不做收尾
+                        # （收尾须在写锁内）；计数照常归还。
+                        if lock_held[0] or self._write_gate is None:
+                            await self._finalize_writable(before_agentao, before_check, meta_out)
                     finally:
                         # 计数-- 与释锁须发生在 finally 内、且在 meta 落定之后（评审 High）。
                         if lock_held[0] and self._write_gate is not None:

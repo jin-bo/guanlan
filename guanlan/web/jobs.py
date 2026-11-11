@@ -22,9 +22,11 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
-from ..errors import EXIT_AGENT_ERROR
+from .. import kblock
+from ..errors import EXIT_AGENT_ERROR, EXIT_USAGE
 from ..runtime import HEARTBEAT_INTERVAL_S
 
 JobState = Literal["queued", "running", "done"]
@@ -41,6 +43,59 @@ Emit = Callable[[str], None]
 ProgressCb = Callable[[float], str]
 # = 共用节拍 HEARTBEAT_INTERVAL_S 的本模块别名（保留独立名便于测试 monkeypatch）。
 _JOB_HEARTBEAT_INTERVAL_S = HEARTBEAT_INTERVAL_S
+
+
+class KBWriteLock:
+    """`threading.Lock` 外加库级 OS 文件锁（P4.30，决策P4.30-15）：Web 写者与 CLI 写命令互斥。
+
+    接口与 `threading.Lock` 相容（`acquire` / `release` / `locked` / with）。`acquire` 先取进程内锁，
+    再**非阻塞**取库级锁；库正被 CLI 等其它进程写 → 释放进程内锁并抛 `kblock.KBLockBusy`（不排队）。
+    只在每个写操作期间持有——开着 Web 时 CLI 照样能写。锁文件建不出来（OSError，如只读介质）时
+    退化为只有进程内锁，不让 Web 因此不可用。
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._lock = threading.Lock()
+        self._root = Path(root)
+        self._kb: kblock.KBLock | None = None
+        kblock.reserve_token_slot()  # 构造在启动线程：之后各写线程取锁只换令牌值，不增删 os.environ 的键
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if not self._lock.acquire(blocking, timeout):
+            return False
+        try:
+            self._kb = kblock.acquire(self._root, "web")
+        except OSError:
+            self._kb = None
+        except BaseException:  # KBLockBusy 及任何意外：不能把进程内锁留在持有态，否则此后所有写永久卡死
+            self._lock.release()
+            raise
+        return True
+
+    def release(self) -> None:
+        kb, self._kb = self._kb, None
+        try:
+            if kb is not None:
+                kb.release()
+        finally:  # 库级锁释放出错（如 os.close 的 EIO）也必须还进程内锁，否则此后所有写永久卡死
+            self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    @property
+    def owns_kb_lock(self) -> bool:
+        """本进程此刻**真持**库级 OS 锁（不是嵌套放行、也不是锁文件建不出时的进程内退化锁）。
+        只有这时才能断定原执行者已退出、可以恢复它留下的任务。"""
+        kb = self._kb
+        return kb is not None and not kb.nested and kb.held
+
+    def __enter__(self) -> KBWriteLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
 
 
 class WriteGate:
@@ -60,8 +115,9 @@ class WriteGate:
       「有可写会话在跑」、不是「有人持写锁」，两者语义不同。
     """
 
-    def __init__(self) -> None:
-        self.write_lock = threading.Lock()
+    def __init__(self, root: Path | None = None) -> None:
+        # root 给定（可写宿主）→ 写锁同时持库级 OS 文件锁（P4.30）；None（reader / 旧测试）→ 纯进程内锁。
+        self.write_lock = KBWriteLock(root) if root is not None else threading.Lock()
         self._turns = 0
         self._turns_lock = threading.Lock()  # 独立于 write_lock：只护计数器
         # wiki 写代际（P4.5-4 修订）：每次 wiki/ 内容可能变化（ingest/heal 作业、改了 violation
@@ -258,22 +314,35 @@ class JobQueue:
 
             # 单写者写锁（P4.5）：包住真正的写执行 `fn(emit)`，与可写 chat turn / 撤销 / GET /graph
             # 串行。在 worker 线程上阻塞 acquire 无碍（非事件循环线程）；None 时退回无锁（P4 行为）。
+            # 库被 CLI 等其它进程占用（P4.30 库级锁）→ 本作业直接以 EXIT_USAGE 完成、说明谁在写，不排队。
+            lock_error: Exception | None = None
             if self._write_lock is not None:
-                self._write_lock.acquire()
+                try:
+                    self._write_lock.acquire()
+                except Exception as exc:  # noqa: BLE001 — 取锁的任何意外都不能让 worker 死（否则此后作业全卡死）
+                    lock_error = exc
             try:
-                # 进程级 redirect：捕获 run_ingest 的人读 stdout/stderr。只在此单 worker 串行
-                # 发生，故无跨线程竞态（读/问答路径都不打印，见模块 docstring 红线）。
-                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                    outcome = fn(emit)
-                # 鸭子分流（决策P4.3-1）：int → 退出码（ingest/投喂，口径不变）；否则为带
-                # `.exit_code` 的结构化结果（heal 的 HealRun），整体存进 result、再取退出码。
-                # worker 仍**域无关**——只碰 `.exit_code`，不 import heal 类型；result 的序列化
-                # 落在 /api/jobs/{id} 端点。
-                if isinstance(outcome, int):
-                    job.exit_code = outcome
+                if lock_error is not None:
+                    if isinstance(lock_error, kblock.KBLockBusy):
+                        buf.write(str(lock_error))
+                        job.exit_code = EXIT_USAGE
+                    else:
+                        buf.write(f"取写锁异常：{type(lock_error).__name__}: {lock_error}")
+                        job.exit_code = EXIT_AGENT_ERROR
                 else:
-                    job.result = outcome
-                    job.exit_code = outcome.exit_code
+                    # 进程级 redirect：捕获 run_ingest 的人读 stdout/stderr。只在此单 worker 串行
+                    # 发生，故无跨线程竞态（读/问答路径都不打印，见模块 docstring 红线）。
+                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                        outcome = fn(emit)
+                    # 鸭子分流（决策P4.3-1）：int → 退出码（ingest/投喂，口径不变）；否则为带
+                    # `.exit_code` 的结构化结果（heal 的 HealRun），整体存进 result、再取退出码。
+                    # worker 仍**域无关**——只碰 `.exit_code`，不 import heal 类型；result 的序列化
+                    # 落在 /api/jobs/{id} 端点。
+                    if isinstance(outcome, int):
+                        job.exit_code = outcome
+                    else:
+                        job.result = outcome
+                        job.exit_code = outcome.exit_code
             except Exception as exc:  # noqa: BLE001 — worker 绝不能死，异常归一为作业失败
                 job.exit_code = EXIT_AGENT_ERROR
                 buf.write(f"\n作业执行异常：{type(exc).__name__}: {exc}")
@@ -286,7 +355,7 @@ class JobQueue:
                     if hb_thread is not None:
                         hb_thread.join(timeout=1.0)
                 job.progress = ""  # 清瞬时进度：最终结果只看 output（干净摘要，不含心跳历史）
-                if self._write_lock is not None:
+                if self._write_lock is not None and lock_error is None:
                     self._write_lock.release()  # 写执行收尾即释放，早于状态翻转/唤醒
                 # 顺序要紧：先写 output、再翻 state="done"，最后 set()。轮询读者只在见到
                 # state=="done" 后读 output（同线程程序序 + GIL 原子赋值保证"见 done 必见完整

@@ -55,12 +55,24 @@ _WATERMARK_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+\S")
 _LIST_RE = re.compile(r"^\s*(?:[-*+]|\d{1,3}[.)])\s+")
-_FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
+_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+
+
+def fence_closes(open_mark: str, line: str) -> bool:
+    """CommonMark 围栏闭合：同种字符、长度不短于开栏、其后只有空白。四个反引号的块里出现 ``` 不算闭合。"""
+    m = _FENCE_RE.match(line)
+    if not m:
+        return False
+    mark, rest = m.group(1), m.group(2)
+    return mark[0] == open_mark[0] and len(mark) >= len(open_mark) and not rest.strip()
 _IMAGE_LINE_RE = re.compile(r"^\s*!\[")
 _COMMENT_RE = re.compile(r"^\s*<!--")
 _HTML_TAG_RE = re.compile(r"^\s*</?[A-Za-z][^>]*>\s*$")
 
-_ROMAN_RE = re.compile(r"^(?=[ivxlcdm]+$)m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$", re.IGNORECASE)
+# 罗马页码只认 i/v/x 组成、≤ xxxix 的形态（前言页码的实际范围）：c/d/l/m 会把试卷的选项行「C」「D」、
+# 单词「Mix」误当页码；单个大写字母（I/V/X）同样常是选项或编号，只认小写的单字母。
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_ROMAN_RE = re.compile(r"^(?:x{0,3})(?:ix|iv|v?i{0,3})$", re.IGNORECASE)
 _PAGE_NUMBER_FORMS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^[-–—]?\s*(\d{1,4})\s*[-–—]?$"),  # 15 / - 15 - / —15—
     re.compile(r"^第\s*(\d{1,4})\s*页$"),  # 第 15 页
@@ -85,7 +97,7 @@ _WS_RE = re.compile(r"\s+")
 class Op:
     """一条整理操作（进作业输出 / 任务日志，供事后核对）。"""
 
-    kind: str  # page_number | header | watermark | watermark_suspect | heading_kept | join
+    kind: str  # page_number | header | watermark | watermark_suspect | heading_kept | join | control
     page: int | None
     text: str
     rule: str = ""
@@ -99,6 +111,7 @@ class Op:
             "watermark_suspect": "疑似水印（保留）",
             "heading_kept": "保留首个同名标题",
             "join": "跨页接句",
+            "control": "清除控制字符",
         }.get(self.kind, self.kind)
         rule = f"［{self.rule}］" if self.rule else ""
         return f"{label} {where}{rule}：{self.text}"
@@ -145,9 +158,18 @@ def _page_number_value(s: str) -> int | None:
         m = pat.match(t)
         if m:
             return int(m.group(1))
-    if _ROMAN_RE.match(t) and len(t) <= 7:
-        return 0  # 罗马数字：值不参与上限判断
+    if t and _ROMAN_RE.match(t) and (len(t) > 1 or t.islower()):
+        return _roman_value(t)  # 前置页的罗马页码：同样按跨页偏移一致性取证
     return None
+
+
+def _roman_value(t: str) -> int:
+    vals = {"i": 1, "v": 5, "x": 10}
+    total = 0
+    digits = [vals[c] for c in t.lower()]
+    for k, d in enumerate(digits):
+        total += -d if k + 1 < len(digits) and d < digits[k + 1] else d
+    return total
 
 
 # ── 行分类 ───────────────────────────────────────────────────────────────────
@@ -162,7 +184,7 @@ def _classify(lines: list[str]) -> list[str]:
         m = _FENCE_RE.match(line)
         if in_fence:
             kinds.append("fence")
-            if m and m.group(1) == fence_mark:
+            if fence_closes(fence_mark, line):
                 in_fence = False
             continue
         if m:
@@ -253,14 +275,23 @@ def _detect_noise(
     if not content_pages:
         return delete, notes
 
-    # 1) 页码：首尾窗口内整行只有页码形态（非标题/列表/表格等结构行）。
+    # 1) 页码：首尾窗口内整行只有页码形态（非标题/列表/表格等结构行），且**跨页有证据**——
+    #    印刷页码与锚点页号的差（偏移，前置页 / 跳页会让它分段变化）至少在 HEADER_MIN_PAGES 页上一致。
+    #    孤零零一个数字（页尾一行「42」、列表项「- 12」）凑不出同一偏移，证据不足就保留。
+    cands: list[tuple[_Page, int, int]] = []
     for p in content_pages:
         for i, _pos in _edge_hits(p):
             if kinds[i] not in ("text", "list"):
                 continue
             v = _page_number_value(lines[i])
             if v is not None and v <= max_page + PAGE_NUMBER_SLACK:
-                delete[i] = Op("page_number", p.number, lines[i].strip())
+                cands.append((p, i, v - p.number))
+    support: dict[int, set[int]] = {}
+    for p, _i, off in cands:
+        support.setdefault(off, set()).add(p.number)
+    for p, i, off in cands:
+        if len(support[off]) >= HEADER_MIN_PAGES:
+            delete[i] = Op("page_number", p.number, lines[i].strip())
 
     # 2) 页眉/页脚：统计 (键, 位置) 出现在哪些页。标题行可参与（标题形式的页眉），其余结构行不参与。
     occ: dict[tuple[str, str], list[tuple[_Page, int]]] = {}
@@ -281,6 +312,8 @@ def _detect_noise(
 
     n_all = len(content_pages)
     parity_pages = {par: [p for p in content_pages if p.number % 2 == par] for par in (0, 1)}
+    # 页号 → 在同奇偶序列里的位置（章节页眉判「连续」用）：每个候选键都要查，只建一次。
+    parity_pos = {par: {p.number: n for n, p in enumerate(seq)} for par, seq in parity_pages.items()}
 
     def qualifies(count: int, n: int) -> bool:
         return count >= HEADER_MIN_PAGES and n > 0 and count >= HEADER_MIN_RATIO * n
@@ -298,8 +331,7 @@ def _detect_noise(
                     # 章节页眉：页首、同奇偶序列里连续 ≥ CHAPTER_HEADER_RUN 次（§3.3 补充三）。
                     # 只认页首的普通文本行：标题形式的页眉须达到全书/奇偶页门槛（决策P4.30-13），
                     # 否则连续几页各自小节开头的同名小标题（「（一）适用范围」）会被误删。
-                    seq = parity_pages[par]
-                    pos_of = {p.number: n for n, p in enumerate(seq)}
+                    pos_of = parity_pos[par]
                     ordered = sorted(ph, key=lambda t: pos_of[t[0].number])
                     run: list[tuple[_Page, int]] = []
                     for item in ordered + [None]:  # type: ignore[list-item]
@@ -432,7 +464,13 @@ def _join_sentences(lines: list[str]) -> tuple[list[str], list[Op]]:
                 lines[j] = kept
             else:
                 remove.add(j)
-        kinds = _classify(lines)
+        # 只有 j / k 两行变了：就地重分类，不必每个锚点都重扫全文（数百页的书是 O(页数×行数)）。
+        # 两行都在围栏外；改完后若意外成了围栏线，围栏状态会波及后文，才退回全量重分类。
+        local = [_classify([lines[i]])[0] for i in (j, k)]
+        if "fence" in local:
+            kinds = _classify(lines)
+        else:
+            kinds[j], kinds[k] = local
     if remove:
         lines = _apply_deletions(lines, remove)
     return lines, ops
@@ -443,9 +481,14 @@ def _join_sentences(lines: list[str]) -> tuple[list[str], list[Op]]:
 
 def _first_h1(body: str) -> str | None:
     in_fence = False
+    fence_mark = ""
     for line in body.split("\n"):
-        if _FENCE_RE.match(line):
-            in_fence = not in_fence
+        m_f = _FENCE_RE.match(line)
+        if m_f:  # 与 _classify 同口径：只有同种围栏线（``` / ~~~）才闭合，别把代码块里的 `# 注释` 当书名
+            if not in_fence:
+                in_fence, fence_mark = True, m_f.group(1)
+            elif fence_closes(fence_mark, line):
+                in_fence = False
             continue
         if not in_fence:
             m = re.match(r"^\s{0,3}#\s+(.+?)\s*#*\s*$", line)
@@ -480,12 +523,17 @@ def normalize(
 ) -> NormalizeResult:
     """规范化整理（§3）。顺序固定：分页 → 去噪 → 跨页接句 → 统计正文、写元数据。"""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # 转换器常带出换页符 \x0c 等 C0 控制字符：raw/ 的文本闸（rawio.check_text_admission）会拒收整本。
+    # 换页符换成换行（它本来就是分隔），其余清掉；记一条操作供核对。
+    text, n_ctrl = _CONTROL_RE.subn(lambda m: "\n" if m.group() == "\x0c" else "", text)
     old_meta, body = _split_meta(text)
     lines = body.split("\n")
     kinds = _classify(lines)
     pages, total = _paginate(lines, kinds)
 
     ops: list[Op] = []
+    if n_ctrl:
+        ops.append(Op("control", None, f"{n_ctrl} 个", "C0 控制字符（换页符改为换行）"))
     if pages:
         delete, notes = _detect_noise(lines, kinds, pages, total or 0)
         ops.extend(delete[i] for i in sorted(delete))
@@ -503,6 +551,8 @@ def normalize(
         "watermarks_removed": sum(1 for o in ops if o.kind == "watermark"),
         "sentences_joined": sum(1 for o in ops if o.kind == "join"),
     }
+    if n_ctrl:
+        summary["control_chars_removed"] = n_ctrl
     meta: dict = {"title": title}
     if origin:
         meta["origin"] = origin

@@ -1,6 +1,6 @@
 "use strict";
 // 由原 app.js 按关注点拆分（经典脚本，共享全局作用域；非 ES module）。
-// 载入顺序见 index.html；boot.js 最后载入。 投喂 + 暂存区（workspace 浏览/晋级/重整）。
+// 载入顺序见 index.html；boot.js 最后载入。 投喂 + 暂存区（workspace 浏览 + 一键入库，P4.30）。
 // ── 投喂：粘贴正文 + 命名 → POST /api/raw → 一键 ingest（P4.1）──────────────────
 //
 // 顶栏「投喂」→ 浮层（文件名输入 + 正文 textarea + 存盘）。存盘期间按钮置「保存中…」并禁用
@@ -94,12 +94,12 @@ async function submitFeed(overwrite) {
   status.appendChild(ingestBtn);
 }
 
-// ── 暂存区（P4.6）：浏览 workspace/ → 审阅/修订/晋级为源/删除 → ingest 串联 ──────────
+// ── 暂存区（P4.6 → P4.30）：上传文件 → 一键入库（解析·整理·拆分 → 确认 → 落 raw/ → 依次入库）──────
 //
-// 顶栏「暂存区」→ 浮层：① 待解析 uploads/（[问 agent 解析] 回填 composer / [晋级为源]（仅 .md）/ 🗑）
-// + ② 待晋级 parsed/（[预览]/[让 agent 修订] 回填 composer/[晋级为源]/🗑 + 勾选「合并选中…」）。
-// 复用既有 #overlay / triggerIngest / pollJob / 投喂 slug-409 交互，不引新组件、不改两栏（决策P4-3）。
-// 晋级/删除是宿主写：可写 turn 跑动期（workspace-write + chatStreaming）置灰，对应后端层③ 423（§7.3）。
+// 顶栏「暂存区」→ 浮层：顶部是一键入库任务卡（等待确认 / 入库中 / 已暂停，可开始、暂停、继续、放弃，
+// 进展日志实时刷新）；下面 ① 上传文件 uploads/（[一键入库] / 🗑）+ ② 已解析 parsed/（只读[预览] / 🗑）。
+// P4.6.1 的「开始解析 / 晋级为源 / 断链检查 / 重整 / 让 agent 修订 / 合并」随 P4.30 下线（决策P4.30-2）。
+// 一键入库/删除是宿主写：可写 turn 跑动期置灰，对应后端层③ 423（§7.3）。
 
 
 function fmtBytes(n) {
@@ -108,22 +108,14 @@ function fmtBytes(n) {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// 宿主写动作在可写 turn 跑动期是否应置灰（晋级/删除/ingest）——对应后端层③ 423（§7.3）。
-function hostWriteBlocked() {
-  return chatStreaming && currentMode === "workspace-write";
+function fmtMinutes(seconds) {
+  const m = Math.max(1, Math.round((seconds || 0) / 60));
+  return m < 60 ? t("oc.minutes", m) : t("oc.hours", Math.floor(m / 60), m % 60);
 }
 
-// 回填 composer（[问 agent 解析] / [让 agent 修订] / [合并选中] 共用）：把指令塞进输入框、聚焦、收起浮层。
-// 当前 read-only 时先提示切 /mode workspace-write（解析/修订都需可写会话，§7.2 ①）。
-function fillComposer(text, { needWritable = false } = {}) {
-  $("#overlay").classList.add("hidden");
-  const ta = $("#chat-input");
-  ta.value = text;
-  autoGrowInput();
-  ta.focus();
-  if (needWritable && currentMode !== "workspace-write") {
-    addMsg("note", t("staging.needWritableNote"));
-  }
+// 宿主写动作在可写 turn 跑动期是否应置灰（一键入库/删除）——对应后端层③ 423（§7.3）。
+function hostWriteBlocked() {
+  return chatStreaming && currentMode === "workspace-write";
 }
 
 $("#staging-btn").addEventListener("click", openStaging);
@@ -159,7 +151,7 @@ function stagingUp() {
   loadStaging();
 }
 
-// 修订 turn 收尾（done/stopped）后，若暂存区仍开着则自动重拉刷新当前目录（决策P4.6-9）。
+// 会话 turn 收尾（done/stopped）后，若暂存区仍开着则自动重拉刷新当前目录（决策P4.6-9）。
 async function refreshStagingIfOpen() {
   if (!stagingOpen || $("#overlay").classList.contains("hidden")) return;
   loadStaging();
@@ -178,10 +170,14 @@ function renderStaging(data) {
   }
 
   if (data.root) {
-    // 根视图：两段（uploads / parsed）。每段列其**直接子项**（子目录可点入、文件带操作）。
-    renderSection(box, t("staging.uploadsHead"), "uploads", "workspace/uploads",
+    // 根视图：一键入库任务卡 + 两段（uploads / parsed）。每段列其**直接子项**（子目录可点入、文件带操作）。
+    const panel = document.createElement("div");
+    panel.id = "oneclick-panel";
+    box.appendChild(panel);
+    loadOneclickPanel();
+    renderSection(box, t("staging.uploadsHead"), "uploads",
       data.uploads || [], blocked, t("staging.uploadsEmpty"));
-    renderSection(box, t("staging.parsedHead"), "parsed", "workspace/parsed",
+    renderSection(box, t("staging.parsedHead"), "parsed",
       data.parsed || [], blocked, t("staging.parsedEmpty"), t("staging.parsedSub"));
   } else {
     // 目录视图：面包屑 + 返回上一级 + 该目录直接子项（一级一级点）。
@@ -196,7 +192,7 @@ function renderStaging(data) {
     label.textContent = data.path; // textContent：路径按字面显示
     crumb.append(up, label);
     box.appendChild(crumb);
-    renderSection(box, "", data.base, data.path, data.items || [], blocked, t("staging.dirEmpty"));
+    renderSection(box, "", data.base, data.items || [], blocked, t("staging.dirEmpty"));
   }
 
   const flow = document.createElement("p");
@@ -206,42 +202,13 @@ function renderStaging(data) {
 }
 
 // 渲染一段目录列表：子目录行（可点入 + 整删）在前，文件行（按 base 决定 uploads/parsed 操作）在后。
-// `base` ∈ {uploads, parsed} 决定文件操作集；`dirPath` 是本段所在目录（合并产物落此目录）。
-function renderSection(box, headerText, base, dirPath, items, blocked, emptyText, sub) {
+function renderSection(box, headerText, base, items, blocked, emptyText, sub) {
   if (headerText) box.appendChild(stagingHeader(headerText, sub));
   if (!items.length) { box.appendChild(stagingEmpty(t("staging.emptyWrap", emptyText))); return; }
-  const selected = new Set();
-  const mergeBtn = document.createElement("button");
-  mergeBtn.className = "stage-merge";
-  mergeBtn.textContent = t("staging.merge");
-  mergeBtn.disabled = true;
-  const updateMerge = () => { mergeBtn.disabled = selected.size < 2; };
-  let parsedFiles = 0;
   for (const it of items) {
-    if (it.is_dir) {
-      box.appendChild(renderFolderRow(it, blocked));
-    } else if (base === "uploads") {
-      box.appendChild(renderUploadRow(it, blocked));
-    } else {
-      parsedFiles++;
-      box.appendChild(renderParsedRow(it, blocked, selected, updateMerge));
-    }
-  }
-  if (base === "parsed" && parsedFiles) {
-    // 合并（复用 heal 勾选子集骨架，决策P4.6-9）：勾 ≥2 个 → 预填 agent 建议名（可改）→ 回填 composer。
-    mergeBtn.addEventListener("click", () => {
-      const picks = [...selected];
-      if (picks.length < 2) return;
-      const suggested = "合并-" + picks.map((p) => p.split("/").pop().replace(/\.md$/i, "")).join("-") + ".md";
-      const name = window.prompt(t("staging.mergePrompt"), suggested);
-      if (!name) return;
-      const list = picks.join("、");
-      fillComposer(t("staging.mergeCmd", list, `${dirPath}/${name}`), { needWritable: true });
-    });
-    const mergeBar = document.createElement("div");
-    mergeBar.className = "stage-mergebar";
-    mergeBar.appendChild(mergeBtn);
-    box.appendChild(mergeBar);
+    if (it.is_dir) box.appendChild(renderFolderRow(it, blocked));
+    else if (base === "uploads") box.appendChild(renderUploadRow(it, blocked));
+    else box.appendChild(renderParsedRow(it, blocked));
   }
 }
 
@@ -316,10 +283,7 @@ function setStageIcon(btn, iconId, label, desc, blocked) {
   btn.setAttribute("aria-label", label);
 }
 
-// uploads/ 行：徽章 + 文件名 + [问 agent 解析]（+ .md 额外 [晋级为源]）+ 🗑。
-function renderUploadRow(it, blocked) {
-  const row = document.createElement("div");
-  row.className = "stage-row";
+function fileRowHead(it) {
   // 图像 → 缩略图（经 /api/workspace/raw 取原字节）；其它 → 文件类型角标。
   const ico = makeFileIcon(it.name, {
     isImage: it.kind === "image",
@@ -330,147 +294,36 @@ function renderUploadRow(it, blocked) {
   nm.className = "stage-name";
   nm.textContent = it.name; // textContent：文件名按字面显示，无注入
   nm.title = it.name;
+  return [ico, nm];
+}
+
+// uploads/ 行：徽章 + 文件名 + 大小 + [一键入库] + 🗑。
+function renderUploadRow(it, blocked) {
+  const row = document.createElement("div");
+  row.className = "stage-row";
   const sz = document.createElement("span");
   sz.className = "stage-size muted";
   sz.textContent = fmtBytes(it.bytes);
-  const parse = document.createElement("button");
-  parse.className = "stage-act";  // P4.6.1：宿主确定性解析（非「问 agent」），点击即建解析作业
-  setStageIcon(parse, "i-play", t("staging.parse"), t("tip.parse"), blocked);
-  parse.disabled = blocked;
-  parse.addEventListener("click", () => triggerParse(it.path));
-  row.append(ico, nm, sz, parse);
-  // 退化路径（§6 / §7.2 ①）：uploads/*.md 也可直接晋级（source 校验只需 workspace/ + .md + 存在）。
-  if (it.kind === "text" && /\.md$/i.test(it.name)) {
-    row.appendChild(promoteButton(it, blocked));
-  }
-  row.appendChild(trashButton(it.path, row, blocked));
+  const go = document.createElement("button");
+  go.className = "stage-act stage-oneclick";
+  go.textContent = t("staging.oneclick");
+  go.title = blocked ? `${t("tip.oneclick")}（${t("staging.writeBusy")}）` : t("tip.oneclick");
+  go.disabled = blocked;
+  go.addEventListener("click", () => triggerOneclick(it.path));
+  row.append(...fileRowHead(it), sz, go, trashButton(it.path, row, blocked));
   return row;
 }
 
-// parsed/ 行：勾选框 + 文件名 + [预览] + [让 agent 修订] + [晋级为源] + 🗑。
-function renderParsedRow(it, blocked, selected, updateMerge) {
+// parsed/ 行：文件名 + 只读[预览] + 🗑（决策P4.30-2：parsed/ 只保留删除与只读预览）。
+function renderParsedRow(it, blocked) {
   const row = document.createElement("div");
   row.className = "stage-row";
-  const cb = document.createElement("input");
-  cb.type = "checkbox";
-  cb.className = "stage-pick";
-  cb.title = t("tip.pickMerge");
-  cb.addEventListener("change", () => {
-    if (cb.checked) selected.add(it.path);
-    else selected.delete(it.path);
-    updateMerge();
-  });
-  const ico = makeFileIcon(it.name, {
-    isImage: it.kind === "image",
-    thumbUrl: `/api/workspace/raw?path=${encodeURIComponent(it.path)}`,
-  });
-  ico.classList.add("stage-ico");
-  const nm = document.createElement("span");
-  nm.className = "stage-name";
-  nm.textContent = it.name;
-  nm.title = it.name;
   const preview = document.createElement("button");
   preview.className = "stage-act";
   setStageIcon(preview, "i-eye", t("staging.preview"), t("tip.preview"));
   preview.addEventListener("click", () => previewWorkspaceFile(it.path));
-  const revise = document.createElement("button");
-  revise.className = "stage-act";
-  setStageIcon(revise, "i-pencil", t("staging.revise"), t("tip.revise"));
-  revise.addEventListener("click", () => {
-    const what = window.prompt(t("staging.revisePrompt", it.name), "");
-    if (what === null || !what.trim()) return;
-    fillComposer(t("staging.reviseCmd", it.path, what.trim()), { needWritable: true });
-  });
-  // 断链检查（P4.6.1，决策P4.6.1-5）：拆分/合并后图片可能悬空/错位，一键检查 + 重整（确定性、宿主写）。
-  const relink = document.createElement("button");
-  relink.className = "stage-act";
-  setStageIcon(relink, "i-link", t("staging.relink"), t("tip.relink"));
-  relink.addEventListener("click", () => checkRelink(it, relink));
-  row.append(cb, ico, nm, preview, revise, relink, promoteButton(it, blocked), trashButton(it.path, row, blocked));
+  row.append(...fileRowHead(it), preview, trashButton(it.path, row, blocked));
   return row;
-}
-
-// 断链检查（决策P4.6.1-5）：GET image-lint → 行内显示悬空/错位计数；可重整时给「重整图片」按钮。
-// 再点收起（与晋级表单同 toggle 行为）。
-async function checkRelink(it, anchorBtn) {
-  const row = anchorBtn.parentElement;
-  const existing = row.querySelector(".stage-relink-status");
-  if (existing) { existing.remove(); return; } // 再点收起
-  const status = document.createElement("div");
-  status.className = "stage-relink-status stage-promote-status";
-  status.textContent = t("staging.relinkChecking");
-  row.appendChild(status);
-  let data;
-  try {
-    data = await getJSON(`/api/workspace/image-lint?file=${encodeURIComponent(it.path)}`);
-  } catch (e) {
-    status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.relinkFail", e.message))}</span>`;
-    return;
-  }
-  status.innerHTML = "";
-  const dangling = (data.dangling || []).length;
-  const misplaced = (data.misplaced || []).length;
-  if (!dangling && !misplaced) {
-    status.innerHTML = `<span class="report-ok">${escapeHtml(t("staging.relinkClean"))}</span>`;
-    return;
-  }
-  if (misplaced) {
-    const m = document.createElement("span");
-    m.className = "muted";
-    m.textContent = t("staging.relinkMisplaced", misplaced) + " ";
-    status.appendChild(m);
-  }
-  if (dangling) {
-    const d = document.createElement("span");
-    d.className = "report-bad";
-    d.textContent = t("staging.relinkDangling", dangling) + " ";
-    status.appendChild(d);
-  }
-  if (data.needs_relocalize) { // 仅错位可自动修；悬空（文件缺失）重整无能为力，只提示
-    const go = document.createElement("button");
-    go.className = "stage-act";
-    go.textContent = t("staging.relinkGo");
-    go.disabled = hostWriteBlocked();
-    if (go.disabled) go.title = t("staging.writeBusy");
-    go.addEventListener("click", () => runRelocalize(it, go, status));
-    status.appendChild(go);
-  }
-}
-
-async function runRelocalize(it, go, status) {
-  go.disabled = true;
-  go.textContent = t("staging.relinking");
-  try {
-    const res = await fetch("/api/workspace/relocalize", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file: it.path }),
-    });
-    if (res.status === 423) {
-      go.disabled = false; go.textContent = t("staging.relinkGo");
-      status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.writableRetryDot"))}</span>`;
-      return;
-    }
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({}));
-      throw new Error(d.detail || `HTTP ${res.status}`);
-    }
-    status.innerHTML = `<span class="report-ok">${escapeHtml(t("staging.relinkDone"))}</span>`;
-    setTimeout(loadStaging, 600); // 重整改了 md/图目录 → 刷新暂存区
-  } catch (e) {
-    go.disabled = false; go.textContent = t("staging.relinkGo");
-    status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.relinkFail", e.message))}</span>`;
-  }
-}
-
-// 「晋级为源」按钮：点开行内晋级表单（名/出处 + 确认）；复用投喂 slug-409 交互。
-function promoteButton(it, blocked) {
-  const btn = document.createElement("button");
-  btn.className = "stage-act stage-promote";
-  setStageIcon(btn, "i-arrow-right", t("staging.promote"), t("tip.promote"), blocked);
-  btn.disabled = blocked;
-  btn.addEventListener("click", () => openPromoteForm(it, btn));
-  return btn;
 }
 
 // 🗑 删 scratch：DELETE /api/workspace/file（单写者 + 层③ 423）。可写 turn 跑动期置灰。
@@ -556,85 +409,272 @@ async function previewWorkspaceFile(path) {
   paint();
 }
 
-// 行内晋级表单：名（slug 预填 stem）+ 出处（可选，空则后端回退 source）+ 确认；409 引导改名/覆盖（失真告警）。
-function openPromoteForm(it, anchorBtn) {
-  const existing = anchorBtn.parentElement.querySelector(".stage-promote-form");
-  if (existing) { existing.remove(); return; } // 再点收起
-  const form = document.createElement("div");
-  form.className = "stage-promote-form";
-  const stem = it.name.replace(/\.md$/i, "");
-  const nameIn = document.createElement("input");
-  nameIn.type = "text";
-  nameIn.value = stem;
-  nameIn.placeholder = t("staging.promoteNamePh");
-  const originIn = document.createElement("input");
-  originIn.type = "text";
-  originIn.placeholder = t("staging.promoteOriginPh");
-  const go = document.createElement("button");
-  go.className = "stage-act";
-  go.textContent = t("staging.promoteConfirm");
-  const status = document.createElement("div");
-  status.className = "stage-promote-status";
-  go.addEventListener("click", () =>
-    submitPromote(it.path, nameIn.value.trim(), originIn.value, false, go, status)
-  );
-  form.append(nameIn, originIn, go, status);
-  anchorBtn.parentElement.appendChild(form);
-  nameIn.focus();
+// ── 一键入库（P4.30）：准备作业 → 任务卡（确认 / 进度 / 暂停 / 继续 / 放弃）────────────────
+//
+// 准备（解析·整理·拆分）是一个写作业：POST /api/oneclick → 进度窗（pollJob 实时显示转换日志）→ 完成后
+// 回暂存区，任务卡停在「等待确认」。确认后的执行是长作业（每篇数分钟），任务卡每 2 秒拉一次
+// GET /api/oneclick 刷新进度与日志尾；只重画任务卡本身，不重画整个暂存区（不打断滚动/预览）。
+
+let oneclickTimer = null;
+
+// t() 首参须是字符串字面量（i18n 静态守恒，决策P4.7-8）：状态 → 文案用查表，不拼 key。
+function ocStateLabel(state) {
+  return ({
+    preparing: t("oc.statePreparing"),
+    awaiting_confirm: t("oc.stateAwaiting"),
+    running: t("oc.stateRunning"),
+    paused: t("oc.statePaused"),
+    done: t("oc.stateDone"),
+    failed: t("oc.stateFailed"),
+    cancelled: t("oc.stateCancelled"),
+  })[state] || state;
 }
 
-async function submitPromote(source, name, origin, overwrite, go, status) {
-  if (!name) { status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.promoteNameEmpty"))}</span>`; return; }
-  go.disabled = true;
-  go.textContent = t("staging.promoting");
-  status.textContent = "";
-  const reset = () => { go.disabled = false; go.textContent = t("staging.promoteConfirm"); };
-  let res, data;
+function ocItemLabel(state) {
+  return ({
+    pending: t("oc.itemPending"),
+    running: t("oc.itemRunning"),
+    done: t("oc.itemDone"),
+    failed: t("oc.itemFailed"),
+  })[state || "pending"] || state;
+}
+
+async function triggerOneclick(uploadPath) {
+  showOverlay("overlay.oneclick", `<p class="muted">${escapeHtml(t("staging.ocSubmitted", uploadPath))}</p>`);
   try {
-    const body = { name, source, overwrite };
-    if (origin.trim()) body.origin = origin;
-    res = await fetch("/api/raw", {
+    const res = await fetch("/api/oneclick", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ upload: uploadPath }),
     });
-    data = await res.json().catch(() => ({}));
+    if (res.status === 423) {
+      $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.writableRetryDot"))}</p>`;
+      return;
+    }
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.detail || `HTTP ${res.status}`);
+    }
+    const { job_id } = await res.json();
+    await pollJob(job_id, t("staging.ocPreparing"), renderOneclickPrepared);
   } catch (e) {
-    reset();
-    status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.promoteFail", e.message))}</span>`;
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.ocFail", e.message))}</p>`;
+  }
+}
+
+function renderOneclickPrepared(job) {
+  if (job.exit_code === 0) { openStaging(); return; } // 回暂存区（标题复位），任务卡停在「等待确认」
+  const box = $("#overlay-body");
+  box.innerHTML = `<p><span class="report-bad">${escapeHtml(t("common.exitCode", job.exit_code))}</span></p>`;
+  const pre = document.createElement("pre");
+  pre.textContent = collapseCR(job.output || t("common.noOutput"));
+  const back = document.createElement("button");
+  back.className = "stage-act";
+  back.textContent = t("staging.backToStaging");
+  back.addEventListener("click", openStaging);
+  box.append(pre, back);
+}
+
+async function loadOneclickPanel() {
+  clearTimeout(oneclickTimer);
+  const panel = document.getElementById("oneclick-panel");
+  if (!panel || !stagingOpen) return;
+  let data;
+  try {
+    data = await getJSON("/api/oneclick");
+  } catch (e) {
+    panel.innerHTML = "";
     return;
   }
-  if (res.status === 423) {
-    reset();
-    status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.writableRetryDot"))}</span>`;
+  if (document.getElementById("oneclick-panel") !== panel) return; // 期间暂存区已重画
+  renderOneclickPanel(panel, data);
+  const task = data.active;
+  if (task && (task.job_id || task.state === "running" || task.state === "preparing")) {
+    oneclickTimer = setTimeout(loadOneclickPanel, 2000);
+  }
+}
+
+function ocButton(label, onClick, { primary = true, disabled = false } = {}) {
+  const b = document.createElement("button");
+  b.className = primary ? "stage-act" : "stage-act stage-act-quiet";
+  b.textContent = label;
+  b.disabled = disabled;
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+async function ocPost(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const d = await res.json().catch(() => ({}));
+  if (res.status === 423) throw new Error(t("staging.writableRetryDot"));
+  if (!res.ok) throw new Error(d.detail || `HTTP ${res.status}`);
+  return d;
+}
+
+function renderOneclickPanel(panel, data) {
+  // 每 2 秒重画：沿用用户上次对「详情」的展开/收起（首次渲染才按状态给默认值）。
+  const prevDet = panel.querySelector("details");
+  const prevOpen = prevDet ? prevDet.open : null;
+  panel.innerHTML = "";
+  const task = data.active;
+  if (!task) {
+    if (data.holder) {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = t("oc.busy", data.holder);
+      panel.appendChild(p);
+    }
     return;
   }
-  if (res.status === 409) {
-    // 默认引导改名（开新源）；覆盖须显式确认 + 失真告警（决策P4.6-10）。
-    reset();
-    status.innerHTML = `<span class="report-bad">${escapeHtml(data.detail || t("staging.promoteConflict"))}</span>${escapeHtml(t("staging.promoteRenameOr"))}`;
-    const ow = document.createElement("button");
-    ow.className = "stage-act";
-    ow.textContent = t("staging.overwriteRisk");
-    ow.title = t("tip.overwrite");
-    ow.addEventListener("click", () => {
-      if (window.confirm(t("staging.overwriteConfirm")))
-        submitPromote(source, name, origin, true, go, status);
-    });
-    status.appendChild(ow);
-    return;
+  const blocked = hostWriteBlocked();
+  const card = document.createElement("div");
+  card.className = "oc-card";
+  const head = document.createElement("div");
+  head.className = "stage-head";
+  head.textContent = `${t("oc.title")} · ${ocStateLabel(task.state)}`;
+  const name = (task.upload || "").split("/").pop();
+  const summary = document.createElement("p");
+  summary.textContent = t("oc.summary", name, task.items.length, fmtMinutes(task.estimate_seconds));
+  card.append(head, summary);
+
+  const status = document.createElement("div");
+  status.className = "stage-promote-status";
+  const fail = (e) => { status.innerHTML = `<span class="report-bad">${escapeHtml(e.message)}</span>`; };
+  const actions = document.createElement("div");
+  actions.className = "oc-actions";
+  const pc = task.precheck || {};
+
+  if (task.state === "awaiting_confirm" && !task.job_id) {
+    let overwrite = null;
+    if (pc.status === "conflict") {
+      const c = document.createElement("div");
+      c.className = "report-bad";
+      c.textContent = t("oc.conflict");
+      const ul = document.createElement("ul");
+      for (const d of pc.details || []) { const li = document.createElement("li"); li.textContent = d; ul.appendChild(li); }
+      card.append(c, ul);
+    } else {
+      if (pc.status === "overwritable") {
+        const label = document.createElement("label");
+        label.className = "oc-overwrite";
+        overwrite = document.createElement("input");
+        overwrite.type = "checkbox";
+        label.append(overwrite, document.createTextNode(" " + t("oc.overwrite")));
+        card.appendChild(label);
+      }
+      actions.appendChild(ocButton(t("oc.start"), async () => {
+        if (overwrite && !overwrite.checked) { status.textContent = t("oc.overwriteNeeded"); return; }
+        try {
+          await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/confirm`, { overwrite: !!(overwrite && overwrite.checked) });
+          loadOneclickPanel();
+        } catch (e) { fail(e); }
+      }, { disabled: blocked }));
+    }
+    actions.appendChild(ocCancelButton(task, fail, blocked));
+  } else if (task.state === "running" || task.job_id) {
+    const prog = document.createElement("p");
+    prog.textContent = t("oc.progress", task.done, task.items.length);
+    card.appendChild(prog);
+    if (task.pausing) {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = t("oc.pausing");
+      card.appendChild(p);
+    } else if (task.job_id) {
+      actions.appendChild(ocButton(t("oc.pause"), async () => {
+        try { await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/pause`); loadOneclickPanel(); } catch (e) { fail(e); }
+      }));
+    } else if (!data.holder) {
+      // 「入库中」却没有本进程作业、也没有别的写者在持锁：执行者已退出（作业异常等）。后端 resume
+      // 会先把它恢复成已暂停再继续，给出口，不让任务卡在这里只能等重启。
+      actions.appendChild(ocButton(t("oc.resume"), async () => {
+        try { await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/resume`); loadOneclickPanel(); } catch (e) { fail(e); }
+      }, { disabled: blocked }));
+      actions.appendChild(ocCancelButton(task, fail, blocked)); // 后端放弃同样先恢复：不必先继续入库才能放弃
+    }
+  } else if (task.state === "paused") {
+    const prog = document.createElement("p");
+    prog.textContent = t("oc.progress", task.done, task.items.length);
+    card.appendChild(prog);
+    // 暂停原因是「复检发现可覆盖的旧文件」：继续时可补给覆盖确认（「冲突」不给这个选项）
+    let pOverwrite = null;
+    if (task.precheck && task.precheck.status === "overwritable" && !task.overwrite) {
+      const label = document.createElement("label");
+      label.className = "oc-overwrite";
+      pOverwrite = document.createElement("input");
+      pOverwrite.type = "checkbox";
+      label.append(pOverwrite, document.createTextNode(" " + t("oc.overwrite")));
+      card.appendChild(label);
+    }
+    actions.appendChild(ocButton(t("oc.resume"), async () => {
+      if (pOverwrite && !pOverwrite.checked) { status.textContent = t("oc.overwriteNeeded"); return; }
+      try {
+        await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/resume`, { overwrite: !!(pOverwrite && pOverwrite.checked) });
+        loadOneclickPanel();
+      } catch (e) { fail(e); }
+    }, { disabled: blocked }));
+    actions.appendChild(ocCancelButton(task, fail, blocked));
   }
-  if (!res.ok) {
-    reset();
-    status.innerHTML = `<span class="report-bad">${escapeHtml(t("staging.promoteFail", data.detail || `HTTP ${res.status}`))}</span>`;
-    return;
+  if (task.reason) {
+    const r = document.createElement("p");
+    r.className = "muted";
+    r.textContent = t("oc.reason", task.reason);
+    card.appendChild(r);
   }
-  // 成功：原地变「✓ 已晋级 + 立即 ingest」。
-  status.innerHTML = `<span class="report-ok">${escapeHtml(t("staging.promoted", data.saved))}</span> `;
-  go.remove();
-  const ingestBtn = document.createElement("button");
-  ingestBtn.className = "stage-act";
-  ingestBtn.textContent = t("staging.ingestNow");
-  ingestBtn.addEventListener("click", () => triggerIngest(data.saved));
-  status.appendChild(ingestBtn);
+  if (task.last_error && !task.job_id) {
+    // 上一次确认/继续作业失败（库被占用、复检被拒等）：任务退回原状态，原因只在作业输出里，在此透出。
+    const e = document.createElement("p");
+    e.className = "report-bad";
+    e.style.whiteSpace = "pre-wrap";
+    e.textContent = task.last_error;
+    card.appendChild(e);
+  }
+  card.append(actions, status);
+
+  // 详情（可展开，只供查看）：整理摘要、图片警告、逐份文件、进展日志尾。
+  const det = document.createElement("details");
+  const sum = document.createElement("summary");
+  sum.textContent = t("oc.details");
+  det.appendChild(sum);
+  const n = task.normalized || {};
+  const norm = document.createElement("p");
+  norm.className = "muted";
+  norm.textContent = t("oc.normalized", n.headers_removed || 0, n.page_numbers_removed || 0, n.watermarks_removed || 0, n.sentences_joined || 0);
+  det.appendChild(norm);
+  if ((task.warnings || []).length) {
+    const w = document.createElement("p");
+    w.className = "muted";
+    w.textContent = t("oc.imageWarn", task.warnings.length);
+    det.appendChild(w);
+  }
+  const list = document.createElement("ol");
+  list.className = "oc-items";
+  for (const it of task.items) {
+    const li = document.createElement("li");
+    const pages = it.pages ? ` · p.${it.pages[0]}–${it.pages[1]}` : "";
+    li.textContent = `${it.raw.split("/").pop()} · ${it.chars}${pages} · ${ocItemLabel(it.state)}`;
+    li.title = (it.path || []).join(" / ");
+    list.appendChild(li);
+  }
+  det.appendChild(list);
+  if ((task.log_tail || []).length) {
+    const pre = document.createElement("pre");
+    pre.className = "oc-log";
+    pre.textContent = task.log_tail.slice(-40).join("\n");
+    det.appendChild(pre);
+  }
+  det.open = prevOpen !== null ? prevOpen : !!(task.job_id || task.state === "running"); // 入库中默认展开日志
+  card.appendChild(det);
+  panel.appendChild(card);
+}
+
+function ocCancelButton(task, fail, blocked) {
+  return ocButton(t("oc.cancel"), async () => {
+    if (!window.confirm(t("oc.cancelConfirm"))) return;
+    try { await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/cancel`); loadStaging(); } catch (e) { fail(e); }
+  }, { primary: false, disabled: blocked });
 }

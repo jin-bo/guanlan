@@ -53,7 +53,7 @@ wrapper 确定性生成最小模板（`AGENTAO.md`、`SCHEMA.md`、`raw/`、含 
 摄入一篇 `.md` 资料。ingest 不读二进制文件。PDF、DOCX 等原件先转成 `.md`：
 
 - 命令行：`guanlan convert <file>` 在 `raw/` 生成 `.md`（带 `origin` 出处），再 ingest 这个 `.md`。
-- Web 可写会话：用 `pdf-to-markdown` skill 解析到 `workspace/parsed/`，经人审核后移入 `raw/`。
+- 整本书或长文档：建议用户自己运行 `guanlan import <file>` 或用 Web 暂存区的「一键入库」，它会自动解析、清理、拆分，经用户确认后落 `raw/` 并逐篇 ingest。你不要在本轮里运行它（嵌套执行会被拒绝），也不要自己把 `workspace/parsed/` 的文件移进 `raw/`。
 
 **范围与切块**：
 
