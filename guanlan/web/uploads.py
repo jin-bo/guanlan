@@ -12,36 +12,99 @@ import base64
 import contextlib
 import os
 import tempfile
+import time
 from pathlib import Path
+from typing import BinaryIO
 from xml.sax.saxutils import quoteattr
 
 from agentao.media_limits import MAX_IMAGE_BYTES, MAX_IMAGES_PER_TURN
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException
 
-from ..errors import EXIT_OK
 from .rawfeed import _normalize_basename, _raw_slug
 
 # ── 文件上传（POST /api/upload）：暂存进 workspace/uploads/，作对话附件 ───────────────
 #
 # 上传是**人投喂二进制/任意文件**到暂存区（非源）：与投喂（写 raw/、`.md`-only 文本）不同——
 # 这里**多格式、不限扩展名、保留原扩展名**（暂存区非源，PDF/docx/任意二进制皆可，决策P4.6-3）。
-# 落点 `workspace/uploads/`（P4.5 可写会话里 agent 可读、可解析），落盘经单写者 JobQueue 串行。
+# 落点 `workspace/uploads/`（P4.5 可写会话里 agent 可读、可解析）。落盘**不进**单写者 JobQueue、不取库级锁
+# （#172）：上传只写 `workspace/uploads/`，CLI 与 wiki 写作业都不写这里；分块写临时文件再原子换名。
 # 上传后该文件可作 chat **附件**（见 ChatBody.attachments / _augment_with_attachments）。
 
 MAX_UPLOAD_BYTES = 256 * 1024 * 1024  # 上传单文件大小上限（默认 256 MiB，> 投喂的 5 MiB；扫描版 PDF 体量大）。
 
 
-async def read_upload_capped(file: UploadFile) -> bytes:
-    """读上传体，**最多读 `MAX_UPLOAD_BYTES + 1` 字节**——多出的那一字节只用来判超限。
+_UPLOAD_CHUNK = 1024 * 1024  # 分块写盘的块大小：内存里同时只留一块，与文件大小无关
+_UPLOAD_HEAD = 65536  # 留给 `_classify_upload` 判类型的文件头
 
-    裸 `await file.read()` 会把整个上传一次性读进内存**再**判大小：拖一个 5 GB 的文件进来，一次
-    注定 400 的请求也要先分配 5 GB。多读一字节即可判定"超了"，无需读完。
+
+def spool_upload(src: BinaryIO, target_dir: Path) -> tuple[Path, int, bytes]:
+    """把上传体**分块**写到 `target_dir` 下的隐藏临时文件（#172）：返回 `(临时文件, 字节数, 文件头)`。
+
+    同步函数，由端点经 `anyio.to_thread` 调用，不占事件循环。内存里同时只有一块（`_UPLOAD_CHUNK`），
+    不再把最多 `MAX_UPLOAD_BYTES` 的整个文件读进内存。超限（读到第一个越界的块即停）或空文件 → 删临时
+    文件、抛 400。临时文件以点号开头，导入面板的列表不显示它（`workspace._dir_items` 跳过点文件）；
+    建在目标目录里，提交时 `os.replace` 是同一文件系统内的原子换名。
 
     **作用域说准**（见 docs/backlog/notes/sag-2026-09-反向评审.md §1.A）：进入端点处理函数之前，
     multipart **已接收完毕并暂存**（Starlette 的 `UploadFile` 超过 1 MiB 即转存临时文件），故本函数
-    **不限制网络接收、也不限制临时磁盘占用**，它只消除端点内的那一次全量内存读取。
+    **不限制网络接收、也不限制那份临时文件**，它只消除端点内的全量内存读取。
     """
-    return await file.read(MAX_UPLOAD_BYTES + 1)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(target_dir), prefix=".upload-", suffix=".tmp")
+    tmp = Path(tmp_name)
+    size = 0
+    head = b""
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while chunk := src.read(_UPLOAD_CHUNK):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=400, detail=f"文件超过 {MAX_UPLOAD_BYTES} 字节上限。")
+                if len(head) < _UPLOAD_HEAD:
+                    head += chunk[: _UPLOAD_HEAD - len(head)]
+                out.write(chunk)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="空文件。")
+    except BaseException:
+        discard_upload(tmp)
+        raise
+    return tmp, size, head
+
+
+def commit_upload(tmp: Path, target: Path) -> None:
+    """把 `spool_upload` 的临时文件原子换名为 `target`（同名直接覆盖：暂存区非源，决策P4.6-3）。"""
+    try:
+        os.replace(tmp, target)
+    except OSError:
+        discard_upload(tmp)
+        raise
+
+
+def discard_upload(tmp: Path) -> None:
+    with contextlib.suppress(OSError):
+        tmp.unlink()
+
+
+STALE_UPLOAD_TMP_SECONDS = 3600  # 隐藏临时文件超过这么久没动过，才算上次进程中途退出留下的残留
+
+
+def sweep_stale_upload_tmps(uploads_dir: Path, *, now: float | None = None) -> int:
+    """删掉 `spool_upload` 中途被杀（kill / 断电）留下的 `.upload-*.tmp`（可写宿主启动时调，#172）。
+
+    这些文件是点文件，导入面板看不见，又可能各有上百 MiB。只删 mtime 超过 `STALE_UPLOAD_TMP_SECONDS`
+    的：同一个库若还开着另一个 Web 进程、正在写某份上传，它的临时文件在持续更新，不会被误删。返回删除个数。
+    """
+    if not uploads_dir.is_dir():
+        return 0
+    cutoff = (time.time() if now is None else now) - STALE_UPLOAD_TMP_SECONDS
+    removed = 0
+    for path in uploads_dir.glob(".upload-*.tmp"):
+        with contextlib.suppress(OSError):
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+    return removed
+
 
 # 图像扩展名 → MIME（与 agentao 视觉通道同口径白名单，镜像 chahua `_EXT_TO_MIME`）：命中者除
 # `<attachment>` 标签外，还经 `arun(images=)` 传 base64 走视觉通道；其余扩展名只发标签（agent 自己
@@ -92,25 +155,6 @@ def _safe_workspace_target(root: Path, subdir: str, filename: str) -> Path:
     return target
 
 
-def _atomic_write_upload(target: Path, data: bytes) -> int:
-    """在串行 worker turn 内原子落盘二进制上传（决策P4.6-3）。同名直接覆盖（暂存区、非源）。
-
-    暂存区语义：同名重传即替换（content 由文件名定位，重复 attach 同一文件不该 409 卡住）；与投喂
-    （写 raw/ 源、默认不覆盖）刻意不同。建目录 → 写同目录临时文件 → `os.replace` 原子换名。
-    """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        os.replace(tmp, target)
-    except OSError:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
-    return EXIT_OK
-
-
 def _classify_upload(target: Path, data: bytes) -> str:
     """判上传是 `image` / `text` / `binary`，供前端徽章配图（图像 → 缩略图）与附件分流。
 
@@ -119,7 +163,7 @@ def _classify_upload(target: Path, data: bytes) -> str:
     """
     if target.suffix.lower() in _IMAGE_EXT_TO_MIME:
         return "image"
-    head = data[:65536]
+    head = data[:_UPLOAD_HEAD]
     if target.suffix.lower() in _TEXT_EXTENSIONS:
         try:
             head.decode("utf-8")

@@ -7681,65 +7681,72 @@ def test_known_scanner_renderer_divergences_are_over_report_only(kb, name, src) 
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-# ── 上传限读（§1.A）：断言的是**端点读取尺寸**，不是内存/磁盘峰值 ────────────────────
-class _RecordingUpload:
-    """假 `UploadFile`：记下每次 `read(size)` 的实参——只断言结果的用例证明不了"没多读"。"""
+# ── 上传分块写盘（§1.A，#172）：断言的是**每次读取的尺寸与读到哪里为止**，不是内存/磁盘峰值 ──────
 
-    filename = "oversized.pdf"
 
-    def __init__(self) -> None:
+class _RecordingSrc:
+    """记下每次 `read(size)` 的尺寸；体为 `total` 字节的 `x`。"""
+
+    def __init__(self, total: int) -> None:
+        self.left = total
         self.read_sizes: list[int] = []
 
-    async def read(self, size: int = -1) -> bytes:
+    def read(self, size: int = -1) -> bytes:
         self.read_sizes.append(size)
-        return b"x" * max(0, size)
+        n = self.left if size < 0 else min(size, self.left)
+        self.left -= n
+        return b"x" * n
 
 
-def test_read_upload_capped_never_reads_more_than_limit_plus_one(monkeypatch) -> None:
-    """限读归口只要 `MAX_UPLOAD_BYTES + 1` 字节——多出的一字节只用来判超限。
+def test_spool_upload_reads_in_chunks_and_stops_past_limit(tmp_path, monkeypatch) -> None:
+    """分块读：每次只要一块（绝不是裸 read() 的 -1），越过上限的那一块读到即停、删临时文件、400。
 
-    上限临时调小（归口在调用时读模块全局）：证明"不为超限体全量分配"的用例自己先分配 256 MiB，
-    未免可笑，且断言与真实 256 MiB 字面值无关——它断的是"要了 上限+1、而不是裸 `read()` 的 -1"。
+    上限与块大小临时调小（函数在调用时读模块全局）：断言与真实 256 MiB 字面值无关。
     """
-    import anyio
+    from fastapi import HTTPException
 
     from guanlan.web import uploads as uploadsmod
 
     monkeypatch.setattr(uploadsmod, "MAX_UPLOAD_BYTES", 64)
-    upload = _RecordingUpload()
-    data = anyio.run(uploadsmod.read_upload_capped, upload)
+    monkeypatch.setattr(uploadsmod, "_UPLOAD_CHUNK", 16)
+    src = _RecordingSrc(200)
+    with pytest.raises(HTTPException) as ei:
+        uploadsmod.spool_upload(src, tmp_path)
+    assert ei.value.status_code == 400 and "上限" in ei.value.detail
+    assert src.read_sizes == [16] * 5  # 第 5 块越过 64 即停：200 字节的体只读进 80
+    assert list(tmp_path.iterdir()) == []  # 临时文件已删
 
-    assert upload.read_sizes == [65]  # 绝不是裸 read() 的 -1
-    assert len(data) == 65  # 多读的那一字节使 `len(data) > 上限` 成立
+
+def test_spool_upload_keeps_head_and_hides_tmp(tmp_path, monkeypatch) -> None:
+    """未超限：临时文件是点文件（导入面板不列），返回的字节数与文件头供分类；空体 400 且不留临时文件。"""
+    from fastapi import HTTPException
+
+    from guanlan.web import uploads as uploadsmod
+
+    monkeypatch.setattr(uploadsmod, "_UPLOAD_CHUNK", 16)
+    tmp, size, head = uploadsmod.spool_upload(_RecordingSrc(40), tmp_path)
+    assert tmp.parent == tmp_path and tmp.name.startswith(".")
+    assert size == 40 and tmp.read_bytes() == b"x" * 40 and head == b"x" * 40
+    tmp.unlink()
+    with pytest.raises(HTTPException) as ei:
+        uploadsmod.spool_upload(_RecordingSrc(0), tmp_path)
+    assert ei.value.status_code == 400
+    assert list(tmp_path.iterdir()) == []
 
 
-def test_upload_endpoint_rejects_oversize_without_reading_all(kb, monkeypatch) -> None:
-    """端点对超限体仍 400，且**实测读取量有界**：体 200 字节、上限 64 → 只读进 65。
-
-    spy **包住真函数**而不是替掉它：若只记一个自己编的常数（`seen.append(上限+1)`），那条断言
-    无论端点怎么读都成立，等于什么也没测。上限两处都要调——`uploads` 侧供限读归口取值、`app`
-    侧供端点比大小。
-    """
-    from guanlan.web import app as appmod
+def test_upload_endpoint_rejects_oversize_and_leaves_no_tmp(kb, monkeypatch) -> None:
+    """端点对超限体 400，`workspace/uploads/` 里不留目标文件，也不留隐藏的临时文件。"""
     from guanlan.web import uploads as uploadsmod
 
     monkeypatch.setattr(uploadsmod, "MAX_UPLOAD_BYTES", 64)
-    monkeypatch.setattr(appmod, "MAX_UPLOAD_BYTES", 64)
-    real = appmod.read_upload_capped
-    seen: list[int] = []
-
-    async def spy(file):
-        data = await real(file)
-        seen.append(len(data))
-        return data
-
-    monkeypatch.setattr(appmod, "read_upload_capped", spy)
     with TestClient(create_app(kb)) as client:
         r = client.post("/api/upload", files={"file": ("big.pdf", b"%PDF" * 50, "application/pdf")})
+        ok = client.post("/api/upload", files={"file": ("small.pdf", b"%PDF" * 10, "application/pdf")})
 
     assert r.status_code == 400
     assert "上限" in r.json()["detail"]
-    assert seen == [65]  # 200 字节的体只读进 65：多出的一字节判超限，其余没碰
+    assert ok.status_code == 200 and ok.json()["bytes"] == 40
+    assert sorted(p.name for p in (kb / "workspace" / "uploads").iterdir()) == ["small.pdf"]
 
 
 # ── P4.23 轮次结论 / 失败轮契约 / 无进展护栏 ──────────────────────────────────
@@ -8028,3 +8035,36 @@ def test_import_panel_upload_button_wired() -> None:
     assert "loadStaging(); // 重拉" in staging
     i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
     assert '"btn.staging": "导入"' in i18n and '"btn.staging": "Import"' in i18n
+
+
+def test_sweep_stale_upload_tmps_only_removes_old_hidden_tmps(tmp_path) -> None:
+    """只删超时的 `.upload-*.tmp`：新的（可能另一个进程正在写）和普通上传文件都不动。"""
+    import os
+
+    from guanlan.web import uploads as uploadsmod
+
+    old = tmp_path / ".upload-old.tmp"
+    fresh = tmp_path / ".upload-fresh.tmp"
+    keep = tmp_path / "书.pdf"
+    for p in (old, fresh, keep):
+        p.write_bytes(b"x")
+    now = 10_000_000.0
+    stale = now - uploadsmod.STALE_UPLOAD_TMP_SECONDS - 1
+    os.utime(old, (stale, stale))
+    os.utime(keep, (stale, stale))
+    os.utime(fresh, (now, now))
+    assert uploadsmod.sweep_stale_upload_tmps(tmp_path, now=now) == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".upload-fresh.tmp", "书.pdf"]
+    assert uploadsmod.sweep_stale_upload_tmps(tmp_path / "none", now=now) == 0
+
+
+def test_writer_startup_sweeps_stale_upload_tmp(kb) -> None:
+    import os
+
+    uploads = kb / "workspace" / "uploads"
+    uploads.mkdir(parents=True)
+    leftover = uploads / ".upload-crash.tmp"
+    leftover.write_bytes(b"half")
+    os.utime(leftover, (1.0, 1.0))
+    create_app(kb)
+    assert not leftover.exists()

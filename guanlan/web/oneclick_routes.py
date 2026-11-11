@@ -40,6 +40,15 @@ LOG_TAIL_LINES = 200
 _LOG_TAIL_BYTES = 256 * 1024  # 每 2 秒轮询只读日志末尾这么多字节，不随长任务的日志整读
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    """两路径是否同一文件。大小写 / Unicode 规范化不敏感的文件系统（macOS 默认 APFS）上，上传规范化后的
+    `书.pdf` 与盘上的 `书.PDF`（或 NFD 名）字符串不等、却是同一个文件，只比 resolve 后的字符串会放过覆盖。"""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:  # 任一不存在：退回比路径
+        return a.resolve() == b.resolve()
+
+
 class OneClickBody(BaseModel):
     """`POST /api/oneclick`：`upload` = `workspace/uploads/<名>`；`backend` 透传转换后端。"""
 
@@ -124,8 +133,11 @@ def register(
     runner=None,
     reader: bool = False,
     owns_kb_lock=None,
-) -> None:
+):
     """把一键入库端点挂到 `app`（reader 下 `writer_only` 不注册写端点；只读端点同样只给可写宿主）。
+
+    返回协程函数 `upload_in_use(target) -> str | None`，供 `POST /api/upload` 在覆盖同名文件前调用（#172）：
+    上传不再进写作业队列，正在准备（解析中）的任务读的那份原件不能被换掉。
 
     `owns_kb_lock()`：作业内问写锁「本进程是否真持库级锁」（`KBWriteLock.owns_kb_lock`）；不给则按锁文件
     里的 pid 判断（只给旧测试兜底）。
@@ -136,7 +148,7 @@ def register(
     # 这些失败不一定写进任务日志，任务又退回「等待确认 / 已暂停」，不透出就成了「点了没反应」。
     # 下一次确认/继续登记作业时清掉。
     last_failure: dict[str, str] = {}
-    pending_prepare: dict[str, str] = {}  # 本进程最近一次准备作业（只在事件循环线程读写）
+    pending_prepare: dict[str, str] = {}  # 本进程最近一次准备作业：job_id 与它读的原件（只在事件循环线程读写）
     state_lock = threading.Lock()
 
     # 启动时恢复（§6.4）：拿得到库级锁 → 原执行者已退出，preparing→failed、running→paused；拿不到 → 不改清单。
@@ -283,6 +295,7 @@ def register(
 
         job_id = jobs.enqueue("oneclick-prepare", _wrap(_prepare))
         pending_prepare["job_id"] = job_id
+        pending_prepare["upload"] = str(upload_path.resolve())
         return {"job_id": job_id}
 
     @writer_only(app.post("/api/oneclick/{task_id}/confirm"))
@@ -353,3 +366,44 @@ def register(
         if job.exit_code != EXIT_OK:
             raise HTTPException(status_code=409, detail=job.output.strip() or "放弃失败。")
         return {"cancelled": task_id}
+
+    def _preparing_on_disk(resolved: Path) -> dict | None:
+        """盘上处于「准备中」、读的正是 `resolved`、且执行者还活着的任务（阻塞读盘，在线程里调）。
+
+        残留的「准备中」（CLI 被 kill、或本进程启动时锁被占而没恢复）不算：没人在读那份原件，拦着只会让
+        「重新上传再一键入库」这条重试路径永远 409。本进程的写作业真持锁时，本进程自己的准备作业由
+        `pending_prepare` 判，盘上那条同样是残留（与 `oneclick_start` 的 `stale_preparing` 同口径）。
+        """
+        task = active_task(root)
+        if task is None or task.get("state") != "preparing" or not task.get("upload"):
+            return None
+        if not _same_file(root / task["upload"], resolved):
+            return None
+        holder = read_holder(root)
+        if not holder_alive(holder):
+            return None
+        if (holder or {}).get("pid") == os.getpid() and (owns_kb_lock() if owns_kb_lock is not None else True):
+            return None  # 本进程的写作业持锁：盘上这条「准备中」不是它的（它的由 pending_prepare 判）
+        return task
+
+    async def upload_in_use(target: Path) -> str | None:
+        """`target`（`workspace/uploads/` 内的落点）此刻是否正被一键入库的准备阶段读取（#172）。
+
+        两处来源：盘上处于「准备中」的任务清单（含 CLI `guanlan import workspace/uploads/…` 发起的，读盘在
+        线程里做）；本进程排队中或执行中的准备作业。后者在**最后一个 await 之后**同步判定：调用方拿到结果后
+        不再 await 就提交，与 `oneclick_start` 写 `pending_prepare` 同在事件循环线程，入队与登记之间不会被
+        上传插进来。确认之后的执行阶段只读 `parsed/` 与 `raw/`，不再读原件。
+        """
+        resolved = target.resolve()
+        task = await anyio.to_thread.run_sync(_preparing_on_disk, resolved)
+        job_id = pending_prepare.get("job_id")
+        pending_upload = pending_prepare.get("upload")
+        if job_id is not None and pending_upload is not None and _same_file(Path(pending_upload), resolved):
+            job = jobs.get_job(job_id)
+            if job is not None and job.state != "done":
+                return f"{target.name} 正在一键入库的准备阶段（解析 · 整理 · 拆分）中被读取；等准备完成后再上传同名文件。"
+        if task is not None:
+            return f"{target.name} 正被入库任务 {task['task_id']} 解析；等准备完成后再上传同名文件。"
+        return None
+
+    return upload_in_use
