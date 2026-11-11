@@ -1068,6 +1068,13 @@ def _stderr(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
+def _progress(line: str) -> None:
+    """进度行（`TaskLog` 的 emit）：前加 `[HH:MM:SS]`，与 Web 浮层同口径；错误与摘要仍走 `_stderr`、不加时间。
+    `last_error` 记原文，`--json` 回执里的错误不带时间前缀。"""
+    _JSON_OUT["last_error"] = line
+    print(f"[{time.strftime('%H:%M:%S')}] {line}", file=sys.stderr, flush=True)
+
+
 def _receipt(task: dict, json_output: bool) -> None:
     if json_output:
         keep = ("task_id", "state", "reason", "upload", "sample", "split", "precheck", "warnings", "estimate_seconds", "links_before", "links_after")
@@ -1302,7 +1309,7 @@ def _cli_resume(
             return EXIT_USAGE
         state = task["state"]
         if state == "paused":
-            code, task = _run_with_pause(resume, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)
+            code, task = _run_with_pause(resume, root, task["task_id"], overwrite=overwrite, emit=_progress, ingest=ingest)
             _receipt(task, json_output)
             return code
         if state != "awaiting_confirm":
@@ -1344,7 +1351,7 @@ def _cli_resume(
         if cur.get("state") == "awaiting_confirm" and cur.get("precheck") != pc:
             cur["precheck"] = pc
             save_task(root, cur)
-        code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)
+        code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_progress, ingest=ingest)
     _receipt(task, json_output)
     return code
 
@@ -1366,7 +1373,7 @@ def _cli_import(
     with acquire(root, origin) as lock:
         _recover_if_owner(root, lock)
         task = prepare(
-            root, src, origin_kind="cli", backend=backend, emit=_stderr, dry_run=dry_run, toc_reviewer=toc_reviewer
+            root, src, origin_kind="cli", backend=backend, emit=_progress, dry_run=dry_run, toc_reviewer=toc_reviewer
         )
     # 进入 awaiting_confirm：释放锁（等待确认期间不妨碍其它写操作）
     if dry_run:
@@ -1401,6 +1408,6 @@ def _cli_import(
             _receipt(task, True)
         return EXIT_OK
     with acquire(root, "cli: import"):
-        code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)
+        code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_progress, ingest=ingest)
     _receipt(task, json_output)
     return code

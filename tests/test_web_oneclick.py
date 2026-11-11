@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from pathlib import Path
@@ -101,6 +102,8 @@ def _prepare(client) -> dict:
     job = _wait(client, r.json()["job_id"])
     assert job["exit_code"] == 0, job["output"]
     assert "[mineru] 转换中…" in job["output"]
+    # 浮层进度每行带 [HH:MM:SS]（解析、审校目录都是分钟级，要看得出每步何时开始）
+    assert all(re.match(r"\[\d\d:\d\d:\d\d\] ", ln) for ln in job["output"].splitlines() if ln.strip())
     active = client.get("/api/oneclick").json()["active"]
     assert active["state"] == "awaiting_confirm"
     return active

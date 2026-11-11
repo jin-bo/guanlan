@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 
 import anyio
@@ -183,11 +184,18 @@ def register(
             last_failure.pop(task_id, None)
 
     def _wrap(fn):
-        """作业 thunk：一键入库的用法/状态错误打印给 job.output、以 EXIT_USAGE 结束。"""
+        """作业 thunk：一键入库的用法/状态错误打印给 job.output、以 EXIT_USAGE 结束。
+
+        进度行前加 `[HH:MM:SS]`：解析、审校目录、逐篇入库都是分钟级，浮层里要看得出每步何时开始。
+        emit 只由 `TaskLog` 逐行调用，故按行加；日志文件另有完整日期时间，CLI 的 stderr 不变。
+        """
 
         def thunk(emit) -> int:
+            def stamped(line: str) -> None:
+                emit(f"[{time.strftime('%H:%M:%S')}] {line}")
+
             try:
-                return fn(emit)
+                return fn(stamped)
             except OneClickError as exc:
                 print(str(exc))
                 return EXIT_USAGE
