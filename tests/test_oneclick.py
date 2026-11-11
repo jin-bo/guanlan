@@ -724,12 +724,24 @@ def test_prepare_with_reviewer_writes_toc_json(kb: Path, tmp_path: Path):
     assert data["toc_source"] == "llm" and len(data["entries"]) == 12 and all(e["matched"] for e in data["entries"])
 
 
-def test_cli_dry_run_and_no_toc_review_skip_reviewer(kb: Path, tmp_path: Path):
+def test_cli_dry_run_reviews_toc_and_no_toc_review_skips(kb: Path, tmp_path: Path):
+    """--dry-run 也送审（预演与正式运行一致）；--no-toc-review 不送审。"""
     src = _toc_book_md(tmp_path)
+    calls = []
+
+    def reviewer(region: str, draft: list[dict]) -> list[dict]:
+        calls.append(1)
+        return draft
+
+    toc_json = kb / "workspace" / "parsed" / "汇编.toc.json"
+    assert oneclick.import_entrypoint(kb, src=str(src), dry_run=True, toc_reviewer=reviewer, interactive=False) == EXIT_OK
+    assert calls == [1] and json.loads(toc_json.read_text(encoding="utf-8"))["toc_source"] == "llm"
 
     def boom(region: str, draft: list[dict]) -> list[dict]:  # pragma: no cover - 不应被调用
         raise AssertionError("不应送审")
 
-    assert oneclick.import_entrypoint(kb, src=str(src), dry_run=True, toc_reviewer=boom, interactive=False) == EXIT_OK
-    data = json.loads((kb / "workspace" / "parsed" / "汇编.toc.json").read_text(encoding="utf-8"))
-    assert data["toc_source"] == "rules"
+    code = oneclick.import_entrypoint(
+        kb, src=str(src), dry_run=True, toc_review=False, toc_reviewer=boom, interactive=False
+    )
+    assert code == EXIT_OK
+    assert json.loads(toc_json.read_text(encoding="utf-8"))["toc_source"] == "rules"

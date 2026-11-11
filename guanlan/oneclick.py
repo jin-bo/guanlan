@@ -1196,10 +1196,8 @@ def _import_main(
             backend=backend,
             ingest=run_ingest_fn,
             interactive=interactive,
-            # 目录审校默认开启（#175）；--dry-run 保持零 LLM，--no-toc-review 关掉
-            toc_reviewer=None
-            if dry_run or not toc_review
-            else (toc_reviewer or _default_toc_reviewer(root, model, thinking)),
+            # 目录审校默认开启（#175），--dry-run 也审：预演的拆分结果须与正式运行一致；--no-toc-review 关掉
+            toc_reviewer=(toc_reviewer or _default_toc_reviewer(root, model, thinking)) if toc_review else None,
         )
     except GuanlanError as exc:  # 含 KBLockBusy
         _stderr(str(exc))
