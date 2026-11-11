@@ -137,6 +137,7 @@ $("#staging-btn").addEventListener("click", openStaging);
 
 async function openStaging() {
   stagingPath = null; // 每次从顶栏打开都回到根视图
+  uploadNotice = null; // 上次上传的结果提示不跨次打开保留
   showOverlay("overlay.staging", `<p class="muted">${escapeHtml(t("staging.loading"))}</p>`);
   stagingOpen = true; // 须在 showOverlay 之后（它会清 stagingOpen）
   loadStaging();
@@ -191,7 +192,7 @@ function renderStaging(data) {
     box.appendChild(panel);
     loadOneclickPanel();
     renderSection(box, t("staging.uploadsHead"), "uploads",
-      data.uploads || [], blocked, t("staging.uploadsEmpty"));
+      data.uploads || [], blocked, t("staging.uploadsEmpty"), undefined, uploadBar(blocked));
     renderSection(box, t("staging.parsedHead"), "parsed",
       data.parsed || [], blocked, t("staging.parsedEmpty"), t("staging.parsedSub"));
   } else {
@@ -217,14 +218,82 @@ function renderStaging(data) {
 }
 
 // 渲染一段目录列表：子目录行（可点入 + 整删）在前，文件行（按 base 决定 uploads/parsed 操作）在后。
-function renderSection(box, headerText, base, items, blocked, emptyText, sub) {
+function renderSection(box, headerText, base, items, blocked, emptyText, sub, extra) {
   if (headerText) box.appendChild(stagingHeader(headerText, sub));
+  if (extra) box.appendChild(extra);
   if (!items.length) { box.appendChild(stagingEmpty(t("staging.emptyWrap", emptyText))); return; }
   for (const it of items) {
     if (it.is_dir) box.appendChild(renderFolderRow(it, blocked));
     else if (base === "uploads") box.appendChild(renderUploadRow(it, blocked));
     else box.appendChild(renderParsedRow(it, blocked));
   }
+}
+
+// 「上传文件…」：选原件（可多选）→ 逐个 POST /api/upload 落 workspace/uploads/ → 重拉列表。
+// 与对话框附件共用同一端点（单写者、层③ 423、库被 CLI 占用 409）；这里只上传、不当附件随消息发。
+// 刻意串行（同 attach.js）：避免并发持多份大文件 body。结果提示存 uploadNotice，重拉后仍显示。
+let uploadNotice = null; // { ok, errors: [[文件名, 原因]] }：最近一次上传的结果（渲染时再翻译，切语言跟着变）
+let uploadBusy = false;
+
+function uploadBar(blocked) {
+  const bar = document.createElement("div");
+  bar.className = "stage-upload";
+  const input = document.createElement("input");
+  input.type = "file";
+  input.multiple = true;
+  input.hidden = true;
+  const btn = document.createElement("button");
+  btn.className = "stage-act stage-upload-btn";
+  btn.textContent = t("staging.uploadBtn");
+  btn.title = blocked ? `${t("tip.uploadFiles")}（${t("staging.writeBusy")}）` : t("tip.uploadFiles");
+  btn.disabled = blocked || uploadBusy;
+  const note = document.createElement("span");
+  note.className = "stage-upload-note muted";
+  if (uploadNotice) {
+    note.textContent = noticeText(uploadNotice); // textContent：文件名与错误按字面显示
+    if (uploadNotice.errors.length) note.classList.add("report-bad");
+  }
+  btn.addEventListener("click", () => { input.value = ""; input.click(); });
+  input.addEventListener("change", () => uploadToStaging(Array.from(input.files || []), btn, note));
+  bar.append(btn, input, note);
+  return bar;
+}
+
+async function uploadToStaging(files, btn, note) {
+  if (!files.length || uploadBusy) return;
+  uploadBusy = true;
+  btn.disabled = true;
+  note.classList.remove("report-bad");
+  const errors = []; // [[文件名, 原因]]
+  let ok = 0;
+  for (const [i, file] of files.entries()) {
+    note.textContent = t("staging.uploading", i + 1, files.length, file.name);
+    try {
+      const fd = new FormData();
+      fd.append("file", file, file.name);
+      const res = await fetch("/api/upload", { method: "POST", body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 423) throw new Error(t("staging.writableRetry"));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      ok += 1;
+    } catch (e) {
+      errors.push([file.name, e.message]);
+    }
+  }
+  uploadBusy = false;
+  uploadNotice = { ok, errors };
+  if (stagingOpen && !$("#overlay").classList.contains("hidden")) {
+    loadStaging(); // 重拉：新文件出现在「上传文件」里（提示随 uploadNotice 保留）
+  } else {
+    btn.disabled = false;
+    note.textContent = noticeText(uploadNotice);
+  }
+}
+
+function noticeText(n) {
+  const parts = n.ok || !n.errors.length ? [t("staging.uploadDone", n.ok)] : [];
+  for (const [name, msg] of n.errors) parts.push(t("staging.uploadFail", name, msg));
+  return parts.join(" ");
 }
 
 // 子目录行：文件夹图标 + 名（点入）+ 🗑（整目录删除，需确认）。

@@ -571,6 +571,8 @@ body.hide-thinking .chat-think { display: none; }
 /* 暂存区浮层（P4.6 → P4.30）：一键入库任务卡 + 分段标题 + uploads/parsed 文件行（徽章 + 操作 + 🗑）。 */
 .stage-head { margin: .7rem 0 .3rem; font-weight: 600; color: var(--lan-deep); font-size: .92rem; }
 .stage-head:first-child { margin-top: 0; }
+.stage-upload { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: 0 0 .4rem; }
+.stage-upload-note { font-size: .8rem; overflow-wrap: anywhere; }
 .stage-sub { font-weight: 400; color: var(--lan-ink-soft); font-size: .78rem; }
 .stage-empty { margin: .2rem 0 .4rem; }
 .stage-row { display: flex; align-items: center; gap: .4rem; padding: .3rem .35rem; border-bottom: 1px solid var(--lan-mist); font-size: .85rem; flex-wrap: wrap; }
