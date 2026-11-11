@@ -294,7 +294,7 @@ def precheck(root: Path, task: dict) -> dict:
     # slug 冲突（沿 ingest._reject_source_slug_collision）：在预检阶段就查，不留到 ⑥ 才炸。
     target_slugs = {raw_slug(Path(t).stem): t for t in targets}
     if raw.is_dir():
-        for p in raw.rglob("*"):  # 后缀不分大小写：与 ingest 的 slug 冲突检查同口径（`X.MD` 同样建 source 页）
+        for p in sorted(raw.rglob("*")):  # 排序：明细进 `_precheck_signature`，次序须稳定；后缀不分大小写：与 ingest 的 slug 冲突检查同口径（`X.MD` 同样建 source 页）
             if p.suffix.lower() != ".md":
                 continue
             rel = _rel(root, p)
@@ -841,6 +841,7 @@ def _ingest_items(
         save_task(root, task)
     started = time.monotonic()
     done_now: list[float] = []
+    wiki_now: dict[str, tuple[int, int]] | None = None  # 上一篇入库后的 wiki/ 状态（持锁、篇间无人写）
     for k, it in enumerate(items, 1):
         raw_path = root / it["raw"]
         cur = _sha_file(raw_path)
@@ -859,7 +860,7 @@ def _ingest_items(
         it.pop("exit_code", None)
         save_task(root, task)
         log(f"[{k}/{n}] 入库 {it['raw']} …")
-        before = _wiki_state(root)
+        before = wiki_now if wiki_now is not None else _wiki_state(root)
         t0 = time.monotonic()
         try:
             rc = ingest(it["raw"], root)
@@ -879,7 +880,7 @@ def _ingest_items(
             return rc, task
         it["state"] = "done"
         save_task(root, task)  # 先记完成再做统计：统计期间被中断不至于把已入库的这篇打回重跑
-        after = _wiki_state(root)
+        after = wiki_now = _wiki_state(root)
         created = sum(1 for p in after if p not in before)
         updated = sum(1 for p, v in after.items() if p in before and before[p] != v)
         done_now.append(took)

@@ -22,7 +22,7 @@ import os
 import secrets
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 from .errors import EXIT_USAGE, GuanlanError
@@ -33,7 +33,6 @@ __all__ = [
     "KBLock",
     "KBLockBusy",
     "acquire",
-    "kb_write_lock",
     "run_locked",
     "needs_kb_lock",
     "reserve_token_slot",
@@ -253,15 +252,6 @@ def acquire(root: str | Path, origin: str) -> KBLock:
     prev = os.environ.get(TOKEN_ENV) or None
     os.environ[TOKEN_ENV] = token  # 持锁期间派生的子进程继承它（键已存在时只换值，见 reserve_token_slot）
     return KBLock(root, fd, holder, prev_token=prev)
-
-
-@contextlib.contextmanager
-def kb_write_lock(root: str | Path, origin: str) -> Iterator[KBLock]:
-    lock = acquire(root, origin)
-    try:
-        yield lock
-    finally:
-        lock.release()
 
 
 def run_locked(root_dir: str | Path, origin: str, fn: Callable[[], int]) -> int:
