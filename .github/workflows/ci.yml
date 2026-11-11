@@ -46,8 +46,16 @@ jobs:
       # extra_ua_tags 就收不到群 @ 事件」这条最关键的回归**永远不跑**——而它正是这组测试存在的理由。
       # pandoc：pdf-to-markdown 技能对 .docx 的首选后端；tests/test_skill_convert_pandoc.py 真跑它，
       # 没装就 skip，下面的「不许跳过」闸会让 CI 失败。
+      # 从 GitHub Release 取官方静态二进制，不走 apt：2026-11-11 runner 解析 Ubuntu 源的 DNS 连续失败近一小时，
+      # apt 这一步把整个测试任务拖红；checkout 能连 GitHub，Release 下载走同一条路。版本钉死，升级时改这里。
       - name: 装 pandoc
-        run: sudo apt-get update && sudo apt-get install -y pandoc
+        env:
+          PANDOC_VERSION: "3.7.0.2"
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/pandoc.tar.gz \
+            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-amd64.tar.gz"
+          sudo tar -xzf /tmp/pandoc.tar.gz -C /usr/local --strip-components 1
+          pandoc --version | head -1
 
       - name: 装依赖
         run: uv sync --extra web --extra mcp --extra im-weixin --extra im-feishu --python ${{ matrix.python-version }}
