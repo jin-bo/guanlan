@@ -835,6 +835,11 @@ def test_collect_for_promotion_traversal_raises(tmp_path):
         ("Error: all backends exhausted:\n", None),
         ("讲到 [done] backend=mineru 但不在行首\n", None),  # 只认行首，防日志正文误匹配
         ("[done] backend=\n", None),  # 空值不算标记
+        # MinerU 4 的实际档位一并记下（#171）：取末条档位行；没有档位行就只记后端
+        ("[mineru] tier=standard\n[done] backend=mineru\n", "mineru/standard"),
+        ("[mineru] fallback: retrying with --tier flash\n[mineru] tier=flash\n[done] backend=mineru\n", "mineru/flash"),
+        ("[mineru] tier=standard\n[mineru] failed: x\n[done] backend=marker\n", "marker"),  # 档位只跟 mineru 走
+        ("讲到 [mineru] tier=basic\n[done] backend=mineru\n", "mineru"),
     ],
 )
 def test_parse_backend_marker_reads_last_or_nothing(stderr, expected):
@@ -908,7 +913,7 @@ def test_run_convert_keeps_converter_own_parsed_by(tmp_path, monkeypatch, kb):
     assert yaml.safe_load(block)["parsed_by"] == "手工"
 
 
-@pytest.mark.parametrize("backend", ["mineru", "marker", "python"])
+@pytest.mark.parametrize("backend", ["mineru", "marker", "python", "mineru/standard", "mineru/flash"])
 def test_apply_parsed_by_is_yaml_safe_for_all_backend_names(backend):
     """三个后端名过 `yaml.safe_dump` 单一归口往返一致（绝不裸拼 `parsed_by: <值>`）。"""
     block, body = split_frontmatter(apply_parsed_by("正文。\n", backend))

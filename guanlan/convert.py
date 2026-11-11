@@ -67,6 +67,8 @@ _RAW_EXISTS_MSG = "raw/{name} 已存在；改名（`--name`）或加 `--overwrit
 
 # skill `convert.py` 成功收尾时打在 **stderr** 的后端标记（`log(f"[done] backend={name}")`）。
 _DONE_BACKEND_RE = re.compile(r"^\[done\] backend=(\S+)[ \t]*$", re.MULTILINE)
+# MinerU 4 解析成功时 skill 另打一行实际档位（`log(f"[mineru] tier={tier}")`，#171）。
+_MINERU_TIER_RE = re.compile(r"^\[mineru\] tier=([a-z]+)[ \t]*$", re.MULTILINE)
 
 
 def parse_backend_marker(stderr: str) -> str | None:
@@ -79,9 +81,19 @@ def parse_backend_marker(stderr: str) -> str | None:
     **这不是跨仓契约**：`_skill_convert_script()` 只解析安装态 `guanlan/_skill/` 或开发期仓库根
     `skills/`，宿主与该脚本随同一个 wheel 发布；故无需版本兼容机制，按"**读不到就不写**"处理即可。
     取**最后一条**匹配（skill 每次成功只打一条；取末条对将来多段输出也稳）。
+
+    后端是 mineru 且 stderr 有 `[mineru] tier=<档位>` 行时返回 `mineru/<档位>`（#171）：MinerU 4 的 flash
+    只取文本层，与 standard 差别不亚于换后端；自动启动时引擎没就绪会被降到 flash，不记下就查不出来。
     """
     matches = _DONE_BACKEND_RE.findall(stderr or "")
-    return matches[-1] if matches else None
+    if not matches:
+        return None
+    backend = matches[-1]
+    if backend == "mineru":  # MinerU 4 的档位差别同样是数量级（flash 只取文本层），一并记成 `mineru/<档位>`（#171）
+        tiers = _MINERU_TIER_RE.findall(stderr or "")
+        if tiers:
+            return f"mineru/{tiers[-1]}"
+    return backend
 
 
 def _collect_and_rewrite_images(

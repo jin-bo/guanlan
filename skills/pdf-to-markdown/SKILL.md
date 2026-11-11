@@ -70,7 +70,12 @@ The script reads `mineru --version` and picks the matching CLI:
 
 - **MinerU 4.x** — `mineru parse <file> -o <stem>/<stem>.md --json`. Parsing goes through
   a local background server; the script runs `mineru server start` automatically on
-  `server_not_running` (stop it with `mineru server stop`). Things 4.x changed that the
+  `server_not_running` (stop it with `mineru server stop`). After a start — or when a
+  running server answers `quality_tier_unavailable` — it polls `mineru server status --json`
+  until the local parse engine is healthy (`--engine-wait`, default 180 s, `0` = don't
+  wait) and logs the tiers it reports, so a cold start doesn't silently drop to `flash`.
+  It skips the wait when the local engine is disabled, for `--tier flash` and for
+  `--remote`. On success it logs `[mineru] tier=<tier>`. Things 4.x changed that the
   script handles for you:
   - **`--pages all` is always passed for PDFs.** Without it MinerU 4 parses only the
     first 10 pages. `--start/--end` (0-based) become 4.x's 1-based syntax (`3-r1`, where
@@ -81,7 +86,7 @@ The script reads `mineru --version` and picks the matching CLI:
   - **Tiers:** `flash` (text-only, runs with no models) < `basic` < `standard` <
     `advanced`. Quality tiers apply to PDFs/images only; Office/HTML/EPUB/CSV always use
     `flash`. With no `--tier`, MinerU picks the best local engine; if none is enabled
-    the script retries with `--tier flash` and, in `auto` mode, falls through to marker
+    (or it is still not ready after the wait) the script retries with `--tier flash` and, in `auto` mode, falls through to marker
     when flash yields nothing (e.g. a scanned PDF).
   - **Enable a local quality engine** (needed for OCR / layout / tables / formulas):
     `mineru config set parse_server.local.mode managed` (tier:
@@ -138,6 +143,7 @@ Page range (backend-agnostic, 0-based inclusive):
 MinerU 4.x:
   --tier CHOICE           flash | basic | standard | advanced (default: best local engine)
   --wait SECONDS          Max seconds to wait for a parse (default: 1800)
+  --engine-wait SECONDS   Max wait for the local parse engine after a start (default 180; 0 = no wait)
   --force                 Ignore MinerU's parse cache and re-parse
   --remote                Use the mineru.net remote service (UPLOADS the file)
 
