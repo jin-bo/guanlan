@@ -36,7 +36,7 @@ from .imageio import (
     collect_for_promotion,
     commit_md_with_images,
 )
-from .kblock import KBLockBusy, acquire, describe_holder, read_holder
+from .kblock import KBLockBusy, acquire, describe_holder, inside_write_run, read_holder
 from .normalize import normalize
 from .pages import load_page
 from .paths import require_kb_root
@@ -658,8 +658,10 @@ def resume(
     log = TaskLog(root, task_id, emit)
     if task.get("state") != "paused":
         raise OneClickError(f"任务 {task_id} 当前状态为 {task.get('state')}，不能继续。")
+    pc = None
     if overwrite and not task.get("overwrite"):
-        if precheck(root, task)["status"] == "overwritable":  # 只在此刻确实「可覆盖」时生效，不留宽于需要的授权
+        pc = precheck(root, task)
+        if pc["status"] == "overwritable":  # 只在此刻确实「可覆盖」时生效，不留宽于需要的授权
             task["overwrite"] = True
             log("已确认覆盖 raw/ 中本任务的旧文件")
         else:
@@ -669,7 +671,8 @@ def resume(
     task.pop("paused_by_user", None)  # 继续后不再是「用户暂停」状态，别让旧标志留在清单里
     save_task(root, task)
     log("▶ 继续入库")
-    return _execute(root, task, log=log, ingest=ingest, should_pause=should_pause)
+    # 刚复检过（持锁、其间 raw/ 未动）就交给 ⑤，不再整扫 raw/、重哈希一遍
+    return _execute(root, task, log=log, ingest=ingest, should_pause=should_pause, pc=pc)
 
 
 def _pause(root: Path, task: dict, log: TaskLog, reason: str) -> None:
@@ -1112,6 +1115,11 @@ def _import_main(
     except GuanlanError as exc:
         _stderr(str(exc))
         return exc.exit_code
+    if not status and inside_write_run(root):
+        # Agent 在 ingest / 可写 turn 里照技能说明跑 `guanlan import`：嵌套放行会让它在外层写门禁与快照里
+        # 连续入库多篇。一键入库只由用户直接发起。
+        _stderr("一键入库不能在另一个写运行（ingest / 可写对话 / 一键入库作业）里嵌套执行；请由用户在外层结束后直接运行。")
+        return EXIT_USAGE
     if interactive is None:
         interactive = sys.stdin.isatty()
     if src and not dry_run and not yes and not interactive:
@@ -1247,9 +1255,11 @@ def _cli_resume(
     # 等待确认：与 `import <file>` 的确认同一口径（问答期间不持锁；确认本身在锁内复检）
     _stderr("\n".join(summary_lines(task, detail=False)))
     pc = precheck(root, task)  # 现查（只读、不落清单）：存下的预检可能已过时；确认时仍在锁内复检
+    # 回执（--json）同样报现查结果：别让 stdout 的 precheck 仍是过时的「ok」、stderr 却说冲突。只改内存。
+    task = {**task, "precheck": pc}
     # 与 `import <file>` 同口径：明知会被 confirm 拒的情形先说清，别等用户答了「y」再拒。
     if pc.get("status") == "conflict":
-        _stderr("存在不可覆盖的冲突，只能放弃（--cancel）。")
+        _stderr("存在不可覆盖的冲突，只能放弃（--cancel）：\n  " + "\n  ".join(pc.get("details", [])))
         if json_output:
             _receipt(task, True)
         return EXIT_USAGE

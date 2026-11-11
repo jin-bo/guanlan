@@ -567,6 +567,22 @@ def test_readonly_lock_file_still_excludes(kb: Path):
         lockfile.chmod(0o644)
 
 
+def test_import_refused_inside_a_write_run(kb: Path, book: Path):
+    """持锁写运行派生的子进程（Agent 的 shell）跑 `guanlan import`：拒绝，不在外层门禁里连续入库多篇。"""
+    code = (
+        "from guanlan import oneclick\n"
+        f"print(oneclick.import_entrypoint({str(kb)!r}, src={str(book)!r}, yes=True, interactive=False))\n"
+    )
+    lock = acquire(kb, "cli: ingest")
+    try:
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    finally:
+        lock.release()
+    assert out.stdout.strip().splitlines()[-1] == str(EXIT_USAGE)
+    assert "嵌套" in out.stderr
+    assert active_task(kb) is None
+
+
 def test_cli_write_commands_refused_while_locked(kb: Path, capsys, monkeypatch):
     called = []
     monkeypatch.setattr("guanlan.cli.run_ingest", lambda *a, **k: called.append(1) or 0)

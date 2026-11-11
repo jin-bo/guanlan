@@ -37,6 +37,7 @@ __all__ = [
     "run_locked",
     "needs_kb_lock",
     "reserve_token_slot",
+    "inside_write_run",
     "read_holder",
     "holder_alive",
     "describe_holder",
@@ -166,6 +167,11 @@ def _nested_holder(root: Path) -> dict | None:
     if holder.get("pid") == os.getpid() or not holder_alive(holder):
         return None
     return holder
+
+
+def inside_write_run(root: str | Path) -> bool:
+    """本进程是不是某个持锁写运行（ingest / 可写 turn / 一键入库作业）派生的子孙。"""
+    return _nested_holder(Path(root).resolve()) is not None
 
 
 class KBLock:
