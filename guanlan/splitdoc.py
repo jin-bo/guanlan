@@ -116,7 +116,9 @@ def _units(body: str) -> list[_Unit]:
     in_fence = False
     fence_mark = ""
     prev_blank = True
-    raw_lines = body.splitlines(keepends=True)
+    # 只按 "\n" 切行（与 normalize / count_chars 同口径）：`splitlines` 还会在 U+2028 / U+0085 等处切，
+    # 行中间的 `# …` 会被误当标题 / 围栏，切点落进 markdown 的同一行里。
+    raw_lines = re.findall(r"[^\n]*\n|[^\n]+$", body)
     for line in raw_lines:
         content = line.rstrip("\r\n")
         eol = line[len(content) :]

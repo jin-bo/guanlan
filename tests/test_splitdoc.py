@@ -200,3 +200,13 @@ def test_render_index_lists_all_parts():
 def test_rewrite_image_refs_only_local():
     t = "![a](images/s/1.png) ![b](http://e/2.png) ![c](/abs/3.png)"
     assert rewrite_image_refs(t) == "![a](../images/s/1.png) ![b](http://e/2.png) ![c](/abs/3.png)"
+
+
+def test_unicode_line_separators_do_not_split_markdown_lines():
+    """U+2028 等不是 markdown 的换行：`a\u2028# x` 是一行正文，不能当成标题行来切。"""
+    from guanlan.splitdoc import _units
+
+    body = "前文\u2028# 不是标题\n下一行\n"
+    units = _units(body)
+    assert "".join(u.text for u in units) == body
+    assert [u.text for u in units] == ["前文\u2028# 不是标题\n", "下一行\n"]

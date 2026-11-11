@@ -1212,6 +1212,10 @@ def _cancel_locked(root: Path, task_id: str) -> dict:
     except KBLockBusy as exc:
         _stderr(f"{exc}\n任务 {task_id} 仍在等待确认；等它结束后运行 `guanlan import --cancel` 放弃。")
         return load_task(root, task_id)
+    except OneClickError:  # 提示期间任务已在别处（Web）确认 / 跑完：不能放弃，如实报告它现在的状态
+        task = load_task(root, task_id)
+        _stderr(f"任务 {task_id} 已在别处推进（{_STATE_LABEL.get(task['state'], task['state'])}），未放弃。")
+        return task
 
 
 def _ask_start() -> bool:
@@ -1281,6 +1285,12 @@ def _cli_resume(
             _receipt(task, True)
         return EXIT_OK
     with acquire(root, "cli: import --resume"):
+        # 用户确认的是上面现查的预检：落进清单作为 confirm 的比对基线，否则存下的旧预检（如准备时的冲突、
+        # 用户已清理）会让 confirm 判「raw/ 有变化」而拒绝这次确认。confirm 仍在锁内再复检一次。
+        cur = load_task(root, task["task_id"])
+        if cur.get("state") == "awaiting_confirm" and cur.get("precheck") != pc:
+            cur["precheck"] = pc
+            save_task(root, cur)
         code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_stderr, ingest=ingest)
     _receipt(task, json_output)
     return code
