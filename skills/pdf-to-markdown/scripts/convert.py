@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Extensions the document backends (MinerU / marker) can convert.
@@ -163,6 +164,78 @@ def mineru_major_version() -> int | None:
     return int(m.group(1)) if m else None
 
 
+# How often to poll `mineru server status --json` while the local engine starts.
+ENGINE_POLL_INTERVAL = 3.0
+
+
+def mineru_server_status() -> dict:
+    """Return `mineru server status --json` as a dict, or {} if it can't be read.
+
+    A server that is still booting answers {"status": "starting", ...} instead of the
+    full status object; `local_engine_state` treats both shapes.
+    """
+    try:
+        proc = subprocess.run(["mineru", "server", "status", "--json"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    decoder = json.JSONDecoder()
+    i = proc.stdout.find("{")
+    while i != -1:
+        try:
+            obj, _ = decoder.raw_decode(proc.stdout, i)
+        except json.JSONDecodeError:
+            i = proc.stdout.find("{", i + 1)
+            continue
+        return obj if isinstance(obj, dict) else {}
+    return {}
+
+
+def local_engine_state(status: dict) -> tuple[str, list[str], str]:
+    """Classify the local parse engine from a server status object.
+
+    Returns (state, supported_tiers, reason). state is one of:
+      ready    — the local engine is healthy and lists at least one tier;
+      disabled — parse_server.local.mode is disabled: only flash runs locally,
+                 so waiting cannot help;
+      failed   — a managed engine used up its restart attempts;
+      starting — anything else (server or engine still booting): worth waiting.
+    """
+    if status.get("status") == "starting":
+        return "starting", [], "mineru server is still starting"
+    if not status.get("running"):
+        return "starting", [], "mineru server is not running yet"
+    local = (status.get("parse_server") or {}).get("local") or {}
+    mode = local.get("mode") or "disabled"
+    tiers = [str(t) for t in local.get("supported_tiers") or []]
+    if mode == "disabled":
+        return "disabled", tiers, "local parse engine disabled (parse_server.local.mode=disabled)"
+    if local.get("healthy") and tiers:
+        return "ready", tiers, ""
+    error = local.get("error_code")
+    reason = f"{error}: {local.get('error_msg')}" if error else (
+        "local parse engine is starting" if local.get("starting") else
+        "local parse engine is not healthy yet")
+    max_restarts = local.get("max_restart_attempts") or 0
+    if (error and not local.get("starting") and mode == "managed" and max_restarts
+            and (local.get("restart_count") or 0) >= max_restarts):
+        return "failed", tiers, reason
+    return "starting", tiers, reason
+
+
+def wait_for_engine(timeout: float, *, sleep=None, clock=None) -> tuple[str, list[str], str]:
+    """Poll the server status until the local engine is ready, disabled or failed, or
+    `timeout` seconds pass. Returns the last `local_engine_state`."""
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    deadline = clock() + timeout
+    while True:
+        state, tiers, reason = local_engine_state(mineru_server_status())
+        if state != "starting" or clock() >= deadline:
+            return state, tiers, reason
+        sleep(ENGINE_POLL_INTERVAL)
+
+
 def run_mineru(input_path: Path, output_dir: Path, args, env_vars: dict[str, str]) -> Path:
     if shutil.which("mineru") is None:
         raise BackendUnavailable("'mineru' not found on PATH (uv tool install -U mineru)")
@@ -234,6 +307,27 @@ def run_mineru_v4(input_path: Path, output_dir: Path, args) -> Path:
     if args.remote:
         log("[mineru] --remote: the document is uploaded to the mineru.net parse service")
 
+    # The local quality engine (basic/standard/advanced) starts after the doclib server
+    # and can take minutes to load its models. Parsing before it is healthy makes MinerU
+    # answer quality_tier_unavailable, so wait for it once instead of degrading to flash.
+    wants_quality = tiered and not args.remote and args.tier != "flash"
+    waited = False
+
+    def wait_engine() -> str:
+        nonlocal waited
+        waited = True
+        if args.engine_wait <= 0:
+            return "skipped"
+        log(f"[mineru] waiting up to {args.engine_wait}s for the local parse engine")
+        state, tiers, reason = wait_for_engine(args.engine_wait)
+        if state == "ready":
+            log(f"[mineru] engine ready: supported tiers={','.join(tiers)}")
+        elif state == "disabled":
+            log(f"[mineru] {reason}; only the flash tier runs locally")
+        else:
+            log(f"[mineru] engine not ready ({reason})")
+        return state
+
     rc, payload = attempt(args.tier)
     err = payload.get("error") or {}
     if rc != 0 and err.get("code") == "server_not_running":
@@ -241,12 +335,20 @@ def run_mineru_v4(input_path: Path, output_dir: Path, args) -> Path:
         log("[mineru] starting local server (stop later with: mineru server stop)")
         if run_backend(["mineru", "server", "start"]) != 0:
             raise BackendFailed("could not start the local mineru server")
+        if wants_quality:
+            wait_engine()
         rc, payload = attempt(args.tier)
         err = payload.get("error") or {}
+    if rc != 0 and err.get("code") in _MINERU_NO_QUALITY_ENGINE and wants_quality and not waited:
+        # The server was already up but its engine may still be loading.
+        log(f"[mineru] {err.get('message')}")
+        if wait_engine() == "ready":
+            rc, payload = attempt(args.tier)
+            err = payload.get("error") or {}
     if rc != 0 and err.get("code") in _MINERU_NO_QUALITY_ENGINE and args.tier is None and tiered:
         log(f"[mineru] {err.get('message')}")
-        log("[mineru] retrying with --tier flash (text-only). For layout/OCR quality, enable a "
-            "local engine: mineru config set parse_server.local.mode managed")
+        log("[mineru] fallback: retrying with --tier flash (text-only). For layout/OCR "
+            "quality, enable a local engine: mineru config set parse_server.local.mode managed")
         rc, payload = attempt("flash")
         err = payload.get("error") or {}
 
@@ -438,6 +540,10 @@ def main() -> None:
                         "falling back to flash)")
     parser.add_argument("--wait", type=int, default=1800,
                         help="MinerU 4: max seconds to wait for a parse (default: 1800)")
+    parser.add_argument("--engine-wait", type=int, default=180,
+                        help="MinerU 4: max seconds to wait for the local parse engine to "
+                        "become healthy before parsing at a quality tier (default: 180; "
+                        "0 = don't wait)")
     parser.add_argument("--force", action="store_true",
                         help="MinerU 4: ignore the parse cache and re-parse")
     parser.add_argument("--remote", action="store_true",
