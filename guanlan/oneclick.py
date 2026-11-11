@@ -513,7 +513,7 @@ def _prepare_steps(
 
     # ② 整理
     if toc_reviewer is not None and toc_title_lines(res.markdown.split("\n")):
-        log("② 整理：发现目录，交模型审校目录结构（只读，约一两分钟）…")
+        log("② 整理：发现目录，交模型审校目录结构（只读，约一两分钟；目录区过长时跳过）…")
     norm = normalize(
         res.markdown,
         title_hint=src.stem,

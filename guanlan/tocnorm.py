@@ -92,7 +92,7 @@ class TocResult:
     entries: int = 0  # 目录条目数（0 = 没找到目录）
     matched: int = 0
     applied: bool = False
-    promoted: list[tuple[int | None, int, str]] = None  # type: ignore[assignment]  # (页, 级, 文本)
+    promoted: list[tuple[int | None, int, str]] = field(default_factory=list)  # (页, 级, 文本)
     relevelled: int = 0  # 改了层级 / 降为正文的其它标题数
     source: str = "rules"  # 条目来源：rules（规则解析）/ llm（经审校）
     review: str | None = None  # 审校结论：None = 未送审；ok / rejected:<原因> / failed:<原因>
@@ -238,6 +238,25 @@ def _assign_levels(entries: list[_Entry]) -> None:
 # ── 定位 ─────────────────────────────────────────────────────────────────────
 
 
+def _fenced(lines: list[str]) -> list[bool]:
+    """每行是否在代码围栏内（含围栏线本身）。与 normalize 同口径（CommonMark 闭合规则）。"""
+    from .normalize import _FENCE_RE, fence_closes  # 延迟导入：normalize 在模块级导入本模块
+
+    out: list[bool] = []
+    mark = ""
+    for line in lines:
+        if mark:
+            out.append(True)
+            if fence_closes(mark, line):
+                mark = ""
+            continue
+        m = _FENCE_RE.match(line)
+        if m:
+            mark = m.group(1)
+        out.append(bool(m))
+    return out
+
+
 @dataclass
 class _Cand:
     idx: int
@@ -246,19 +265,17 @@ class _Cand:
     key: str
 
 
-def _candidates(lines: list[str], lo: int) -> list[_Cand]:
+def _candidates(lines: list[str], lo: int, fenced: list[bool]) -> list[_Cand]:
     out: list[_Cand] = []
     page: int | None = None
-    in_fence = False
     for i, line in enumerate(lines):
+        if fenced[i]:
+            continue
         m = _ANCHOR_RE.match(line)
         if m:
             page = int(m.group(1))
             continue
-        if line.lstrip().startswith(("```", "~~~")):
-            in_fence = not in_fence
-            continue
-        if i <= lo or in_fence:
+        if i <= lo:
             continue
         s = _clean(line)
         if not s or len(s) > _LINE_MAX_CHARS or s.startswith(("|", "!", "<")):
@@ -374,6 +391,8 @@ def _validate_review(items: object, region_text: str) -> tuple[list[_Entry] | No
     if not isinstance(items, list) or not items:
         return None, "rejected:结果不是非空列表"
     region_key = _KEY_DROP_RE.sub("", re.sub(r"\s+", "", _nfkc(region_text))).casefold()
+    # 目录原文作 seq2 只建一次索引（最长可达 REVIEW_MAX_CHARS），逐条只换 seq1
+    sm = difflib.SequenceMatcher(None, "", region_key, autojunk=False)
     entries: list[_Entry] = []
     dropped = 0
     for it in items:
@@ -394,7 +413,7 @@ def _validate_review(items: object, region_text: str) -> tuple[list[_Entry] | No
             dropped += 1
             continue
         if k not in region_key:
-            sm = difflib.SequenceMatcher(None, k, region_key, autojunk=False)
+            sm.set_seq1(k)
             if sm.find_longest_match(0, len(k), 0, len(region_key)).size < 0.85 * len(k):
                 dropped += 1  # 原文里找不到：编造或改写过度
                 continue
@@ -412,18 +431,29 @@ def _validate_review(items: object, region_text: str) -> tuple[list[_Entry] | No
     return entries, "ok"
 
 
+def _key_in(k: str, text_key: str) -> bool:
+    """条目文字是否出现在一段文字里：整串包含，或最长公共子串 ≥ 85%（与 `_validate_review` 同口径）。"""
+    if k in text_key:
+        return True
+    if not k or not text_key:
+        return False
+    sm = difflib.SequenceMatcher(None, k, text_key, autojunk=False)
+    return sm.find_longest_match(0, len(k), 0, len(text_key)).size >= 0.85 * len(k)
+
+
 def _reviewed_end(lines: list[str], lo: int, hi: int, entries: list[_Entry]) -> int:
     """审校后的目录末行：从目录标题起按顺序逐条对上条目文字，全部对完的那一行。
 
     规则没认出目录时送审区会延伸进正文，正文标题也含条目文字；目录在前、按序列出全部条目，
-    所以第一次按序对完全部条目的地方就是目录结尾。对不完（审校漏抄了几行）→ 取最后一次对上的行。
+    所以第一次按序对完全部条目的地方就是目录结尾。对上的口径与审校校验相同（含模糊），否则
+    校验放行的条目在这里对不上，结尾会提前截断。对不完 → 取最后一次对上的行。
     """
-    keys = [e.key for e in entries]
+    keys = [_KEY_DROP_RE.sub("", re.sub(r"\s+", "", _nfkc(e.title))).casefold() for e in entries]
     pos, end = 0, lo
     for i in range(lo + 1, hi + 1):
         lk = _KEY_DROP_RE.sub("", re.sub(r"\s+", "", _nfkc(_clean(lines[i])))).casefold()
         hit = False
-        while pos < len(keys) and (not keys[pos] or keys[pos] in lk):
+        while pos < len(keys) and _key_in(keys[pos], lk):
             pos, hit = pos + 1, True
         if hit:
             end = i
@@ -451,7 +481,10 @@ def _apply_review(
     entries, verdict = _validate_review(items, text)
     if entries is None:
         return found, "rules", verdict
-    return (lo, _reviewed_end(lines, lo, hi, entries), entries), "llm", verdict
+    end = _reviewed_end(lines, lo, hi, entries)
+    if found is not None:  # 规则已认出的目录区不缩：审校条目对不全时，余下目录行不能当正文候选
+        end = max(end, found[1])
+    return (lo, end, entries), "llm", verdict
 
 
 def normalize_by_toc(lines: list[str], reviewer: TocReviewer | None = None) -> TocResult:
@@ -469,7 +502,8 @@ def normalize_by_toc(lines: list[str], reviewer: TocReviewer | None = None) -> T
     if found is None:
         return TocResult(lines, promoted=[], review=review)
     start, end, entries = found
-    cands = _candidates(lines, end)
+    fenced = _fenced(lines)
+    cands = _candidates(lines, end, fenced)
     _locate(entries, cands)
     matched = [e for e in entries if e.line is not None]
     res = TocResult(lines, entries=len(entries), matched=len(matched), promoted=[], source=source, review=review)
@@ -492,7 +526,9 @@ def normalize_by_toc(lines: list[str], reviewer: TocReviewer | None = None) -> T
         return mk[0] if mk else None
 
     present = {
-        kind_of(_clean(ln)) for i, ln in enumerate(lines) if i > end and i not in target and _HEADING_MARK_RE.match(ln)
+        kind_of(_clean(ln))
+        for i, ln in enumerate(lines)
+        if i > end and i not in target and not fenced[i] and _HEADING_MARK_RE.match(ln)
     }
     ranks = [k for k in _SUB_ORDER if k in present and k not in toc_kind] + [None]
 
@@ -511,7 +547,7 @@ def normalize_by_toc(lines: list[str], reviewer: TocReviewer | None = None) -> T
                 out[i] = new
                 res.promoted.append((page, level, text))
             continue
-        hm = _HEADING_MARK_RE.match(line)
+        hm = None if fenced[i] else _HEADING_MARK_RE.match(line)  # 代码块里的 `# 注释` 不是标题
         if not hm:
             continue
         text = line[hm.end() :]

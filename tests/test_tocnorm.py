@@ -310,3 +310,34 @@ def test_page_only_continuation_line_gives_page_to_previous_entry():
     r = normalize(toc + body, title_hint="t")
     assert r.summary["toc_entries"] == 7 and r.summary["toc_applied"] is True
     assert [e["page"] for e in r.toc] == [2, 4, 6, 8, 10, 12, 14]
+
+
+def test_code_fence_comments_untouched():
+    """代码块里的 `# 注释` 不是标题：按目录改层级时一字不动（四个反引号的块里 ``` 不闭合）。"""
+    fence = "````python\n# 甲市物业管理条例\n```\n## 第一章 总则\n````\n\n"
+    book = _book().replace("## 第一章 总则\n\n", "## 第一章 总则\n\n" + fence, 1)
+    r = normalize(book, title_hint="t")
+    assert r.summary["toc_applied"]
+    assert fence in r.body
+
+
+def test_reviewed_toc_end_accepts_fuzzy_entries():
+    """审校条目被模糊放行（目录原文末尾 OCR 多了字），按序对条目时也认，目录结尾不提前截断。"""
+    from guanlan.tocnorm import _Entry, _reviewed_end
+
+    lines = [
+        "## 目录",
+        "第一章 市场主体登记管理的一般规定……3",
+        "第二章 市场主体的监督检查与行政处罚程序规则……9",  # 审校条目末尾抄成「等」：不是子串，只能模糊对上
+        "第三章 附则……12",
+        "",
+        "# 第一章 市场主体登记管理的一般规定",
+        "# 第二章 市场主体的监督检查与行政处罚程序",
+        "# 第三章 附则",
+    ]
+    entries = [
+        _Entry("第一章 市场主体登记管理的一般规定", 3),
+        _Entry("第二章 市场主体的监督检查与行政处罚程序等", 9),
+        _Entry("第三章 附则", 12),
+    ]
+    assert _reviewed_end(lines, 0, len(lines) - 1, entries) == 3
