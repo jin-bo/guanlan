@@ -108,6 +108,21 @@ function fmtBytes(n) {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// 精确到秒的时长（进度用）：<1 分钟显示秒，<1 小时显示分秒，再长显示时分。
+function fmtDuration(seconds) {
+  const s = Math.max(0, Math.round(seconds || 0));
+  if (s < 60) return t("oc.durSec", s);
+  const m = Math.floor(s / 60);
+  if (m < 60) return s % 60 ? t("oc.durMinSec", m, s % 60) : t("oc.minutes", m);
+  return t("oc.hours", Math.floor(m / 60), m % 60);
+}
+
+function fmtChars(n) {
+  n = n || 0;
+  if (currentLang() !== "zh") return t("oc.chars", n.toLocaleString("en"));
+  return n >= 10000 ? t("oc.charsWan", (n / 10000).toFixed(1)) : t("oc.chars", n);
+}
+
 function fmtMinutes(seconds) {
   const m = Math.max(1, Math.round((seconds || 0) / 60));
   return m < 60 ? t("oc.minutes", m) : t("oc.hours", Math.floor(m / 60), m % 60);
@@ -576,9 +591,7 @@ function renderOneclickPanel(panel, data) {
     }
     actions.appendChild(ocCancelButton(task, fail, blocked));
   } else if (task.state === "running" || task.job_id) {
-    const prog = document.createElement("p");
-    prog.textContent = t("oc.progress", task.done, task.items.length);
-    card.appendChild(prog);
+    card.appendChild(ocProgressBlock(task));
     if (task.pausing) {
       const p = document.createElement("p");
       p.className = "muted";
@@ -597,9 +610,7 @@ function renderOneclickPanel(panel, data) {
       actions.appendChild(ocCancelButton(task, fail, blocked)); // 后端放弃同样先恢复：不必先继续入库才能放弃
     }
   } else if (task.state === "paused") {
-    const prog = document.createElement("p");
-    prog.textContent = t("oc.progress", task.done, task.items.length);
-    card.appendChild(prog);
+    card.appendChild(ocProgressBlock(task));
     // 暂停原因是「复检发现可覆盖的旧文件」：继续时可补给覆盖确认（「冲突」不给这个选项）
     let pOverwrite = null;
     if (task.precheck && task.precheck.status === "overwritable" && !task.overwrite) {
@@ -657,6 +668,7 @@ function renderOneclickPanel(panel, data) {
     const li = document.createElement("li");
     const pages = it.pages ? ` · p.${it.pages[0]}–${it.pages[1]}` : "";
     li.textContent = `${it.raw.split("/").pop()} · ${it.chars}${pages} · ${ocItemLabel(it.state)}`;
+    if (it.state === "running") li.className = "oc-item-current";
     li.title = (it.path || []).join(" / ");
     list.appendChild(li);
   }
@@ -670,6 +682,38 @@ function renderOneclickPanel(panel, data) {
   det.open = prevOpen !== null ? prevOpen : !!(task.job_id || task.state === "running"); // 入库中默认展开日志
   card.appendChild(det);
   panel.appendChild(card);
+}
+
+// 入库进度：进度条 + 共几篇 / 完成几篇 + 正在入哪一篇（已用多久）+ 累计耗时与预计剩余（后端 progress_info 算）。
+function ocProgressBlock(task) {
+  const pi = task.progress || { total: task.items.length, done: task.done };
+  const box = document.createElement("div");
+  box.className = "oc-progress";
+  const bar = document.createElement("progress");
+  bar.max = Math.max(1, pi.total);
+  bar.value = pi.done;
+  const count = document.createElement("span");
+  count.textContent = t("oc.progress", pi.done, pi.total);
+  const row = document.createElement("div");
+  row.className = "oc-progress-row";
+  row.append(bar, count);
+  box.appendChild(row);
+  if (pi.current) {
+    const cur = document.createElement("p");
+    cur.className = "oc-current";
+    const name = (pi.current.raw || "").split("/").pop();
+    cur.textContent = t("oc.current", pi.current.index, pi.total, name, fmtChars(pi.current.chars), fmtDuration(pi.current.elapsed_seconds));
+    cur.title = pi.current.raw || "";
+    box.appendChild(cur);
+  }
+  if (pi.remaining) {
+    const eta = document.createElement("p");
+    eta.className = "muted";
+    const basis = pi.eta_basis === "history" ? t("oc.basisHistory") : pi.eta_basis === "default" ? t("oc.basisDefault") : "";
+    eta.textContent = t("oc.timing", fmtDuration(pi.elapsed_seconds), fmtDuration(pi.eta_seconds), pi.remaining) + basis;
+    box.appendChild(eta);
+  }
+  return box;
 }
 
 function ocCancelButton(task, fail, blocked) {

@@ -56,6 +56,7 @@ __all__ = [
     "iter_tasks",
     "load_task",
     "prepare",
+    "progress_info",
     "recover_stale",
     "resume",
     "summary_lines",
@@ -347,6 +348,77 @@ def _average_item_seconds(root: Path) -> float:
                 samples.append(float(it["seconds"]))
     samples = samples[-_RECENT_SAMPLES:]
     return sum(samples) / len(samples) if samples else float(DEFAULT_ITEM_SECONDS)
+
+
+def _rate(items) -> float | None:
+    """每字耗时（秒/字）：取有实测耗时和字数的已入库各篇。分份大小差很多，按字数加权比按篇平均准。"""
+    sec = chars = 0.0
+    for it in items:
+        if it.get("state") == "done" and isinstance(it.get("seconds"), (int, float)) and (it.get("chars") or 0) > 0:
+            sec += float(it["seconds"])
+            chars += it["chars"]
+    return sec / chars if chars > 0 and sec > 0 else None
+
+
+def _history_rate(root: Path, skip: str | None) -> float | None:
+    recent: list[dict] = []
+    for task in iter_tasks(root):
+        if task.get("task_id") != skip:
+            recent += [it for it in task.get("items", []) if it.get("state") == "done"]
+    return _rate(recent[-_RECENT_SAMPLES:])
+
+
+def _elapsed_since(stamp: str | None) -> float:
+    if not stamp:
+        return 0.0
+    try:
+        t0 = time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, OverflowError):
+        return 0.0
+    return max(0.0, time.time() - t0)
+
+
+def progress_info(root: Path, task: dict) -> dict:
+    """入库进度（CLI 与 Web 共用）：共几篇、完成几篇、正在入哪一篇及已用多久、累计耗时、预计剩余。
+
+    预计剩余 = 每字耗时 × 未入库各篇字数，减去当前这篇已用的时间（当前篇超出自身估计时按 0 计，不倒扣别的篇）。
+    每字耗时先取本任务已入完的各篇；还没有就取本库最近 `_RECENT_SAMPLES` 篇；仍没有就按每篇 `DEFAULT_ITEM_SECONDS`。
+    累计耗时只算真正在入库的时间（各篇实测 + 当前篇已用），不含暂停和排队。
+    """
+    items = task.get("items", [])
+    total = len(items)
+    done = sum(1 for it in items if it.get("state") == "done")
+    cur_idx = next((i for i, it in enumerate(items) if it.get("state") == "running"), None)
+    current = None
+    cur_elapsed = 0.0
+    if cur_idx is not None and task.get("state") == "running":
+        it = items[cur_idx]
+        cur_elapsed = _elapsed_since(it.get("started"))
+        current = {"index": cur_idx + 1, "raw": it.get("raw"), "chars": it.get("chars"), "elapsed_seconds": round(cur_elapsed)}
+    left = [it for it in items if it.get("state") != "done"]
+    rate = _rate(items)
+    basis = "task"
+    if rate is None:
+        rate = _history_rate(root, task.get("task_id"))
+        basis = "history"
+    eta = 0.0
+    for i, it in enumerate(items):
+        if it.get("state") == "done":
+            continue
+        est = rate * (it.get("chars") or 0) if rate is not None else float(DEFAULT_ITEM_SECONDS)
+        eta += max(0.0, est - cur_elapsed) if i == cur_idx else est
+    if rate is None:
+        basis = "default"
+    spent = sum(float(it["seconds"]) for it in items if it.get("state") == "done" and isinstance(it.get("seconds"), (int, float)))
+    return {
+        "total": total,
+        "done": done,
+        "remaining": len(left),
+        "current": current,
+        "elapsed_seconds": round(spent + cur_elapsed),
+        "eta_seconds": round(eta) if left else 0,
+        "eta_basis": basis,
+    }
 
 
 def _write_parsed_images(target: Path, images: tuple) -> None:
@@ -871,7 +943,6 @@ def _ingest_items(
         task["links_before"] = _broken_links(root)
         save_task(root, task)
     started = time.monotonic()
-    done_now: list[float] = []
     wiki_now: dict[str, tuple[int, int]] | None = None  # 上一篇入库后的 wiki/ 状态（持锁、篇间无人写）
     for k, it in enumerate(items, 1):
         raw_path = root / it["raw"]
@@ -890,7 +961,9 @@ def _ingest_items(
         it["started"] = _now()
         it.pop("exit_code", None)
         save_task(root, task)
-        log(f"[{k}/{n}] 入库 {it['raw']} …")
+        pi = progress_info(root, task)
+        eta = f"，预计剩余约 {_fmt_duration(pi['eta_seconds'])}" if pi["eta_seconds"] else ""
+        log(f"[{k}/{n}] 入库 {it['raw']}（{it.get('chars', 0)} 字；已完成 {pi['done']} 篇、剩 {pi['remaining']} 篇{eta}）…")
         before = wiki_now if wiki_now is not None else _wiki_state(root)
         t0 = time.monotonic()
         try:
@@ -914,12 +987,13 @@ def _ingest_items(
         after = wiki_now = _wiki_state(root)
         created = sum(1 for p in after if p not in before)
         updated = sum(1 for p, v in after.items() if p in before and before[p] != v)
-        done_now.append(took)
         log(f"[{k}/{n}] 入库 {it['raw']} … 完成（{_fmt_duration(took)}，wiki 新建 {created} 页、更新 {updated} 页）")
-        left = sum(1 for x in items[k:] if x.get("state") != "done")
-        if left:
-            avg = sum(done_now) / len(done_now)
-            log(f"入库 {k}/{n} · 已用 {_fmt_duration(time.monotonic() - started)} · 预计剩余约 {_fmt_duration(avg * left)}")
+        pi = progress_info(root, task)
+        if pi["remaining"]:
+            log(
+                f"进度 {pi['done']}/{n} 篇 · 本次已用 {_fmt_duration(time.monotonic() - started)}"
+                f" · 预计剩余约 {_fmt_duration(pi['eta_seconds'])}（{pi['remaining']} 篇）"
+            )
     task["state"] = "done"
     task["finished"] = _now()
     task.pop("reason", None)
@@ -945,7 +1019,7 @@ _STATE_LABEL = {
 }
 
 
-def summary_lines(task: dict, *, detail: bool = False) -> list[str]:
+def summary_lines(task: dict, *, detail: bool = False, root: Path | None = None) -> list[str]:
     items = task.get("items", [])
     est = task.get("estimate_seconds")
     label = "预演，未建任务" if task.get("dry_run") else _STATE_LABEL.get(task.get("state"), task.get("state"))
@@ -957,6 +1031,15 @@ def summary_lines(task: dict, *, detail: bool = False) -> list[str]:
     done = sum(1 for it in items if it.get("state") == "done")
     if task.get("state") in ("running", "paused", "done"):
         lines.append(f"  进度：{done}/{len(items)} 篇已入库")
+        if root is not None and task.get("state") in ("running", "paused"):
+            pi = progress_info(root, task)
+            cur = pi["current"]
+            if cur:
+                lines.append(f"  当前：第 {cur['index']} 篇 {cur['raw']}（已用 {_fmt_duration(cur['elapsed_seconds'])}）")
+            lines.append(
+                f"  耗时：已用 {_fmt_duration(pi['elapsed_seconds'])} · 预计剩余约 {_fmt_duration(pi['eta_seconds'])}"
+                f"（{pi['remaining']} 篇）"
+            )
     if task.get("reason"):
         lines.append(f"  说明：{task['reason']}")
     pc = task.get("precheck") or {}
@@ -1075,7 +1158,7 @@ def _progress(line: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {line}", file=sys.stderr, flush=True)
 
 
-def _receipt(task: dict, json_output: bool) -> None:
+def _receipt(task: dict, json_output: bool, *, root: Path | None = None) -> None:
     if json_output:
         keep = ("task_id", "state", "reason", "upload", "sample", "split", "precheck", "warnings", "estimate_seconds", "links_before", "links_after")
         out = {k: task.get(k) for k in keep if k in task}
@@ -1083,10 +1166,12 @@ def _receipt(task: dict, json_output: bool) -> None:
             {k: it.get(k) for k in ("raw", "parsed", "chars", "pages", "path", "land", "state", "exit_code", "seconds")}
             for it in task.get("items", [])
         ]
+        if root is not None and task.get("state") in ("running", "paused"):
+            out["progress"] = progress_info(root, task)  # --status --json：给脚本看的进度
         print(json.dumps(out, ensure_ascii=False, indent=2))
         _JSON_OUT["emitted"] = True
     else:
-        print("\n".join(summary_lines(task)))
+        print("\n".join(summary_lines(task, root=root)))
 
 
 def import_entrypoint(
@@ -1245,9 +1330,9 @@ def _cli_status(root: Path, json_output: bool) -> int:
             print("没有未完成的一键入库任务。")
         return EXIT_OK
     if json_output:
-        _receipt(task, True)
+        _receipt(task, True, root=root)
     else:
-        print("\n".join(summary_lines(task, detail=True)))
+        print("\n".join(summary_lines(task, detail=True, root=root)))
         print(f"  日志：{task.get('log')}")
     return EXIT_OK
 

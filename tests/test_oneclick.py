@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -749,3 +750,61 @@ def test_cli_dry_run_reviews_toc_and_no_toc_review_skips(kb: Path, tmp_path: Pat
     )
     assert code == EXIT_OK
     assert json.loads(toc_json.read_text(encoding="utf-8"))["toc_source"] == "rules"
+
+
+# ── 入库进度（progress_info：CLI 与 Web 共用）────────────────────────────────
+
+
+def _stamp(seconds_ago: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - seconds_ago))
+
+
+def _ptask(task_id="t-prog", state="running", items=None) -> dict:
+    return {"task_id": task_id, "state": state, "created": _stamp(1000), "items": items or []}
+
+
+def test_progress_info_weights_eta_by_chars(kb: Path):
+    task = _ptask(items=[
+        {"raw": "raw/a/a-1.md", "chars": 1000, "state": "done", "seconds": 100},
+        {"raw": "raw/a/a-2.md", "chars": 2000, "state": "running", "started": _stamp(30)},
+        {"raw": "raw/a/a-3.md", "chars": 3000, "state": "pending"},
+    ])
+    pi = oneclick.progress_info(kb, task)
+    assert (pi["total"], pi["done"], pi["remaining"]) == (3, 1, 2)
+    assert pi["current"]["index"] == 2 and pi["current"]["raw"] == "raw/a/a-2.md"
+    assert 29 <= pi["current"]["elapsed_seconds"] <= 33
+    # 0.1 秒/字：当前篇 200−30 + 下一篇 300
+    assert 466 <= pi["eta_seconds"] <= 471
+    assert 129 <= pi["elapsed_seconds"] <= 133  # 已入完的 100 + 当前已用 30，不含暂停
+    assert pi["eta_basis"] == "task"
+
+
+def test_progress_info_overrun_current_counts_zero(kb: Path):
+    task = _ptask(items=[
+        {"raw": "r1", "chars": 1000, "state": "done", "seconds": 10},
+        {"raw": "r2", "chars": 1000, "state": "running", "started": _stamp(500)},  # 估 10 秒，已跑 500
+        {"raw": "r3", "chars": 1000, "state": "pending"},
+    ])
+    assert oneclick.progress_info(kb, task)["eta_seconds"] == 10  # 不倒扣下一篇
+
+
+def test_progress_info_falls_back_to_history_then_default(kb: Path):
+    task = _ptask(items=[{"raw": "r1", "chars": 500, "state": "pending"}, {"raw": "r2", "chars": 1500, "state": "pending"}])
+    pi = oneclick.progress_info(kb, task)
+    assert pi["eta_basis"] == "default" and pi["eta_seconds"] == 2 * oneclick.DEFAULT_ITEM_SECONDS
+    oneclick.save_task(kb, _ptask("t-old", "done", [{"raw": "x", "chars": 1000, "state": "done", "seconds": 50}]))
+    pi = oneclick.progress_info(kb, task)
+    assert pi["eta_basis"] == "history" and pi["eta_seconds"] == 100  # 0.05 秒/字 × 2000 字
+    assert pi["current"] is None
+
+
+def test_progress_info_paused_has_no_current(kb: Path):
+    task = _ptask(state="paused", items=[{"raw": "r1", "chars": 10, "state": "running", "started": _stamp(5)}])
+    assert oneclick.progress_info(kb, task)["current"] is None
+
+
+def test_cli_logs_show_current_part_counts_and_eta(kb: Path, book: Path, capsys):
+    oneclick.import_entrypoint(kb, src=str(book), yes=True, json_output=True, ingest=FakeIngest(), interactive=False)
+    err = capsys.readouterr().err
+    assert re.search(r"\[1/3\] 入库 \S+（\d+ 字；已完成 0 篇、剩 3 篇", err), err
+    assert re.search(r"进度 1/3 篇 · 本次已用 .+ · 预计剩余约 .+（2 篇）", err), err
