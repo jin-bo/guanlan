@@ -80,7 +80,7 @@ async function submitFeed(overwrite) {
   }
   if (!res.ok) {
     resetSave();
-    status.innerHTML = `<span class="report-bad">${escapeHtml(t("feed.saveFail", data.detail || `HTTP ${res.status}`))}</span>`;
+    status.innerHTML = `<span class="report-bad">${escapeHtml(t("feed.saveFail", apiDetail(data, res.status)))}</span>`;
     return;
   }
   // 成功：复位按钮（可接着存下一篇）+ 提示 + 一键「立即 ingest」（复用既有 ingest 流）。存盘后
@@ -256,8 +256,191 @@ function uploadBar(blocked) {
   }
   btn.addEventListener("click", () => { input.value = ""; input.click(); });
   input.addEventListener("change", () => uploadToStaging(Array.from(input.files || []), btn, note));
-  bar.append(btn, input, note);
-  return bar;
+  const fetchBtn = document.createElement("button");
+  fetchBtn.className = "stage-act stage-act-quiet";
+  fetchBtn.textContent = t("staging.fetchBtn");
+  fetchBtn.title = blocked ? `${t("tip.fetch")}（${t("staging.writeBusy")}）` : t("tip.fetch");
+  fetchBtn.disabled = blocked;
+  const area = document.createElement("div");
+  area.id = "stage-fetch-area";
+  fetchBtn.addEventListener("click", () => {
+    const v = fetchView;
+    if (v && (v.state === "downloading" || v.state === "committing")) return; // 下载中不开表单（同一时刻一个下载）
+    fetchFormOpen = !fetchFormOpen;
+    fetchFocusNext = fetchFormOpen; // 只在用户点开表单时聚焦；重画（切语言、刷新列表）不抢焦点
+    renderFetchArea(area, blocked);
+  });
+  bar.append(btn, fetchBtn, input, note);
+  const wrap = document.createElement("div");
+  wrap.append(bar, area);
+  renderFetchArea(area, blocked);
+  // 页面刷新 / 重开暂存区：找回进行中的下载。已在轮询、或刚查过（如 loadFetchStatus 自己触发的这次重画）就不再多发
+  // reader 宿主不注册下载端点（决策P4.9-2）：别每次重画都打一个 404
+  if (!readerMode && fetchTimer === null && Date.now() - fetchStatusAt > 2000) loadFetchStatus();
+  return wrap;
+}
+
+// ── 从网址下载（P4.31）────────────────────────────────────────────────────────
+// 一次一个网址、同一时刻一个下载（决策P4.31-12）。下载在后台跑：POST 拿 download_id，轮询
+// GET /api/upload/url 看进度；完成后重拉列表，勾了「直接一键入库」时接着跟准备作业的进度浮层。
+let fetchFormOpen = false;
+let fetchView = null; // 最近一次 GET /api/upload/url 的结果
+let fetchTimer = null;
+let fetchStatusAt = 0; // 最近一次查下载状态的时间
+let fetchSeq = 0; // 查询序号：只认最新一次的结果，慢响应期间重画又发起的查询不会叠出第二条轮询链
+let fetchSeenActive = null; // 本页轮询时见过「下载中」的 download_id
+let fetchFollowed = null; // 已接手（刷新列表 / 跟进一键入库）的 download_id，防重复
+// 表单草稿：暂存区每次重画都会重建表单（切语言、刷新列表），输入到一半的网址与勾选不能丢
+let fetchDraft = { url: "", oneclick: false, whole: false };
+let fetchFocusNext = false;
+
+function renderFetchArea(area, blocked) {
+  if (!area) return;
+  area.innerHTML = "";
+  const v = fetchView;
+  const active = v && (v.state === "downloading" || v.state === "committing");
+  if (active) {
+    const row = document.createElement("div");
+    row.className = "stage-fetch-row";
+    const status = document.createElement("span");
+    status.className = "stage-fetch-status muted";
+    status.textContent = v.state === "committing"
+      ? t("staging.fetchSaving", v.url)
+      : t("staging.fetchProgress", v.url, v.total ? `${fmtBytes(v.received)} / ${fmtBytes(v.total)}` : fmtBytes(v.received));
+    const stop = document.createElement("button");
+    stop.className = "stage-act stage-act-quiet";
+    stop.textContent = t("staging.fetchStop");
+    stop.disabled = v.state !== "downloading";
+    stop.addEventListener("click", async () => {
+      stop.disabled = true;
+      try { await fetch(`/api/upload/url/${encodeURIComponent(v.download_id)}/cancel`, { method: "POST" }); } catch (e) { /* 轮询会给出结局 */ }
+    });
+    row.append(status, stop);
+    area.appendChild(row);
+    return;
+  }
+  if (v && fetchFollowed === v.download_id && !fetchFormOpen) { // 进行中的已在上面返回
+    const msg = document.createElement("p");
+    msg.className = "stage-fetch-status muted";
+    if (v.state === "done") {
+      msg.textContent = v.oneclick_error ? t("staging.fetchOneclickFail", v.name, v.oneclick_error) : t("staging.fetchDone", v.name);
+      // 403 后经 agentao 后备取得（决策P4.31-14）：说清楚是浏览器渲染还是第三方代取
+      if (v.via === "playwright") msg.textContent += " " + t("staging.fetchViaBrowser");
+      else if (v.via === "jina") msg.textContent += " " + t("staging.fetchViaJina");
+      if (v.oneclick_error) msg.classList.replace("muted", "stage-fetch-error");
+    } else if (v.state === "cancelled") {
+      msg.textContent = v.error || v.state; // 用户自己停的，不算失败
+    } else {
+      msg.textContent = t("staging.fetchFail", v.error || v.state);
+      msg.classList.replace("muted", "stage-fetch-error");
+    }
+    area.appendChild(msg);
+  }
+  if (!fetchFormOpen) return;
+  const form = document.createElement("form");
+  form.className = "stage-fetch";
+  const url = document.createElement("input");
+  url.type = "url";
+  url.required = true;
+  url.placeholder = "https://";
+  url.value = fetchDraft.url;
+  url.addEventListener("input", () => { fetchDraft.url = url.value; });
+  const one = document.createElement("input");
+  one.type = "checkbox";
+  one.checked = fetchDraft.oneclick;
+  const oneLabel = document.createElement("label");
+  oneLabel.append(one, document.createTextNode(t("staging.fetchOneclick")));
+  const whole = document.createElement("input");
+  whole.type = "checkbox";
+  whole.checked = fetchDraft.oneclick && fetchDraft.whole;
+  whole.disabled = !fetchDraft.oneclick;
+  const wholeLabel = document.createElement("label");
+  wholeLabel.className = "stage-fetch-sub";
+  wholeLabel.append(whole, document.createTextNode(t("staging.fetchWholePage")));
+  one.addEventListener("change", () => {
+    whole.disabled = !one.checked;
+    if (!one.checked) whole.checked = false;
+    fetchDraft.oneclick = one.checked;
+    fetchDraft.whole = whole.checked;
+  });
+  whole.addEventListener("change", () => { fetchDraft.whole = whole.checked; });
+  const err = document.createElement("span");
+  err.className = "stage-fetch-status stage-fetch-error";
+  const go = document.createElement("button");
+  go.type = "submit";
+  go.className = "stage-act";
+  go.textContent = t("staging.fetchGo");
+  go.disabled = blocked;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "stage-act stage-act-quiet";
+  close.textContent = t("staging.fetchClose");
+  close.addEventListener("click", () => { fetchFormOpen = false; renderFetchArea(area, blocked); });
+  const row = document.createElement("div");
+  row.className = "stage-fetch-row";
+  row.append(go, close, err);
+  form.append(url, oneLabel, wholeLabel, row);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    go.disabled = true;
+    err.textContent = "";
+    try {
+      const res = await fetch("/api/upload/url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: url.value.trim(), oneclick: one.checked, html_extract: whole.checked ? "off" : "auto" }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.status === 423) throw new Error(t("staging.writableRetry"));
+      if (!res.ok) throw new Error(apiDetail(d, res.status));
+      fetchFormOpen = false;
+      fetchFollowed = null;
+      fetchDraft = { url: "", oneclick: false, whole: false }; // 已提交：清空草稿
+      loadFetchStatus();
+    } catch (ex) {
+      err.textContent = ex.message;
+      go.disabled = false;
+    }
+  });
+  area.appendChild(form);
+  if (fetchFocusNext) { url.focus(); fetchFocusNext = false; }
+}
+
+async function loadFetchStatus() {
+  clearTimeout(fetchTimer);
+  fetchTimer = null;
+  fetchStatusAt = Date.now();
+  const seq = ++fetchSeq;
+  let v;
+  try { v = await getJSON("/api/upload/url"); } catch (e) {
+    if (seq !== fetchSeq) return; // 已有更新的查询接手轮询
+    // 一次轮询失败（网络抖动）不能让进行中的下载从此没人跟：沿用上次结果、稍后再问
+    const was = fetchView;
+    if (was && (was.state === "downloading" || was.state === "committing")) fetchTimer = setTimeout(loadFetchStatus, 3000);
+    return;
+  }
+  if (seq !== fetchSeq) return; // 已有更新的查询接手轮询：旧结果丢掉，不另起一条链
+  fetchView = v;
+  const area = document.getElementById("stage-fetch-area");
+  if (v && (v.state === "downloading" || v.state === "committing")) {
+    if (fetchFollowed === v.download_id) fetchFollowed = null;
+    fetchSeenActive = v.download_id; // 看到过它在跑：结束后无论隔多久才轮询到（后台标签页节流），都要接手
+    renderFetchArea(area, hostWriteBlocked());
+    fetchTimer = setTimeout(loadFetchStatus, 1000);
+    return;
+  }
+  const justEnded = v && v.finished && (fetchSeenActive === v.download_id || Date.now() / 1000 - v.finished < 30);
+  if (v && fetchFollowed !== v.download_id && justEnded) {
+    // 刚结束、还没接手：刷新列表让新文件出现；勾了直接一键入库的跟进准备进度
+    fetchFollowed = v.download_id;
+    if (v.oneclick_job) {
+      renderFetchArea(document.getElementById("stage-fetch-area"), hostWriteBlocked()); // 先把「保存中」那行换成结果
+      watchPrepare(v.oneclick_job, v.saved);
+      return;
+    }
+    if (stagingOpen && !$("#overlay").classList.contains("hidden")) { loadStaging(); return; }
+  }
+  renderFetchArea(area, hostWriteBlocked());
 }
 
 async function uploadToStaging(files, btn, note) {
@@ -275,7 +458,7 @@ async function uploadToStaging(files, btn, note) {
       const res = await fetch("/api/upload", { method: "POST", body: fd });
       const data = await res.json().catch(() => ({}));
       if (res.status === 423) throw new Error(t("staging.writableRetry"));
-      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(apiDetail(data, res.status));
       ok += 1;
     } catch (e) {
       errors.push([file.name, e.message]);
@@ -382,6 +565,15 @@ function fileRowHead(it) {
   return [ico, nm];
 }
 
+// 网址导入来的标记（P4.31）：🔗，悬停显示原网址（服务端已去掉签名参数）。间距由 .stage-link-mark 的 margin 给
+function linkMark(url) {
+  const mark = document.createElement("span");
+  mark.className = "stage-link-mark";
+  mark.textContent = "🔗";
+  mark.title = t("staging.fromUrl", url);
+  return mark;
+}
+
 // uploads/ 行：徽章 + 文件名 + 大小 + [一键入库图标] + 🗑。
 function renderUploadRow(it, blocked) {
   const row = document.createElement("div");
@@ -394,7 +586,20 @@ function renderUploadRow(it, blocked) {
   setStageIcon(go, "i-oneclick", t("staging.oneclick"), t("tip.oneclick"), blocked);
   go.disabled = blocked;
   go.addEventListener("click", () => triggerOneclick(it.path));
-  row.append(...fileRowHead(it), sz, go, trashButton(it.path, row, blocked));
+  const head = fileRowHead(it);
+  if (it.source_url) { // 网址导入来的文件（P4.31）：标 🔗，悬停显示原网址
+    head.splice(2, 0, linkMark(it.source_url)); // 放在文件名之后、不放进去：.stage-name 溢出省略，长名字会把标记裁掉
+  }
+  const acts = [go];
+  if (/\.html?$/i.test(it.name)) { // 网页多一个「整页一键入库」：正文提取丢了内容时的重试入口（决策P4.31-13）
+    const whole = document.createElement("button");
+    whole.className = "stage-act stage-oneclick";
+    setStageIcon(whole, "i-oneclick-page", t("staging.oneclickWhole"), t("tip.oneclickWhole"), blocked);
+    whole.disabled = blocked;
+    whole.addEventListener("click", () => triggerOneclick(it.path, "off"));
+    acts.push(whole);
+  }
+  row.append(...head, sz, ...acts, trashButton(it.path, row, blocked));
   return row;
 }
 
@@ -523,13 +728,13 @@ function ocItemLabel(state) {
   })[state || "pending"] || state;
 }
 
-async function triggerOneclick(uploadPath) {
+async function triggerOneclick(uploadPath, htmlExtract = "auto") {
   showOverlay("overlay.oneclick", `<p class="muted">${escapeHtml(t("staging.ocSubmitted", uploadPath))}</p>`);
   try {
     const res = await fetch("/api/oneclick", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ upload: uploadPath }),
+      body: JSON.stringify({ upload: uploadPath, html_extract: htmlExtract }),
     });
     if (res.status === 423) {
       $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.writableRetryDot"))}</p>`;
@@ -537,27 +742,52 @@ async function triggerOneclick(uploadPath) {
     }
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
-      throw new Error(d.detail || `HTTP ${res.status}`);
+      throw new Error(apiDetail(d, res.status));
     }
     const { job_id } = await res.json();
-    // 准备阶段可「停止」（#173）：整组结束转换 / 目录审校子进程，任务记已放弃，回暂存区可重新导入。
-    let stopped = false;
-    const footer = document.createElement("div");
-    footer.className = "oc-actions";
-    const stopBtn = ocButton(t("oc.stop"), async () => {
-      if (!window.confirm(t("oc.stopConfirm"))) return;
-      try {
-        await ocPost(`/api/oneclick/prepare/${encodeURIComponent(job_id)}/stop`);
-        stopped = true;
-        stopBtn.disabled = true;
-        stopBtn.textContent = t("oc.stopping");
-      } catch (e) { /* 作业已结束：交给 pollJob 的完成分支 */ }
-    }, { primary: false });
-    footer.appendChild(stopBtn);
-    await pollJob(job_id, t("staging.ocPreparing"), (job) => (stopped ? openStaging() : renderOneclickPrepared(job)), "oc-joblog", footer);
+    await followPrepare(job_id);
   } catch (e) {
-    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.ocFail", e.message))}</p>`;
+    showPrepareFail(e);
   }
+}
+
+// 跟进一个已发起的准备作业（P4.31「下载后直接一键入库」由宿主发起，前端只接手进度浮层）。
+async function watchPrepare(jobId, uploadPath) {
+  showOverlay("overlay.oneclick", `<p class="muted">${escapeHtml(t("staging.ocSubmitted", uploadPath || ""))}</p>`);
+  await followPrepare(jobId);
+}
+
+// 两个入口共用的准备进度跟进（浮层已由调用方打开）；失败提示也只写一处
+async function followPrepare(jobId) {
+  // 准备阶段可「停止」（#173）：整组结束转换 / 目录审校子进程，任务记已放弃，回暂存区可重新导入。
+  let stopped = false;
+  const footer = document.createElement("div");
+  footer.className = "oc-actions";
+  const stopBtn = ocButton(t("oc.stop"), async () => {
+    if (!window.confirm(t("oc.stopConfirm"))) return;
+    try {
+      await ocPost(`/api/oneclick/prepare/${encodeURIComponent(jobId)}/stop`);
+      stopped = true;
+      stopBtn.disabled = true;
+      stopBtn.textContent = t("oc.stopping");
+    } catch (e) { /* 作业已结束：交给 pollJob 的完成分支 */ }
+  }, { primary: false });
+  footer.appendChild(stopBtn);
+  try {
+    await pollJob(jobId, t("staging.ocPreparing"), (job) => (stopped ? openStaging() : renderOneclickPrepared(job)), "oc-joblog", footer);
+  } catch (e) {
+    showPrepareFail(e);
+  }
+}
+
+function showPrepareFail(e) {
+  $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.ocFail", e.message))}</p>`;
+  // 回暂存区会重拉列表：网址下载后自动一键入库失败时，刚下载的文件就在那里，可再点「一键入库」
+  const back = document.createElement("button");
+  back.className = "stage-act";
+  back.textContent = t("staging.backToStaging");
+  back.addEventListener("click", openStaging);
+  $("#overlay-body").appendChild(back);
 }
 
 function renderOneclickPrepared(job) {
@@ -566,7 +796,7 @@ function renderOneclickPrepared(job) {
   box.innerHTML = `<p><span class="report-bad">${escapeHtml(t("common.exitCode", job.exit_code))}</span></p>`;
   const pre = document.createElement("pre");
   pre.className = "oc-joblog";
-  pre.textContent = collapseCR(job.output || t("common.noOutput"));
+  pre.innerHTML = jobLogHtml(job.output || t("common.noOutput"));
   const back = document.createElement("button");
   back.className = "stage-act";
   back.textContent = t("staging.backToStaging");
@@ -610,7 +840,7 @@ async function ocPost(url, body) {
   });
   const d = await res.json().catch(() => ({}));
   if (res.status === 423) throw new Error(t("staging.writableRetryDot"));
-  if (!res.ok) throw new Error(d.detail || `HTTP ${res.status}`);
+  if (!res.ok) throw new Error(apiDetail(d, res.status));
   return d;
 }
 
@@ -638,6 +868,9 @@ function renderOneclickPanel(panel, data) {
   const name = (task.upload || "").split("/").pop();
   const summary = document.createElement("p");
   summary.textContent = t("oc.summary", name, task.items.length, fmtMinutes(task.estimate_seconds));
+  if (task.source_url) { // 网址导入（P4.31 §5）：任务卡显示原网址（服务端已去掉签名参数）
+    summary.appendChild(linkMark(task.source_url));
+  }
   card.append(head, summary);
 
   const status = document.createElement("div");

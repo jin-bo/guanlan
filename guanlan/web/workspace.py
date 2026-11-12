@@ -7,12 +7,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 from pathlib import Path
 
 from fastapi import HTTPException
 
 from ..errors import EXIT_OK
+from ..sourcerec import load_source_record, redact_url, source_record_path
 from .uploads import _classify_by_ext
 
 # workspace scratch 两子目录（决策P4.6-5/11）：列举（_list_workspace）与删除白名单
@@ -20,7 +22,18 @@ from .uploads import _classify_by_ext
 _SCRATCH_SUBDIRS = ("uploads", "parsed")
 
 
-def _dir_items(root: Path, d: Path) -> list[dict]:
+def _source_url_hint(path: Path, size: int, mtime_ns: int) -> str | None:
+    """列表用的出处网址（只为显示）：读出处记录，**只比字节数与修改时间、不算哈希**——列表每 2 秒刷新，不能每次
+    整读几百 MiB。对不上（被同名上传覆盖、被手工拷入的同大小文件替换）就不显示；入库的判定在 `oneclick.prepare` 里按哈希做。"""
+    rec = load_source_record(path)
+    if rec is None or rec.get("bytes") != size or rec.get("mtime_ns") != mtime_ns:
+        return None
+    url = rec.get("url")
+    # `/api/workspace` 对 reader 宿主也开放：签名链接的凭据参数不随列表出去（同 raw/ 口径）
+    return redact_url(url) if isinstance(url, str) else None
+
+
+def _dir_items(root: Path, d: Path, *, with_source: bool = False) -> list[dict]:
     """列一个目录的**直接子项**（不递归）：子目录在前（按名）、文件在后（按 mtime 倒序）。
 
     每项 `{path, name, is_dir, mtime}`，文件另带 `{kind, bytes}`。`path` 相对知识库根，**直接作**
@@ -29,7 +42,10 @@ def _dir_items(root: Path, d: Path) -> list[dict]:
     """
     dirs: list[dict] = []
     files: list[dict] = []
-    for path in d.iterdir():
+    entries = list(d.iterdir())
+    # 有出处记录的文件名（同目录点文件）：只对这些读记录，列表每 2 秒刷新，不为每个普通上传各试开一次
+    hidden = {p.name for p in entries if p.name.startswith(".")} if with_source else set()
+    for path in entries:
         if path.name.startswith("."):  # 跳过 .DS_Store / .git 等点文件/点目录
             continue
         try:
@@ -40,12 +56,15 @@ def _dir_items(root: Path, d: Path) -> list[dict]:
         if path.is_dir():
             dirs.append({"path": rel, "name": path.name, "is_dir": True, "mtime": st.st_mtime})
         elif path.is_file():
-            files.append(
-                {
-                    "path": rel, "name": path.name, "is_dir": False,
-                    "kind": _classify_by_ext(path), "bytes": st.st_size, "mtime": st.st_mtime,
-                }
-            )
+            item = {
+                "path": rel, "name": path.name, "is_dir": False,
+                "kind": _classify_by_ext(path), "bytes": st.st_size, "mtime": st.st_mtime,
+            }
+            has_rec = source_record_path(path).name in hidden
+            url = _source_url_hint(path, st.st_size, st.st_mtime_ns) if has_rec else None
+            if url:
+                item["source_url"] = url  # 网址导入来的文件（P4.31）：前端标「🔗」、悬停显示网址
+            files.append(item)
     dirs.sort(key=lambda it: it["name"])
     files.sort(key=lambda it: it["mtime"], reverse=True)
     return dirs + files
@@ -87,10 +106,11 @@ def _list_workspace(root: Path, path: str | None = None) -> dict:
         out: dict = {"root": True}
         for subdir in _SCRATCH_SUBDIRS:
             d = root / "workspace" / subdir
-            out[subdir] = _dir_items(root, d) if d.is_dir() else []
+            out[subdir] = _dir_items(root, d, with_source=subdir == "uploads") if d.is_dir() else []
         return out
     d, base = _safe_workspace_dir(root, path, allow_base_root=True)
-    return {"root": False, "path": d.relative_to(root).as_posix(), "base": base, "items": _dir_items(root, d)}
+    items = _dir_items(root, d, with_source=base == "uploads")  # 出处记录只会在 uploads/ 里（网址导入）
+    return {"root": False, "path": d.relative_to(root).as_posix(), "base": base, "items": items}
 
 
 def _rmtree_workspace_dir(target: Path) -> int:
@@ -156,6 +176,10 @@ def _delete_workspace_scratch(target: Path) -> int:
     已被并发删除（TOCTOU）→ 当作达成目标（不报错）；其它 IO 异常向上抛，由 worker 归一为
     EXIT_AGENT_ERROR（端点转 500）。
     """
+    # 网址导入的出处记录随文件一起删（P4.31 §2.5），**先删记录、再删文件**：文件还在时同名下载不会落到这个名字上
+    # （不覆盖、加序号），删完文件后才可能有新下载用这个名字写新记录——反过来的顺序会把新记录误删。
+    with contextlib.suppress(OSError):  # 记录删不掉只留一个隐藏孤儿，不能把删除报成失败
+        source_record_path(target).unlink(missing_ok=True)
     try:
         target.unlink()
     except FileNotFoundError:

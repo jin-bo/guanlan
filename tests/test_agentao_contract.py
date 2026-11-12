@@ -988,3 +988,41 @@ def test_model_switch_refused_on_read_only_real_conv(real_conv) -> None:
     with pytest.raises(PermissionError):
         real_conv.set_model("openai/other")
     assert real_conv.agent.get_current_model() == before
+
+
+def test_web_fetch_fallback_seams_exist():
+    """P4.31 网址导入在 403 后复用 agentao web_fetch 的后备（决策P4.31-14）：这三个私有接缝变了要第一时间知道。"""
+    import inspect
+
+    import agentao.tools.web as web
+
+    mode, retired = web._read_fallback_setting()
+    assert isinstance(mode, str)
+    sig = inspect.signature(web._render_with_playwright)
+    assert "allow_networks" in sig.parameters and inspect.iscoroutinefunction(web._render_with_playwright)
+    assert inspect.iscoroutinefunction(web._fetch_via_jina)
+    # 地址与主机名检查复用 agentao 的 url_policy（同一口径，§3）
+    import ipaddress
+
+    from agentao.security import url_policy
+
+    assert url_policy._is_disallowed(ipaddress.ip_address("169.254.169.254"), ())
+    assert "metadata.google.internal" in url_policy._LOCAL_HOSTNAMES
+    assert ".internal" in url_policy._LOCAL_HOST_SUFFIXES
+
+
+def test_guanlan_parses_web_fetch_settings_like_agentao(monkeypatch, tmp_path):
+    """网址导入按 agentao 的规则自己解析这两个配置（为了能读 `<库>/.env`）：与 agentao 的解析逐项对照。"""
+    import agentao.tools.web as web
+    from agentao.security.url_policy import read_allow_cidrs_setting
+
+    from guanlan import fetch
+
+    monkeypatch.chdir(tmp_path)
+    for raw in ["", "none", "playwright", "JINA", " jina ", "crawl4ai", "bogus"]:
+        monkeypatch.setenv("AGENTAO_WEB_FETCH_FALLBACK", raw)
+        mode, _ = web._read_fallback_setting()
+        assert fetch.fallback_mode(None) == mode, raw
+    for raw in ["", "198.18.0.0/15", "10.0.0.0/8, 192.168.1.5", "10.0.0.0/8\tbad 172.16.0.0/12", "::1/128"]:
+        monkeypatch.setenv("AGENTAO_WEB_FETCH_ALLOW_CIDRS", raw)
+        assert tuple(fetch.allow_networks(None)) == tuple(dict.fromkeys(read_allow_cidrs_setting())), raw

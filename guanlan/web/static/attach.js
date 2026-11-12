@@ -194,7 +194,7 @@ async function uploadOne(file) {
     const res = await fetch("/api/upload", { method: "POST", body: fd });
     const data = await res.json().catch(() => ({}));
     if (res.status === 423) throw new Error(t("staging.writableRetry"));
-    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    if (!res.ok) throw new Error(apiDetail(data, res.status));
     finalizeAttachChip(chip, { rel: data.saved, name: data.name, kind: data.kind, thumb, visionOversize });
   } catch (e) {
     errorAttachChip(chip, e.message);

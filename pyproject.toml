@@ -97,6 +97,9 @@ dependencies = [
     # 拿到的是那份答案。同版删除 `[PIN]` 消息前缀、默认上下文窗口改为 256K（0.5.19），观澜都不涉及。
     "agentao[cli]>=0.5.20,<0.6",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
+    # P4.31 网址导入：`guanlan/fetch.py` 用 httpx 下载（固定解析地址、逐跳检查）。它本已随 agentao 传递安装，
+    # 显式声明是因为 fetch.py 是核心模块（将来 CLI `import <url>` 复用），不靠传递依赖。
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -116,6 +119,9 @@ web = [
     # 须 >=4.1：投喂端点 `to_thread.run_sync(..., abandon_on_cancel=True)` 用的 kwarg 自 4.1.0
     # 起才有（3.x 只有 `cancellable=`），不钉则可能传递解析到 anyio 3 → 每次 POST /api/raw 即 TypeError。
     "anyio>=4.1",
+    # P4.31：HTML 正文提取（Apache-2.0，零模型）。pdf-to-markdown skill 可选导入，缺了退回整页转换；
+    # 放 [web] 是因为本期只有 Web 的网址导入用得上（P4.31 §9 Q1）。2.x 起 output_format="html" 稳定可用。
+    "trafilatura>=2.0,<3",
 ]
 # MCP 宿主（P4.10，可选叠加层，见 docs/P4.10-MCP宿主.md 决策P4.10-2/14）：装了 `guanlan-wiki[mcp]`
 # 才有 `guanlan mcp`（只读 MCP 服务端，stdio + P4.17 Streamable HTTP）。

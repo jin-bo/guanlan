@@ -83,7 +83,7 @@ from .jobs import JobQueue, WriteGate
 # 整模块导入（不 from-import 具体函数）：端点内经 `mcpdiag.<fn>` 取属性，测试可 monkeypatch
 # 单飞/慢检查而不必真起上游进程。模块本身零 mcp SDK 依赖（只导 agentao.mcp.config）。
 from . import graphview, mcpdiag
-from . import oneclick_routes
+from . import fetch_routes, oneclick_routes
 from .rawfeed import (
     _atomic_write_raw,
     _check_text_admission,
@@ -789,7 +789,7 @@ def create_app(
     # `oneclick_routes`，内核在 `guanlan/oneclick.py`（与 CLI `guanlan import` 共用任务清单）。
     if not reader:  # reader 零写（决策P4.9-2）
         sweep_stale_upload_tmps(root / "workspace" / "uploads")  # 上次中途被杀的上传留下的隐藏临时文件
-    upload_in_use = oneclick_routes.register(
+    oneclick_api = oneclick_routes.register(
         app,
         root=root,
         jobs=jobs,
@@ -799,6 +799,15 @@ def create_app(
         runner=runner,
         reader=reader,
         owns_kb_lock=lambda: bool(getattr(write_gate.write_lock, "owns_kb_lock", False)),
+    )
+    upload_in_use = oneclick_api.upload_in_use
+    # P4.31 网址导入：下载走上传快车道（不进写作业队列、不取库级锁），提交在事件循环线程上做。
+    fetch_routes.register(
+        app,
+        root=root,
+        writer_only=_writer_only,
+        reject_if_writable_active=_reject_if_writable_active,
+        start_prepare=oneclick_api.start_prepare,
     )
 
     # 零 LLM 报告（决策P4-7）：只序列化既有 *Report，与 CLI `--json` 字节对齐；阻塞跑 to_thread。

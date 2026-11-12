@@ -2,7 +2,7 @@
 name: pdf-to-markdown
 description: >
   Convert documents (PDF, DOCX, PPTX, XLSX, EPUB, HTML, images) to Markdown using a
-  tiered backend strategy: pandoc for .docx, then MinerU, then marker-pdf, then a
+  tiered backend strategy: pandoc for .docx/.html, then MinerU, then marker-pdf, then a
   pure-python pypdf fallback. Trigger on: "convert PDF to markdown", "PDF to markdown", "DOCX/Word to
   markdown", "PPTX to markdown", "XLSX/Excel to markdown", "convert document to
   markdown", "transform to text", "mineru", "marker-pdf", "extract markdown from
@@ -20,12 +20,12 @@ fails:
 
 | Tier | Backend | Command | When it runs | Strength |
 |---|---|---|---|---|
-| 0 | **pandoc** | `pandoc -t gfm` | `.docx` only, whenever on `PATH` | Reads the document structure: Word heading styles, tables, footnotes, images. Fast, no models |
+| 0 | **pandoc** | `pandoc -t gfm` | `.docx` / `.html` / `.htm`, whenever on `PATH` | Reads the document structure: headings, tables, footnotes, images. Fast, no models |
 | 1 | **MinerU** (4.x preferred, 3.x supported) | `mineru parse` / `mineru -p` | Used first whenever on `PATH` | Highest-fidelity layout, tables, formulas, OCR |
 | 2 | **marker-pdf** | `marker_single` | Fallback if MinerU missing/fails | Strong layout + optional Gemini LLM cleanup |
 | 3 | **pure-python** | `pypdf` | Last resort | Plain text-layer extraction (PDF only, no OCR) |
 
-With the default `--backend auto`, the script tries tiers **0 (`.docx` only) → 1 → 2 → 3** in order,
+With the default `--backend auto`, the script tries tiers **0 (`.docx`/`.html` only) → 1 → 2 → 3** in order,
 moving to the next one when a backend is **unavailable** (not installed) *or*
 **fails** (non-zero exit / no output). It prints which backend produced the result on
 `stderr` (`[done] backend=...`) and the output `.md` path on `stdout`.
@@ -43,7 +43,7 @@ Force a single tier with `--backend pandoc|mineru|marker|python`.
 | PowerPoint | `.pptx` | — | ✅ | ✅ | — |
 | Excel | `.xlsx` | — | ✅ | ✅ | — |
 | E-book | `.epub` | — | ✅ | ✅ | — |
-| Web | `.html`, `.htm` | — | ✅ | ✅ | — |
+| Web | `.html`, `.htm` | ✅ | ✅ | ✅ | — |
 | Images | `.png`, `.jpg`, `.jpeg`, `.webp`, `.tif`, `.tiff`, `.bmp`, `.gif` | — | ✅ | ✅ | — |
 
 The pure-python tier only handles PDFs **with a text layer** (no OCR). A scanned PDF
@@ -72,6 +72,29 @@ Markdown: tables with merged cells stay HTML tables; images are extracted next t
 replaces images a browser cannot show, such as EMF/WMF, with their alt text).
 `--start/--end` are ignored. If pandoc is missing or fails, `auto` falls through to
 MinerU.
+
+### HTML preprocessing (`.html` / `.htm`)
+
+Before any backend runs, HTML goes through one shared step (`scripts/htmlprep.py`), so every
+tier gets the same input:
+
+1. **Decode to UTF-8**: charset from a BOM, else `--html-charset` (the HTTP header), else
+   `<meta charset>`, else detection (`charset_normalizer`), else UTF-8. GBK/GB2312 are read as
+   GB18030. Old charset `<meta>` tags are dropped.
+2. **Main-content extraction** with [trafilatura](https://trafilatura.readthedocs.io/) when it
+   is installed: navigation, sidebars and footers go away. If it keeps too little text (< 200
+   characters or < 10% of the page), the whole page is used instead. `--html-extract off` always
+   keeps the whole page. Either way, the page `<title>` becomes the `<h1>` when the result has none.
+   Note: extraction drops `rowspan`/`colspan`, so merged table cells are flattened — use `off`
+   for such pages.
+3. **Images and links**: relative URLs are resolved against `--html-base-url`; remote `<img>`
+   become plain links (`[图：alt](url)`) so the Markdown never fetches third-party images;
+   `srcset` and `<picture><source>` are removed; `data:` images are kept.
+
+pandoc then reads the prepared HTML with `-f html-native_divs-native_spans`, so `<div>`/`<span>`
+wrappers do not leak into the Markdown while merged-cell tables stay HTML tables. stderr shows
+`[html] charset=…` and `[html] extract=trafilatura|off|none|fallback`. The user's file is never
+modified (the prepared copy lives in a temporary folder next to it and is removed afterwards).
 
 ### Tier 1 — MinerU
 
@@ -166,6 +189,11 @@ MinerU 4.x:
   --engine-wait SECONDS   Max wait for the local parse engine after a start (default 180; 0 = no wait)
   --force                 Ignore MinerU's parse cache and re-parse
   --remote                Use the mineru.net remote service (UPLOADS the file)
+
+HTML (see "HTML preprocessing"):
+  --html-charset NAME     Charset from the HTTP Content-Type header (wins over <meta>)
+  --html-base-url URL     Page URL used to resolve relative image/link URLs
+  --html-extract CHOICE   auto (default: trafilatura when installed) | off (whole page)
 
 MinerU 3.x (legacy CLI):
   --method CHOICE         auto (default) | txt | ocr

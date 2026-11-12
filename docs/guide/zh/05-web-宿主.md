@@ -34,6 +34,9 @@ guanlan -C my-wiki web --port 9000 --no-browser # 换端口 / 不开浏览器
 - **全文检索**(`/api/search`),输入框防抖召回
 - **投喂**(顶栏「投喂」):粘贴一篇素材存进 `raw/`(`POST /api/raw`)
 - **导入**(顶栏「导入」):点「上传文件…」把 PDF、DOCX 等原件传到 `workspace/uploads/`(可多选,也可在对话框里附上文件),再对文件点「一键入库」:解析 · 整理 · 拆分 → 确认 → 落 `raw/` → 依次 ingest,与 CLI `guanlan import` 共用任务清单
+  - **从网址下载**(P4.31):「从网址下载…」粘贴一个网址,把 PDF、网页、Word / PowerPoint / Excel、图片或 Markdown 下到 `workspace/uploads/`,文件名旁标 🔗,入库后 `origin` 记网址、另记抓取日期 `fetched`。同名不覆盖、自动加序号;可勾「下载完成后直接一键入库」(写 `raw/` 前仍停在确认)。其它格式(EPUB、CSV、老版 Office 等)先下载到本地再上传。需要登录、要在浏览器里通过验证（如知乎专栏）或靠 JavaScript 渲染的页面取不到——会提示「网站拒绝了自动下载」，这时在浏览器里打开页面、「另存为」网页或打印为 PDF，再用「上传文件…」上传。若在 agentao 里配置了 `AGENTAO_WEB_FETCH_FALLBACK`（写在 `<库>/.env`），遇到 403 会按它再取一次：`playwright` 用本机无头浏览器渲染（需 `pip install 'agentao[playwright]'` 与 `playwright install chromium`），`jina` 把网址交给第三方 r.jina.ai 代取；成功时下载完成提示与 `raw/` 的 `fetched_via` 会写明
+  - **网页正文提取**:网页先去掉导航、侧栏、页脚(trafilatura,随 `[web]` 安装)再由 pandoc 转成 Markdown,远程图片改成链接、不下载。提取丢了内容时,放弃任务、对同一文件点「整页一键入库」重来。正文提取会丢掉表格的合并单元格,有这类表格的页面建议整页入库
+  - **网络与安全**:不访问本机与内网地址(每次跳转都检查);要取内网文档,在 `<库>/.env`(或启动目录往上能找到的 `.env`)里设 `AGENTAO_WEB_FETCH_ALLOW_CIDRS`(逗号分隔的网段,与 agentao 的 `web_fetch` 共用)。开着 Clash / Surge 等 fake-ip 代理时所有域名都解析到 `198.18.0.0/15`,须把这一段写进去,否则一个网址都下不了。要走代理,设标准的 `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`(与 agentao 的 `web_fetch` 共用;走代理时本机的地址检查照做)
 - **回填**(`query --backfill`):把问答沉淀回 wiki(走门禁)
 - **语义审计**(`audit`):复核 `raw/` 已变但 wiki 未重综合的漂移源(顶栏「审计」按钮:预览漂移源组 → 一键复核 → 轮询结构化回执;走门禁)
 - **斜杠命令与只读自省**:`/status` `/context` `/skills` `/tools` `/mode`,停止按钮

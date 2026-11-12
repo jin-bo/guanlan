@@ -74,6 +74,8 @@ _PIPE_ENCODING = "utf-8"
 _DONE_BACKEND_RE = re.compile(r"^\[done\] backend=(\S+)[ \t]*$", re.MULTILINE)
 # MinerU 4 解析成功时 skill 另打一行实际档位（`log(f"[mineru] tier={tier}")`，#171）。
 _MINERU_TIER_RE = re.compile(r"^\[mineru\] tier=([a-z]+)[ \t]*$", re.MULTILINE)
+# HTML 公共预处理的正文提取结果（`log(f"[html] extract={status}")`，P4.31 §4.5）。
+_HTML_EXTRACT_RE = re.compile(r"^\[html\] extract=([a-z]+)[ \t]*$", re.MULTILINE)
 
 
 def parse_backend_marker(stderr: str) -> str | None:
@@ -89,6 +91,9 @@ def parse_backend_marker(stderr: str) -> str | None:
 
     后端是 mineru 且 stderr 有 `[mineru] tier=<档位>` 行时返回 `mineru/<档位>`（#171）：MinerU 4 的 flash
     只取文本层，与 standard 差别不亚于换后端；自动启动时引擎没就绪会被降到 flash，不记下就查不出来。
+
+    HTML 经正文提取（trafilatura）时再加 `+trafilatura`（P4.31 §4.5），如 `pandoc+trafilatura`；
+    关闭、未安装或退回整页时不加——一眼可查哪些网页是整页转换的。
     """
     matches = _DONE_BACKEND_RE.findall(stderr or "")
     if not matches:
@@ -97,7 +102,10 @@ def parse_backend_marker(stderr: str) -> str | None:
     if backend == "mineru":  # MinerU 4 的档位差别同样是数量级（flash 只取文本层），一并记成 `mineru/<档位>`（#171）
         tiers = _MINERU_TIER_RE.findall(stderr or "")
         if tiers:
-            return f"mineru/{tiers[-1]}"
+            backend = f"mineru/{tiers[-1]}"
+    extract = _HTML_EXTRACT_RE.findall(stderr or "")
+    if extract and extract[-1] == "trafilatura":
+        backend += "+trafilatura"
     return backend
 
 
@@ -211,6 +219,9 @@ def convert_to_markdown(
     backend: str = "auto",
     cwd: Path | None = None,
     progress: Callable[[str], None] | None = None,
+    html_charset: str | None = None,
+    html_base_url: str | None = None,
+    html_extract: str = "auto",
 ) -> ConvertResult:
     """**转换内核**：把一个多格式文件转成 markdown + 随源图片，零 LLM。复用 skill `convert.py` 当引擎。
 
@@ -234,6 +245,10 @@ def convert_to_markdown(
        按安全闸收集字节、编号、重写引用为 `images/<stem>/<stem>-<n>.<ext>`，返回 `ConvertResult`；
     5. exit≠0（全后端耗尽 / skill 不支持的格式 / 文件不存在）→ raise `ConvertError`（带 skill stderr）。
 
+    `html_charset` / `html_base_url` / `html_extract`（P4.31 §4）：只对 HTML 有意义，透传为 skill 的
+    `--html-charset` / `--html-base-url` / `--html-extract`。网址导入的出处记录给出前两项；`html_extract="off"`
+    即「保留整页」。其它格式不传，命令行与以前逐字节相同。
+
     **不**承诺字节确定性（决策P5.2-4）：输出随 mineru/marker/pypdf 版本、输入结构、及外部后端
     是否启用 LLM 增强而变——它是**源**、非可重建派生物。
     """
@@ -243,8 +258,17 @@ def convert_to_markdown(
         tmp_root = Path(tmp).resolve()
         staged = tmp_root / src.name  # 绝对路径；产物落 tmp（决策P5.2-10）。
         shutil.copyfile(src, staged)
+        cmd = [sys.executable, str(script), str(staged), "--backend", backend]
+        if src.suffix.lower() in (".html", ".htm"):
+            if html_charset:
+                # `--opt=值` 一个参数：字符集来自服务器响应头，以 `-` 开头的值分开传会被 argparse 当成选项
+                cmd.append(f"--html-charset={html_charset}")
+            if html_base_url:
+                cmd.append(f"--html-base-url={html_base_url}")
+            if html_extract != "auto":
+                cmd += ["--html-extract", html_extract]
         returncode, stdout, stderr = _run_converter(
-            [sys.executable, str(script), str(staged), "--backend", backend],
+            cmd,
             cwd=run_cwd,  # KB root，绝非 tmpdir（决策P5.2-12）；透传环境、不透传 model（决策P5.2-4）。
             progress=progress,
         )

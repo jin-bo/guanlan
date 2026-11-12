@@ -15,6 +15,10 @@ Tiered backend strategy (best quality first, degrade gracefully):
 With `--backend auto` (the default) the script tries each tier in order, moving to
 the next one when a backend is missing OR fails, and prints which backend produced
 the result. Force a single backend with `--backend mineru|marker|python`.
+
+HTML (.html/.htm) is preprocessed once before any backend (see htmlprep.py): decoded
+to UTF-8, main content extracted (trafilatura, optional), remote images turned into
+links. pandoc is tried first for HTML, as for .docx.
 """
 
 import argparse
@@ -24,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -50,7 +55,10 @@ MARKER_EXTENSIONS = {
 
 # pandoc reads the document structure directly (Word heading styles, tables, footnotes),
 # so for .docx it beats the layout-based engines and needs no models.
-PANDOC_EXTENSIONS = {".docx"}
+PANDOC_EXTENSIONS = {".docx", ".html", ".htm"}
+
+# HTML goes through the shared preprocessing (htmlprep.py) before any backend.
+HTML_EXTENSIONS = {".html", ".htm"}
 
 # Image formats a browser can show; pandoc may extract others (EMF/WMF/WDP) from Office files.
 WEB_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg"}
@@ -446,7 +454,9 @@ def run_mineru_legacy(input_path: Path, output_dir: Path, args) -> Path:
 PANDOC_IMAGE_FILTER = """
 local web = {%s}
 function Image(el)
-  local ext = (el.src:match("%%.([%%w]+)$") or ""):lower()
+  -- data: images (kept by htmlprep) carry their type in the MIME, not in a file extension;
+  -- --extract-media writes them out only after this filter runs.
+  local ext = (el.src:match("^data:image/(%%w+)") or el.src:match("%%.([%%w]+)$") or ""):lower()
   if not web[ext] then
     return el.caption
   end
@@ -469,7 +479,7 @@ def run_pandoc(input_path: Path, output_dir: Path, args, env_vars: dict[str, str
     if shutil.which("pandoc") is None:
         raise BackendUnavailable("'pandoc' not found on PATH (https://pandoc.org/installing.html)")
     if args.start is not None or args.end is not None:
-        log("[pandoc] --start/--end ignored: a .docx has no fixed pages")
+        log("[pandoc] --start/--end ignored: a .docx / .html has no fixed pages")
 
     out_subdir = output_dir / input_path.stem
     out_subdir.mkdir(parents=True, exist_ok=True)
@@ -481,6 +491,16 @@ def run_pandoc(input_path: Path, output_dir: Path, args, env_vars: dict[str, str
     # relative to the markdown file, as the other backends do.
     cmd = ["pandoc", str(input_path), "-t", "gfm", "--wrap=none",
            "--extract-media=media", "--lua-filter", lua.name, "-o", out_md.name]
+    if input_path.suffix.lower() in HTML_EXTENSIONS:
+        # Without native divs/spans, <div class=…>/<span style=…> wrappers stop leaking into the
+        # Markdown, while tables with merged cells still come out as HTML tables (P4.31 §4.3).
+        cmd[2:2] = ["-f", "html-native_divs-native_spans"]
+        resource_dir = getattr(args, "html_resource_dir", None)
+        # pandoc splits --resource-path on the search-path separator (":" on POSIX, ";" on Windows) and has
+        # no escape: a folder name containing it would make pandoc look for (and --extract-media copy)
+        # relative images somewhere else. Skip it then — the page's relative images are simply not found.
+        if resource_dir and os.pathsep not in str(resource_dir):
+            cmd.append(f"--resource-path={resource_dir}")
     log(f"[pandoc] {redact_cmd(cmd)}")
     try:
         proc = subprocess.run(cmd, cwd=out_subdir, stdout=sys.stderr, stderr=subprocess.PIPE,
@@ -628,7 +648,7 @@ def backend_order(backend: str, suffix: str) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert a document to Markdown via a tiered backend strategy "
-        "(pandoc for .docx -> MinerU -> marker-pdf -> pure-python).",
+        "(pandoc for .docx/.html -> MinerU -> marker-pdf -> pure-python).",
     )
     parser.add_argument(
         "input",
@@ -638,7 +658,7 @@ def main() -> None:
         "--backend",
         choices=["auto", *BACKENDS],
         default="auto",
-        help="Backend to use. 'auto' (default) tries pandoc (.docx only) -> mineru -> "
+        help="Backend to use. 'auto' (default) tries pandoc (.docx/.html only) -> mineru -> "
         "marker -> python, falling back when one is missing or fails.",
     )
     # Page range (backend-agnostic, 0-based inclusive).
@@ -673,6 +693,14 @@ def main() -> None:
                         help="marker: do not extract images")
     parser.add_argument("--model", default=None,
                         help=f"marker Gemini model (default: {DEFAULT_GEMINI_MODEL})")
+    # HTML preprocessing (htmlprep.py)
+    parser.add_argument("--html-charset", default=None,
+                        help="HTML: charset declared by the HTTP Content-Type header (wins over <meta>)")
+    parser.add_argument("--html-base-url", default=None,
+                        help="HTML: page URL used to resolve relative image/link URLs")
+    parser.add_argument("--html-extract", choices=["auto", "off"], default="auto",
+                        help="HTML: extract the main content with trafilatura when installed "
+                        "(auto, default) or keep the whole page (off)")
     args = parser.parse_args()
 
     input_path = Path(args.input).resolve()
@@ -692,6 +720,41 @@ def main() -> None:
     output_dir = input_path.parent
     order = backend_order(args.backend, input_path.suffix)
 
+    prep_dir: Path | None = None
+    source_path = input_path
+    try:
+        if input_path.suffix.lower() in HTML_EXTENSIONS:
+            # Same directory as this script. Add it explicitly: with PYTHONSAFEPATH / `python -P`
+            # (passed through from the caller's environment) the script folder is not on sys.path.
+            script_dir = str(Path(__file__).resolve().parent)
+            if script_dir not in sys.path:
+                sys.path.insert(0, script_dir)
+            from htmlprep import prepare_html
+
+            text, report = prepare_html(input_path.read_bytes(), charset=args.html_charset,
+                                        base_url=args.html_base_url, extract=args.html_extract)
+            log(f"[html] charset={report['charset']} ({report['charset_source']})")
+            log(f"[html] extract={report['extract']}")
+            # Never overwrite the user's file: the prepared copy lives in its own folder and keeps
+            # the stem, so every backend names its output exactly as before. Inside the try, so a
+            # failed write (disk full) does not leave the hidden folder behind.
+            # A unique folder (not `.<stem>.htmlprep`): two runs on the same file cannot delete each
+            # other's input, and a long stem cannot push the folder name past 255 bytes.
+            prep_dir = Path(tempfile.mkdtemp(prefix=".htmlprep-", dir=output_dir))
+            source_path = prep_dir / f"{input_path.stem}.html"
+            # pandoc looks up relative <img src> in its working directory: point it at the folder of the
+            # input file, where htmlprep allows plain relative paths (and nothing outside it). When guanlan
+            # calls this skill, that folder is its staging temp dir holding only the page itself, so
+            # relative images are reported missing there (P4.31 §4.4) — this matters for direct skill use.
+            args.html_resource_dir = str(input_path.parent)
+            source_path.write_text(text, encoding="utf-8")
+        _run_backends(order, source_path, output_dir, args, env_vars)
+    finally:
+        if prep_dir is not None:
+            shutil.rmtree(prep_dir, ignore_errors=True)
+
+
+def _run_backends(order, input_path, output_dir, args, env_vars) -> None:
     errors: list[str] = []
     for name in order:
         try:

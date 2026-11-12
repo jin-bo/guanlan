@@ -27,6 +27,23 @@ function escapeHtml(s) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 接口错误 → 给人看的一句话。FastAPI 的 422 把 detail 给成数组（逐字段的校验错误），
+// 直接 new Error(d.detail) 会显示 [object Object]
+function apiDetail(d, status) {
+  if (d && typeof d.detail === "string") return d.detail;
+  if (d && Array.isArray(d.detail)) return d.detail.map((x) => (x && x.msg) || String(x)).join("；");
+  return `HTTP ${status}`;
+}
+
+// 作业日志 → `<pre>` 的 HTML：以「✗」开头的行（观澜各命令的失败行，如「✗ 准备失败：…」；一键入库日志行前
+// 还有「[时:分:秒] 」时间戳）标红，其余原样转义。
+function jobLogHtml(text) {
+  return collapseCR(text)
+    .split("\n")
+    .map((line) => (/^\s*(\[[\d:]+\]\s*)?✗/.test(line) ? `<span class="log-bad">${escapeHtml(line)}</span>` : escapeHtml(line)))
+    .join("\n");
+}
+
 // 终端进度条（tqdm，如 ingest/convert 解析）用回车 `\r` 原地刷新同一行；浏览器 `<pre>` 不识别
 // `\r`，会把每次刷新堆成一行，进度日志爆成几十行。还原"原地刷新"：按 `\n` 切行，每行只保留
 // 最后一个 `\r` 之后的片段（= 该行进度条的最终/当前态）。纯展示层处理，不动 job.output 原文。

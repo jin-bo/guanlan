@@ -234,7 +234,7 @@ def test_resume_with_overwrite_unblocks_overwritable_pause(kb: Path, book: Path)
     task.update(state="paused", overwrite=False)
     task["stages"]["confirm"] = "done"
     first = task["items"][0]
-    first.update(land="written", sha256=oneclick._sha_file(kb / first["raw"]), images={})
+    first.update(land="written", sha256=oneclick.sha256_file(kb / first["raw"]), images={})
     oneclick.save_task(kb, task)
     with acquire(kb, "test"):
         code, t = resume(kb, task["task_id"], ingest=FakeIngest())
@@ -808,3 +808,237 @@ def test_cli_logs_show_current_part_counts_and_eta(kb: Path, book: Path, capsys)
     err = capsys.readouterr().err
     assert re.search(r"\[1/3\] 入库 \S+（\d+ 字；已完成 0 篇、剩 3 篇", err), err
     assert re.search(r"进度 1/3 篇 · 本次已用 .+ · 预计剩余约 .+（2 篇）", err), err
+
+
+def test_bad_html_extract_rejected_before_reading_file(kb, tmp_path, monkeypatch):
+    src = tmp_path / "x.pdf"
+    src.write_bytes(b"%PDF")
+    monkeypatch.setattr(oneclick, "sha256_file", lambda p: (_ for _ in ()).throw(AssertionError("不该先读文件")))
+    with acquire(kb, "test"), pytest.raises(OneClickError, match="html_extract"):
+        prepare(kb, src, origin_kind="cli", html_extract="bad")
+
+
+def test_url_imported_markdown_does_not_collect_local_images(kb: Path):
+    """网址下载来的 .md：相对图片指原站，不能把 uploads/ 里碰巧同名的本地图片搬进来（P4.31 代码评审）。"""
+    import hashlib
+
+    uploads = kb / "workspace" / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    (uploads / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    src = uploads / "readme.md"
+    src.write_text("# 说明\n\n![](shot.png)\n\n" + "正文。" * 100 + "\n", encoding="utf-8")
+    rec = {
+        "url": "https://e.org/readme.md",
+        "final_url": "https://e.org/readme.md",
+        "sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
+        "fetched_at": "2026-11-11T00:00:00+08:00",
+    }
+    (uploads / ".readme.md.source.json").write_text(json.dumps(rec), encoding="utf-8")
+    with acquire(kb, "test"):
+        task = prepare(kb, src, origin_kind="cli", dry_run=True)
+    parsed = kb / "workspace" / "parsed"
+    assert not list(parsed.rglob("*.png")), task
+    text = (parsed / f"{task['sample']}.md").read_text(encoding="utf-8")
+    assert "[图](https://e.org/shot.png)" in text and "![" not in text  # 按原网址补全成普通链接（P4.31 §4.4 同口径）
+
+
+def test_url_markdown_image_variants_all_become_links():
+    """与 ⑤ 收图用同一套图片语法：单引号标题、跨行说明、尖括号地址都要改成链接，`data:` 不动。"""
+    from guanlan.oneclick import _md_images_to_links
+
+    text = "![a](x.png 'T') ![多\n行](<y.png>) ![d](data:image/png;base64,AA)"
+    out = _md_images_to_links(text, "https://e.org/docs/r.md")
+    assert "](https://e.org/docs/x.png)" in out and "](https://e.org/docs/y.png)" in out
+    assert "![d](data:image/png;base64,AA)" in out and out.count("![") == 1
+
+
+def test_url_markdown_angle_destinations_with_spaces_resolve_whole():
+    """尖括号地址可含空格（CommonMark）：整段补全、写回仍放进 `<…>`，不在第一个空格处截断成错地址。"""
+    from guanlan.oneclick import _md_images_to_links
+
+    base = "https://e.org/d/r.md"
+    assert _md_images_to_links("![a](<img/x y.png>)", base) == "[图：a](<https://e.org/d/img/x y.png>)"
+    assert _md_images_to_links("[a](<rel path.md>)", base) == "[a](<https://e.org/d/rel path.md>)"
+    assert _md_images_to_links("[![l](a.png)](<my g.md>)", base) == "[图：l](<https://e.org/d/my g.md>)"
+    assert _md_images_to_links("[x]: <rel.png>", base) == "[x]: <https://e.org/d/rel.png>"
+
+
+def test_url_markdown_existing_private_use_chars_survive_code_stash():
+    """原文自带私用区字符（图标字体）时，代码占位符不能与之混淆：不抛 IndexError、原文逐字保留。"""
+    from guanlan.oneclick import _md_images_to_links
+
+    text = "5 `code` [a](b.md)"
+    assert _md_images_to_links(text, "https://e.org/d/r.md") == "5 `code` [a](https://e.org/d/b.md)"
+
+
+def test_url_markdown_linked_image_does_not_nest_links():
+    """README 徽章 `[![CI](badge.svg)](actions)`：只留外层链接，不改出 `[[图：CI](…)](…)` 嵌套链接。"""
+    from guanlan.oneclick import _md_images_to_links
+
+    out = _md_images_to_links("[![CI](badge.svg)](https://ci.example/run)", "https://e.org/r/README.md")
+    assert out == "[图：CI](https://ci.example/run)"
+
+
+def test_url_markdown_image_with_text_inside_link_does_not_nest():
+    """链接文字里图后还有字（`[![logo](a.png) 文档](guide.md)`）：同样不嵌套，外层相对地址照常补全。"""
+    from guanlan.oneclick import _md_images_to_links
+
+    base = "https://e.org/r/README.md"
+    assert _md_images_to_links("[![logo](a.png) 文档](guide.md)", base) == "[图：logo 文档](https://e.org/r/guide.md)"
+    out = _md_images_to_links("[![logo][l] 文档](guide.md)\n\n[l]: a.png\n", base)
+    assert out.startswith("[图：logo 文档](https://e.org/r/guide.md)")
+
+
+def test_url_markdown_reference_images_become_links():
+    """引用式图片 `![说明][ref]`（README 徽章常见）同样改成链接：否则预览照样去第三方取图；外层带链接的不嵌套。"""
+    from guanlan.oneclick import _md_images_to_links
+
+    text = "[![CI][badge]][ci] ![logo][l] ![x][]\n\n[badge]: https://img.example/b.svg\n"
+    out = _md_images_to_links(text, "https://e.org/r/README.md")
+    assert "![" not in out
+    assert out.startswith("[图：CI][ci] [图：logo][l] [图：x][x]")
+
+
+def test_url_markdown_reference_definitions_resolved():
+    """引用式定义 `[ref]: 相对地址` 按原网址补全：`![x][l]` 改成链接后，相对定义会指向库里不存在的文件。"""
+    from guanlan.oneclick import _md_images_to_links
+
+    text = "![logo][l]\n\n[l]: img/logo.png\n[s]: https://x.example/a\n[t]: #top\n"
+    out = _md_images_to_links(text, "https://e.org/r/README.md")
+    assert "[l]: https://e.org/r/img/logo.png" in out
+    assert "[s]: https://x.example/a" in out and "[t]: #top" in out
+
+
+def test_url_markdown_footnotes_and_code_not_rewritten():
+    """脚注定义 `[^1]: 文字` 不是地址；代码里的链接与引用定义是示例文字：都不按原网址补全。"""
+    from guanlan.oneclick import _md_images_to_links
+
+    text = "a[^1] `[c](c.md)`\n\n[^1]: See the docs.\n\n```md\n[y](b.md)\n[r]: rel.md\n```\n[w](w.md)\n"
+    out = _md_images_to_links(text, "https://e.org/r/README.md")
+    assert "[^1]: See the docs." in out
+    assert "`[c](c.md)`" in out and "[y](b.md)\n[r]: rel.md" in out
+    assert "[w](https://e.org/r/w.md)" in out
+
+
+def test_url_markdown_shortcut_reference_image_becomes_link():
+    """简写引用式图片 `![logo]` 同样改成链接；外层带链接的 `[![CI]](…)` 只留说明文字，不嵌套。"""
+    from guanlan.oneclick import _md_images_to_links
+
+    text = "![logo] [![CI]](https://ci.example/run)\n\n[logo]: img/logo.png\n[ci]: img/ci.svg\n"
+    out = _md_images_to_links(text, "https://e.org/r/README.md")
+    assert "![" not in out
+    assert out.startswith("[图：logo][logo] [图：CI](https://ci.example/run)")
+
+
+def test_url_markdown_undefined_shortcut_is_plain_text():
+    """没有引用定义的 `![x]` 只是正文（CommonMark），不能改写（如 `What a result![1]`）。"""
+    from guanlan.oneclick import _md_images_to_links
+
+    text = "What a result![1] wow\n"
+    assert _md_images_to_links(text, "https://e.org/r/README.md") == text
+
+
+def test_url_markdown_longer_closing_fence_and_data_image_link():
+    """收尾围栏比开头长也算关上，后面的相对链接照样补全；外层链接里是 data: 图时外层地址也补全。"""
+    from guanlan.oneclick import _md_images_to_links
+
+    base = "https://e.org/r/README.md"
+    out = _md_images_to_links("````\n[a](b)\n`````\n[c](d)\n", base)
+    assert "[a](b)" in out and "[c](https://e.org/r/d)" in out
+    out = _md_images_to_links("[![x](data:image/png;base64,AA)](rel/page)", base)
+    assert out == "[![x](data:image/png;base64,AA)](https://e.org/r/rel/page)"
+
+
+def _html_prepare(kb: Path, tmp_path: Path, monkeypatch, markdown: str, suffix: str = ".html"):
+    from guanlan.imageio import ConvertResult
+
+    src = tmp_path / f"page{suffix}"
+    src.write_text("<html><body>x</body></html>", encoding="utf-8")
+    monkeypatch.setattr(oneclick, "convert_to_markdown", lambda *a, **k: ConvertResult(markdown=markdown, backend="pandoc"))
+    with acquire(kb, "test"):
+        return prepare(kb, src, origin_kind="cli")
+
+
+def test_html_empty_shell_refused(kb: Path, tmp_path: Path, monkeypatch):
+    """靠 JS 渲染的空壳页（P4.31 §4.6）：只剩提示语、导航和网址，准备阶段就挡下，不进 raw/。"""
+    shell = (
+        "# 示例应用\n\n请开启 JavaScript 以继续。You need to enable JavaScript to run this app.\n\n"
+        "[首页](https://example.com/) [关于](https://example.com/about) ![](https://example.com/logo.png)\n\n"
+        + "https://example.com/very/long/path/" * 50
+        + "\n"
+    )
+    with pytest.raises(OneClickError, match="空壳页"):
+        _html_prepare(kb, tmp_path, monkeypatch, shell)
+    assert not list((kb / "raw").rglob("*.md"))
+
+
+def test_html_short_but_real_page_passes(kb: Path, tmp_path: Path, monkeypatch):
+    """刚过阈值的正文不能被误拦：数字要数对（汉字、字母一个算一个），漏报是沉默的。"""
+    body = "通" * 180 + " " + " ".join(["word"] * 5)  # 180 + 5×4 = 200
+    assert oneclick.body_chars(body) == oneclick.MIN_HTML_BODY_CHARS
+    task = _html_prepare(kb, tmp_path, monkeypatch, f"# 短通知\n\n{body}\n", suffix=".htm")
+    assert task["state"] == "awaiting_confirm"
+
+
+def test_empty_shell_check_only_for_html(kb: Path, tmp_path: Path, monkeypatch):
+    """短 PDF / DOCX 不按网页空壳判（扫描件另有提示）。"""
+    task = _html_prepare(kb, tmp_path, monkeypatch, "# 一页\n\n很短的正文。\n", suffix=".docx")
+    assert task["state"] == "awaiting_confirm"
+
+
+def test_body_chars_ignores_frontmatter_urls_and_markup():
+    md = "---\ntitle: 很长很长的标题\norigin: https://a.example/x\n---\n## 标题\n\n**正文** [链接](https://b.example/long) <https://c.example/>\n"
+    assert oneclick.body_chars(md) == 6  # 标题 正文 链接
+
+
+def test_short_english_notice_not_mistaken_for_shell():
+    """英文按字母数，不按词折算：80 来词的正常英文通知不能被判空壳（代码评审发现）。"""
+    notice = "# Notice\n\n" + "The office will be closed on Friday for maintenance work. " * 8
+    assert oneclick.body_chars(notice) >= oneclick.MIN_HTML_BODY_CHARS
+    assert oneclick.body_chars("You need to enable JavaScript to run this app.") < oneclick.MIN_HTML_BODY_CHARS
+
+
+def test_body_chars_ignores_leftover_html_tags():
+    """pandoc 留下的原始 HTML（合并单元格表格等）只数单元格里的字，不数标签名和属性（代码评审发现）。"""
+    cells = "".join(f'<td colspan="2" class="cell">{c}</td>' for c in "一二三四五六七八九十" * 2)
+    assert oneclick.body_chars(f"<table><tr>{cells}</tr></table>\n<!-- 注释里的很多字不算 -->") == 20
+
+
+def test_url_markdown_relative_links_resolved():
+    """网址下载来的 Markdown：普通相对链接按原网址补全（与网页同口径）；锚点、外链、wikilink 不动。"""
+    out = oneclick._md_images_to_links(
+        "[文档](docs/x.md) [锚](#a) [外](https://o.org/) [[页面]]", "https://h.org/r/README.md"
+    )
+    assert out == "[文档](https://h.org/r/docs/x.md) [锚](#a) [外](https://o.org/) [[页面]]"
+
+
+def test_jina_fetched_markdown_shell_refused(kb: Path):
+    """403 后经 jina 代取的网页落成 .md，同样做空壳判断（代码评审发现）；普通下载的 .md 不判。"""
+    import hashlib
+
+    uploads = kb / "workspace" / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    src = uploads / "page.md"
+    src.write_text("# 应用\n\n请开启 JavaScript 以继续。\n", encoding="utf-8")
+    rec = {
+        "url": "https://e.org/p/1",
+        "final_url": "https://e.org/p/1",
+        "sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
+        "fetched_at": "2026-11-12T00:00:00+00:00",
+        "fetched_via": "jina",
+    }
+    (uploads / ".page.md.source.json").write_text(json.dumps(rec), encoding="utf-8")
+    with acquire(kb, "test"), pytest.raises(OneClickError, match="空壳页"):
+        prepare(kb, src, origin_kind="cli")
+    rec.pop("fetched_via")
+    (uploads / ".page.md.source.json").write_text(json.dumps(rec), encoding="utf-8")
+    with acquire(kb, "test"):
+        assert prepare(kb, src, origin_kind="cli")["state"] == "awaiting_confirm"
+
+
+def test_url_markdown_code_and_anchor_untouched():
+    """Rust 的 `vec![1, 2]` 在代码里不能被当成引用式图片改坏；链接包着的图指向锚点时不补成外链（代码评审发现）。"""
+    md = "```rust\nlet v = vec![1, 2];\n```\nuse `vec![0; n]` and [![logo](a.png)](#top)"
+    out = oneclick._md_images_to_links(md, "https://h.org/r/README.md")
+    assert "let v = vec![1, 2];" in out and "`vec![0; n]`" in out
+    assert out.endswith("[图：logo](#top)")

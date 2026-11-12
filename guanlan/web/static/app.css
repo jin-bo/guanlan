@@ -573,6 +573,16 @@ body.hide-thinking .chat-think { display: none; }
 .stage-head:first-child { margin-top: 0; }
 .stage-upload { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: 0 0 .4rem; }
 .stage-upload-note { font-size: .8rem; overflow-wrap: anywhere; }
+/* P4.31 从网址下载：行内表单（网址 + 两个选项）与进度行 */
+.stage-fetch { display: flex; flex-direction: column; gap: .35rem; margin: 0 0 .5rem; padding: .5rem .6rem; border: 1px solid var(--lan-mist); border-radius: 6px; }
+.stage-fetch input[type="url"] { width: 100%; box-sizing: border-box; font: inherit; padding: .3rem .4rem; }
+.stage-fetch label { font-size: .85rem; display: flex; align-items: center; gap: .35rem; }
+.stage-fetch .stage-fetch-sub { margin-left: 1.4rem; }
+.stage-fetch-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.stage-fetch-status { font-size: .8rem; overflow-wrap: anywhere; }
+/* 下载失败：红字、比常规状态小两号；不挂 .muted（它在后面定义，会把颜色和字号盖回灰色 .85rem） */
+.stage-fetch-status.stage-fetch-error { color: #c0392b; font-size: .7rem; }
+.stage-link-mark { font-size: .75rem; margin-left: .25rem; cursor: help; }
 .stage-sub { font-weight: 400; color: var(--lan-ink-soft); font-size: .78rem; }
 .stage-empty { margin: .2rem 0 .4rem; }
 .stage-row { display: flex; align-items: center; gap: .4rem; padding: .3rem .35rem; border-bottom: 1px solid var(--lan-mist); font-size: .85rem; flex-wrap: wrap; }
@@ -616,6 +626,8 @@ body.hide-thinking .chat-think { display: none; }
 .oc-items li.oc-item-current { font-weight: 600; color: var(--lan-deep); }
 /* 一键入库解析进度（浮层）与任务卡日志同为 10px：比通用作业输出（.72rem）小 2px 左右，长日志一屏看得全。 */
 .overlay-body pre.oc-joblog { font-size: .625rem; }
+/* 作业日志里的失败行（✗ 开头）：红字 */
+.log-bad { color: #c0392b; }
 .stage-promote-status { flex-basis: 100%; font-size: .82rem; display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
 .stage-preview { margin-top: .5rem; padding: .6rem .8rem; background: var(--lan-foam); border-radius: 6px; }
 /* 预览「Markdown ⇄ 源码」切换条：当前态按钮高亮，源码视图按 <pre><code> 等宽显示原始 md。 */
