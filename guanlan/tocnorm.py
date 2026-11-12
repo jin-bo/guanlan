@@ -21,6 +21,8 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from .stopscope import StopRequested
+
 __all__ = ["TocResult", "TocReviewer", "normalize_by_toc", "toc_title_lines"]
 
 # 目录审校（#175）：(目录区原文, 规则草稿 [{title, page, level}]) → 修正后的条目列表。
@@ -476,6 +478,8 @@ def _apply_review(
     draft = [{"title": e.title, "page": e.page, "level": e.level} for e in (found[2] if found else [])]
     try:
         items = reviewer(text, draft)
+    except StopRequested:  # 用户停止准备（#173）：不是审校失败，不能退回规则结果接着跑
+        raise
     except Exception as exc:  # noqa: BLE001 —— 审校只是增强：任何失败都退回规则结果
         return found, "rules", f"failed:{str(exc)[:200] or type(exc).__name__}"
     entries, verdict = _validate_review(items, text)

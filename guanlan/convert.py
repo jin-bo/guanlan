@@ -34,6 +34,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
+from . import stopscope
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .imageio import (
     IMAGE_EXTS,  # noqa: F401 — 历史 re-export（测试 / 文档对齐口径）
@@ -154,7 +155,11 @@ def _run_converter(
     # env 继承全量环境、只覆盖这一项（决策P5.2-4 不擦环境）；用户手设的 PYTHONIOENCODING 会被覆盖——这条
     # 管道是机器协议，编码不可协商。不用 PYTHONUTF8=1：它还改文件名口径，波及后端对磁盘的读写。
     env = {**os.environ, "PYTHONIOENCODING": _PIPE_ENCODING}
-    if progress is None:
+    # 一键入库准备阶段可被「停止」（#173，见 stopscope.py）：有停止标志时子进程自成一组、等待改为轮询，
+    # 一停就整组结束（skill 脚本 + mineru 客户端 / marker），抛 StopRequested。
+    stoppable = stopscope.current() is not None
+    stopscope.check()
+    if progress is None and not stoppable:
         proc = subprocess.run(
             cmd, cwd=cwd, capture_output=True, encoding=_PIPE_ENCODING, errors="replace", env=env
         )
@@ -167,6 +172,7 @@ def _run_converter(
         encoding=_PIPE_ENCODING,
         errors="replace",
         env=env,
+        **(stopscope.isolate_kwargs() if stoppable else {}),
     )
     out_lines: list[str] = []
     err_lines: list[str] = []
@@ -178,14 +184,21 @@ def _run_converter(
     def _drain_stderr() -> None:
         for line in proc.stderr:  # type: ignore[union-attr]
             err_lines.append(line)
-            with contextlib.suppress(Exception):  # 回调失败绝不拖垮 drain / 子进程收尾
-                progress(line.rstrip("\n"))
+            if progress is not None:
+                with contextlib.suppress(Exception):  # 回调失败绝不拖垮 drain / 子进程收尾
+                    progress(line.rstrip("\n"))
 
     t_out = threading.Thread(target=_drain_stdout, daemon=True)
     t_err = threading.Thread(target=_drain_stderr, daemon=True)
     t_out.start()
     t_err.start()
-    proc.wait()
+    try:
+        stopscope.wait(proc)
+    except stopscope.StopRequested:
+        # 整组已结束、管道随之关闭；万一有逃出进程组的孙进程还握着管道，不在这里无限等它（drain 线程是 daemon）
+        t_out.join(timeout=2)
+        t_err.join(timeout=2)
+        raise
     t_out.join()
     t_err.join()
     return proc.returncode, "".join(out_lines), "".join(err_lines)

@@ -128,7 +128,8 @@ async function triggerIngest(target) {
 
 // 通用作业轮询骨架（ingest / heal 共用）。`renderDone(job)` 可选：heal 有结构化 result，传入
 // 自定义渲染；省略则走 ingest 默认（退出码徽标 + output 文本）。完成后统一 loadPages 刷新。
-async function pollJob(jobId, label, renderDone, outClass = "") {
+// `footer`（可选 DOM 节点）：运行期每次重画后挂回浮层末尾，如一键入库准备阶段的「停止」按钮（#173）。
+async function pollJob(jobId, label, renderDone, outClass = "", footer = null) {
   for (;;) {
     const job = await getJSON(`/api/jobs/${jobId}`);
     if (job.state === "done") {
@@ -155,6 +156,7 @@ async function pollJob(jobId, label, renderDone, outClass = "") {
       ? `<p class="muted job-hb">${escapeHtml(job.progress)}</p>`
       : "";
     $("#overlay-body").innerHTML = `${running}${out}${prog}`;
+    if (footer) $("#overlay-body").appendChild(footer);
     await sleep(400);
   }
 }

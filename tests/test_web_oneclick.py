@@ -340,3 +340,76 @@ def test_same_file_matches_by_identity_not_spelling(tmp_path):
     os.link(a, b)
     assert oneclick_routes._same_file(a, b)
     assert not oneclick_routes._same_file(a, tmp_path / "另一本.pdf")  # 不存在：退回比路径
+
+
+# ── #173：准备阶段「停止」 ────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def stoppable_convert(monkeypatch):
+    """假转换：一直跑到停止标志置位（模拟 MinerU 解析扫描版的几分钟），按 stopscope 的口径抛 StopRequested。"""
+    from guanlan import stopscope
+
+    started = threading.Event()
+
+    def convert(src, *, stem, backend, cwd, progress=None):
+        started.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            stopscope.check()
+            time.sleep(0.02)
+        raise AssertionError("没收到停止")
+
+    monkeypatch.setattr(oneclick, "convert_to_markdown", convert)
+    return started
+
+
+def test_stop_preparing_task_from_card(kb, stoppable_convert):
+    """任务卡：「准备中」可停止（走 /pause），任务记已放弃，库立即可用、可重新导入。"""
+    with TestClient(create_app(kb)) as client:
+        up = _upload(client)
+        job_id = client.post("/api/oneclick", json={"upload": up}).json()["job_id"]
+        assert stoppable_convert.wait(5)
+        active = client.get("/api/oneclick").json()["active"]
+        assert active["state"] == "preparing" and active["stoppable"] and not active["stopping"]
+        r = client.post(f"/api/oneclick/{active['task_id']}/pause")
+        assert r.status_code == 200 and r.json() == {"stopping": True}
+        job = _wait(client, job_id)
+        assert job["exit_code"] == 1 and "已按要求停止" in job["output"]
+        assert client.get("/api/oneclick").json()["active"] is None
+        task = client.get(f"/api/oneclick/{active['task_id']}").json()
+        assert task["state"] == "cancelled" and not task["stoppable"]
+        # 写锁已释放：重新导入不 409
+        assert client.post("/api/oneclick", json={"upload": up}).status_code == 200
+
+
+def test_stop_prepare_by_job_id(kb, stoppable_convert):
+    """解析进度浮层只知道作业号：按作业号停止；作业结束后再停 → 409。"""
+    with TestClient(create_app(kb)) as client:
+        up = _upload(client)
+        job_id = client.post("/api/oneclick", json={"upload": up}).json()["job_id"]
+        assert stoppable_convert.wait(5)
+        assert client.post("/api/oneclick/prepare/other-job/stop").status_code == 409
+        assert client.post(f"/api/oneclick/prepare/{job_id}/stop").json() == {"stopping": True}
+        assert _wait(client, job_id)["exit_code"] == 1
+        (task,) = oneclick.iter_tasks(kb)
+        assert task["state"] == "cancelled"
+        assert client.post(f"/api/oneclick/prepare/{job_id}/stop").status_code == 409
+
+
+def test_pause_still_409_for_preparing_task_not_ours(kb):
+    """盘上「准备中」但不是本进程在跑（如 CLI 正在准备）：不给停止，/pause 仍 409。"""
+    (kb / "workspace" / "uploads").mkdir(parents=True)
+    (kb / "workspace" / "uploads" / "书.pdf").write_bytes(b"%PDF")
+    oneclick.save_task(
+        kb,
+        {"task_id": "20261111-120000-书", "state": "preparing", "upload": "workspace/uploads/书.pdf", "created": "x"},
+    )
+    lock = acquire(kb, "cli: import")
+    try:
+        with TestClient(create_app(kb)) as client:
+            active = client.get("/api/oneclick").json()["active"]
+            assert active["state"] == "preparing" and not active["stoppable"]
+            assert client.post("/api/oneclick/20261111-120000-书/pause").status_code == 409
+    finally:
+        lock.release()

@@ -164,7 +164,7 @@ Steps:
 
 Notes:
 
-- **Pause and resume**: the first Ctrl+C pauses after the current part finishes; the second aborts at once (that part may be half-written — run `guanlan check` afterwards). A failed ingest also pauses the task; fix the cause and `--resume` retries that part. Progress and logs live in `workspace/tasks/`, so a task survives a restart.
+- **Pause and resume**: during preparation (parse · clean · split), Ctrl+C stops at once and the task is dropped; just import again (MinerU caches parses, so re-parsing the same file is fast). During ingest, the first Ctrl+C pauses after the current part finishes; the second aborts at once (that part may be half-written — run `guanlan check` afterwards). A failed ingest also pauses the task; fix the cause and `--resume` retries that part. Progress and logs live in `workspace/tasks/`, so a task survives a restart.
 - **One import task per KB at a time**; finish or abandon the old one before starting a new one. The CLI and the Web "Import" panel share task manifests and can resume each other's tasks.
 - **KB write lock**: during preparation and during landing/ingest the task holds `.guanlan.lock` at the KB root (an OS file lock, released automatically when the process exits). Other writes (`ingest`, `heal`, Web write jobs, …) fail at once and show who is writing. No lock is held while a task awaits confirmation or is paused.
 - **Overwrite rules**: `raw/<name>.md` and `raw/<name>/` are checked together. `--overwrite` works only when an earlier one-click import wrote exactly the same set of files. A different set, or files that no import task wrote, is a conflict: the only option is to abandon and clean up `raw/` yourself.
