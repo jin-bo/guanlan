@@ -35,6 +35,7 @@ re-export 旧名（`_raw_slug` / `_normalize_basename` / …）并把校验 `Val
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import tempfile
@@ -45,6 +46,31 @@ import yaml
 
 from .errors import EXIT_OK, EXIT_USAGE
 from .pages import split_frontmatter
+
+# 文件名 stem 的 UTF-8 字节上限：Linux 文件名按字节计 255，还要留出 `-<序号>`、`.<名>.source.json`、
+# 任务清单 `<时间戳>-…json` 的余量。下载命名与一键入库的 sample 共用（`cap_utf8`）。
+NAME_STEM_MAX_BYTES = 180
+
+
+def cap_utf8(text: str, max_bytes: int) -> str:
+    """按 UTF-8 字节截短、不切坏字符，去掉截断处留下的 `-` / `.`。"""
+    data = text.encode("utf-8")
+    if len(data) <= max_bytes:
+        return text
+    return data[:max_bytes].decode("utf-8", errors="ignore").rstrip("-.")
+
+
+def sha256_file(path: Path) -> str | None:
+    """分块读、流式哈希（文件可达 256 MiB，不整读进内存）；读不到 → None。下载器与一键入库共用。"""
+    h = hashlib.sha256()
+    try:
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
 
 MAX_RAW_BYTES = 5 * 1024 * 1024  # 投喂正文大小上限（默认 5 MiB），防误粘巨量文本。
 

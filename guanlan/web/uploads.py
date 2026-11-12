@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
+import hashlib
+import json
 import os
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -20,6 +24,8 @@ from xml.sax.saxutils import quoteattr
 from agentao.media_limits import MAX_IMAGE_BYTES, MAX_IMAGES_PER_TURN
 from fastapi import HTTPException
 
+from ..rawio import NAME_STEM_MAX_BYTES, cap_utf8
+from ..sourcerec import TMP_PREFIX, TMP_SUFFIX, redact_url, source_record_path
 from .rawfeed import _normalize_basename, _raw_slug
 
 # ── 文件上传（POST /api/upload）：暂存进 workspace/uploads/，作对话附件 ───────────────
@@ -50,7 +56,7 @@ def spool_upload(src: BinaryIO, target_dir: Path) -> tuple[Path, int, bytes]:
     **不限制网络接收、也不限制那份临时文件**，它只消除端点内的全量内存读取。
     """
     target_dir.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(target_dir), prefix=".upload-", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=str(target_dir), prefix=TMP_PREFIX, suffix=TMP_SUFFIX)  # 与网址下载同前缀，启动清理一并收
     tmp = Path(tmp_name)
     size = 0
     head = b""
@@ -78,6 +84,82 @@ def commit_upload(tmp: Path, target: Path) -> None:
     except OSError:
         discard_upload(tmp)
         raise
+    # 覆盖了网址导入来的同名文件：旧出处记录已不属于新内容，一并删掉（入库时也会按哈希判作废，这里删掉是让列表不再标 🔗）
+    with contextlib.suppress(OSError):
+        source_record_path(target).unlink()
+
+
+def commit_download(tmp: Path, target: Path, record: dict) -> Path:
+    """网址下载的提交（P4.31 §2.4，决策P4.31-4）：**不覆盖**，同名加序号；连同出处记录。返回最终落点。
+
+    **调用方须在事件循环线程上、中间不 await 地调用**：与 `POST /api/upload` 的 `commit_upload` 串行，
+    「选名 → 换名」之间不会被另一次提交插进来。换名本身也不覆盖（POSIX `os.link`、Windows `os.rename`
+    遇已存在即失败），兜住事件循环之外的写入者（用户直接往 `uploads/` 拷文件）。
+
+    出处记录先写临时文件、文件换名后再换名：中途失败只会留下「有文件、没记录」，等同一个普通上传。
+    """
+    rec_tmp = tmp.with_name(tmp.stem + "-source.tmp")  # 仍是 `.upload-*.tmp`：中途被杀时启动清理一并收掉
+    try:
+        # 硬链接 / replace 都保留 inode 的 mtime：记下它，列表判 🔗 时连同字节数一起比（文件被别的途径换掉就对不上）
+        record = {**record, "mtime_ns": tmp.stat().st_mtime_ns}
+        # 落盘这一处再脱敏一次（下载器已脱敏；这里是记录写进磁盘的唯一出口，不管记录是谁造的都不留签名）
+        for key in ("url", "final_url"):
+            if isinstance(record.get(key), str):
+                record[key] = redact_url(record[key])
+        rec_tmp.write_text(json.dumps(record, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        stem, suffix = target.stem, target.suffix
+        n = 1
+        while True:
+            candidate = target if n == 1 else target.with_name(f"{stem}-{n}{suffix}")
+            try:
+                if os.name == "nt":  # pragma: no cover - CI 主跑 POSIX；Windows 的 rename 遇已存在即失败
+                    os.rename(tmp, candidate)
+                else:
+                    _link_no_replace(tmp, candidate)
+                break
+            except FileExistsError:
+                n += 1
+                if n > 999:
+                    raise OSError(f"同名文件太多：{target.name}") from None
+    except BaseException:
+        discard_upload(tmp)
+        rec_tmp.unlink(missing_ok=True)
+        raise
+    # 文件已落定：记录换名失败只丢出处（等同普通上传），不能把已保存的文件报成「写盘失败」
+    try:
+        os.replace(rec_tmp, source_record_path(candidate))
+    except OSError:
+        rec_tmp.unlink(missing_ok=True)
+    return candidate
+
+
+# 不支持硬链接的文件系统（exFAT、部分 SMB / FUSE 挂载）上 `os.link` 报这些错，而不是 FileExistsError。
+_NO_HARDLINK_ERRNOS = {errno.EPERM, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EXDEV, errno.ENOSYS, errno.EMLINK}
+
+
+def _link_no_replace(tmp: Path, candidate: Path) -> None:
+    """把 `tmp` 放到 `candidate`，已存在就抛 FileExistsError、绝不覆盖（决策P4.31-4）。
+
+    首选 `os.link`（原子、遇已存在即失败）。文件系统不支持硬链接时退一步：先以 `O_EXCL` 建一个空的占位文件
+    **占住名字**（已存在同样失败），再 `os.replace` 换成真文件——被替换的只会是自己刚建的占位。
+    """
+    try:
+        os.link(tmp, candidate)
+    except FileExistsError:
+        raise
+    except OSError as exc:
+        if exc.errno not in _NO_HARDLINK_ERRNOS:
+            raise
+        fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)  # 已存在 → FileExistsError
+        os.close(fd)
+        try:
+            os.replace(tmp, candidate)
+        except BaseException:
+            candidate.unlink(missing_ok=True)
+            raise
+        return
+    with contextlib.suppress(OSError):  # 已链接成功、文件已落定；临时名删不掉由启动清理收掉
+        tmp.unlink()
 
 
 def discard_upload(tmp: Path) -> None:
@@ -98,10 +180,17 @@ def sweep_stale_upload_tmps(uploads_dir: Path, *, now: float | None = None) -> i
         return 0
     cutoff = (time.time() if now is None else now) - STALE_UPLOAD_TMP_SECONDS
     removed = 0
-    for path in uploads_dir.glob(".upload-*.tmp"):
+    for path in uploads_dir.glob(f"{TMP_PREFIX}*{TMP_SUFFIX}"):
         with contextlib.suppress(OSError):
             if path.is_file() and path.stat().st_mtime < cutoff:
                 path.unlink()
+                removed += 1
+    # Agent 直接用 pdf-to-markdown skill 转 uploads/ 里的网页时，HTML 预处理的隐藏目录 `.htmlprep-*`（P4.31 §4）
+    # 在进程被杀时会留下；同样只清超时的
+    for path in uploads_dir.glob(".htmlprep-*"):
+        with contextlib.suppress(OSError):
+            if path.is_dir() and path.stat().st_mtime < cutoff:
+                shutil.rmtree(path)
                 removed += 1
     return removed
 
@@ -139,8 +228,16 @@ def _safe_workspace_target(root: Path, subdir: str, filename: str) -> Path:
     """
     normalized = _normalize_basename(filename)  # 剥目录 + NFKC + 映射 + 剥空白（共用归口）
     suffix = Path(normalized).suffix.lower()
+    if len(suffix.encode("utf-8")) > 16:  # `1.<几百字节>` 这种「扩展名」不是扩展名：整段并进 stem 一起截短
+        suffix = ""
     stem = normalized[: -len(suffix)] if suffix else normalized
+    # Linux 文件名按字节计 255：stem 按 UTF-8 字节截短（不切坏字符），给 `-<序号>`、出处记录 `.<名>.source.json`
+    # 留出余量。以前超长中文名上传会在换名时 ENAMETOOLONG、报 500（P4.31 代码评审）。
     slug = _raw_slug(stem)
+    capped = cap_utf8(slug, NAME_STEM_MAX_BYTES - 9)
+    if capped != slug:
+        # 截短后加原名的短哈希：前 170 多字节相同的两个长文件名不会互相覆盖；同一个名字照旧落到同一处（覆盖语义不变）
+        slug = f"{capped}-{hashlib.sha1(slug.encode('utf-8')).hexdigest()[:8]}"
     if not slug:
         raise HTTPException(status_code=400, detail="文件名经规范化后为空，请改名。")
     safe = f"{slug}{suffix}"  # 保留原扩展名（小写）

@@ -575,16 +575,27 @@ def _split_meta(text: str) -> tuple[dict, str]:
     return meta, body
 
 
+# 观澜写进 frontmatter 的出处类键：网址导入时不从原文 frontmatter 继承
+_PROVENANCE_KEYS = frozenset(
+    {"origin", "origin_url", "fetched", "fetched_via", "parsed_by", "source_sha256", "pages", "chars", "normalized", "split"}
+)
+
+
 def normalize(
     text: str,
     *,
     title_hint: str,
     origin: str | None = None,
+    provenance: dict | None = None,
     parsed_by: str | None = None,
     source_sha256: str | None = None,
     toc_reviewer: TocReviewer | None = None,
 ) -> NormalizeResult:
-    """规范化整理（§3）。顺序固定：分页 → 去噪 → 跨页接句 → 统计正文、写元数据。"""
+    """规范化整理（§3）。顺序固定：分页 → 去噪 → 跨页接句 → 统计正文、写元数据。
+
+    `provenance`：紧跟 `origin` 写入的出处键（网址导入的 `origin_url` / `fetched`，P4.31 §5）；值为空的键不写。
+    给出的键以它为准：原文 frontmatter 里的同名键（下载来的 Markdown 自带的）不再保留，免得冒充出处。
+    """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     # 转换器常带出换页符 \x0c 等 C0 控制字符：raw/ 的文本闸（rawio.check_text_admission）会拒收整本。
     # 换页符换成换行（它本来就是分隔），其余清掉；记一条操作供核对。
@@ -634,9 +645,16 @@ def normalize(
         summary["toc_source"] = toc.source
     if toc.review:
         summary["toc_review"] = toc.review.split(":", 1)[0]
+    if provenance is not None:
+        # 网址导入：原文自带的 frontmatter 来自对方网站，其中观澜自己会写的出处类键（parsed_by、pages、source_sha256…）
+        # 一律不认，免得一份下载来的 Markdown 冒充出处（P4.31 代码评审）
+        old_meta = {k: v for k, v in old_meta.items() if k not in _PROVENANCE_KEYS}
     meta: dict = {"title": title}
     if origin:
         meta["origin"] = origin
+    for key, value in (provenance or {}).items():
+        if value:
+            meta[key] = value
     pb = parsed_by or old_meta.get("parsed_by")
     if pb:
         meta["parsed_by"] = pb
@@ -646,7 +664,7 @@ def normalize(
         meta["pages"] = total
     meta["chars"] = chars
     meta["normalized"] = summary
-    for key, value in old_meta.items():  # 转换器自带的其它键原样保留在后面
+    for key, value in old_meta.items():  # 转换器自带的其它键原样保留在后面（网址导入时出处类键已在上面滤掉）
         meta.setdefault(key, value)
 
     full = dump_frontmatter(meta, new_body.lstrip("\n"))

@@ -140,7 +140,7 @@ async function pollJob(jobId, label, renderDone, outClass = "", footer = null) {
         const badge = ok
           ? `<span class="report-ok">${escapeHtml(t("common.passed"))}</span>`
           : `<span class="report-bad">${escapeHtml(t("common.exitCode", job.exit_code))}</span>`;
-        $("#overlay-body").innerHTML = `<p>${escapeHtml(label)} ${badge}</p><pre>${escapeHtml(collapseCR(job.output || t("common.noOutput")))}</pre>`;
+        $("#overlay-body").innerHTML = `<p>${escapeHtml(label)} ${badge}</p><pre>${jobLogHtml(job.output || t("common.noOutput"))}</pre>`;
       }
       await loadPages(); // 写后刷新 wiki 搜索列表（heal 新建了页）
       return;
@@ -149,7 +149,7 @@ async function pollJob(jobId, label, renderDone, outClass = "", footer = null) {
     // 实时可见（emit 推上）；ingest/heal/backfill 顺带受益。无 output 时仍只显运行徽标。
     const running = `<p class="muted">${escapeHtml(t("job.running", label, job.state))}</p>`;
     const cls = outClass ? ` class="${outClass}"` : "";
-    const out = job.output ? `<pre${cls}>${escapeHtml(collapseCR(job.output))}</pre>` : "";
+    const out = job.output ? `<pre${cls}>${jobLogHtml(job.output)}</pre>` : "";
     // 瞬时进度行（A+ 心跳）：ingest 这类静默长跑作业的活跃提示（「⏳ 仍在运行 Ns · wiki/ 已写 N 页」）。
     // 仅 running 期出现，done 后服务端清空 → 最终结果只剩干净摘要。放在 output 之后、轻样式。
     const prog = job.progress

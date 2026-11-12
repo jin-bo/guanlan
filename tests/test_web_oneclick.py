@@ -75,7 +75,7 @@ class FakeIngest:
 
 @pytest.fixture
 def fake_convert(monkeypatch):
-    def convert(src, *, stem, backend, cwd, progress=None):
+    def convert(src, *, stem, backend, cwd, progress=None, **kw):
         if progress:
             progress("[mineru] 转换中…")
         return ConvertResult(markdown=_book(), backend="mineru")
@@ -274,7 +274,7 @@ def test_upload_refuses_to_replace_original_being_prepared(kb, monkeypatch):
     release = threading.Event()
     started = threading.Event()
 
-    def convert(src, *, stem, backend, cwd, progress=None):
+    def convert(src, *, stem, backend, cwd, progress=None, **kw):
         started.set()
         release.wait(5)
         return ConvertResult(markdown=_book(), backend="mineru")
@@ -352,7 +352,7 @@ def stoppable_convert(monkeypatch):
 
     started = threading.Event()
 
-    def convert(src, *, stem, backend, cwd, progress=None):
+    def convert(src, *, stem, backend, cwd, progress=None, **html_opts):  # P4.31 起另传 html_* 参数
         started.set()
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:

@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import anyio
@@ -38,6 +40,15 @@ from ..oneclick import (
 )
 from .uploads import _safe_upload_file
 
+
+@dataclass(frozen=True)
+class OneClickApi:
+    """`register` 交给宿主其它端点用的两个入口（见 `register` 说明）。"""
+
+    upload_in_use: Callable[[Path], Awaitable[str | None]]
+    start_prepare: Callable[..., Awaitable[str]]
+
+
 LOG_TAIL_LINES = 200
 _LOG_TAIL_BYTES = 256 * 1024  # 每 2 秒轮询只读日志末尾这么多字节，不随长任务的日志整读
 
@@ -51,11 +62,19 @@ def _same_file(a: Path, b: Path) -> bool:
         return a.resolve() == b.resolve()
 
 
-class OneClickBody(BaseModel):
-    """`POST /api/oneclick`：`upload` = `workspace/uploads/<名>`；`backend` 透传转换后端。"""
+class ImportOptions(BaseModel):
+    """一键入库的转换选项（`POST /api/oneclick` 与 P4.31 网址导入共用，校验只写一处）：`backend` 透传转换后端；
+    `html_extract="off"` = HTML「整页一键入库」（不提取正文，决策P4.31-13）。"""
 
-    upload: str
     backend: str = "auto"
+    html_extract: str = "auto"
+
+    @field_validator("html_extract")
+    @classmethod
+    def _extract_known(cls, v: str) -> str:
+        if v not in ("auto", "off"):
+            raise ValueError("html_extract 只能是 auto 或 off。")
+        return v
 
     @field_validator("backend")
     @classmethod
@@ -63,6 +82,12 @@ class OneClickBody(BaseModel):
         if v not in _BACKENDS:
             raise ValueError(f"未知 backend：{v}（须 ∈ {_BACKENDS}）。")
         return v
+
+
+class OneClickBody(ImportOptions):
+    """`POST /api/oneclick`：`upload` = `workspace/uploads/<名>`。"""
+
+    upload: str
 
 
 class ConfirmBody(BaseModel):
@@ -110,6 +135,7 @@ def task_view(root: Path, task: dict, *, job_id: str | None = None, pausing: boo
         "finished",
         "origin",
         "log",
+        "source_url",  # 网址导入来的任务：任务卡显示原网址（已脱敏，P4.31 §5）
     )
     out = {k: task.get(k) for k in keep}
     out["items"] = [
@@ -138,8 +164,11 @@ def register(
 ):
     """把一键入库端点挂到 `app`（reader 下 `writer_only` 不注册写端点；只读端点同样只给可写宿主）。
 
-    返回协程函数 `upload_in_use(target) -> str | None`，供 `POST /api/upload` 在覆盖同名文件前调用（#172）：
-    上传不再进写作业队列，正在准备（解析中）的任务读的那份原件不能被换掉。
+    返回 `OneClickApi`：
+    - `upload_in_use(target) -> str | None`，供 `POST /api/upload` 在覆盖同名文件前调用（#172）：
+      上传不再进写作业队列，正在准备（解析中）的任务读的那份原件不能被换掉；
+    - `start_prepare(upload_path, backend, html_extract) -> job_id`，发起准备作业（`POST /api/oneclick` 与
+      P4.31 网址导入的「下载后直接一键入库」共用，决策P4.31-10）；不能开始时抛 HTTPException(409)。
 
     `owns_kb_lock()`：作业内问写锁「本进程是否真持库级锁」（`KBWriteLock.owns_kb_lock`）；不给则按锁文件
     里的 pid 判断（只给旧测试兜底）。
@@ -152,6 +181,9 @@ def register(
     last_failure: dict[str, str] = {}
     # 本进程最近一次准备作业：job_id、它读的原件、停止标志（#173）。只在事件循环线程写。
     pending_prepare: dict = {}
+    # 正在 start_prepare 检查中的原件（还没登记进 pending_prepare）→ 重叠调用数；只在事件循环线程读写。
+    # 计数而非集合：同一原件两次调用重叠时，先结束的那次不能把后一次的占位一并撤掉。
+    reserved: dict[str, int] = {}
     state_lock = threading.Lock()
 
     # 启动时恢复（§6.4）：拿得到库级锁 → 原执行者已退出，preparing→failed、running→paused；拿不到 → 不改清单。
@@ -284,6 +316,24 @@ def register(
     async def oneclick_start(body: OneClickBody) -> dict:
         reject_if_writable_active()
         upload_path = _safe_upload_file(root, body.upload)  # 越界 400 / 缺失 404
+        return {"job_id": await start_prepare(upload_path, body.backend, body.html_extract)}
+
+    async def start_prepare(upload_path: Path, backend: str, html_extract: str = "auto") -> str:
+        """检查能否开始、入队准备作业，返回作业号。**最后一个 await 之后同步登记**（同 `upload_in_use` 的说明）。
+
+        进入时（第一个 await 之前）先把原件记进 `reserved`，登记 `pending_prepare` 后再撤：下面要 await 查盘，
+        这段空档里同名上传不能把原件换掉（P4.31：网址下载提交后紧接着调本函数，中间没有 await）。
+        """
+        key = str(upload_path.resolve())
+        reserved[key] = reserved.get(key, 0) + 1
+        try:
+            return await _start_prepare(upload_path, backend, html_extract)
+        finally:
+            reserved[key] -= 1
+            if not reserved[key]:
+                del reserved[key]
+
+    async def _start_prepare(upload_path: Path, backend: str, html_extract: str) -> str:
         existing = await anyio.to_thread.run_sync(active_task, root)
         # 残留的「准备中」（执行者已退出：CLI 被 kill / 关终端、或本进程启动时锁被占而没恢复）没有继续/放弃
         # 的出口：不在这里 409，交给作业——作业持锁先 `_recover_in_job` 把它改成失败，`prepare` 再复检。
@@ -307,7 +357,6 @@ def register(
             job = jobs.get_job(pending)
             if job is not None and job.state != "done":
                 raise HTTPException(status_code=409, detail="已有一个入库准备作业在排队或执行中。")
-        backend = body.backend
         stop = threading.Event()  # 每个准备作业一枚新标志（#173）
 
         def _prepare(emit) -> int:
@@ -325,6 +374,7 @@ def register(
                     emit=emit,
                     toc_reviewer=make_toc_reviewer(root, model=model, runner=runner),
                     stop=stop,
+                    html_extract=html_extract,
                 )
             except StopRequested:  # 任务已记已放弃；作业结束即释放写锁
                 return EXIT_USAGE
@@ -332,7 +382,7 @@ def register(
 
         job_id = jobs.enqueue("oneclick-prepare", _wrap(_prepare))
         pending_prepare.update(job_id=job_id, upload=str(upload_path.resolve()), stop=stop)
-        return {"job_id": job_id}
+        return job_id
 
     @writer_only(app.post("/api/oneclick/prepare/{job_id}/stop"))
     async def oneclick_stop_prepare(job_id: str) -> dict:
@@ -447,6 +497,8 @@ def register(
         """
         resolved = target.resolve()
         task = await anyio.to_thread.run_sync(_preparing_on_disk, resolved)
+        if any(_same_file(Path(r), resolved) for r in reserved):
+            return f"{target.name} 正要开始一键入库；稍后再上传同名文件。"
         job_id = pending_prepare.get("job_id")
         pending_upload = pending_prepare.get("upload")
         if job_id is not None and pending_upload is not None and _same_file(Path(pending_upload), resolved):
@@ -457,4 +509,4 @@ def register(
             return f"{target.name} 正被入库任务 {task['task_id']} 解析；等准备完成后再上传同名文件。"
         return None
 
-    return upload_in_use
+    return OneClickApi(upload_in_use=upload_in_use, start_prepare=start_prepare)

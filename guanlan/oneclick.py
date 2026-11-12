@@ -16,6 +16,7 @@ import contextlib
 import functools
 import hashlib
 import json
+import re
 import shutil
 import signal
 import sys
@@ -23,12 +24,17 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urljoin
 
 from .check import run_check
 from .convert import _default_origin, convert_to_markdown
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
+from .sourcerec import read_source_record, redact_url
 from .imageio import (
     ConvertError,
+    ConvertResult,
+    _MD_IMAGE,
+    _URL_SCHEME,
     _admit_image_ref,
     _images_dir,
     _stage_and_swap_images,
@@ -38,10 +44,17 @@ from .imageio import (
 )
 from .kblock import KBLockBusy, acquire, describe_holder, inside_write_run, read_holder
 from .normalize import normalize
-from .pages import load_page
+from .pages import load_page, split_frontmatter
 from .paths import require_kb_root
 from .provenance import parse_digest_value
-from .rawio import atomic_write_text, check_text_admission, raw_slug
+from .rawio import (
+    NAME_STEM_MAX_BYTES,
+    atomic_write_text,
+    cap_utf8,
+    check_text_admission,
+    raw_slug,
+    sha256_file,
+)
 from .sourcepage import locate_source_page
 from .stopscope import StopRequested, stop_scope
 from .stopscope import check as stop_check
@@ -102,18 +115,6 @@ def _now() -> str:
 
 def _sha_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def _sha_file(path: Path) -> str | None:
-    """分块读、流式哈希：上传件可达 256 MiB，不整读进内存。读不到 → None。"""
-    h = hashlib.sha256()
-    try:
-        with path.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                h.update(chunk)
-    except OSError:
-        return None
-    return h.hexdigest()
 
 
 def save_task(root: Path, task: dict) -> None:
@@ -233,7 +234,7 @@ def _modified_since_written(root: Path, files: list[str], owned: dict[str, set[s
     out: list[str] = []
     for rel in files:
         shas = owned.get(rel)
-        if shas and None not in shas and _sha_file(root / rel) not in shas:
+        if shas and None not in shas and sha256_file(root / rel) not in shas:
             out.append(rel)
     return out
 
@@ -255,7 +256,7 @@ def _self_owned(root: Path, task: dict) -> tuple[set[str], list[str]]:
         files = {it["raw"]: it.get("sha256")}
         files.update(it.get("images") or {})
         for rel, sha in files.items():
-            cur = _sha_file(root / rel)
+            cur = sha256_file(root / rel)
             if cur is not None and cur == sha:
                 ok.add(rel)
             elif cur is not None:
@@ -480,15 +481,175 @@ def _check_images(root: Path, items: list[dict], split: bool, sample: str) -> li
     return warnings
 
 
-_SAMPLE_MAX_BYTES = 180  # 留出 `<时间戳>-…json` / `….origin.md` 的余量：Linux 文件名按字节计 255
+# 网页空壳判断（P4.31 §4.6）：靠 JS 渲染的页面，转出的 Markdown 只剩「请开启 JavaScript」「加载中…」和几个导航词，
+# 进了 raw/ 会让 ingest 对着空壳写 source 页。只数正文字数，不维护特征词表（词表要追着各站改、且漏得无声）。
+# 阈值与正文提取的回退阈值（htmlprep.MIN_EXTRACT_CHARS）同为 200：提取不到 200 字已退回整页，整页仍不足即判空壳。
+MIN_HTML_BODY_CHARS = 200
+_MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_URL = re.compile(r"<?(?:https?|ftp)://[^\s>)]+>?")
+_LETTER = re.compile(r"[^\W_]")  # 字母、数字、汉字等：一个算一个
+# pandoc 转 gfm 时合并单元格的表格、`<br>`、`<sup>` 等以原始 HTML 留下：标签名与属性不是正文，不计
+_HTML_MARKUP = re.compile(r"<!--.*?-->|</?[A-Za-z][^>]*>", re.DOTALL)
 
 
-def _cap_sample(sample: str) -> str:
-    """sample 会拼进任务清单 / 日志 / `parsed/<sample>.origin.md` 等文件名，按 UTF-8 字节截短（不切坏字符）。"""
-    data = sample.encode("utf-8")
-    if len(data) <= _SAMPLE_MAX_BYTES:
-        return sample
-    return data[:_SAMPLE_MAX_BYTES].decode("utf-8", errors="ignore").rstrip("-.")
+def body_chars(markdown: str) -> int:
+    """Markdown 正文「字数」：字母、数字、汉字一个算一个；标点、空白、图片、网址、标记符号不计。
+
+    与正文提取数「可见非空白字符」同一口径（不按词折算：曾按「英文一词折 2 字」，82 词的正常英文通知只得 162、被误判空壳）。
+    """
+    _, text = split_frontmatter(markdown)
+    # 图片语法与 ⑤ 落盘、`_md_images_to_links` 同一个正则（`imageio._MD_IMAGE`）
+    text = _URL.sub(" ", _MD_LINK.sub(r" \1 ", _MD_IMAGE.sub(" ", text)))
+    return len(_LETTER.findall(_HTML_MARKUP.sub(" ", text)))
+
+
+# 链接文字里除了图还可以有别的字（`[![logo](a.png) 文档](guide.md)`）：前后文字（不含方括号）一并收进来，
+# 否则只认「整段链接文字就是一张图」时，这种写法会被改成嵌套链接、外层相对地址也补全不了
+_MD_LINKED_IMAGE = re.compile(
+    r"\[(?P<lead>[^\[\]]*?)" + _MD_IMAGE.pattern + r"(?P<trail>[^\[\]]*)\]\((?P<href>[^)\s]+)(?P<hpost>[^)]*)\)"
+)
+_MD_REF_IMAGE = re.compile(r"!\[([^\]]*)\]\[([^\]]*)\]")  # 引用式图片 `![说明][ref]`
+_MD_LINKED_REF_IMAGE = re.compile(r"\[([^\[\]]*?)!\[([^\]]*)\]\[[^\]]*\]([^\[\]]*)\](?=[\[(])")
+_MD_PLAIN_LINK = re.compile(r"(?<!!)\[(?P<text>[^\]]*)\]\((?P<pre>\s*)(?P<url>[^)\s]+)(?P<post>[^)]*)\)")
+# 引用式链接 / 图片的定义行 `[ref]: 地址`（README 徽章常把地址写在这里）
+# `[^1]: 文字` 是脚注定义、不是地址：排除 `[^`，否则脚注首词会被当成相对地址补全
+_MD_REF_DEF = re.compile(r"^(?P<lead> {0,3}\[(?!\^)[^\]]+\]:[ \t]*)(?P<url><[^>\n]*>|[^\s<>]+)", re.MULTILINE)
+# 引用式图片的简写 `![说明]`（后面不跟 `[` / `(`）；前面带 `[` 的是外层链接里的图
+_MD_SHORTCUT_IMAGE = re.compile(r"(?P<lb>\[\s*)?!\[(?P<alt>[^\]]*)\](?![\[(])")
+# 引用定义的标签（CommonMark：不分大小写、空白折叠后比较）
+_MD_REF_LABEL = re.compile(r"^ {0,3}\[(?!\^)([^\]]+)\]:", re.MULTILINE)
+
+
+def _ref_label(label: str) -> str:
+    return " ".join(label.split()).casefold()
+
+
+# 代码块（``` / ~~~ 围栏）与行内代码：里面的 `[x](y)` / `[ref]: y` 是示例文字，不补全地址
+_MD_CODE = re.compile(
+    # 收尾围栏可以比开头长（CommonMark）：`(?P=fence)` 后再收同一种字符，否则 ```` 配 ````` 会一路吞到文末
+    r"^[ ]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n.*?(?:^[ ]{0,3}(?P=fence)(?:(?<=`)`*|(?<=~)~*)[ \t]*$|\Z)"
+    r"|(?P<ticks>`+)[^\n]*?(?P=ticks)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _angle_dest(url: str, post: str) -> tuple[str, str] | None:
+    """`<…>` 括起的链接目标（CommonMark 允许其中有空格，图片正则的地址部分只截到第一个空格）：返回 (目标, 其后剩余)；
+    不是这种写法 → None。不认的话 `![a](<img/x y.png>)` 会被补全成 `…/img/x`，进了 raw/ 就是错地址。"""
+    if not url.startswith("<"):
+        return None
+    full = url + post
+    end = full.find(">")
+    if end < 0:
+        return None
+    return full[1:end], full[end + 1 :]
+
+
+def _md_dest(url: str) -> str:
+    """写回链接目标：含空白的放进 `<…>`（否则 Markdown 在空格处就断了）。"""
+    return f"<{url}>" if re.search(r"\s", url) else url
+
+
+def _img_label(alt: str) -> str:
+    alt = " ".join(alt.split())
+    return "图：" + alt if alt else "图"
+
+
+def _md_images_to_links(text: str, base_url: str) -> str:
+    """网址导入的 Markdown：`![说明](相对或远程地址)` → `[图：说明](按原网址补全的地址)`；`data:` 图片原样。
+
+    用 ⑤ 落盘收集图片的同一个正则（`imageio._MD_IMAGE`）：两边认的图片语法必须一致——这里漏掉的
+    （单引号标题、跨行的说明…）到 ⑤ 会被当成 `parsed/` 里的本地图去找，可能把无关的图搬进 raw/。
+    """
+
+    def label(m: re.Match) -> str:
+        return _img_label(m.group("head")[2:-2])
+
+    def linked(m: re.Match) -> str:
+        # 外层带链接的图（README 徽章 `[![CI](badge.svg)](actions)`）：只留外层链接、说明作文字，
+        # 不然会改出 `[[图：CI](…)](…)` 这种嵌套链接（与网页预处理 `in_link` 同口径）
+        angle = _angle_dest(m.group("href"), m.group("hpost"))
+        href = angle[0] if angle else m.group("href").strip("<>")
+        # 锚点与带协议的地址原样（与下面 `rel_link` 同口径）：`#top` 不能补成原网址的 `…#top`
+        if not (href.startswith("#") or _URL_SCHEME.match(href)):
+            href = urljoin(base_url, href)
+        if m.group("url").strip("<>").startswith("data:"):
+            # 内嵌图原样留着，外层链接的相对地址照样补全（`_MD_PLAIN_LINK` 认不出外层：链接文字里有 `]`）
+            return f"[{m.group(0)[1 : m.end('trail') - m.start()]}]({_md_dest(href)})"
+        text = f"{m.group('lead').strip()} {label(m)} {m.group('trail').strip()}".strip()
+        return f"[{text}]({_md_dest(href)})"
+
+    def sub(m: re.Match) -> str:
+        angle = _angle_dest(m.group("url"), m.group("post"))
+        url = angle[0] if angle else m.group("url").strip("<>")
+        if url.startswith("data:"):
+            return m.group(0)
+        return f"[{label(m)}]({_md_dest(urljoin(base_url, url))})"
+
+    text = _MD_LINKED_IMAGE.sub(linked, text)
+    text = _MD_IMAGE.sub(sub, text)
+
+    # 以上行内图片改写不避开代码：⑤ 落盘收集图片（`_MD_IMAGE`）也不分代码与正文，两边必须一致（否则代码里的
+    # `![x](a.png)` 到 ⑤ 会去 parsed/ 找同名图）。以下的引用式 / 简写图片、普通链接与引用定义 ⑤ 都不认：
+    # 代码里的是示例文字（Rust 的 `vec![1, 2]` 会被认成简写图片），先换成占位符（私用区字符）再改写、改完换回
+    codes: list[str] = []
+    # 占位符用原文里没有的字符：原文自带 `\ue000…` 时（图标字体字形）换回会错位，序号越界还会抛 IndexError
+    mark = "\ue000"
+    while mark in text:
+        mark = chr(ord(mark) + 1)
+
+    def stash(m: re.Match) -> str:
+        codes.append(m.group(0))
+        return f"{mark}{len(codes) - 1}{mark}"
+
+    text = _MD_CODE.sub(stash, text)
+
+    # 引用式图片 `![说明][ref]` / `![说明][]`（README 徽章常见）：同样改成链接，否则预览仍会去第三方取图。
+    # 外层已是链接的（`[![CI][badge]][ci]`）只留说明文字，不改出嵌套链接（同 `linked`）
+    text = _MD_LINKED_REF_IMAGE.sub(
+        lambda m: "[" + f"{m.group(1).strip()} {_img_label(m.group(2))} {m.group(3).strip()}".strip() + "]", text
+    )
+    text = _MD_REF_IMAGE.sub(lambda m: f"[{_img_label(m.group(1))}][{m.group(2) or m.group(1)}]", text)
+    # 简写 `![说明]` 同理；外层是链接（`[![CI]](…)`）时只留说明文字
+    # 只改有定义的：没有 `[说明]: 地址` 时 `![说明]` 只是正文（`What a result![1]`），改了就是篡改原文
+    defined = {_ref_label(m.group(1)) for m in _MD_REF_LABEL.finditer(text)}
+
+    def shortcut(m: re.Match) -> str:
+        if _ref_label(m.group("alt")) not in defined:
+            return m.group(0)
+        if m.group("lb"):
+            return f"{m.group('lb')}{_img_label(m.group('alt'))}"
+        return f"[{_img_label(m.group('alt'))}][{m.group('alt')}]"
+
+    text = _MD_SHORTCUT_IMAGE.sub(shortcut, text)
+
+    # 普通链接的相对地址同样按原网址补全（与网页预处理补全 `<a href>` 同口径）：留着相对地址，进了 raw/ 就指向库里不存在的文件
+    def rel_link(m: re.Match) -> str:
+        url = m.group("url")
+        angle = _angle_dest(url, m.group("post"))
+        if angle is not None:  # `[a](<相对 地址.md>)`：括号里的才是目标
+            dest, rest = angle
+            if not dest or dest.startswith("#") or _URL_SCHEME.match(dest):
+                return m.group(0)
+            return f"[{m.group('text')}]({m.group('pre')}<{urljoin(base_url, dest)}>{rest})"
+        if url.startswith(("#", "<")) or _URL_SCHEME.match(url):
+            return m.group(0)
+        return f"[{m.group('text')}]({m.group('pre')}{urljoin(base_url, url)}{m.group('post')})"
+
+    # 引用式定义 `[ref]: 相对地址` 同样补全：上面把 `![说明][ref]` 改成了 `[图：说明][ref]`，地址若留相对就指向库里不存在的文件
+    def ref_def(m: re.Match) -> str:
+        url = m.group("url")
+        angle = url.startswith("<")
+        dest = url[1:-1] if angle else url
+        if not dest or dest.startswith("#") or _URL_SCHEME.match(dest):
+            return m.group(0)
+        resolved = urljoin(base_url, dest)
+        return f"{m.group('lead')}{f'<{resolved}>' if angle else resolved}"
+
+    text = _MD_REF_DEF.sub(ref_def, _MD_PLAIN_LINK.sub(rel_link, text))
+    if not codes:
+        return text
+    return re.sub(re.escape(mark) + r"(\d+)" + re.escape(mark), lambda m: codes[int(m.group(1))], text)
 
 
 def prepare(
@@ -501,15 +662,20 @@ def prepare(
     dry_run: bool = False,
     toc_reviewer: TocReviewer | None = None,
     stop: threading.Event | None = None,
+    html_extract: str = "auto",
 ) -> dict:
     """①–④（**调用方持锁**）：解析 → 整理 → 拆分 → 预检，停在 `awaiting_confirm`。返回任务清单。
 
     `dry_run=True`：照跑 ①–④、写 `parsed/`，但**不创建任务记录**（返回的 dict 只用于打印摘要）。
+    `html_extract="off"`：HTML 保留整页、不提取正文（P4.31「整页一键入库」，决策P4.31-13）。
+    原件旁有有效的网址出处记录（P4.31 §2.5）时，`origin` 记最终网址，另记 `origin_url` / `fetched`。
     `toc_reviewer`：整理时送审目录（#175，见 tocreview.py）；None = 只用规则解析。
     `stop`：Web 的「停止」标志（#173）。置位后转换 / 审校子进程整组结束、步与步之间也检查，抛 `StopRequested`。
     停止（含 CLI 的 Ctrl+C）不是失败：任务记 `cancelled`，可立即重新导入；`parsed/` 残留由下次准备覆盖。
     准备阶段只停不续——重新导入与「从解析这一步续跑」几乎等价（MinerU 有解析缓存，原件仍在暂存区）。
     """
+    if html_extract not in ("auto", "off"):  # 参数错先报：不为它整读一遍可达 256 MiB 的原件
+        raise OneClickError(f"html_extract 只能是 auto 或 off：{html_extract}")
     if stop is not None and stop.is_set():  # 排队期间就点了停止：任务还没建，什么都不留
         raise StopRequested
     src = Path(src).expanduser()
@@ -521,7 +687,8 @@ def prepare(
             f"已有未完成的入库任务 {existing['task_id']}（{_STATE_LABEL.get(existing['state'], existing['state'])}）；"
             "请先继续（--resume）或放弃（--cancel）它。"
         )
-    sample = _cap_sample(raw_slug(src.stem)) or "import"
+    # sample 会拼进任务清单 / 日志 / `parsed/<sample>.origin.md` 等文件名：按 UTF-8 字节截短（Linux 文件名按字节计 255）
+    sample = cap_utf8(raw_slug(src.stem), NAME_STEM_MAX_BYTES) or "import"
     if sample.lower() == "images":  # raw/images/ 是所有未拆文档共用的图片根，不能当本任务的分卷目录
         sample = f"{sample}-doc"
     base = f"{time.strftime('%Y%m%d-%H%M%S')}-{sample}"
@@ -529,9 +696,10 @@ def prepare(
     while _task_file(root, task_id).exists():  # 同一秒内的第二个任务不能覆盖第一个的清单
         n += 1
         task_id = f"{base}-{n}"
-    upload_sha = _sha_file(src)
+    upload_sha = sha256_file(src)
     if upload_sha is None:
         raise OneClickError(f"输入文件读不出：{src}")
+    source = read_source_record(src, sha256=upload_sha, discard_stale=not dry_run)  # 网址导入的出处记录；哈希对不上（被同名上传覆盖）即作废
     task: dict = {
         "task_id": task_id,
         "sample": sample,
@@ -544,13 +712,18 @@ def prepare(
         "items": [],
         "dry_run": dry_run,
     }
+    if source is not None:
+        # 任务清单与 raw/ 只记去掉凭据参数的网址（签名链接）；完整记录只作参数传给 `_prepare_steps`、不进清单
+        task["source_url"] = redact_url(source.get("url") or source["final_url"])
+    if html_extract != "auto":
+        task["html_extract"] = html_extract
     log = TaskLog(root, None if dry_run else task_id, emit)
     if not dry_run:
         save_task(root, task)
         task["log"] = _rel(root, _log_file(root, task_id))
     try:
         with stop_scope(stop):
-            _prepare_steps(root, src, task, backend=backend, log=log, toc_reviewer=toc_reviewer)
+            _prepare_steps(root, src, task, backend=backend, log=log, toc_reviewer=toc_reviewer, source=source)
     except (StopRequested, KeyboardInterrupt):
         # 用户要求停止（Web「停止」/ CLI Ctrl+C）：不是失败，记已放弃，调用方随即释放写锁
         if not dry_run:
@@ -573,29 +746,64 @@ def prepare(
 
 
 def _prepare_steps(
-    root: Path, src: Path, task: dict, *, backend: str, log: TaskLog, toc_reviewer: TocReviewer | None = None
+    root: Path,
+    src: Path,
+    task: dict,
+    *,
+    backend: str,
+    log: TaskLog,
+    toc_reviewer: TocReviewer | None = None,
+    source: dict | None = None,
 ) -> None:
     sample = task["sample"]
     ws = _ws(root)
     parsed = ws / "parsed"
     parsed.mkdir(parents=True, exist_ok=True)
     whole = parsed / f"{sample}.md"
+    source = source or {}  # 网址导入的出处记录（P4.31 §2.5）；没有时为空
+    # 去掉凭据参数的网址（签名链接）：作相对引用的基址、写进 frontmatter，都只用这两个
+    final_url, first_url = redact_url(source.get("final_url") or ""), redact_url(source.get("url") or "")
 
     # ① 解析
     log(f"① 解析 {src.name} …")
     if src.suffix.lower() == ".md":
         text = src.read_text(encoding="utf-8", errors="replace")
-        try:  # 图片超容量同样是 ConvertError：与转换分支同口径归一为用法错误，不让 CLI 抛 traceback
-            res = collect_and_rewrite(text, produced_md=src.resolve(), root=src.resolve().parent, stem=sample)
-        except ConvertError as exc:
-            raise OneClickError(f"解析失败：{exc}") from None
+        if source:
+            # 网址下载来的 Markdown：相对图片引用指的是原站上的文件，不是暂存区里碰巧同名的本地图片——
+            # 不按 uploads/ 收集（否则会把无关的本地上传图搬进 raw/）。与网页同口径（P4.31 §4.4）：图片按原网址补全后
+            # 改成普通链接，不留会让预览去第三方取图的图片语法；⑤ 落盘时也就不会去 parsed/ 里找同名图
+            res = ConvertResult(markdown=_md_images_to_links(text, final_url))
+        else:
+            try:  # 图片超容量同样是 ConvertError：与转换分支同口径归一为用法错误，不让 CLI 抛 traceback
+                res = collect_and_rewrite(text, produced_md=src.resolve(), root=src.resolve().parent, stem=sample)
+            except ConvertError as exc:
+                raise OneClickError(f"解析失败：{exc}") from None
         backend_used = None
     else:
+        # HTML 选项（P4.31 §4）：字符集、基址来自出处记录，「整页」来自用户；只对 HTML 生效由 convert_to_markdown 判断。
+        # 基址给去掉凭据参数的网址：相对引用解析出的地址不带基址的查询串，签名也不进子进程命令行（`ps` 看得见）。
         try:
-            res = convert_to_markdown(src, stem=sample, backend=backend, cwd=root, progress=lambda ln: log("  " + ln))
+            res = convert_to_markdown(
+                src,
+                stem=sample,
+                backend=backend,
+                cwd=root,
+                progress=lambda ln: log("  " + ln),
+                html_charset=source.get("charset"),
+                html_base_url=final_url or None,
+                html_extract=task.get("html_extract", "auto"),
+            )
         except ConvertError as exc:
             raise OneClickError(f"解析失败：{exc}") from None
         backend_used = res.backend
+    # 403 后经 jina 代取的网页按 .md 落盘（决策P4.31-14），本质仍是网页，同样可能只是个 JS 壳
+    if src.suffix.lower() in (".html", ".htm") or source.get("fetched_via") == "jina":
+        n = body_chars(res.markdown)
+        if n < MIN_HTML_BODY_CHARS:
+            raise OneClickError(
+                f"网页正文只有约 {n} 字（不足 {MIN_HTML_BODY_CHARS} 字），像是要在浏览器里执行脚本才显示内容的空壳页，未入库。"
+                "可以在浏览器里打开后打印成 PDF 再上传。"
+            )
     _write_parsed_images(whole, res.images)
     atomic_write_text(parsed / f"{sample}.origin.md", res.markdown)
     task["stages"]["parse"] = "done"
@@ -608,7 +816,18 @@ def _prepare_steps(
     norm = normalize(
         res.markdown,
         title_hint=src.stem,
-        origin=task["upload"],
+        # 网址导入：出处是网址而不是暂存区路径（P4.31 §5）；抓取日期是出处的一部分（网页会变）
+        origin=final_url or task["upload"],
+        provenance=(
+            {
+                "origin_url": first_url if first_url != final_url else None,
+                "fetched": (source.get("fetched_at") or "")[:10] or None,
+                # 403 后经 agentao 后备取得（决策P4.31-14）：浏览器渲染或第三方代取，内容未必与直接下载一致，记下来
+                "fetched_via": source.get("fetched_via") if source.get("fetched_via") in ("playwright", "jina") else None,
+            }
+            if source
+            else None
+        ),
         parsed_by=backend_used,
         source_sha256=task["upload_sha256"],
         toc_reviewer=toc_reviewer,
@@ -700,7 +919,7 @@ def _prepare_steps(
         log("  ⚠ " + w, detail=True)
     if task["warnings"]:
         log(f"  ⚠ {len(task['warnings'])} 处图片引用找不到，原样保留（见日志）")
-    task["prepared_sha256"] = {it["parsed"]: _sha_file(ws / it["parsed"]) for it in items}
+    task["prepared_sha256"] = {it["parsed"]: sha256_file(ws / it["parsed"]) for it in items}
     task["precheck"] = precheck(root, task)
     task["estimate_seconds"] = round(_average_item_seconds(root) * len(items))
     if task["precheck"]["status"] != "ok":
@@ -737,7 +956,7 @@ def confirm(
     if task.get("state") != "awaiting_confirm":
         raise OneClickError(f"任务 {task_id} 当前状态为 {task.get('state')}，不在等待确认。")
     ws = _ws(root)
-    changed = [rel for rel, sha in task.get("prepared_sha256", {}).items() if _sha_file(ws / rel) != sha]
+    changed = [rel for rel, sha in task.get("prepared_sha256", {}).items() if sha256_file(ws / rel) != sha]
     if changed:
         task["state"] = "failed"
         task["reason"] = "确认前已解析的文件被改动：" + "、".join(changed[:5]) + "。请重新导入。"
@@ -833,7 +1052,7 @@ def _land(root: Path, task: dict, log: TaskLog, pc: dict | None = None) -> int:
         if it.get("land") == "writing":
             files = {it["raw"]: it.get("sha256")}
             files.update(it.get("images") or {})
-            state = {rel: _sha_file(root / rel) for rel in files}
+            state = {rel: sha256_file(root / rel) for rel in files}
             if all(state[rel] == sha for rel, sha in files.items()):
                 it["land"] = "written"
                 save_task(root, task)
@@ -847,7 +1066,7 @@ def _land(root: Path, task: dict, log: TaskLog, pc: dict | None = None) -> int:
                 return EXIT_USAGE
         md = ws / it["parsed"]
         expected = (task.get("prepared_sha256") or {}).get(it["parsed"])
-        if expected is not None and _sha_file(md) != expected:  # 暂停期间 parsed/ 被改：不能落未经确认的内容
+        if expected is not None and sha256_file(md) != expected:  # 暂停期间 parsed/ 被改：不能落未经确认的内容
             _pause(root, task, log, f"{it['parsed']} 在确认后被改动或删除，与确认时的内容不符；请放弃后重新导入")
             return EXIT_USAGE
         text = md.read_text(encoding="utf-8")
@@ -861,7 +1080,7 @@ def _land(root: Path, task: dict, log: TaskLog, pc: dict | None = None) -> int:
         it["images"] = {_rel(root, img_dir / img.name): img.sha256 for img in col.images}
         it["land"] = "writing"
         save_task(root, task)
-        overwrite = bool(task.get("overwrite")) or target.exists() and _sha_file(target) == it["sha256"]
+        overwrite = bool(task.get("overwrite")) or target.exists() and sha256_file(target) == it["sha256"]
         # `atomic_write_raw` 同名冲突时把提示 print 到 stdout：`import --json` 的 stdout 只能有一份 JSON，
         # 故改道 stderr（Web worker 下 stderr 同样被重定向进 job.output，提示不丢）。
         with contextlib.redirect_stdout(sys.stderr):
@@ -967,7 +1186,7 @@ def _ingest_items(
     wiki_now: dict[str, tuple[int, int]] | None = None  # 上一篇入库后的 wiki/ 状态（持锁、篇间无人写）
     for k, it in enumerate(items, 1):
         raw_path = root / it["raw"]
-        cur = _sha_file(raw_path)
+        cur = sha256_file(raw_path)
         if cur != it.get("sha256"):
             _pause(root, task, log, f"{it['raw']} 与任务记录不一致（被改动或删除），请核对后再继续")
             return EXIT_USAGE, task
