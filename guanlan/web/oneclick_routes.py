@@ -4,6 +4,7 @@
   决策P4.30-15），与 ingest/heal/可写 turn 同一单写者 FIFO；进度经 `emit` 实时推进 `job.output`，同时
   追加写 `workspace/tasks/<id>.log`（页面刷新或服务重启后仍可看）。
 - 暂停（决策P4.30-5）：进程内标志，作业在篇与篇之间检查；不中途杀 Agentao。
+- 准备阶段的「停止」（#173）：另一枚进程内标志，转换 / 目录审校子进程整组结束，任务记已放弃；只停不续。
 - 全部写端点 `_writer_only` + 层③ 423（可写 turn 活跃时拒）。
 """
 
@@ -25,6 +26,7 @@ from ..kblock import KBLockBusy, acquire, describe_holder, holder_alive, read_ho
 from ..tocreview import make_toc_reviewer
 from ..oneclick import (
     OneClickError,
+    StopRequested,
     active_task,
     cancel,
     confirm,
@@ -148,7 +150,8 @@ def register(
     # 这些失败不一定写进任务日志，任务又退回「等待确认 / 已暂停」，不透出就成了「点了没反应」。
     # 下一次确认/继续登记作业时清掉。
     last_failure: dict[str, str] = {}
-    pending_prepare: dict[str, str] = {}  # 本进程最近一次准备作业：job_id 与它读的原件（只在事件循环线程读写）
+    # 本进程最近一次准备作业：job_id、它读的原件、停止标志（#173）。只在事件循环线程写。
+    pending_prepare: dict = {}
     state_lock = threading.Lock()
 
     # 启动时恢复（§6.4）：拿得到库级锁 → 原执行者已退出，preparing→failed、running→paused；拿不到 → 不改清单。
@@ -216,6 +219,29 @@ def register(
 
         return thunk
 
+    def _prepare_stop_flag(job_id: str | None = None) -> threading.Event | None:
+        """本进程排队中或执行中的准备作业的停止标志（给了 `job_id` 则须是这一个作业）；没有 → None。"""
+        pid, flag = pending_prepare.get("job_id"), pending_prepare.get("stop")
+        if pid is None or flag is None or (job_id is not None and job_id != pid):
+            return None
+        job = jobs.get_job(pid)
+        if job is None or job.state == "done":
+            return None
+        return flag
+
+    def _prepare_flag_for(task: dict) -> threading.Event | None:
+        """盘上「准备中」的任务若正由本进程的准备作业执行，返回该作业的停止标志。
+
+        准备作业在 `prepare` 里才建出任务号，作业登记时还不知道；按它读的原件对上（同一时刻至多一个准备作业）。
+        """
+        if task.get("state") != "preparing" or not task.get("upload"):
+            return None
+        flag = _prepare_stop_flag()
+        upload = pending_prepare.get("upload")
+        if flag is None or upload is None or not _same_file(root / task["upload"], Path(upload)):
+            return None
+        return flag
+
     def _view(task: dict) -> dict:
         # 暂停标志只在本进程作业还在跑时有意义：作业结束后留着的标志不能让任务显示成「正在暂停」。
         entry = _running(task["task_id"])
@@ -225,6 +251,9 @@ def register(
             job_id=entry[0] if entry is not None else None,
             pausing=entry is not None and entry[1].is_set(),
         )
+        stop_flag = _prepare_flag_for(task)
+        view["stoppable"] = stop_flag is not None  # 准备阶段：本进程在跑，可「停止」（#173）
+        view["stopping"] = stop_flag is not None and stop_flag.is_set()
         with state_lock:
             view["last_error"] = last_failure.get(task["task_id"])
         return view
@@ -279,24 +308,40 @@ def register(
             if job is not None and job.state != "done":
                 raise HTTPException(status_code=409, detail="已有一个入库准备作业在排队或执行中。")
         backend = body.backend
+        stop = threading.Event()  # 每个准备作业一枚新标志（#173）
 
         def _prepare(emit) -> int:
+            if stop.is_set():  # 排队期间就点了停止：不取锁恢复、不建任务
+                print("准备阶段已按要求停止。")
+                return EXIT_USAGE
             _recover_in_job()
-            # 目录审校默认开启（#175）：与 CLI 同口径，经 Agentao 只读调用，失败退回规则解析
-            prepare(
-                root,
-                upload_path,
-                origin_kind="web",
-                backend=backend,
-                emit=emit,
-                toc_reviewer=make_toc_reviewer(root, model=model, runner=runner),
-            )
+            try:
+                # 目录审校默认开启（#175）：与 CLI 同口径，经 Agentao 只读调用，失败退回规则解析
+                prepare(
+                    root,
+                    upload_path,
+                    origin_kind="web",
+                    backend=backend,
+                    emit=emit,
+                    toc_reviewer=make_toc_reviewer(root, model=model, runner=runner),
+                    stop=stop,
+                )
+            except StopRequested:  # 任务已记已放弃；作业结束即释放写锁
+                return EXIT_USAGE
             return EXIT_OK
 
         job_id = jobs.enqueue("oneclick-prepare", _wrap(_prepare))
-        pending_prepare["job_id"] = job_id
-        pending_prepare["upload"] = str(upload_path.resolve())
+        pending_prepare.update(job_id=job_id, upload=str(upload_path.resolve()), stop=stop)
         return {"job_id": job_id}
+
+    @writer_only(app.post("/api/oneclick/prepare/{job_id}/stop"))
+    async def oneclick_stop_prepare(job_id: str) -> dict:
+        """停止本进程的准备作业（#173）：解析进度浮层只知道作业号，任务号要到 prepare 里才建出来。"""
+        flag = _prepare_stop_flag(job_id)
+        if flag is None:
+            raise HTTPException(status_code=409, detail="没有正在进行的准备作业。")
+        flag.set()
+        return {"stopping": True}
 
     @writer_only(app.post("/api/oneclick/{task_id}/confirm"))
     async def oneclick_confirm(task_id: str, body: ConfirmBody) -> dict:
@@ -344,7 +389,13 @@ def register(
     async def oneclick_pause(task_id: str) -> dict:
         entry = _running(task_id)
         if entry is None:
-            raise HTTPException(status_code=409, detail="该任务当前没有在执行。")
+            # 准备阶段（#173）：「暂停」即立即停止，任务记已放弃（准备只停不续，见 P4.30 §6.4）
+            task = await anyio.to_thread.run_sync(_load, task_id)
+            flag = _prepare_flag_for(task)
+            if flag is None:
+                raise HTTPException(status_code=409, detail="该任务当前没有在执行。")
+            flag.set()
+            return {"stopping": True}
         entry[1].set()
         return {"pausing": True}
 

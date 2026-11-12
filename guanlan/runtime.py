@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import stopscope
 from .paths import count_files_modified_since
 
 # 心跳节拍（秒）——**单一真相源**：CLI 子进程心跳（本模块）/ Web chat SSE（app.py）/ Web 作业心跳
@@ -251,22 +252,28 @@ def _run_in_new_session(cmd: list[str], *, input: str, capture_output: bool, **k
 
     `subprocess.run` 被中断只 kill 直接子进程；子进程在新会话里，agentao 派生的 shell 工具等孙进程
     收不到终端信号，会在父进程退出、库级锁释放之后继续写 wiki/。会话首进程的 pid 即进程组号。
+
+    在 `stopscope.stop_scope` 内（一键入库准备阶段的目录审校，#173）：等待改为每 `POLL_SECONDS` 醒一次，
+    停止标志置位即抛 `StopRequested`，同样整组结束子进程。
     """
     pipe = subprocess.PIPE if capture_output else None
+    ev = stopscope.current()
     with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=pipe, stderr=pipe, **kwargs) as proc:
         try:
-            stdout, stderr = proc.communicate(input)
+            if ev is None:
+                stdout, stderr = proc.communicate(input)
+            else:
+                pending = input  # communicate 只在第一次调用时收 input；超时后重试要传 None，输出不会丢
+                while True:
+                    if ev.is_set():
+                        raise stopscope.StopRequested
+                    try:
+                        stdout, stderr = proc.communicate(pending, timeout=stopscope.POLL_SECONDS)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pending = None
         except BaseException:
-            try:
-                if sys.platform == "win32":  # pragma: no cover - CI 跑 POSIX
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
-                else:
-                    import signal
-
-                    os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                proc.kill()
-            proc.wait()
+            stopscope.kill_group(proc)
             raise
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
@@ -311,6 +318,8 @@ def _subprocess_runner(
     if thinking:
         cmd += ["--thinking", thinking]
 
+    # 一键入库准备阶段的目录审校在 stop_scope 内跑（#173）：同样放进新会话，「停止」时才能整组结束。
+    new_session = new_session or stopscope.current() is not None
     try:
         # capture_output 仍把子进程 stdout（JSON 信封）缓冲到结束；心跳是父进程旁路打到 stderr，
         # 二者互不干扰——既保住信封解析，又在交互式终端给出「还活着」的进展信号。

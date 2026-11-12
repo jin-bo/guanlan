@@ -540,7 +540,21 @@ async function triggerOneclick(uploadPath) {
       throw new Error(d.detail || `HTTP ${res.status}`);
     }
     const { job_id } = await res.json();
-    await pollJob(job_id, t("staging.ocPreparing"), renderOneclickPrepared, "oc-joblog");
+    // 准备阶段可「停止」（#173）：整组结束转换 / 目录审校子进程，任务记已放弃，回暂存区可重新导入。
+    let stopped = false;
+    const footer = document.createElement("div");
+    footer.className = "oc-actions";
+    const stopBtn = ocButton(t("oc.stop"), async () => {
+      if (!window.confirm(t("oc.stopConfirm"))) return;
+      try {
+        await ocPost(`/api/oneclick/prepare/${encodeURIComponent(job_id)}/stop`);
+        stopped = true;
+        stopBtn.disabled = true;
+        stopBtn.textContent = t("oc.stopping");
+      } catch (e) { /* 作业已结束：交给 pollJob 的完成分支 */ }
+    }, { primary: false });
+    footer.appendChild(stopBtn);
+    await pollJob(job_id, t("staging.ocPreparing"), (job) => (stopped ? openStaging() : renderOneclickPrepared(job)), "oc-joblog", footer);
   } catch (e) {
     $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("staging.ocFail", e.message))}</p>`;
   }
@@ -660,6 +674,19 @@ function renderOneclickPanel(panel, data) {
       }, { disabled: blocked }));
     }
     actions.appendChild(ocCancelButton(task, fail, blocked));
+  } else if (task.state === "preparing" && task.stoppable) {
+    // 准备阶段（解析 · 整理 · 拆分）由本进程在跑：只能停止、不能续跑（#173，P4.30 §6.4）
+    if (task.stopping) {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = t("oc.stopping");
+      card.appendChild(p);
+    } else {
+      actions.appendChild(ocButton(t("oc.stop"), async () => {
+        if (!window.confirm(t("oc.stopConfirm"))) return;
+        try { await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/pause`); loadOneclickPanel(); } catch (e) { fail(e); }
+      }, { primary: false }));
+    }
   } else if (task.state === "running" || task.job_id) {
     card.appendChild(ocProgressBlock(task));
     if (task.pausing) {

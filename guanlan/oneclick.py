@@ -43,12 +43,15 @@ from .paths import require_kb_root
 from .provenance import parse_digest_value
 from .rawio import atomic_write_text, check_text_admission, raw_slug
 from .sourcepage import locate_source_page
+from .stopscope import StopRequested, stop_scope
+from .stopscope import check as stop_check
 from .splitdoc import index_name, render_index, render_part, split_document
 from .tocnorm import TocReviewer, toc_title_lines
 
 __all__ = [
     "ACTIVE_STATES",
     "OneClickError",
+    "StopRequested",
     "active_task",
     "cancel",
     "confirm",
@@ -497,12 +500,18 @@ def prepare(
     emit: Emit | None = None,
     dry_run: bool = False,
     toc_reviewer: TocReviewer | None = None,
+    stop: threading.Event | None = None,
 ) -> dict:
     """①–④（**调用方持锁**）：解析 → 整理 → 拆分 → 预检，停在 `awaiting_confirm`。返回任务清单。
 
     `dry_run=True`：照跑 ①–④、写 `parsed/`，但**不创建任务记录**（返回的 dict 只用于打印摘要）。
     `toc_reviewer`：整理时送审目录（#175，见 tocreview.py）；None = 只用规则解析。
+    `stop`：Web 的「停止」标志（#173）。置位后转换 / 审校子进程整组结束、步与步之间也检查，抛 `StopRequested`。
+    停止（含 CLI 的 Ctrl+C）不是失败：任务记 `cancelled`，可立即重新导入；`parsed/` 残留由下次准备覆盖。
+    准备阶段只停不续——重新导入与「从解析这一步续跑」几乎等价（MinerU 有解析缓存，原件仍在暂存区）。
     """
+    if stop is not None and stop.is_set():  # 排队期间就点了停止：任务还没建，什么都不留
+        raise StopRequested
     src = Path(src).expanduser()
     if not src.is_file():
         raise OneClickError(f"输入文件不存在：{src}")
@@ -540,7 +549,16 @@ def prepare(
         save_task(root, task)
         task["log"] = _rel(root, _log_file(root, task_id))
     try:
-        _prepare_steps(root, src, task, backend=backend, log=log, toc_reviewer=toc_reviewer)
+        with stop_scope(stop):
+            _prepare_steps(root, src, task, backend=backend, log=log, toc_reviewer=toc_reviewer)
+    except (StopRequested, KeyboardInterrupt):
+        # 用户要求停止（Web「停止」/ CLI Ctrl+C）：不是失败，记已放弃，调用方随即释放写锁
+        if not dry_run:
+            task["state"] = "cancelled"
+            task["reason"] = "准备阶段已按要求停止；可重新导入。"
+            save_task(root, task)
+        log("■ 准备阶段已按要求停止")
+        raise
     except BaseException as exc:
         if not dry_run:
             task["state"] = "failed"
@@ -582,6 +600,7 @@ def _prepare_steps(
     atomic_write_text(parsed / f"{sample}.origin.md", res.markdown)
     task["stages"]["parse"] = "done"
     log(f"  解析完成（{'backend=' + backend_used if backend_used else '已是 markdown'}，{len(res.images)} 张图片）")
+    stop_check()
 
     # ② 整理
     if toc_reviewer is not None and toc_title_lines(res.markdown.split("\n")):
@@ -631,6 +650,7 @@ def _prepare_steps(
     task["pages"] = norm.pages
     task["chars"] = norm.chars
     task["normalized"] = dict(s)
+    stop_check()
 
     # ③④ 拆分 + 目录索引
     # 已按目录规范化（#175）→ 拆分直接信任标题层级（目录优先）
@@ -673,6 +693,7 @@ def _prepare_steps(
     task["items"] = items
     task["split"] = bool(parts)
     task["stages"]["split"] = "done"
+    stop_check()
 
     task["warnings"] = _check_images(root, items, bool(parts), sample)
     for w in task["warnings"]:
@@ -1455,11 +1476,17 @@ def _cli_import(
     toc_reviewer: TocReviewer | None = None,
 ) -> int:
     origin = "cli: import --dry-run" if dry_run else "cli: import"
-    with acquire(root, origin) as lock:
-        _recover_if_owner(root, lock)
-        task = prepare(
-            root, src, origin_kind="cli", backend=backend, emit=_progress, dry_run=dry_run, toc_reviewer=toc_reviewer
-        )
+    try:
+        with acquire(root, origin) as lock:
+            _recover_if_owner(root, lock)
+            task = prepare(
+                root, src, origin_kind="cli", backend=backend, emit=_progress, dry_run=dry_run, toc_reviewer=toc_reviewer
+            )
+    except KeyboardInterrupt:
+        # 准备阶段第一次 Ctrl+C 就立即停止（#173）：转换子进程与本进程同组、一并收到 SIGINT；目录审校在新会话里，
+        # 由 `_run_in_new_session` 整组结束。prepare 已把任务记为已放弃，锁随 with 释放。
+        _stderr("已停止准备" + ("。" if dry_run else "；任务已放弃，可重新导入。"))
+        return EXIT_USAGE
     # 进入 awaiting_confirm：释放锁（等待确认期间不妨碍其它写操作）
     if dry_run:
         if json_output:
