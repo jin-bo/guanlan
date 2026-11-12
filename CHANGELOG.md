@@ -15,6 +15,7 @@
   - 网站拒绝自动下载（401 / 403 / 429，如知乎专栏的 JS 验证页）时报错给出路：浏览器里另存为网页或打印 PDF 后上传。403 且用户在 agentao 里配了 `AGENTAO_WEB_FETCH_FALLBACK` 时按它再取一次（`playwright` 本机无头浏览器渲染 / `jina` 经 r.jina.ai 代取），`raw/` 记 `fetched_via`（决策P4.31-14）。
   - 靠 JS 渲染的空壳网页（转出的正文去掉网址与标记后不足 200 个字母 / 数字 / 汉字）停在准备阶段并说明原因，不进 `raw/`；出路是浏览器里打印 PDF 后上传（决策P4.31-15）。
   - 下载失败的提示改为红字小号（原先被灰色的次要文字样式盖住）。
+  - 粘贴 GitHub / GitLab.com / Gitee 的文件页链接（`…/blob/…`）时自动换成 Raw 链接下载，`raw/` 里 `origin_url` 仍记原链接（决策P4.31-16）。
   - User-Agent 带项目主页（`guanlan/<版本> (<主页>) httpx/<版本>`），符合维基媒体等站点的爬虫政策；只写名称与版本时维基百科直接 403。
   - 核心依赖显式声明 `httpx`（本已随 agentao 安装）。
 - **HTML 转换：正文提取 + pandoc 优先**（P4.31 §4，`skills/pdf-to-markdown/scripts/htmlprep.py`）。网页在进入任何后端之前统一预处理：按 HTTP 头 / BOM / `<meta>` / 探测解码成 UTF-8（GBK 按 GB18030 解），用 trafilatura 去掉导航、侧栏、页脚（提取太少时退回整页），远程图片改成链接、相对地址补全、去掉 `srcset`；之后 pandoc 优先（`-f html-native_divs-native_spans`，不漏 `<div>`/`<span>`），没装再退 MinerU / marker。`parsed_by` 经提取时记 `<后端>+trafilatura`。HTML 文件行多一个「整页一键入库」（不提取正文），`POST /api/oneclick` 新增 `html_extract`。trafilatura 进 `[web]` extra，没装时整页转换。

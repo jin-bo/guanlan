@@ -586,9 +586,41 @@ def test_name_capped_after_nfkc(tmp_path):
 
 
 def test_markdown_url_returning_page_hints_raw_link(tmp_path):
-    site = Site({"github.com/x/y/blob/main/README.md": httpx.Response(200, content=HTML, headers={"content-type": "text/html"})})
+    """不认识的托管站（自建 Gitea 等）文件页仍返回网页：报错提示改用 Raw 链接。"""
+    site = Site({"git.example.org/x/y/src/branch/main/README.md": httpx.Response(200, content=HTML, headers={"content-type": "text/html"})})
     with pytest.raises(FetchError, match="Raw 链接"):
-        _get("https://github.com/x/y/blob/main/README.md", tmp_path, site)
+        _get("https://git.example.org/x/y/src/branch/main/README.md", tmp_path, site)
+
+
+@pytest.mark.parametrize(
+    ("url", "raw"),
+    [
+        ("https://github.com/o/r/blob/main/README.md", "https://raw.githubusercontent.com/o/r/main/README.md"),
+        ("https://github.com/o/r/blob/v1.2/docs/a%20b.md?plain=1#L3", "https://raw.githubusercontent.com/o/r/v1.2/docs/a%20b.md"),
+        ("https://gitlab.com/g/sub/r/-/blob/main/x.pdf", "https://gitlab.com/g/sub/r/-/raw/main/x.pdf"),
+        ("https://gitee.com/o/r/blob/master/README.md", "https://gitee.com/o/r/raw/master/README.md"),
+        ("https://github.com/o/r", "https://github.com/o/r"),  # 仓库首页：不是文件页，原样
+        ("https://github.com/o/r/tree/main/docs", "https://github.com/o/r/tree/main/docs"),
+        ("https://e.org/o/r/blob/main/README.md", "https://e.org/o/r/blob/main/README.md"),  # 别家同形路径不动
+    ],
+)
+def test_raw_url(url, raw):
+    assert fetch.raw_url(url) == raw
+
+
+def test_github_blob_link_downloads_raw_markdown(tmp_path):
+    """粘贴 GitHub 文件页链接：实际下 Raw 文件，出处记原链接与 Raw 地址（用户实测 README 链接被拒）。"""
+    site = Site({
+        "raw.githubusercontent.com/o/r/main/README.md": httpx.Response(
+            200, content="# 插画\n\n正文。\n".encode(), headers={"content-type": "text/plain; charset=utf-8"}
+        ),
+    })
+    r = _get("https://github.com/o/r/blob/main/README.md", tmp_path, site)
+    assert r.kind == "md" and r.suggested_name == "README.md"
+    assert r.record["url"] == "https://github.com/o/r/blob/main/README.md"
+    assert r.record["final_url"] == "https://raw.githubusercontent.com/o/r/main/README.md"
+    assert [req.headers["host"] for req in site.requests] == ["raw.githubusercontent.com"]
+    r.tmp.unlink()
 
 
 def test_user_agent_follows_robot_policy_format():
