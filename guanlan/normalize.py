@@ -3,7 +3,8 @@
 输入转换器产出的 `<sample>.origin.md` 文本，返回 `(整理后文本, 操作日志)`：
 
 1. **分页**（§3.2）：按 `<!-- page N of M -->` / `<!-- page N -->` 锚点切页；没有锚点 → 跳过 2–3，只写 frontmatter。
-2. **去噪**（§3.3）：页码、页眉页脚（全书 ≥30%、奇偶分计、同行页码剥离、章节页眉连续 ≥3 次）、
+2. **去噪**（§3.3）：页边行号（草案逐页行号块 + 并进段落的行号）、页码、页眉页脚（全书 ≥30%、奇偶分计、
+   同行页码剥离、章节页眉连续 ≥3 次）、
    明确模式的水印。只动页首尾窗口里的命中行；标题/列表/表格/代码/引用/图片一概不当页码与水印删。
    证据不足一律保留，疑似项只记日志。
 3. **跨页接句**（§3.4）：去噪之后再接，把被锚点切开的句子挪到长的一侧；锚点本身保留。
@@ -43,6 +44,10 @@ HEADER_MIN_PAGES = 3  # 至少出现在几页
 HEADER_MIN_RATIO = 0.30  # 至少占（同奇偶）有内容页面的比例
 CHAPTER_HEADER_RUN = 3  # 章节页眉：同奇偶序列连续出现次数
 PAGE_NUMBER_SLACK = 20  # 页码值上限 = 最大页号 + 余量（挡掉孤行的年份等大数字）
+LINE_NO_RUN_MIN = 5  # 页边行号块：至少连续几行纯数字
+LINE_NO_STEP_RATIO = 0.6  # 行号块里相邻两行「+1」的比例下限（草案行号偶有跳号：2 4 5 6 …）
+INLINE_LINE_NO_RUN_MIN = 4  # 段内行号：至少几个连续递增的数字才删
+INLINE_LINE_NO_GAP = (20, 200)  # 段内相邻两个行号之间的字数（约一行的长度）
 
 # 分页锚点：mineru `<!-- page 24 of 539 -->`；pypdf `<!-- page 3 -->` / `<!-- page 3 (no text) -->`。
 PAGE_ANCHOR_RE = re.compile(r"^\s*<!--\s*page\s+(\d+)(?:\s+of\s+(\d+))?(?:\s*\([^)]*\))?\s*-->\s*$")
@@ -125,13 +130,21 @@ _FIELD_START_RE = re.compile(r"^[^\s，。、；：,;:！？!?]{1,10}[：:](?!//
 
 _URL_PART_RE = re.compile(r"(!?\[[^\]]*\])\([^)]*\)")
 _WS_RE = re.compile(r"\s+")
+_LINE_NO_RE = re.compile(r"^\s*(\d{1,3})\s*$")
+_INLINE_LINE_NO_RE = re.compile(r"(?:(?<=\s)|^)(\d{1,3}) (?=[^\s\d])")
+# 转换器把页脚注包成带样式的 HTML（MinerU 客户端：`data-block-type="page_footnote"`）：整行压成引用块
+# 压成引用块的页脚注（以脚注号开头）：跨页接句往回找正文末行时跳过它们
+_FOOTNOTE_QUOTE_RE = re.compile(r"^\s*>\s*(?:[①-⑳]|\d{1,3}(?!\d))")
+_PAGE_FOOTNOTE_RE = re.compile(
+    r'^\s*<small>\s*<span\b[^>]*\bdata-block-type="page_footnote"[^>]*>(.*?)</span>\s*</small>\s*$'
+)
 
 
 @dataclass(frozen=True)
 class Op:
     """一条整理操作（进作业输出 / 任务日志，供事后核对）。"""
 
-    kind: str  # page_number | header | watermark | watermark_suspect | heading_kept | join | control
+    kind: str  # page_number | line_number | footnote | header | watermark | watermark_suspect | heading_kept | join | control
     page: int | None
     text: str
     rule: str = ""
@@ -140,6 +153,8 @@ class Op:
         where = f"第 {self.page} 页" if self.page is not None else "—"
         label = {
             "page_number": "删页码",
+            "line_number": "删行号",
+            "footnote": "脚注压成引用块",
             "header": "删页眉/页脚",
             "watermark": "删水印",
             "watermark_suspect": "疑似水印（保留）",
@@ -294,13 +309,71 @@ def _strip_same_line_page_no(text: str, page_no: int) -> str | None:
     return None
 
 
-def _edge_hits(page: _Page) -> list[tuple[int, str]]:
-    """页首尾窗口内的 (行下标, 位置 top|bottom)；短页首尾重叠时同一行记一次（优先 top）。"""
-    top = page.lines[:EDGE_WINDOW]
-    bottom = page.lines[-EDGE_WINDOW:]
+def _edge_hits(page: _Page, skip: set[int] | frozenset[int] = frozenset()) -> list[tuple[int, str]]:
+    """页首尾窗口内的 (行下标, 位置 top|bottom)；短页首尾重叠时同一行记一次（优先 top）。
+
+    `skip`：已判为页边行号的行不占窗口——草案每页开头一列行号，真正的页眉在它后面。
+    """
+    rest = [i for i in page.lines if i not in skip]
+    top = rest[:EDGE_WINDOW]
+    bottom = rest[-EDGE_WINDOW:]
     out = [(i, "top") for i in top]
     out += [(i, "bottom") for i in bottom if i not in top]
     return out
+
+
+def _line_number_blocks(page: _Page, lines: list[str], kinds: list[str]) -> list[list[tuple[int, int]]]:
+    """页边行号块（草案、法律文书每页左侧印的行号，转换器抽成一串纯数字行）：贴着页首或页尾、
+    连续 ≥ LINE_NO_RUN_MIN 行纯数字、相邻两行多数是「+1」。返回各块的 [(行下标, 数值)]。"""
+    runs: list[list[tuple[int, int]]] = []
+    cur: list[tuple[int, int]] = []
+    for i in page.lines:
+        m = _LINE_NO_RE.match(lines[i]) if kinds[i] == "text" else None
+        if m:
+            cur.append((i, int(m.group(1))))
+            continue
+        if cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    pos = {i: n for n, i in enumerate(page.lines)}
+    out = []
+    for run in runs:
+        if len(run) < LINE_NO_RUN_MIN:
+            continue
+        vals = [v for _, v in run]
+        steps = sum(1 for a, b in zip(vals, vals[1:]) if b == a + 1)
+        if steps < LINE_NO_STEP_RATIO * (len(vals) - 1):
+            continue
+        if pos[run[0][0]] < EDGE_WINDOW or pos[run[-1][0]] >= len(page.lines) - EDGE_WINDOW:
+            out.append(run)
+    return out
+
+
+def _strip_inline_line_numbers(line: str) -> tuple[str, list[int]]:
+    """段内行号（转换器把页边行号并进了段落：「2 This draft … 3 language models …」）：
+    找相隔约一行字数、连续递增 ≥ INLINE_LINE_NO_RUN_MIN 个的数字链，删掉链上的数字。返回 (新行, 删掉的数值)。"""
+    lo, hi = INLINE_LINE_NO_GAP
+    chains: list[list[re.Match[str]]] = []
+    for m in _INLINE_LINE_NO_RE.finditer(line):
+        v = int(m.group(1))
+        for ch in chains:
+            last = ch[-1]
+            if int(last.group(1)) == v - 1 and lo <= m.start() - last.end() <= hi:
+                ch.append(m)
+                break
+        else:
+            chains.append([m])
+    hits = sorted((m for ch in chains if len(ch) >= INLINE_LINE_NO_RUN_MIN for m in ch), key=lambda m: m.start())
+    if not hits:
+        return line, []
+    out, last = [], 0
+    for m in hits:
+        out.append(line[last : m.start()])
+        last = m.end()  # 连同数字后的一个空格
+    out.append(line[last:])
+    return "".join(out), [int(m.group(1)) for m in hits]
 
 
 def _detect_noise(
@@ -313,12 +386,22 @@ def _detect_noise(
     if not content_pages:
         return delete, notes
 
+    # 0) 页边行号块（草案逐页行号）：须有跨页证据——至少 HEADER_MIN_PAGES 页都有，单页一串数字不算。
+    #    先删它们，后面的页码 / 页眉窗口才落在真正的页首尾（否则页眉被挤出窗口，一处也认不出）。
+    blocks = [(p, b) for p in content_pages for b in _line_number_blocks(p, lines, kinds)]
+    if len({p.number for p, _b in blocks}) >= HEADER_MIN_PAGES:
+        for p, b in blocks:
+            op = Op("line_number", p.number, f"{b[0][1]}–{b[-1][1]}（{len(b)} 行）", "页边行号")
+            for i, _v in b:
+                delete[i] = op
+    skip = set(delete)
+
     # 1) 页码：首尾窗口内整行只有页码形态（非标题/列表/表格等结构行），且**跨页有证据**——
     #    印刷页码与锚点页号的差（偏移，前置页 / 跳页会让它分段变化）至少在 HEADER_MIN_PAGES 页上一致。
     #    孤零零一个数字（页尾一行「42」、列表项「- 12」）凑不出同一偏移，证据不足就保留。
     cands: list[tuple[_Page, int, int]] = []
     for p in content_pages:
-        for i, _pos in _edge_hits(p):
+        for i, _pos in _edge_hits(p, skip):
             if kinds[i] not in ("text", "list"):
                 continue
             v = _page_number_value(lines[i])
@@ -335,7 +418,7 @@ def _detect_noise(
     occ: dict[tuple[str, str], list[tuple[_Page, int]]] = {}
     for p in content_pages:
         seen: set[tuple[str, str]] = set()
-        for i, pos in _edge_hits(p):
+        for i, pos in _edge_hits(p, skip):
             if i in delete or kinds[i] not in ("text", "heading"):
                 continue
             raw = lines[i].strip()
@@ -479,7 +562,8 @@ def _join_sentences(lines: list[str]) -> tuple[list[str], list[Op]]:
     anchors = [i for i, k in enumerate(kinds) if k == "anchor"]
     for a in anchors:
         j = a - 1
-        while j >= 0 and kinds[j] == "blank":
+        # 页末的脚注（引用块，脚注号开头）夹在正文末行与锚点之间：跳过它们，接正文真正的末行
+        while j >= 0 and (kinds[j] == "blank" or (kinds[j] == "quote" and _FOOTNOTE_QUOTE_RE.match(lines[j]))):
             j -= 1
         k = a + 1
         while k < len(lines) and kinds[k] == "blank":
@@ -602,21 +686,49 @@ def normalize(
     text, n_ctrl = _CONTROL_RE.subn(lambda m: "\n" if m.group() == "\x0c" else "", text)
     old_meta, body = _split_meta(text)
     lines = body.split("\n")
-    kinds = _classify(lines)
-    pages, total = _paginate(lines, kinds)
 
     ops: list[Op] = []
     if n_ctrl:
         ops.append(Op("control", None, f"{n_ctrl} 个", "C0 控制字符（换页符改为换行）"))
+    # 页脚注（转换器包成带样式的 HTML）：压成引用块。引用块不参与页眉 / 页码判定，跨页接句也不会把下一页正文接到脚注后面
+    n_footnotes = 0
+    for i, line in enumerate(lines):
+        m = _PAGE_FOOTNOTE_RE.match(line)
+        if m:
+            note = m.group(1).strip()
+            lines[i] = f"> {note}" if note else ""
+            n_footnotes += 1
+    if n_footnotes:
+        ops.append(Op("footnote", None, f"{n_footnotes} 条", "页脚注 HTML"))
+    kinds = _classify(lines)
+    pages, total = _paginate(lines, kinds)
+
+    n_line_numbers = 0
     if pages:
         delete, notes = _detect_noise(lines, kinds, pages, total or 0)
-        ops.extend(delete[i] for i in sorted(delete))
+        seen: set[int] = set()
+        for i in sorted(delete):  # 同一个行号块整块记一条
+            if id(delete[i]) not in seen:
+                seen.add(id(delete[i]))
+                ops.append(delete[i])
         ops.extend(notes)
+        n_line_numbers = sum(1 for op in delete.values() if op.kind == "line_number")
         lines = _apply_deletions(lines, set(delete))
+        if n_line_numbers:
+            # 有页边行号块为证，才去段落里找并进来的行号（没有这条证据时不碰正文里的数字）
+            kinds = _classify(lines)
+            for i, k in enumerate(kinds):
+                if k != "text":
+                    continue
+                new, vals = _strip_inline_line_numbers(lines[i])
+                if vals:
+                    lines[i] = new
+                    n_line_numbers += len(vals)
+                    ops.append(Op("line_number", None, f"{vals[0]}–{vals[-1]}：{new.strip()[:30]}…", "段内行号"))
     # 书名在按目录改层级之前取：封面标题会被降级，免得与目录第 1 级争层级
     h1 = _first_h1("\n".join(lines))
     # 按目录规范化标题层级（#175）：在接句之前——目录条目所在行改成标题后，不会被接进上一页的残句
-    toc = normalize_by_toc(lines, reviewer=toc_reviewer)
+    toc = normalize_by_toc(lines, reviewer=toc_reviewer, line_numbered=n_line_numbers > 0)
     lines = toc.lines
     ops.extend(Op("toc", page, text, f"目录第 {level} 级") for page, level, text in toc.promoted)
     if toc.review and toc.review != "ok":
@@ -633,11 +745,14 @@ def normalize(
     summary = {
         "headers_removed": sum(1 for o in ops if o.kind == "header"),
         "page_numbers_removed": sum(1 for o in ops if o.kind == "page_number"),
+        "line_numbers_removed": n_line_numbers,
         "watermarks_removed": sum(1 for o in ops if o.kind == "watermark"),
         "sentences_joined": sum(1 for o in ops if o.kind == "join"),
     }
     if n_ctrl:
         summary["control_chars_removed"] = n_ctrl
+    if n_footnotes:
+        summary["footnotes_flattened"] = n_footnotes
     if toc.entries:
         summary["toc_entries"] = toc.entries
         summary["toc_matched"] = toc.matched

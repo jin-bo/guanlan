@@ -369,3 +369,92 @@ def test_four_backtick_fence_not_closed_by_inner_three_backticks():
     kinds = _classify(body.split("\n"))
     assert kinds[:5] == ["fence"] * 5 and kinds[6] == "heading"
     assert not fence_closes("```", "```python") and fence_closes("```", "````  ")
+
+
+# ── 页边行号（草案逐页行号，test2 实测 NIST AI 800-2 ipd） ──────────────────────
+
+DRAFT_HEADER = "NIST AI 800-2 ipd January 2026"
+PARA = "This draft identifies practices for conducting automated benchmark evaluations of language models."
+
+
+def _numbered_page(no: int, start: int, n: int = 8, header: str = DRAFT_HEADER) -> str:
+    """一页草案：开头一列行号 start..start+n-1，接页眉，再接正文。"""
+    nums = "\n".join(str(start + k) for k in range(n))
+    return f"{nums}\n\n{header}\n\n第{no}页：{PARA}\n\n{PARA}"
+
+
+def test_margin_line_number_blocks_removed_and_header_found_behind_them():
+    """行号块删掉；它后面的页眉也能认出来（原先窗口被行号占满，页眉一处都认不出）。"""
+    text = _book({no: _numbered_page(no, 1 + 30 * (no % 2)) for no in range(1, 7)}, total=6)
+    r = normalize(text, title_hint="x")
+    body = _body(r.text)
+    assert DRAFT_HEADER not in body
+    assert not any(ln.strip().isdigit() for ln in body.split("\n"))
+    s = r.meta["normalized"]
+    assert s["line_numbers_removed"] == 6 * 8 and s["headers_removed"] == 6
+    assert body.count(PARA) == 12  # 正文一句没少
+
+
+def test_line_number_block_needs_cross_page_evidence():
+    """只有两页有一串数字：证据不足，保留（漏报是沉默的，这条守着「不该删的别删」）。"""
+    pages = {no: f"第{no}页：{PARA}\n\n{PARA}" for no in range(1, 7)}
+    pages[2] = _numbered_page(2, 1)
+    pages[5] = _numbered_page(5, 1)
+    body = _body(normalize(_book(pages, total=6), title_hint="x").text)
+    assert "\n1\n2\n3\n4\n5\n" in body
+
+
+def test_number_columns_that_are_not_line_numbers_kept():
+    """文档确有行号块（规则已开启）时，表格抽成的不递增数字列、贴页尾但不足 5 行的递增串仍保留。"""
+    pages = {}
+    for no in range(1, 7):
+        values = "\n".join(str(no * 100 + x) for x in (40, 7, 90, 3, 60, 21))  # 不递增；每页不同，不会被当页眉
+        short = "\n".join(str(no * 100 + 50 + k) for k in range(4))  # 递增但只有 4 行，贴着页尾
+        pages[no] = f"{_numbered_page(no, 1)}\n\n{values}\n\n{PARA}\n\n{short}"
+    r = normalize(_book(pages, total=6), title_hint="x")
+    body = _body(r.text)
+    for no in range(1, 7):
+        assert "\n".join(str(no * 100 + x) for x in (40, 7, 90, 3, 60, 21)) in body
+        assert "\n".join(str(no * 100 + 50 + k) for k in range(4)) in body
+    assert r.meta["normalized"]["line_numbers_removed"] == 6 * 8
+
+
+def test_inline_line_numbers_stripped_only_with_block_evidence():
+    """并进段落的行号：文档有页边行号块为证才删，且须连续递增 ≥4 个、相隔约一行。"""
+    merged = (
+        "2 This draft document identifies practices for conducting automated 3 benchmark evaluations of "
+        "language models and similar models that output 4 text. Evaluations of these models are often embedded "
+        "into systems 5 capable of functioning as chatbots and AI agents."
+    )
+    ordinary = "In 2019 there were 3 cases and 4 appeals across 5 districts, out of 6 regions surveyed in total."
+    pages = {no: _numbered_page(no, 1) for no in range(1, 5)}
+    pages[3] = _numbered_page(3, 1) + f"\n\n{merged}\n\n{ordinary}"
+    body = _body(normalize(_book(pages, total=4), title_hint="x").text)
+    assert "This draft document identifies practices for conducting automated benchmark evaluations of" in body
+    assert " 3 benchmark" not in body and " 5 capable" not in body
+    assert ordinary in body  # 相隔太近、不像逐行行号：不动
+
+    # 没有行号块为证：同一段原样保留
+    plain = {no: f"第{no}页：{PARA}" for no in range(1, 5)}
+    plain[3] += f"\n\n{merged}"
+    assert merged in _body(normalize(_book(plain, total=4), title_hint="x").text)
+
+
+def test_page_footnote_html_becomes_blockquote_and_is_not_joined():
+    """转换器的页脚注 HTML 压成引用块；跨页接句不会把下一页正文接到脚注后面。"""
+    note = '<small><span class="docvortex-page-footnote" data-block-type="page_footnote" style="color:#6b7280">1 Terms defined in the Glossary are underlined</span></small>'
+    text = _book({1: f"第一页正文没有说完的半句\n\n{note}", 2: "接着上一页的后半句。"}, total=2)
+    r = normalize(text, title_hint="x")
+    body = _body(r.text)
+    assert "> 1 Terms defined in the Glossary are underlined" in body
+    assert "<span" not in body and "underlined接着" not in body and "underlined 接着" not in body
+    assert r.meta["normalized"]["footnotes_flattened"] == 1
+
+
+def test_join_skips_page_end_footnotes():
+    """页末有脚注时，跨页残句越过脚注接到正文末行；脚注原样留在页末（test2 实测「…斗 / 争。」）。"""
+    note = '<small><span data-block-type="page_footnote">① 这是一条脚注。</span></small>'
+    text = _book({1: f"这一页正文的最后一句话讲到一半就到了页末的斗\n\n{note}", 2: "争。下一页的正文继续往下讲。"}, total=2)
+    body = _body(normalize(text, title_hint="x").text)
+    assert "页末的斗争。" in body and "> ① 这是一条脚注。" in body
+    assert "\n争。" not in body

@@ -1,7 +1,7 @@
 """源撤回 remove（P3.9，见 docs/P3.9-源撤回.md）。**零 LLM、人发起的宿主确定性写。**
 
-`guanlan remove <源>`：把一个误摄 / 已撤稿源的"自身落盘物"（`raw/<slug>.md` + 可选
-`raw/images/<slug>/` 图片、`wiki/sources/<slug>.md` 摘要页）**整体移入回收区
+`guanlan remove <源>`：把一个误摄 / 已撤稿源的"自身落盘物"（`raw/<slug>.md` 或一键入库的分卷
+`raw/<sample>/<slug>.md` + 同级 `images/<slug>/` 图片、`wiki/sources/<slug>.md` 摘要页）**整体移入回收区
 `<kb>/.trash/<slug>@ts>/` 而非 `rm`**（gbrain 软删形状 + `manifest.json` 留档，给反悔窗），
 多源衍生页里的 `<slug>` 引用**确定性摘除**（provenance 编辑、正文一字不改），独源衍生页 /
 撤回后留下的悬链**只报 advisory、不删不改**。
@@ -104,11 +104,40 @@ def _resolve_slug(src: str) -> str:
     return slug
 
 
+def _raw_file(root: Path, slug: str) -> str | None:
+    """源的 raw 文件（相对库根 posix）。先看 `raw/<slug>.md`；没有再找子目录里同名的——一键入库的分卷落在
+    `raw/<sample>/<slug>.md`（P4.30 §5），source 页仍按文件名 stem 命名。子目录里同名不止一份 → `ValueError`
+    （认不准就不动）。`raw/images/` 与各处 `images/` 图片目录、隐藏目录不算。"""
+    top = f"raw/{slug}.md"
+    if (root / top).exists():
+        return top
+    raw = root / "raw"
+    if not raw.is_dir():
+        return None
+    name = f"{slug}.md"
+    hits = []
+    for path in raw.rglob("*.md"):  # 逐个比文件名：slug 里可能有 `[` 等 glob 元字符
+        parts = path.relative_to(raw).parts
+        if path.name != name or not path.is_file():
+            continue
+        if any(part == "images" or part.startswith(".") for part in parts[:-1]):
+            continue
+        hits.append(path.relative_to(root).as_posix())
+    if len(hits) > 1:
+        raise ValueError(f"raw/ 下有多份 {name}，认不准要撤回哪一份：{'、'.join(sorted(hits))}")
+    return hits[0] if hits else None
+
+
 def _locate(root: Path, slug: str) -> list[str]:
-    """探源自身落盘物（raw 文件 / 图片目录 / 摘要页），返回存在者的相对库根 posix 列表。"""
+    """探源自身落盘物（raw 文件 / 图片目录 / 摘要页），返回存在者的相对库根 posix 列表。
+
+    图片目录与 raw 文件同级：`raw/<slug>.md` → `raw/images/<slug>/`，分卷 `raw/<sample>/<slug>.md` →
+    `raw/<sample>/images/<slug>/`（`imageio._images_dir` 同口径）。"""
     found: list[str] = []
-    for rel in (f"raw/{slug}.md", f"raw/images/{slug}", f"wiki/sources/{slug}.md"):
-        if (root / rel).exists():
+    raw_rel = _raw_file(root, slug)
+    images_rel = (Path(raw_rel).parent / "images" / slug).as_posix() if raw_rel else f"raw/images/{slug}"
+    for rel in (raw_rel, images_rel, f"wiki/sources/{slug}.md"):
+        if rel and (root / rel).exists():
             found.append(rel)
     return found
 
@@ -315,7 +344,22 @@ def _execute(root: Path, plan: RemovePlan) -> Path:
     _prune_index_line(root / "wiki" / "index.md", plan.slug)
     for rel in plan.relocate:
         _move_into_trash(root / rel, root, trash_dir)
+    _prune_empty_raw_dirs(root, plan.relocate)
     return trash_dir
+
+
+def _prune_empty_raw_dirs(root: Path, moved: list[str]) -> None:
+    """分卷全撤完后，`raw/<sample>/`（及其下的 `images/`）空了就删掉；`raw/` 本身与非空目录不动。"""
+    raw = (root / "raw").resolve()
+    dirs = {(root / rel).parent for rel in moved if rel.startswith("raw/")}
+    for d in sorted(dirs, key=lambda x: len(x.parts), reverse=True):
+        cur = d
+        while cur.resolve() != raw and raw in cur.resolve().parents:
+            try:
+                cur.rmdir()  # 非空 → OSError，停
+            except OSError:
+                break
+            cur = cur.parent
 
 
 def format_plan(plan: RemovePlan, *, executed: bool, json_output: bool) -> str:
@@ -366,7 +410,11 @@ def run_remove(root: Path, *, src: str, yes: bool, json_output: bool) -> int:
         print(exc, file=sys.stderr)
         return EXIT_USAGE
 
-    plan = run_remove_result(root, slug)
+    try:
+        plan = run_remove_result(root, slug)
+    except ValueError as exc:  # raw/ 下同名多份，认不准
+        print(exc, file=sys.stderr)
+        return EXIT_USAGE
     if not plan.ok:
         if json_output:
             print(json.dumps({"ok": False, "slug": slug, "error": "source_not_found"}, ensure_ascii=False, indent=2))
