@@ -341,3 +341,71 @@ def test_reviewed_toc_end_accepts_fuzzy_entries():
         _Entry("第三章 附则", 12),
     ]
     assert _reviewed_end(lines, 0, len(lines) - 1, entries) == 3
+
+
+# ── 英文草案目录（test2 实测 NIST AI 800-2 ipd） ──────────────────────────────
+
+EN_TOC = """\
+## TABLE OF CONTENTS
+
+- **INTRODUCTION** 1
+- **1. DEFINING OBJECTIVES** 2
+- Practice 1.1 Define evaluation objectives. 3
+- **2. RUNNING EVALUATIONS** 4
+- Practice 2.1 Design the evaluation protocol. 5
+- **3. REPORTING RESULTS 6**
+"""
+EN_HEADINGS = {  # 印刷页码 → 正文标题（行首并进了行号的几个）
+    1: "## INTRODUCTION",
+    2: "# 1. DEFINING OBJECTIVES",
+    3: "## 2 Practice 1.1 Define evaluation objectives.",
+    4: "## 2. RUNNING EVALUATIONS",
+    5: "## 7 Practice 2.1 Design the evaluation protocol.",
+    6: "## 3. REPORTING RESULTS",
+}
+
+
+def _en_lines() -> list[str]:
+    out = ["# Practices", "", EN_TOC, ""]
+    for printed, heading in EN_HEADINGS.items():
+        out += [f"<!-- page {printed + OFFSET} -->", "", heading, "", "Body text of this section goes here.", ""]
+    return "\n".join(out).split("\n")
+
+
+def test_english_toc_with_period_endings_and_bold_page_numbers():
+    """「… objectives. 4」与页码包在粗体里的「**3. RESULTS 24**」都认作带页码的条目（以前漏认，只能送审）。"""
+    from guanlan.tocnorm import _find_toc, _segments
+
+    found = _find_toc(_en_lines())
+    assert found is not None
+    assert [e.page for e in found[2]] == [1, 2, 3, 4, 5, 6]
+    assert _segments("Chapter 1. 2") == [("Chapter 1. 2", None, False)]  # 「1. 2」这类编号仍不当页码
+
+
+def test_heading_line_number_stripped_only_for_line_numbered_docs():
+    """并进标题的行号：文档有页边行号时，按目录条目去掉标题行首多出的裸数字；没有行号证据时不动。"""
+    res = normalize_by_toc(_en_lines(), line_numbered=True)
+    assert res.applied
+    body = "\n".join(res.lines)
+    assert "# Practice 1.1 Define evaluation objectives." in body and "# Practice 2.1 Design" in body
+    assert "2 Practice" not in body and "7 Practice" not in body
+    assert "# 3. REPORTING RESULTS" in body  # 目录里本有编号的「3.」不动
+
+    plain = "\n".join(normalize_by_toc(_en_lines()).lines)
+    assert "2 Practice 1.1" in plain and "7 Practice 2.1" in plain
+
+
+def test_review_region_capped_instead_of_rejected():
+    """规则没认出目录时按字数封顶送审（正文密的文档 400 行就超长，以前整份拒审）。"""
+    from guanlan.tocnorm import REVIEW_MAX_CHARS
+
+    lines = ["## 目录", "", "某种规则认不出的目录写法", ""] + ["这是一段很长的正文。" * 30] * 400
+    seen: list[str] = []
+
+    def reviewer(region: str, draft: list[dict]) -> list[dict]:
+        seen.append(region)
+        return []
+
+    res = normalize_by_toc(lines, reviewer=reviewer)
+    assert seen and len(seen[0]) <= REVIEW_MAX_CHARS and "某种规则认不出的目录写法" in seen[0]
+    assert res.review != "rejected:目录区过长，未送审"

@@ -45,9 +45,10 @@ _TOC_TITLE_RE = re.compile(r"^(?:目录|目次|contents|tableofcontents)$", re.I
 _ROMAN = "IVXLCDMivxlcdmⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ"
 # 引导点后的页码（行中也认）：转换器常把几条目录并成一行「摘要....I Abstract....II 引言 1」，按它切开
 _LEADER_REF_RE = re.compile(rf"(?:[.．…·]{{2,}}|…)\s*[(（]?\s*(\d{{1,4}}|[{_ROMAN}]{{1,6}})\s*[)）]?")
-# 行尾页码（无引导点）：括号页码「(3)」、贴在书名号 / 括号后的「》188」、空白后的裸数字「绪论 1」
+# 行尾页码（无引导点）：括号页码「(3)」、贴在书名号 / 括号后的「》188」、空白后的裸数字「绪论 1」；
+# 英文句点结尾的条目「Define evaluation objectives. 4」也认（句点前须是字母等，「1. 2」这类编号仍不算）
 _TAIL_REF_RE = re.compile(
-    rf"(?:[(（]\s*(\d{{1,4}}|[{_ROMAN}]{{1,6}})\s*[)）]|(?<=[》）)」”])\s*(\d{{1,4}})|(?<=[^\d.\s])\s+(\d{{1,4}}))\s*$"
+    rf"(?:[(（]\s*(\d{{1,4}}|[{_ROMAN}]{{1,6}})\s*[)）]|(?<=[》）)」”])\s*(\d{{1,4}})|(?:(?<=[^\d.\s])|(?<=[^\d\s]\.))\s+(\d{{1,4}}))\s*$"
 )
 _LEADER_RE = re.compile(r"[\s.．…·•]+$")
 # 图表目录：表头去掉；「图1.1 …」「表 2-3 …」条目不算正文目录
@@ -55,6 +56,8 @@ _FIG_LIST_HEAD_RE = re.compile(r"^(?:图表目录|插图目录|附图目录|图�
 _FIG_ENTRY_RE = re.compile(r"^(?:图|表|附图|附表|Figure|Fig\.|Table)\s*\d+(?:\s*[.\-－]\s*\d+)*(?!\d)", re.IGNORECASE)
 _PAGE_ONLY_RE = re.compile(r"^(?:\d{1,4}|[ivxlcdm]{1,8})$", re.IGNORECASE)
 _HEADING_MARK_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+_BOLD_MARK_RE = re.compile(r"\*\*|__")
+_LEAD_LINE_NO_RE = re.compile(r"^\d{1,3}\s+(?=\S)")
 _LIST_MARK_RE = re.compile(r"^\s*(?:[-*+]\s+|>\s*)")
 _ANCHOR_RE = re.compile(r"^\s*<!--\s*page\s+(\d+)")
 # 编号形式（按目录里首次出现的顺序定层级）。在保留空格的文本上匹配：「1 范围」靠空格才认得出编号
@@ -106,9 +109,10 @@ def _nfkc(s: str) -> str:
 
 
 def _clean(line: str) -> str:
-    """去行首标题标记 / 列表标记 / 引用标记后的文本。"""
+    """去行首标题标记 / 列表标记 / 引用标记，以及粗体标记后的文本（「**3. 结果 24**」页码包在粗体里）。"""
     s = _HEADING_MARK_RE.sub("", line)
     s = _LIST_MARK_RE.sub("", s)
+    s = _BOLD_MARK_RE.sub("", s)
     return s.strip()
 
 
@@ -385,7 +389,13 @@ def _review_region(lines: list[str], found: tuple[int, int, list[_Entry]] | None
     if not titles:
         return None
     lo = titles[0]
-    return lo, min(len(lines) - 1, lo + _REVIEW_SCAN_LINES)
+    # 规则没认出目录：从标题起最多 _REVIEW_SCAN_LINES 行，同时按 REVIEW_MAX_CHARS 封顶——这是猜的范围，
+    # 正文密的文档（去掉页边行号后）400 行就超长，整份拒审反而丢了目录；封顶后目录本身通常仍在里面。
+    hi, size = lo, len(lines[lo])
+    while hi < min(len(lines) - 1, lo + _REVIEW_SCAN_LINES) and size + 1 + len(lines[hi + 1]) <= REVIEW_MAX_CHARS:
+        hi += 1
+        size += 1 + len(lines[hi])
+    return lo, hi
 
 
 def _validate_review(items: object, region_text: str) -> tuple[list[_Entry] | None, str]:
@@ -491,11 +501,15 @@ def _apply_review(
     return (lo, end, entries), "llm", verdict
 
 
-def normalize_by_toc(lines: list[str], reviewer: TocReviewer | None = None) -> TocResult:
+def normalize_by_toc(
+    lines: list[str], reviewer: TocReviewer | None = None, *, line_numbered: bool = False
+) -> TocResult:
     """按目录改写标题层级；没有目录或命中率不足 → 原样返回（applied=False）。
 
     `reviewer`：规则解析后送审目录（#175）。审校结果须通过 `_validate_review`，否则沿用规则结果；
     之后的定位、把关、改写都是确定性的，审校改不了正文。
+    `line_numbered`：文档有页边行号（normalize 已认出行号块）。此时命中目录条目的标题若比条目多出
+    行首一个裸数字（「2 Practice 2.1 …」对目录「Practice 2.1 …」），那是并进标题的行号，去掉。
     """
     found = _find_toc(lines)
     if found is not None:
@@ -518,6 +532,12 @@ def normalize_by_toc(lines: list[str], reviewer: TocReviewer | None = None) -> T
     out = list(lines)
     deepest = max(e.level for e in entries)
     target: dict[int, tuple[int, int | None]] = {cands[e.line].idx: (e.level, cands[e.line].page) for e in matched}  # type: ignore[index]
+    # 并进标题的行号：目录条目没有编号、正文标题多一个「数字 + 空格」（「3.」这类带点编号不算）
+    strip_no = {
+        cands[e.line].idx  # type: ignore[index]
+        for e in matched
+        if line_numbered and e.marker is None and _LEAD_LINE_NO_RE.match(_clean(lines[cands[e.line].idx]))  # type: ignore[index]
+    }
     first_hit = min(target)
     # 不在目录里的标题：多级数字编号（1.1 / 1.1.1，深度由编号自身决定）在目录里出现过 → 用目录里该级的层级
     # （目录漏列的「1.1.4」与「1.1.3」同级）。「一、」「1.」等单级编号不继承：汇编里各篇自己的「七、…」
@@ -546,6 +566,8 @@ def normalize_by_toc(lines: list[str], reviewer: TocReviewer | None = None) -> T
         if i in target:
             level, page = target[i]
             text = _clean(line)
+            if i in strip_no:
+                text = _LEAD_LINE_NO_RE.sub("", text, count=1)
             new = f"{'#' * level} {text}"
             if new != line:
                 out[i] = new

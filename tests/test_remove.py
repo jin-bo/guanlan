@@ -560,3 +560,51 @@ def test_json_contract_carries_backlinks(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["backlinks"] == ["wiki/concepts/引用者.md"]
     assert payload["orphans"] == [] and payload["drop_slug"] == []
+
+
+# ---------- 一键入库的分卷（raw/<sample>/<slug>.md，test2 实测漏撤） ----------
+
+
+def _part(root: Path, sample: str, slug: str, *, image: bool = False) -> Path:
+    p = root / "raw" / sample / f"{slug}.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("分卷正文。", encoding="utf-8")
+    if image:
+        img = root / "raw" / sample / "images" / slug / f"{slug}-1.png"
+        img.parent.mkdir(parents=True, exist_ok=True)
+        img.write_bytes(b"\x89PNG")
+    return p
+
+
+def test_split_part_in_subdir_is_located_and_moved(tmp_path):
+    """分卷在 raw/<sample>/ 下：连同同级 images/<slug>/ 一起撤回；最后一卷撤完，空的 sample 目录也删掉。"""
+    root = _kb(tmp_path)
+    _part(root, "book", "book-01-a", image=True)
+    _part(root, "book", "book-02-b")
+    _source_page(root, "book-01-a")
+    _source_page(root, "book-02-b")
+
+    plan = run_remove_result(root, "book-01-a")
+    assert plan.relocate == ["raw/book/book-01-a.md", "raw/book/images/book-01-a", "wiki/sources/book-01-a.md"]
+    assert remove_entrypoint(root, src="book-01-a", yes=True, json_output=False) == EXIT_OK
+    [entry] = _trash_entries(root)
+    assert (entry / "raw/book/book-01-a.md").is_file() and (entry / "raw/book/images/book-01-a/book-01-a-1.png").is_file()
+    assert (root / "raw/book/book-02-b.md").is_file()  # 另一卷不动
+    assert not (root / "raw/book/images").exists()  # 空了的 images/ 收掉
+
+    assert remove_entrypoint(root, src="raw/book/book-02-b.md", yes=True, json_output=False) == EXIT_OK
+    assert not (root / "raw/book").exists() and (root / "raw").is_dir()
+
+
+def test_top_level_raw_wins_and_ambiguous_subdirs_refused(tmp_path, capsys):
+    """库根 raw/<slug>.md 优先；只在子目录里、且同名不止一份 → 拒绝，零写。"""
+    root = _kb(tmp_path)
+    _raw(root, "dup")
+    _part(root, "a", "dup")
+    assert run_remove_result(root, "dup").relocate == ["raw/dup.md"]
+
+    (root / "raw" / "dup.md").unlink()
+    _part(root, "b", "dup")
+    assert remove_entrypoint(root, src="dup", yes=True, json_output=False) == EXIT_USAGE
+    assert "认不准" in capsys.readouterr().err
+    assert not (root / ".trash").exists()
