@@ -601,6 +601,29 @@ def _no_proxy_match(host: str, raw: str) -> bool:
     return False
 
 
+# 代码托管站的「文件页」链接（用户最常粘贴的那种）返回的是站点界面，不是文件本身：换成 Raw 链接再下载。
+# 只认路径格式确定的三家；出处记录的 `url` 仍记用户粘贴的原链接，`final_url` 是实际下载的 Raw 地址。
+_BLOB_PATH = re.compile(r"^/([^/]+)/([^/]+)/blob/(.+)$")
+
+
+def raw_url(url: str) -> str:
+    """GitHub / GitLab.com / Gitee 的文件页链接 → Raw 链接；其它网址原样返回。查询串与锚点（`?plain=1`、`#L10`）丢弃。"""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    path = parts.path
+    if host in ("github.com", "www.github.com"):
+        m = _BLOB_PATH.match(path)
+        if m:
+            return urlunsplit(("https", "raw.githubusercontent.com", f"/{m[1]}/{m[2]}/{m[3]}", "", ""))
+    elif host == "gitlab.com" and "/-/blob/" in path:
+        return urlunsplit((parts.scheme, parts.netloc, path.replace("/-/blob/", "/-/raw/", 1), "", ""))
+    elif host == "gitee.com":
+        m = _BLOB_PATH.match(path)
+        if m:
+            return urlunsplit((parts.scheme, parts.netloc, f"/{m[1]}/{m[2]}/raw/{m[3]}", "", ""))
+    return url
+
+
 def fetch_url(
     url: str,
     dest_dir: Path,
@@ -627,7 +650,7 @@ def fetch_url(
         try:
             with os.fdopen(fd, "wb") as out:
                 final_url, resp_headers, size, sha, head = _download(
-                    url, out, transport=transport, env_root=env_root, resolver=resolver,
+                    raw_url(url), out, transport=transport, env_root=env_root, resolver=resolver,
                     progress=progress, cancel=cancel, allow=allow,
                 )
         except FetchRefused as refused:
@@ -637,7 +660,7 @@ def fetch_url(
             if cancel is not None and cancel.is_set():
                 raise FetchCancelled from None
             return _fetch_with_fallback(
-                url, refused, tmp, mode, progress=progress, allow=allow, cancel=cancel, env_root=env_root
+                raw_url(url), refused, tmp, mode, progress=progress, allow=allow, cancel=cancel, env_root=env_root
             )
         content_type, charset = _mime(resp_headers.get("content-type"))
         disp = _disposition_name(resp_headers.get("content-disposition"))
