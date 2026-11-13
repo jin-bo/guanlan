@@ -990,12 +990,12 @@ function renderOneclickPanel(panel, data) {
   const sum = document.createElement("summary");
   sum.textContent = t("oc.details");
   det.appendChild(sum);
-  const n = task.normalized || ocNormalizedTotal(task.docs);
+  const n = task.normalized || {};
   const norm = document.createElement("p");
   norm.className = "muted";
   norm.textContent = t("oc.normalized", n.headers_removed || 0, n.page_numbers_removed || 0, n.watermarks_removed || 0, n.sentences_joined || 0);
   det.appendChild(norm);
-  const warnings = task.warnings || (task.docs || []).flatMap((d) => d.warnings || []);
+  const warnings = task.warnings || [];
   if (warnings.length) {
     const w = document.createElement("p");
     w.className = "muted";
@@ -1068,15 +1068,6 @@ function ocProgressBlock(task) {
     box.appendChild(eta);
   }
   return box;
-}
-
-// 批量任务没有顶层整理统计：合计各份（与 CLI `_normalized_total` 同口径）
-function ocNormalizedTotal(docs) {
-  const keys = ["headers_removed", "page_numbers_removed", "watermarks_removed", "sentences_joined"];
-  const total = {};
-  for (const k of keys) total[k] = 0;
-  for (const d of docs || []) for (const k of keys) total[k] += (d.normalized || {})[k] || 0;
-  return total;
 }
 
 function ocCancelButton(task, fail, blocked) {

@@ -292,6 +292,17 @@ def test_kb_own_dirs_are_rejected_as_input(kb: Path, rel: str):
         _prep(kb, d, dry_run=True)
 
 
+def test_kb_own_dir_symlinked_elsewhere_is_still_rejected(kb: Path, tmp_path_factory):
+    """`raw/` 软链到库外：经外部真实路径导入同样被拒（只 resolve 库根时守卫失效）。"""
+    outside = tmp_path_factory.mktemp("外盘") / "raw"
+    outside.mkdir()
+    (outside / "下篇.md").write_text(_short("下篇"), encoding="utf-8")
+    (kb / "raw").rmdir()
+    (kb / "raw").symlink_to(outside)
+    with pytest.raises(OneClickError, match="不能导入库自己的 raw/"):
+        _prep(kb, outside, dry_run=True)
+
+
 def test_uploads_dir_is_still_accepted(kb: Path):
     d = kb / "workspace" / "uploads"
     d.mkdir(parents=True, exist_ok=True)

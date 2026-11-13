@@ -1011,8 +1011,9 @@ def prepare_batch(
             _prepare_doc(root, task, i, src, backend=backend, log=log, toc_reviewer=toc_reviewer, dry_run=dry_run)
         task["precheck"] = precheck(root, task)
         task["estimate_seconds"] = round(_average_item_seconds(root) * len(task["items"]))
-        for d in _batch_slug_clashes(task["items"]):  # 逐份的明细已由各份准备记进日志，这里只补批内的
-            log("  ✋ " + d)
+        if task["precheck"]["status"] != "ok":  # 逐份明细已带份名，批内 slug 冲突也在其中
+            for d in task["precheck"]["details"]:
+                log("  ✋ " + d)
 
     return _guarded_prepare(root, task, log, dry_run=dry_run, stop=stop, body=body)
 
@@ -1025,9 +1026,11 @@ def _reject_own_dir(root: Path, folder: Path) -> None:
     target = folder.resolve()
     if target == real_root:
         raise OneClickError(f"不能把库根当输入目录导入：{folder}（第一层的 AGENTAO.md / SCHEMA.md 是配置，不是原件）")
-    for own in (real_root / "raw", real_root / "wiki", _ws(root).resolve() / "parsed"):
+    # 每个都 resolve：`raw/`、`wiki/`、`workspace/` 可能是指向别处的符号链接（只 resolve 库根会让守卫失效、`_rel` 报 ValueError）
+    for label, own in (("raw", root / "raw"), ("wiki", root / "wiki"), ("workspace/parsed", _ws(root) / "parsed")):
+        own = own.resolve()
         if target == own or own in target.parents:
-            raise OneClickError(f"不能导入库自己的 {_rel(real_root, own)}/ 目录：{folder}")
+            raise OneClickError(f"不能导入库自己的 {label}/ 目录：{folder}")
 
 
 def _prepare_doc(
@@ -1060,7 +1063,7 @@ def _prepare_doc(
         }
         # 网址下载来的原件：沿用单份的出处记录读取，否则出处退回本地路径、Markdown 相对图片被当成本地附件（复审）
         source = _attach_source(doc, src, dry_run=dry_run)
-        _prepare_steps(root, src, doc, backend=backend, log=log, toc_reviewer=toc_reviewer, source=source)
+        _prepare_steps(root, src, doc, backend=backend, log=log, toc_reviewer=toc_reviewer, source=source, final=False)
     except (StopRequested, KeyboardInterrupt):
         raise
     except Exception as exc:  # 一份失败即整批失败（决策P4.32-2）：原因指明是哪一份
@@ -1093,6 +1096,7 @@ def _prepare_steps(
     log: TaskLog,
     toc_reviewer: TocReviewer | None = None,
     source: dict | None = None,
+    final: bool = True,
 ) -> None:
     sample = task["sample"]
     ws = _ws(root)
@@ -1259,6 +1263,8 @@ def _prepare_steps(
     if task["warnings"]:
         log(f"  ⚠ {len(task['warnings'])} 处图片引用找不到，原样保留（见日志）")
     task["prepared_sha256"] = {it["parsed"]: sha256_file(ws / it["parsed"]) for it in items}
+    if not final:  # 批量的一份：预检与估时由整批在全部准备完后统一做一次（否则 N 份 = 整扫 raw/、读全部旧任务 N 遍）
+        return
     task["precheck"] = precheck(root, task)
     task["estimate_seconds"] = round(_average_item_seconds(root) * len(items))
     if task["precheck"]["status"] != "ok":
@@ -1634,7 +1640,7 @@ def summary_lines(task: dict, *, detail: bool = False, root: Path | None = None)
         lines.append("  ✋ 冲突（不可覆盖，只能放弃）：")
         lines += [f"    - {d}" for d in pc.get("details", [])]
     if detail:
-        s = task.get("normalized") or _normalized_total(task)
+        s = task.get("normalized") or normalized_total(task)
         if s:
             lines.append(
                 f"  整理：页眉页脚 {s.get('headers_removed', 0)}、页码 {s.get('page_numbers_removed', 0)}、"
@@ -1682,7 +1688,7 @@ def _unit(task: dict) -> str:
     return "篇" if task.get("kind") == "batch" else "份"
 
 
-def _normalized_total(task: dict) -> dict:
+def normalized_total(task: dict) -> dict:
     """批量：各份整理统计的合计（只合计摘要里显示的几项）。"""
     keys = ("headers_removed", "page_numbers_removed", "watermarks_removed", "sentences_joined")
     total = dict.fromkeys(keys, 0)
