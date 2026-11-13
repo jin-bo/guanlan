@@ -25,7 +25,7 @@ import shutil
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -41,6 +41,8 @@ from .rawio import (  # slug 归一 + 逐字读写（避免半写、不静默改
     normalize_basename,
     raw_slug,
     read_text_verbatim,
+    same_name_key,
+    source_identity,
 )
 from .reindex import (  # index 行删除的单一归口
     _join_lines,
@@ -82,6 +84,7 @@ class RemovePlan:
     orphans: list[str]  # 独源衍生页（advisory，一期不删；相对库根 posix）
     index_lines: list[str]  # 待删的 index.md 登记行原文（通常 0/1 条）
     backlinks: list[str] = field(default_factory=list)  # 入链页：撤回后将悬链（advisory，不改）
+    requested: str = ""  # 用户给的源名（规范化后）；与 `slug` 不同 = 摘要页是按旧算法建的旧名页（#203）
 
 
 def _resolve_slug(src: str) -> str:
@@ -114,11 +117,12 @@ def _raw_file(root: Path, slug: str) -> str | None:
     raw = root / "raw"
     if not raw.is_dir():
         return None
-    name = f"{slug}.md"
+    name = same_name_key(f"{slug}.md")
     hits = []
     for path in raw.rglob("*.md"):  # 逐个比文件名：slug 里可能有 `[` 等 glob 元字符
         parts = path.relative_to(raw).parts
-        if path.name != name or not path.is_file():
+        # 按 NFC 比：盘上可能存 NFD 写法（Linux 上 NFC 键入的名字到不了它，#203）
+        if same_name_key(path.name) != name or not path.is_file():
             continue
         if any(part == "images" or part.startswith(".") for part in parts[:-1]):
             continue
@@ -128,15 +132,51 @@ def _raw_file(root: Path, slug: str) -> str | None:
     return hits[0] if hits else None
 
 
-def _locate(root: Path, slug: str) -> list[str]:
+def _resolve_target(root: Path, slug: str) -> tuple[str | None, str]:
+    """用户给的源名 → (raw 文件, 摘要页 slug)。摘要页 slug 通常就是 `slug`，有两种例外（#203）：
+
+    - 找到了 raw 文件，而它的摘要页是 #201 之前按旧算法建的旧名页（NFD `résumé` 的 `re-sume`，`raw_digest`
+      确证属于它）：摘要页、衍生页 `sources`、index 行、入链都按旧名处理，否则原文进了回收区、旧页成孤页。
+    - 按旧页名给的（`remove re-sume`）：raw 按名字找不到；旧页的 `raw_digest` 指向的原文若以这张页为身份，
+      一并撤回。只认「页身份正是这张页」的原文，不把改过名的普通页牵连到别的资料上。
+    """
+    sources = root / "wiki" / "sources"
+    raw_rel = _raw_file(root, slug)
+    if raw_rel is not None:
+        return raw_rel, source_identity(sources, PurePosixPath(raw_rel).stem, raw_rel)
+    return _raw_from_page(root, sources, slug), slug
+
+
+def _raw_from_page(root: Path, sources: Path, slug: str) -> str | None:
+    """`wiki/sources/<slug>.md` 的 `raw_digest` 指向的原文——仅当该原文的页身份就是这张页（旧名页）。"""
+    from .provenance import RAW_DIGEST_KEY, parse_digest_value
+
+    page = sources / f"{slug}.md"
+    if not page.is_file():
+        return None
+    meta, _body = load_page(page)
+    parsed = parse_digest_value((meta or {}).get(RAW_DIGEST_KEY))
+    if parsed is None:
+        return None
+    rel = parsed[0]
+    if not rel.startswith("raw/") or not (root / rel).is_file():
+        return None
+    if same_name_key(source_identity(sources, PurePosixPath(rel).stem, rel)) != same_name_key(slug):
+        return None
+    return rel
+
+
+def _locate(root: Path, raw_rel: str | None, page_slug: str) -> list[str]:
     """探源自身落盘物（raw 文件 / 图片目录 / 摘要页），返回存在者的相对库根 posix 列表。
 
-    图片目录与 raw 文件同级：`raw/<slug>.md` → `raw/images/<slug>/`，分卷 `raw/<sample>/<slug>.md` →
-    `raw/<sample>/images/<slug>/`（`imageio._images_dir` 同口径）。"""
+    图片目录与 raw 文件同级、按 raw 文件名命名：`raw/<stem>.md` → `raw/images/<stem>/`，分卷
+    `raw/<sample>/<stem>.md` → `raw/<sample>/images/<stem>/`（`imageio._images_dir` 同口径）。"""
     found: list[str] = []
-    raw_rel = _raw_file(root, slug)
-    images_rel = (Path(raw_rel).parent / "images" / slug).as_posix() if raw_rel else f"raw/images/{slug}"
-    for rel in (raw_rel, images_rel, f"wiki/sources/{slug}.md"):
+    if raw_rel:
+        images_rel = (PurePosixPath(raw_rel).parent / "images" / PurePosixPath(raw_rel).stem).as_posix()
+    else:
+        images_rel = f"raw/images/{page_slug}"
+    for rel in (raw_rel, images_rel, f"wiki/sources/{page_slug}.md"):
         if rel and (root / rel).exists():
             found.append(rel)
     return found
@@ -226,19 +266,22 @@ def _backlink_pages(root: Path, slug: str) -> list[str]:
 def run_remove_result(root: Path, slug: str) -> RemovePlan:
     """算一次撤回的 plan。**纯函数、只读、不写盘**（仿 `reindex.run_reindex` / `heal.run_heal_result`）。"""
     root = Path(root)
-    relocate = _locate(root, slug)
+    raw_rel, page_slug = _resolve_target(root, slug)
+    relocate = _locate(root, raw_rel, page_slug)
     if not relocate:  # 源自身落盘物全缺 → 无可撤
-        return RemovePlan(ok=False, slug=slug, relocate=[], drop_slug=[], orphans=[], index_lines=[])
-    drops, orphans = _scan_derivatives(root, slug)
-    index_lines = _plan_index_lines(root / "wiki", slug)
+        return RemovePlan(ok=False, slug=slug, relocate=[], drop_slug=[], orphans=[], index_lines=[], requested=slug)
+    # 衍生页 `sources`、index 行、入链都按摘要页 slug（旧名页即旧名，#203）
+    drops, orphans = _scan_derivatives(root, page_slug)
+    index_lines = _plan_index_lines(root / "wiki", page_slug)
     return RemovePlan(
         ok=True,
-        slug=slug,
+        slug=page_slug,
         relocate=relocate,
         drop_slug=drops,
         orphans=orphans,
         index_lines=index_lines,
-        backlinks=_backlink_pages(root, slug),
+        backlinks=_backlink_pages(root, page_slug),
+        requested=slug,
     )
 
 
@@ -369,6 +412,7 @@ def format_plan(plan: RemovePlan, *, executed: bool, json_output: bool) -> str:
             {
                 "ok": plan.ok,
                 "slug": plan.slug,
+                "requested": plan.requested or plan.slug,
                 "executed": executed,
                 "relocate": list(plan.relocate),
                 "drop_slug": [asdict(d) for d in plan.drop_slug],
@@ -382,6 +426,8 @@ def format_plan(plan: RemovePlan, *, executed: bool, json_output: bool) -> str:
 
     verb = "已撤回" if executed else "将撤回（预览，未写盘；加 --yes 执行）"
     out = [f"· remove {plan.slug}：{verb}"]
+    if plan.requested and plan.requested != plan.slug:
+        out.append(f"    注：摘要页是按旧算法建的旧名页 `{plan.slug}`（输入 `{plan.requested}`），按旧名撤回与摘除引用。")
     if plan.relocate:
         out.append(f"    移入 .trash/：{', '.join(plan.relocate)}")
     for d in plan.drop_slug:

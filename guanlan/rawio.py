@@ -130,7 +130,7 @@ def same_name_key(name: str) -> str:
     return unicodedata.normalize("NFC", name)
 
 
-def find_source_page(sources_dir: Path, raw_stem: str) -> Path | None:
+def find_source_page(sources_dir: Path, raw_stem: str, raw_rel: str | None = None) -> Path | None:
     """按 raw 文件名 stem 定位其 source 摘要页路径；容忍 `.`/`-` 归一分歧，无则 None。
 
     `raw_slug` **保留内部点**（`1.示例报告` 原样），而 ingest Agent 按「kebab-case（同源文件名）」
@@ -145,7 +145,7 @@ def find_source_page(sources_dir: Path, raw_stem: str) -> Path | None:
     """
     for stem, legacy in _claim_candidates(raw_stem):
         page = sources_dir / f"{stem}.md"
-        if page.is_file() and (not legacy or _digest_names_stem(page, raw_stem)):
+        if page.is_file() and (not legacy or _digest_names_raw(page, raw_stem, raw_rel)):
             return page
     return None
 
@@ -175,7 +175,7 @@ def source_page_stems(raw_stem: str) -> tuple[str, ...]:
 
     旧算法形只在 NFD 文件名上与新形不同（`re-sume` ↔ `résumé`）。它丢了组合符号，可能与**别的**资料的新页名
     相同（NFD `café` 的旧形 `cafe` 恰是 `cafe.md` 的页），所以 `find_source_page` 认领它时还要求该页的
-    `raw_digest` 指向的文件名就是这一篇（`_digest_names_stem`）；health 只问「这张页有没有原文」，不判归属，照单全收。
+    `raw_digest` 指向的就是这一篇（`_digest_names_raw`；给了完整路径就比路径）；health 只问「这张页有没有原文」，不判归属，照单全收。
     """
     return tuple(stem for stem, _legacy in _page_stem_candidates(raw_stem))
 
@@ -209,10 +209,11 @@ def _page_stem_candidates(raw_stem: str) -> list[tuple[str, bool]]:
     return uniq
 
 
-def _digest_names_stem(page: Path, raw_stem: str) -> bool:
-    """页的 `raw_digest` 指向的文件名（stem）是否**逐字**就是 `raw_stem`——旧算法形认领的归属确证。
+def _digest_names_raw(page: Path, raw_stem: str, raw_rel: str | None = None) -> bool:
+    """页的 `raw_digest` 是否指向这一篇——旧算法形认领的归属确证（按 NFC 比）。
 
-    没有或读不出 `raw_digest` → False（宁可认不出、显示未收录，也不把别篇的页认成这篇的）。
+    给了 `raw_rel`（相对库根，`raw/…`）就比完整路径：不同目录里同名的两篇 NFD 文件不会认领彼此的旧页（#203）；
+    只有 stem 的调用方退回比文件名。没有或读不出 `raw_digest` → False（宁可认不出、显示未收录，也不认错页）。
     """
     from .pages import load_page
     from .provenance import RAW_DIGEST_KEY, parse_digest_value
@@ -222,11 +223,15 @@ def _digest_names_stem(page: Path, raw_stem: str) -> bool:
     except OSError:
         return False
     parsed = parse_digest_value((meta or {}).get(RAW_DIGEST_KEY))
+    if parsed is None:
+        return False
     # 按 `same_name_key` 比：macOS 上按 NFC 键入的路径与盘上 NFD 名是同一个文件，指纹里记的可能是另一种写法
-    return parsed is not None and same_name_key(PurePosixPath(parsed[0]).stem) == same_name_key(raw_stem)
+    if raw_rel is not None:
+        return same_name_key(parsed[0]) == same_name_key(raw_rel)
+    return same_name_key(PurePosixPath(parsed[0]).stem) == same_name_key(raw_stem)
 
 
-def source_identity(sources_dir: Path, raw_stem: str) -> str:
+def source_identity(sources_dir: Path, raw_stem: str, raw_rel: str | None = None) -> str:
     """这篇 raw 的 source 页身份（slug）：通常就是 `raw_slug`；新名页还不存在、而旧算法形的页确证属于它时，
     是那个旧名（#201）。撞名检查用它比，旧页被另一篇资料的新名命中时才查得出来。"""
     slug = raw_slug(raw_stem)
@@ -237,18 +242,18 @@ def source_identity(sources_dir: Path, raw_stem: str) -> str:
         return slug
     for stem in legacy:
         page = sources_dir / f"{stem}.md"
-        if page.is_file() and _digest_names_stem(page, raw_stem):
+        if page.is_file() and _digest_names_raw(page, raw_stem, raw_rel):
             return stem
     return slug
 
 
-def source_identity_keys(sources_dir: Path, raw_stem: str) -> frozenset[str]:
+def source_identity_keys(sources_dir: Path, raw_stem: str, raw_rel: str | None = None) -> frozenset[str]:
     """撞名比较用的键集（`same_name_key` 后、去空）：`raw_slug` 与 `source_identity` 两个都算。
 
     只比 `source_identity` 不够：NFD `café` 的身份是旧名 `cafe` 时，另一篇 NFC `café` 的新名 `café` 与它的
     `raw_slug` 相同、`find_source_page` 也会先认新名页——两篇其实会抢同一张页，单比身份就漏报。"""
     return frozenset(
-        same_name_key(s) for s in (raw_slug(raw_stem), source_identity(sources_dir, raw_stem)) if s
+        same_name_key(s) for s in (raw_slug(raw_stem), source_identity(sources_dir, raw_stem, raw_rel)) if s
     )
 
 

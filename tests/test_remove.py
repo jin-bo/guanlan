@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,10 @@ import guanlan.remove as rmmod
 from guanlan.errors import EXIT_OK, EXIT_USAGE
 from guanlan.lint import run_lint
 from guanlan.pages import iter_pages, split_frontmatter
+from guanlan.provenance import compute_raw_digest, format_digest_value, stamp_raw_digest
+from guanlan.rawio import find_source_page
 from guanlan.remove import _resolve_slug, remove_entrypoint, run_remove_result
+from guanlan.sourcepage import locate_source_page
 
 FM = "---\ntitle: '{title}'\ntype: {type}\ntags: []\nsources: {sources}\nlast_updated: 2026-06-03\n---\n\n{body}\n"
 
@@ -608,3 +612,79 @@ def test_top_level_raw_wins_and_ambiguous_subdirs_refused(tmp_path, capsys):
     assert remove_entrypoint(root, src="dup", yes=True, json_output=False) == EXIT_USAGE
     assert "认不准" in capsys.readouterr().err
     assert not (root / ".trash").exists()
+
+
+# ---------- #203：按旧算法建的旧名页（NFD 文件名的 re-sume 形） ----------
+
+_NFD_RESUME = unicodedata.normalize("NFD", "résumé")
+
+
+def _legacy_kb(tmp_path: Path, sub: str = "x") -> tuple[Path, Path, Path]:
+    """`raw/<sub>/<NFD résumé>.md`（带图片目录）+ 旧名页 `re-sume.md`（raw_digest 确证）+ 多源页 + index 行。
+    NFD 文件放子目录：macOS 与 Linux 都建得出（CI 不许跳过）。"""
+    root = _kb(tmp_path)
+    raw = root / "raw" / sub / f"{_NFD_RESUME}.md"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("简历原文", encoding="utf-8")
+    img = raw.parent / "images" / _NFD_RESUME / "1.png"
+    img.parent.mkdir(parents=True)
+    img.write_bytes(b"png")
+    page = _source_page(root, "re-sume", sources="['re-sume']")
+    assert stamp_raw_digest(page, format_digest_value(f"raw/{sub}/{_NFD_RESUME}.md", compute_raw_digest(raw)))
+    (root / "wiki" / "index.md").write_text(
+        "# 索引\n\n## Sources\n\n- [简历](sources/re-sume.md) — 摘要\n- [Bar](sources/bar.md) — 摘要\n",
+        encoding="utf-8",
+    )
+    return root, raw, page
+
+
+@pytest.mark.parametrize("given", ["résumé", unicodedata.normalize("NFD", "résumé"), "raw/x/résumé.md"])
+def test_remove_by_raw_name_takes_legacy_page_along(tmp_path: Path, given: str, capsys):
+    """撤回 NFD `résumé`：原文、图片、旧名页一起进回收区；多源页摘的是旧名 `re-sume`；index 删旧名行。"""
+    root, raw, page = _legacy_kb(tmp_path)
+    multi = _page(root, "wiki/concepts/x.md", sources="['re-sume', 'bar']")
+    orphan = _page(root, "wiki/concepts/y.md", sources="['re-sume']")
+
+    plan = run_remove_result(root, _resolve_slug(given))
+    assert plan.ok and plan.slug == "re-sume" and plan.requested == "résumé"
+    assert f"raw/x/{_NFD_RESUME}.md" in plan.relocate and "wiki/sources/re-sume.md" in plan.relocate
+    assert f"raw/x/images/{_NFD_RESUME}" in plan.relocate
+    assert [d.page for d in plan.drop_slug] == ["wiki/concepts/x.md"] and plan.orphans == ["wiki/concepts/y.md"]
+
+    assert remove_entrypoint(root, src=given, yes=True, json_output=False) == EXIT_OK
+    assert "旧名页 `re-sume`" in capsys.readouterr().out
+    assert not raw.exists() and not page.exists() and not (raw.parent / "images").exists()
+    assert _sources_of(multi) == ["bar"] and orphan.exists()
+    idx = (root / "wiki" / "index.md").read_text(encoding="utf-8")
+    assert "sources/re-sume.md" not in idx and "sources/bar.md" in idx
+
+
+def test_remove_by_legacy_page_name_takes_raw_along(tmp_path: Path):
+    """按旧页名撤回（`remove re-sume`）：旧页的 raw_digest 指向的原文以这张页为身份，一并撤回。"""
+    root, raw, page = _legacy_kb(tmp_path)
+    plan = run_remove_result(root, "re-sume")
+    assert plan.ok and plan.slug == "re-sume"
+    assert set(plan.relocate) >= {f"raw/x/{_NFD_RESUME}.md", "wiki/sources/re-sume.md"}
+
+
+def test_remove_renamed_page_does_not_drag_other_raw(tmp_path: Path):
+    """普通的改名页（raw_digest 指向 `raw/foo.md`，但 foo 的页身份是 `foo`）：按页名撤回只动页，不牵连原文。"""
+    root = _kb(tmp_path)
+    raw = _raw(root, "foo")
+    page = _source_page(root, "renamed")
+    assert stamp_raw_digest(page, format_digest_value("raw/foo.md", compute_raw_digest(raw)))
+    plan = run_remove_result(root, "renamed")
+    assert plan.relocate == ["wiki/sources/renamed.md"]
+
+
+def test_same_named_nfd_raws_in_two_dirs_do_not_claim_each_others_legacy_page(tmp_path: Path):
+    """不同目录里同名的两篇 NFD 文件：旧页的 raw_digest 指向 `raw/a/…`，`raw/b/…` 不认领它（#203 显示偏差）。"""
+    root, _raw_a, page = _legacy_kb(tmp_path, sub="a")
+    raw_b = root / "raw" / "b" / f"{_NFD_RESUME}.md"
+    raw_b.parent.mkdir()
+    raw_b.write_text("另一份", encoding="utf-8")
+    sources = root / "wiki" / "sources"
+    assert find_source_page(sources, _NFD_RESUME, f"raw/a/{_NFD_RESUME}.md") == page
+    assert find_source_page(sources, _NFD_RESUME, f"raw/b/{_NFD_RESUME}.md") is None
+    assert locate_source_page(root, f"b/{_NFD_RESUME}.md").page is None
+    assert locate_source_page(root, f"a/{_NFD_RESUME}.md").page == page
