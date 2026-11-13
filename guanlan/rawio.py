@@ -230,10 +230,14 @@ def source_identity(sources_dir: Path, raw_stem: str) -> str:
     """这篇 raw 的 source 页身份（slug）：通常就是 `raw_slug`；新名页还不存在、而旧算法形的页确证属于它时，
     是那个旧名（#201）。撞名检查用它比，旧页被另一篇资料的新名命中时才查得出来。"""
     slug = raw_slug(raw_stem)
+    legacy = [stem for stem, is_legacy in _claim_candidates(raw_stem) if is_legacy]
+    if not legacy:  # 文件名里没有可分解字符：没有旧算法形，身份就是新名，不必 stat（撞名检查对全部 raw 逐篇调）
+        return slug
     if any((sources_dir / f"{f}.md").is_file() for f in _slug_forms(slug)):
         return slug
-    for stem, legacy in _claim_candidates(raw_stem):
-        if legacy and (sources_dir / f"{stem}.md").is_file() and _digest_names_stem(sources_dir / f"{stem}.md", raw_stem):
+    for stem in legacy:
+        page = sources_dir / f"{stem}.md"
+        if page.is_file() and _digest_names_stem(page, raw_stem):
             return stem
     return slug
 

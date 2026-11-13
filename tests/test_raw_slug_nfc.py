@@ -217,3 +217,12 @@ def test_nfc_typed_stem_does_not_claim_others_legacy_page(kb: Path):
     _raw(kb, "re-sume.md")
     _source_page(kb, "re-sume", owner="raw/re-sume.md")  # 属于另一篇（真叫 re-sume 的资料）
     assert find_source_page(kb / "wiki" / "sources", nfc("résumé")) is None
+
+
+def test_owner_reingest_allowed_when_digest_written_in_other_form(kb: Path):
+    """属主重摄豁免：`raw_digest` 记的是 NFC 写法、盘上名是 NFD，照样认属主（与 `find_source_page` 同口径）。"""
+    _raw(kb, "cafe.md")
+    raw = _raw(kb, f"x/{nfd('café')}.md")
+    page = _source_page(kb, "cafe")
+    assert stamp_raw_digest(page, format_digest_value(f"raw/x/{nfc('café')}.md", compute_raw_digest(raw)))
+    _reject_source_slug_collision(kb / "raw", raw.resolve(), kb / "wiki" / "sources")  # 属主：不抛

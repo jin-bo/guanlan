@@ -28,7 +28,7 @@ from .provenance import (
     parse_digest_value,
     stamp_raw_digest,
 )
-from .rawio import find_source_page, source_identity, source_identity_keys
+from .rawio import find_source_page, same_name_key, source_identity, source_identity_keys
 from .runtime import AgentRunner
 from .sourcepage import locate_source_page, source_slug
 
@@ -206,7 +206,8 @@ def _target_page_owned_by(sources_dir: Path, tpath: Path, raw_dir: Path) -> bool
         rel = tpath.relative_to(raw_dir).as_posix()
     except ValueError:
         return False
-    return owner_raw_rel == f"raw/{rel}"
+    # 按 `same_name_key` 比：指纹里记的写法可能与盘上名只差 NFC / NFD（#197），`find_source_page` 认旧页时也这样比（#201）
+    return same_name_key(owner_raw_rel) == same_name_key(f"raw/{rel}")
 
 
 def _reject_source_slug_collision(raw_dir: Path, tpath: Path, sources_dir: Path) -> None:
