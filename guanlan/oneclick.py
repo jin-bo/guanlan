@@ -1093,6 +1093,10 @@ def _prepare_doc(
         it["doc"] = i
     task["items"] += doc["items"]
     task["prepared_sha256"].update(doc["prepared_sha256"])
+    # 整批合计写进顶层（#198）：摘要、Web、`--json` 与单份任务读同名字段。每份归并后更新——中途失败或停止的批量
+    # 也看得到已准备那几份的合计；准备结束后不再变
+    task["normalized"] = _normalized_total(task)
+    task["warnings"] = [w for d in task["docs"] for w in d.get("warnings") or []]
     if not dry_run:
         save_task(root, task)
 
@@ -1657,13 +1661,13 @@ def summary_lines(task: dict, *, detail: bool = False, root: Path | None = None)
         lines.append("  ✋ 冲突（不可覆盖，只能放弃）：")
         lines += [f"    - {d}" for d in pc.get("details", [])]
     if detail:
-        s = task.get("normalized") or normalized_total(task)
+        s = task.get("normalized") or {}
         if s:
             lines.append(
                 f"  整理：页眉页脚 {s.get('headers_removed', 0)}、页码 {s.get('page_numbers_removed', 0)}、"
                 f"水印 {s.get('watermarks_removed', 0)}、接句 {s.get('sentences_joined', 0)}"
             )
-        warnings = task.get("warnings") or [w for d in task.get("docs", []) for w in d.get("warnings") or []]
+        warnings = task.get("warnings") or []
         if warnings:
             lines.append(f"  图片：{len(warnings)} 处引用找不到，原样保留")
         for k, it in enumerate(items, 1):
@@ -1705,18 +1709,18 @@ def _unit(task: dict) -> str:
     return "篇" if task.get("kind") == "batch" else "份"
 
 
-def normalized_total(task: dict) -> dict:
-    """批量：各份整理统计的合计（只合计摘要里显示的几项）。"""
-    keys = ("headers_removed", "page_numbers_removed", "watermarks_removed", "sentences_joined")
-    total = dict.fromkeys(keys, 0)
-    found = False
+def _normalized_total(task: dict) -> dict:
+    """批量：各份整理统计（`docs[i].normalized`）的合计，准备结束时写进顶层 `normalized`（#198）。
+
+    只合计整理动作的计数（删了多少页眉、接了多少句……）。目录相关的 `toc_*`（条目数、命中数、是否采用、来源）
+    是逐份的性质——两份目录的条目数相加说明不了哪份按目录改了层级——不进顶层，看 `docs[i]`。
+    """
+    total: dict[str, int] = {}
     for d in task.get("docs", []):
-        s = d.get("normalized") or {}
-        if s:
-            found = True
-            for k in keys:
-                total[k] += s.get(k) or 0
-    return total if found else {}
+        for k, v in (d.get("normalized") or {}).items():
+            if isinstance(v, int) and not isinstance(v, bool) and not k.startswith("toc_"):
+                total[k] = total.get(k, 0) + v
+    return total
 
 
 # ── CLI：guanlan import ──────────────────────────────────────────────────────
@@ -1817,7 +1821,7 @@ def _receipt(task: dict, json_output: bool, *, root: Path | None = None) -> None
     if json_output:
         keep = (
             "task_id", "kind", "state", "reason", "upload", "sample", "split", "docs", "skipped",
-            "precheck", "warnings", "estimate_seconds", "links_before", "links_after",
+            "precheck", "normalized", "warnings", "estimate_seconds", "links_before", "links_after",
         )
         out = {k: task.get(k) for k in keep if k in task}
         out["items"] = [
