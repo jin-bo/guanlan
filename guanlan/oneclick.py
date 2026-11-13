@@ -22,6 +22,7 @@ import signal
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urljoin
@@ -54,6 +55,7 @@ from .rawio import (
     cap_utf8,
     check_text_admission,
     raw_slug,
+    same_name_key,
     sha256_file,
 )
 from .sourcepage import locate_source_page
@@ -302,13 +304,20 @@ def precheck(root: Path, task: dict) -> dict:
     return {"status": status, "details": details, "existing": existing, "docs": docs_pc}
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return a.samefile(b)
+    except OSError:  # 目标还没落盘 → 不是同一个文件
+        return False
+
+
 def _batch_slug_clashes(items: list[dict]) -> list[str]:
     """批内 slug 冲突：逐份预检只看盘上 `raw/`，看不到同批其它份**将要写**的文件（沿 `ingest._reject_source_slug_collision`）。"""
     seen: dict[str, str] = {}
     out: list[str] = []
     for it in items:
         slug = raw_slug(Path(it["raw"]).stem)
-        first = seen.setdefault(slug, it["raw"])
+        first = seen.setdefault(same_name_key(slug), it["raw"])  # NFC / NFD 只差写法的也算同一个（#197）
         if first != it["raw"]:
             out.append(f"批内：{first} 与 {it['raw']} 的 source 页 slug 相同（`{slug}`）")
     return out
@@ -364,13 +373,15 @@ def _precheck_doc(
     details += self_diffs
 
     # slug 冲突（沿 ingest._reject_source_slug_collision）：在预检阶段就查，不留到 ⑥ 才炸。
-    target_slugs = {raw_slug(Path(t).stem): t for t in targets}
+    # 键按 NFC 规范化：只差 NFC / NFD 写法的也算同一个（#197）
+    target_slugs = {same_name_key(raw_slug(Path(t).stem)): t for t in targets}
     for rel in raw_md if raw_md is not None else _raw_md_files(root):  # 已排序：明细进 `_precheck_signature`，次序须稳定
         if rel in targets:
             continue
         slug = raw_slug(Path(rel).stem)
-        if slug in target_slugs:
-            details.append(f"{rel} 与 {target_slugs[slug]} 的 source 页 slug 相同（`{slug}`）")
+        hit = target_slugs.get(same_name_key(slug))
+        if hit is not None and not _same_file(root / rel, root / hit):  # macOS：只差 NFC / NFD 的是目标自己
+            details.append(f"{rel} 与 {hit} 的 source 页 slug 相同（`{slug}`）")
 
     remaining = [e for e in existing if e not in self_ok]
     if details:
@@ -884,16 +895,22 @@ def _footprint_clash(a: str, b: str) -> str | None:
     """两个样本名的准备产物是否相撞：任一路径相等，或一方落在另一方的目录之下。返回撞上的路径。
 
     统一 `casefold()`：macOS 默认文件系统不分大小写（区分大小写的文件系统上会多拒一些，宁可多拒）。
+    再按 NFC 规范化：只差 NFC / NFD 写法的名字在 macOS 上是同一个文件（#197）。
     """
     for p, p_dir in _doc_footprint(a):
-        pk = p.casefold()
+        pk = _path_key(p)
         for q, q_dir in _doc_footprint(b):
-            qk = q.casefold()
+            qk = _path_key(q)
             if pk == qk or (p_dir and qk.startswith(pk + "/")):
                 return p
             if q_dir and pk.startswith(qk + "/"):
                 return q
     return None
+
+
+def _path_key(path: str) -> str:
+    # Unicode 规范的「标准等价 + 不分大小写」比较：先 NFD 再 casefold，结果再规范化
+    return same_name_key(unicodedata.normalize("NFD", path).casefold())
 
 
 def scan_dir(folder: Path) -> tuple[list[Path], list[str]]:

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+
 from conftest import make_runner, write_page
 
 from guanlan.errors import (
@@ -11,7 +12,7 @@ from guanlan.errors import (
     EXIT_RAW_MUTATED,
     EXIT_USAGE,
 )
-from guanlan.ingest import run_ingest
+from guanlan.ingest import _reject_source_slug_collision, run_ingest
 from guanlan.provenance import (
     compute_raw_digest,
     format_digest_value,
@@ -170,6 +171,42 @@ def test_ingest_rejects_source_slug_collision(kb: Path, capsys):
     assert rc == EXIT_USAGE
     err = capsys.readouterr().err
     assert "report" in err and "raw/a/report.md" in err and "raw/b/report.md" in err
+
+
+def test_ingest_rejects_nfc_nfd_slug_collision(kb: Path, capsys):
+    """#197 漏报用例：两篇只差 NFC / NFD 写法（韩文 NFD 拆成字母后 `raw_slug` 仍保留）→ macOS 上是同一张 source 页，须拒。
+
+    放在不同子目录：macOS 文件系统同一目录里建不出两者，分开放两边都建得出，Linux CI 与本机都能跑。
+    """
+    import unicodedata
+
+    nfc, nfd = unicodedata.normalize("NFC", "한글보고서"), unicodedata.normalize("NFD", "한글보고서")
+    assert nfc != nfd
+    (kb / "raw" / "a").mkdir()
+    (kb / "raw" / "b").mkdir()
+    (kb / "raw" / "a" / f"{nfc}.md").write_text("甲\n", encoding="utf-8")
+    (kb / "raw" / "b" / f"{nfd}.md").write_text("乙\n", encoding="utf-8")
+
+    rc = run_ingest(f"raw/a/{nfc}.md", root=kb, runner=make_runner(None))
+    assert rc == EXIT_USAGE
+    assert "raw/b/" in capsys.readouterr().err
+
+
+def test_slug_collision_check_skips_target_typed_in_other_form(kb: Path):
+    """#197 回归：macOS 上盘里存 NFD、命令行按 NFC 键入的是同一个文件，不能把目标自己当成撞车的另一篇。
+
+    macOS 文件系统本身就让两种写法指向同一个文件；区分写法的文件系统（Linux CI）上用硬链接造出同样的情形——
+    两个路径串、同一个文件，`resolve()` 各自保留原样（符号链接会被 resolve 跟随，测不出回归）。CI 不许跳过。
+    """
+    import os
+    import unicodedata
+
+    nfc, nfd = unicodedata.normalize("NFC", "한글보고서"), unicodedata.normalize("NFD", "한글보고서")
+    (kb / "raw" / f"{nfd}.md").write_text("甲\n", encoding="utf-8")
+    typed = kb / "raw" / f"{nfc}.md"
+    if not typed.is_file():
+        os.link(kb / "raw" / f"{nfd}.md", typed)
+    _reject_source_slug_collision(kb / "raw", typed.resolve(), kb / "wiki" / "sources")  # 不抛
 
 
 def test_ingest_rejects_slug_fold_collision(kb: Path, capsys):
