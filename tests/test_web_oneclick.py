@@ -413,3 +413,80 @@ def test_pause_still_409_for_preparing_task_not_ours(kb):
             assert client.post("/api/oneclick/20261111-120000-书/pause").status_code == 409
     finally:
         lock.release()
+
+
+# ── P4.32：CLI 发起的目录批量任务在 Web 里 ──────────────────────────────────
+
+
+def _batch_dir(kb: Path) -> Path:
+    d = kb / "src" / "报告集"
+    d.mkdir(parents=True)
+    (d / "上册.md").write_text(_book(), encoding="utf-8")
+    (d / "下篇.md").write_text("# 下篇\n\n" + _para(3_000) + "\n", encoding="utf-8")
+    return d
+
+
+def _prepare_batch(kb: Path) -> dict:
+    with acquire(kb, "cli: import"):
+        return oneclick.prepare_batch(kb, _batch_dir(kb), origin_kind="cli")
+
+
+def test_batch_task_shown_but_confirm_refused(kb, ingest):
+    """批量只在终端确认（P4.32 §8）：任务卡看得到原件分组，确认端点直接 409，任务仍等待确认，放弃照常可用。"""
+    task = _prepare_batch(kb)
+    with TestClient(create_app(kb)) as client:
+        active = client.get("/api/oneclick").json()["active"]
+        assert active["kind"] == "batch" and [d["sample"] for d in active["docs"]] == ["上册", "下篇"]
+        assert [it["doc"] for it in active["items"]] == [0, 0, 0, 1]
+        r = client.post(f"/api/oneclick/{task['task_id']}/confirm", json={})
+        assert r.status_code == 409 and "--resume" in r.json()["detail"]
+        assert oneclick.load_task(kb, task["task_id"])["state"] == "awaiting_confirm"
+        assert ingest.calls == [] and list((kb / "raw").iterdir()) == []
+        assert client.post(f"/api/oneclick/{task['task_id']}/cancel").status_code == 200
+    assert oneclick.active_task(kb) is None
+
+
+def test_web_resumes_paused_batch_task(kb, ingest):
+    """CLI 发起、失败暂停的批量任务可在 Web 继续（P4.30「CLI 发起的任务可在 Web 里继续」不因批量而破）。"""
+    task = _prepare_batch(kb)
+
+    def fail_second(raw_rel: str, root: Path) -> int:
+        return 5 if raw_rel == "raw/下篇.md" else ingest(raw_rel, root=root)
+
+    with acquire(kb, "cli: import"):
+        code, task = oneclick.confirm(kb, task["task_id"], ingest=fail_second)
+    assert code == 5 and task["state"] == "paused"
+    with TestClient(create_app(kb)) as client:
+        r = client.post(f"/api/oneclick/{task['task_id']}/resume", json={})
+        job = _wait(client, r.json()["job_id"])
+        assert job["exit_code"] == 0, job["output"]
+        done = client.get(f"/api/oneclick/{task['task_id']}").json()
+        assert done["state"] == "done" and done["progress"]["docs_total"] == 2
+    assert ingest.calls[-1] == "raw/下篇.md"
+
+
+def test_upload_refuses_original_of_preparing_batch(kb):
+    """批量准备中：顶层 upload 是目录，被读的原件在 `docs[*].upload`，同名上传覆盖同样要拦（#172）。"""
+    uploads = kb / "workspace" / "uploads"
+    uploads.mkdir(parents=True)
+    (uploads / "书.pdf").write_bytes(b"%PDF old")
+    oneclick.save_task(
+        kb,
+        {
+            "task_id": "20261112-120000-uploads-批量",
+            "kind": "batch",
+            "state": "preparing",
+            "upload": "workspace/uploads",
+            "docs": [{"upload": "workspace/uploads/甲.pdf", "sample": "甲"}, {"upload": "workspace/uploads/书.pdf", "sample": "书"}],
+            "created": "x",
+        },
+    )
+    lock = acquire(kb, "cli: import")
+    try:
+        with TestClient(create_app(kb)) as client:
+            r = client.post("/api/upload", files={"file": ("书.pdf", b"%PDF new", "application/pdf")})
+            assert r.status_code == 409 and "uploads-批量" in r.json()["detail"]
+            assert _upload(client, "别的.pdf") == "workspace/uploads/别的.pdf"
+    finally:
+        lock.release()
+    assert (uploads / "书.pdf").read_bytes() == b"%PDF old"

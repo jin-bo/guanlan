@@ -39,6 +39,7 @@ from agentao.security.url_policy import _LOCAL_HOST_SUFFIXES, _LOCAL_HOSTNAMES
 from agentao.security.url_policy import _is_disallowed as _agentao_disallowed
 
 from . import __version__
+from .formats import EXT_KIND
 from .sourcerec import TMP_PREFIX, TMP_SUFFIX, redact_url
 from .rawio import NAME_STEM_MAX_BYTES, cap_utf8
 
@@ -112,24 +113,7 @@ KIND_LABEL = {
     "html": "网页",
     "md": "Markdown",
 }
-_EXT_KIND = {
-    ".pdf": "pdf",
-    ".docx": "docx",
-    ".pptx": "pptx",
-    ".xlsx": "xlsx",
-    ".html": "html",
-    ".htm": "html",
-    ".md": "md",
-    ".markdown": "md",
-    ".png": "png",
-    ".jpg": "jpeg",
-    ".jpeg": "jpeg",
-    ".gif": "gif",
-    ".webp": "webp",
-    ".tif": "tiff",
-    ".tiff": "tiff",
-    ".bmp": "bmp",
-}
+_EXT_KIND = EXT_KIND  # 与目录批量入库共用（决策P4.32-7）
 _MIME_KIND = {
     "application/pdf": "pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",

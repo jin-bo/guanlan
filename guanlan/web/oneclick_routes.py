@@ -32,7 +32,9 @@ from ..oneclick import (
     active_task,
     cancel,
     confirm,
+    doc_entries,
     load_task,
+    normalized_total,
     prepare,
     progress_info,
     recover_stale,
@@ -136,10 +138,16 @@ def task_view(root: Path, task: dict, *, job_id: str | None = None, pausing: boo
         "origin",
         "log",
         "source_url",  # 网址导入来的任务：任务卡显示原网址（已脱敏，P4.31 §5）
+        "kind",  # P4.32：CLI 发起的目录批量任务（"batch"）；单份任务没有这个字段
+        "docs",
+        "skipped",
     )
     out = {k: task.get(k) for k in keep}
+    if task.get("kind") == "batch":  # 批量没有顶层整理统计 / 图片警告：合计各份（与 CLI 摘要同口径），前端不再各算一遍
+        out["normalized"] = normalized_total(task)
+        out["warnings"] = [w for d in task.get("docs", []) for w in d.get("warnings") or []]
     out["items"] = [
-        {k: it.get(k) for k in ("raw", "parsed", "chars", "pages", "path", "method", "land", "state", "exit_code", "seconds")}
+        {k: it.get(k) for k in ("doc", "raw", "parsed", "chars", "pages", "path", "method", "land", "state", "exit_code", "seconds")}
         for it in task.get("items", [])
     ]
     out["done"] = sum(1 for it in task.get("items", []) if it.get("state") == "done")
@@ -399,6 +407,11 @@ def register(
         task = await anyio.to_thread.run_sync(_load, task_id)
         if task.get("state") != "awaiting_confirm":
             raise HTTPException(status_code=409, detail=f"任务当前状态为 {task.get('state')}，不在等待确认。")
+        if task.get("kind") == "batch":
+            # P4.32 §8：确认页按单份设计，批量只在终端确认；只藏按钮不够，接口仍能被直接调用
+            raise HTTPException(
+                status_code=409, detail="批量入库任务请在终端用 `guanlan import --resume` 确认；Web 上只能放弃。"
+            )
         if _job_for(task_id) is not None:  # 确认作业已在队列里（排在别的写作业后，状态还没翻）
             raise HTTPException(status_code=409, detail="该任务已确认，正在排队执行。")
         flag = threading.Event()  # 每个作业一枚新标志
@@ -476,9 +489,10 @@ def register(
         `pending_prepare` 判，盘上那条同样是残留（与 `oneclick_start` 的 `stale_preparing` 同口径）。
         """
         task = active_task(root)
-        if task is None or task.get("state") != "preparing" or not task.get("upload"):
+        if task is None or task.get("state") != "preparing":
             return None
-        if not _same_file(root / task["upload"], resolved):
+        # 批量任务（P4.32）读的是 `docs[*].upload` 里的各份原件，顶层 `upload` 是目录
+        if not any(d.get("upload") and _same_file(root / d["upload"], resolved) for d in doc_entries(task)):
             return None
         holder = read_holder(root)
         if not holder_alive(holder):

@@ -866,8 +866,11 @@ function renderOneclickPanel(panel, data) {
   head.className = "stage-head";
   head.textContent = `${t("oc.title")} · ${ocStateLabel(task.state)}`;
   const name = (task.upload || "").split("/").pop();
+  const batch = task.kind === "batch"; // P4.32：CLI 发起的目录批量任务
   const summary = document.createElement("p");
-  summary.textContent = t("oc.summary", name, task.items.length, fmtMinutes(task.estimate_seconds));
+  summary.textContent = batch
+    ? t("oc.batchSummary", name, (task.docs || []).length, task.items.length, fmtMinutes(task.estimate_seconds))
+    : t("oc.summary", name, task.items.length, fmtMinutes(task.estimate_seconds));
   if (task.source_url) { // 网址导入（P4.31 §5）：任务卡显示原网址（服务端已去掉签名参数）
     summary.appendChild(linkMark(task.source_url));
   }
@@ -889,6 +892,12 @@ function renderOneclickPanel(panel, data) {
       const ul = document.createElement("ul");
       for (const d of pc.details || []) { const li = document.createElement("li"); li.textContent = d; ul.appendChild(li); }
       card.append(c, ul);
+    } else if (batch) {
+      // 批量只在终端确认（P4.32 §8；后端确认端点同样拒绝）
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = t("oc.batchConfirmCli");
+      card.appendChild(p);
     } else {
       if (pc.status === "overwritable") {
         const label = document.createElement("label");
@@ -986,23 +995,37 @@ function renderOneclickPanel(panel, data) {
   norm.className = "muted";
   norm.textContent = t("oc.normalized", n.headers_removed || 0, n.page_numbers_removed || 0, n.watermarks_removed || 0, n.sentences_joined || 0);
   det.appendChild(norm);
-  if ((task.warnings || []).length) {
+  const warnings = task.warnings || [];
+  if (warnings.length) {
     const w = document.createElement("p");
     w.className = "muted";
-    w.textContent = t("oc.imageWarn", task.warnings.length);
+    w.textContent = t("oc.imageWarn", warnings.length);
     det.appendChild(w);
   }
-  const list = document.createElement("ol");
-  list.className = "oc-items";
-  for (const it of task.items) {
-    const li = document.createElement("li");
-    const pages = it.pages ? ` · p.${it.pages[0]}–${it.pages[1]}` : "";
-    li.textContent = `${it.raw.split("/").pop()} · ${it.chars}${pages} · ${ocItemLabel(it.state)}`;
-    if (it.state === "running") li.className = "oc-item-current";
-    li.title = (it.path || []).join(" / ");
-    list.appendChild(li);
+  // 批量：篇目按原件分组，每组一个标题 + 一个列表；单份只有一组、没有标题
+  const groups = batch
+    ? (task.docs || []).map((d, i) => ({ head: (d.upload || "").split("/").pop(), sourceUrl: d.source_url, items: task.items.filter((it) => it.doc === i) }))
+    : [{ head: null, items: task.items }];
+  for (const g of groups) {
+    if (g.head !== null) {
+      const h = document.createElement("p");
+      h.className = "muted";
+      h.textContent = g.head;
+      if (g.sourceUrl) h.appendChild(linkMark(g.sourceUrl)); // 网址导入来的原件（P4.31）：🔗 悬停显示原网址
+      det.appendChild(h);
+    }
+    const list = document.createElement("ol");
+    list.className = "oc-items";
+    for (const it of g.items) {
+      const li = document.createElement("li");
+      const pages = it.pages ? ` · p.${it.pages[0]}–${it.pages[1]}` : "";
+      li.textContent = `${it.raw.split("/").pop()} · ${it.chars}${pages} · ${ocItemLabel(it.state)}`;
+      if (it.state === "running") li.className = "oc-item-current";
+      li.title = (it.path || []).join(" / ");
+      list.appendChild(li);
+    }
+    det.appendChild(list);
   }
-  det.appendChild(list);
   if ((task.log_tail || []).length) {
     const pre = document.createElement("pre");
     pre.className = "oc-log";
@@ -1033,6 +1056,7 @@ function ocProgressBlock(task) {
     cur.className = "oc-current";
     const name = (pi.current.raw || "").split("/").pop();
     cur.textContent = t("oc.current", pi.current.index, pi.total, name, fmtChars(pi.current.chars), fmtDuration(pi.current.elapsed_seconds));
+    if (pi.current.doc) cur.textContent += ` · ${t("oc.docProgress", pi.current.doc, pi.docs_total)}`;
     cur.title = pi.current.raw || "";
     box.appendChild(cur);
   }
