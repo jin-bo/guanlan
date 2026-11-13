@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from conftest import make_runner, write_page
 
 from guanlan.errors import (
@@ -11,7 +13,7 @@ from guanlan.errors import (
     EXIT_RAW_MUTATED,
     EXIT_USAGE,
 )
-from guanlan.ingest import run_ingest
+from guanlan.ingest import _reject_source_slug_collision, run_ingest
 from guanlan.provenance import (
     compute_raw_digest,
     format_digest_value,
@@ -189,6 +191,18 @@ def test_ingest_rejects_nfc_nfd_slug_collision(kb: Path, capsys):
     rc = run_ingest(f"raw/a/{nfc}.md", root=kb, runner=make_runner(None))
     assert rc == EXIT_USAGE
     assert "raw/b/" in capsys.readouterr().err
+
+
+def test_slug_collision_check_skips_target_typed_in_other_form(kb: Path):
+    """#197 回归：macOS 上盘里存 NFD、命令行按 NFC 键入的是同一个文件，不能把目标自己当成撞车的另一篇。"""
+    import unicodedata
+
+    nfc, nfd = unicodedata.normalize("NFC", "한글보고서"), unicodedata.normalize("NFD", "한글보고서")
+    (kb / "raw" / f"{nfd}.md").write_text("甲\n", encoding="utf-8")
+    typed = kb / "raw" / f"{nfc}.md"
+    if not typed.is_file():
+        pytest.skip("文件系统区分 NFC / NFD（Linux），换种写法找不到同一个文件")
+    _reject_source_slug_collision(kb / "raw", typed.resolve(), kb / "wiki" / "sources")  # 不抛
 
 
 def test_ingest_rejects_slug_fold_collision(kb: Path, capsys):

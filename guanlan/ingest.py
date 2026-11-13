@@ -237,7 +237,8 @@ def _reject_source_slug_collision(raw_dir: Path, tpath: Path, sources_dir: Path)
         if p.suffix.lower() == ".md"
         and same_name_key(raw_slug(p.stem)) == key
         and p.is_file()
-        and p.resolve() != tpath
+        # samefile 而非比路径串：macOS 上按 NFC 键入、盘上存 NFD 的同一个文件，路径串不等（#197）
+        and not p.samefile(tpath)
     ]
     if not dups:
         return

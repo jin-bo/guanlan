@@ -210,6 +210,19 @@ def test_precheck_slug_clash_ignores_nfc_nfd(kb: Path, tmp_path: Path):
     assert any("source 页 slug 相同" in d for d in task["precheck"]["details"])
 
 
+def test_precheck_does_not_flag_target_typed_in_other_form(kb: Path, tmp_path: Path):
+    """macOS：盘上 `raw/` 存 NFD 名、本次目标是 NFC 名——是同一个文件，不能报「与自己 slug 相同」（#197 审查发现的回归）。"""
+    (kb / "raw" / f"{_NFD}.md").write_text("旧\n", encoding="utf-8")
+    if not (kb / "raw" / f"{_NFC}.md").exists():
+        pytest.skip("文件系统区分 Unicode 规范化（Linux），NFC 路径到不了 NFD 文件")
+    src = tmp_path / "src" / f"{_NFC}.md"
+    src.parent.mkdir()
+    src.write_text(_short("한글"), encoding="utf-8")
+    with acquire(kb, "test"):
+        task = prepare(kb, src, origin_kind="cli", dry_run=True)
+    assert not any("slug 相同" in d for d in task["precheck"]["details"]), task["precheck"]
+
+
 def test_scan_rejects_nfc_nfd_twins_on_disk(tmp_path: Path):
     """真文件：同一目录里只差 NFC / NFD 的两个名字。只在能建出两者的文件系统（Linux）上跑。"""
     d = tmp_path / "in"

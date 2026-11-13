@@ -22,6 +22,7 @@ import signal
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urljoin
@@ -303,6 +304,13 @@ def precheck(root: Path, task: dict) -> dict:
     return {"status": status, "details": details, "existing": existing, "docs": docs_pc}
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return a.samefile(b)
+    except OSError:  # 目标还没落盘 → 不是同一个文件
+        return False
+
+
 def _batch_slug_clashes(items: list[dict]) -> list[str]:
     """批内 slug 冲突：逐份预检只看盘上 `raw/`，看不到同批其它份**将要写**的文件（沿 `ingest._reject_source_slug_collision`）。"""
     seen: dict[str, str] = {}
@@ -372,7 +380,7 @@ def _precheck_doc(
             continue
         slug = raw_slug(Path(rel).stem)
         hit = target_slugs.get(same_name_key(slug))
-        if hit is not None:
+        if hit is not None and not _same_file(root / rel, root / hit):  # macOS：只差 NFC / NFD 的是目标自己
             details.append(f"{rel} 与 {hit} 的 source 页 slug 相同（`{slug}`）")
 
     remaining = [e for e in existing if e not in self_ok]
@@ -901,8 +909,8 @@ def _footprint_clash(a: str, b: str) -> str | None:
 
 
 def _path_key(path: str) -> str:
-    # casefold 前后各规范化一次：casefold 的结果不保证仍是 NFC
-    return same_name_key(same_name_key(path).casefold())
+    # Unicode 规范的「标准等价 + 不分大小写」比较：先 NFD 再 casefold，结果再规范化
+    return same_name_key(unicodedata.normalize("NFD", path).casefold())
 
 
 def scan_dir(folder: Path) -> tuple[list[Path], list[str]]:
