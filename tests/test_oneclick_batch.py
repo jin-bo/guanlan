@@ -188,9 +188,13 @@ _NFD = unicodedata.normalize("NFD", "한글보고서")  # 音节拆成字母（�
 
 
 def test_footprint_clash_ignores_nfc_nfd():
-    """#197：只差 NFC / NFD 写法的样本名在 macOS 上是同一批文件，须判相撞（修复前漏报）。"""
-    assert _NFC != _NFD and doc_sample(_NFC) != doc_sample(_NFD)
+    """#197：只差 NFC / NFD 写法的样本名在 macOS 上是同一批文件，须判相撞（修复前漏报）。
+
+    #201 起 `raw_slug` 先做 NFC，两种写法的样本名本身就相同；比较键仍按 NFC，未规范化的名字传进来也相撞。
+    """
+    assert _NFC != _NFD and doc_sample(_NFC) == doc_sample(_NFD) == _NFC
     assert oneclick._footprint_clash(doc_sample(_NFC), doc_sample(_NFD)) == f"workspace/parsed/{_NFC}.md"
+    assert oneclick._footprint_clash(_NFC, _NFD) == f"workspace/parsed/{_NFC}.md"
 
 
 def test_batch_slug_clash_ignores_nfc_nfd():
