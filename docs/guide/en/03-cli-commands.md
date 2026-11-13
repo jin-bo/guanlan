@@ -135,6 +135,7 @@ One-click import: take one original (PDF/DOCX/…, or already `.md`) all the way
 ```bash
 guanlan -C my-wiki import book.pdf --dry-run   # parse, normalize, split and print the summary; no raw/ writes, no ingest
 guanlan -C my-wiki import book.pdf             # summary → interactive confirm → land in raw/ → ingest part by part
+guanlan -C my-wiki import ./sources/           # a whole directory as one task: prepare each file → confirm once → ingest part by part
 guanlan -C my-wiki import --status             # progress of the unfinished task (zero-LLM)
 guanlan -C my-wiki import --resume             # continue from where it stopped
 guanlan -C my-wiki import --cancel             # abandon a task that is awaiting confirmation or paused
@@ -152,7 +153,7 @@ Steps:
 
 | Arg | Meaning |
 |---|---|
-| `src` | The file to import; any path (it need not be inside the KB) |
+| `src` | The file or directory to import; any path (it need not be inside the KB) |
 | `--dry-run` | Parse, normalize, split and print the summary only; no task, no `raw/` writes, no ingest. A TOC is still reviewed once by the model |
 | `--yes` | Skip the interactive confirmation (required on a non-interactive terminal) |
 | `--overwrite` | Allow overwriting **the same set of** `raw/` files that an earlier one-click import wrote |
@@ -168,6 +169,7 @@ Notes:
 - **One import task per KB at a time**; finish or abandon the old one before starting a new one. The CLI and the Web "Import" panel share task manifests and can resume each other's tasks.
 - **KB write lock**: during preparation and during landing/ingest the task holds `.guanlan.lock` at the KB root (an OS file lock, released automatically when the process exits). Other writes (`ingest`, `heal`, Web write jobs, …) fail at once and show who is writing. No lock is held while a task awaits confirmation or is paused.
 - **Overwrite rules**: `raw/<name>.md` and `raw/<name>/` are checked together. `--overwrite` works only when an earlier one-click import wrote exactly the same set of files. A different set, or files that no import task wrote, is a conflict: the only option is to abandon and clean up `raw/` yourself.
+- **A whole directory**: when `src` is a directory, the PDF / DOCX / PPTX / XLSX / HTML / `.md` / image files at its top level become **one** task. They are parsed, cleaned and split one by one in file-name order (add a number prefix if you want another order). When all are ready you confirm **once**, then the parts are ingested in turn. Subdirectories are not entered; hidden files, subdirectories, unsupported formats and empty files are skipped and listed in the summary. At most 50 files per batch. If two files would write to the same place (e.g. `report.pdf` and `report.md`), the import is refused; rename one and try again. **If any file fails to prepare, nothing from the batch is imported**; a conflict means the whole batch can only be abandoned — conflicting files are never skipped. The write lock is held for the whole preparation, which takes a while for many files. A batch task can only be confirmed in the terminal; the Web panel can show, resume, pause and abandon it. Design: [`P4.32-目录批量入库.md`](../../P4.32-目录批量入库.md) (Chinese).
 - When everything is done, the change in the wiki's broken-link count is reported; if it is high, `guanlan heal --dry-run` shows the pages worth filling. **Heal is never run automatically.**
 - Exit codes: `0` when all parts succeed; `1` for usage errors, conflicts or a busy KB; the failed part's exit code when a failure pauses the task; a user pause via Ctrl+C counts as success (`0`).
 

@@ -29,6 +29,7 @@ from urllib.parse import urljoin
 from .check import run_check
 from .convert import _default_origin, convert_to_markdown
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
+from .formats import BATCH_IMPORT_EXTS
 from .sourcerec import read_source_record, redact_url
 from .imageio import (
     ConvertError,
@@ -71,7 +72,9 @@ __all__ = [
     "import_entrypoint",
     "iter_tasks",
     "load_task",
+    "doc_entries",
     "prepare",
+    "prepare_batch",
     "progress_info",
     "recover_stale",
     "resume",
@@ -265,9 +268,54 @@ def _self_owned(root: Path, task: dict) -> tuple[set[str], list[str]]:
 
 
 def precheck(root: Path, task: dict) -> dict:
-    """冲突预检（§5、决策P4.30-12）。`raw/<sample>.md` 与 `raw/<sample>/` 作为一个整体检查。
+    """冲突预检的唯一入口：准备结束、确认、续跑、⑤ 落盘前都调它。
 
-    返回 `{"status": "ok" | "overwritable" | "conflict", "details": [...]}`。
+    单份任务 → `_precheck_doc`，结果与 P4.30 相同。批量任务（P4.32 §5）→ 按 `items[*].doc` 筛出各份篇目、
+    **每次都重新**逐份检查（不复用准备时的结果），再加批内 slug 检查并汇总：任一份冲突或批内冲突 → `conflict`；
+    否则任一份可覆盖 → `overwritable`；否则 `ok`。逐份结果放在 `docs`。
+    """
+    if task.get("kind") != "batch":
+        return _precheck_doc(root, task)
+    items = task.get("items", [])
+    docs_pc: list[dict] = []
+    details: list[str] = []
+    existing: list[str] = []
+    for i, d in enumerate(task.get("docs", [])):
+        view = {
+            "task_id": task["task_id"],
+            "sample": d["sample"],
+            "split": d.get("split", False),
+            "items": [it for it in items if it.get("doc") == i],
+        }
+        pc = _precheck_doc(root, view)
+        docs_pc.append(pc)
+        existing += pc.get("existing", [])
+        name = Path(d["upload"]).name
+        details += [f"{name}：{x}" for x in pc.get("details", [])]
+    clashes = _batch_slug_clashes(items)
+    details += clashes
+    statuses = {pc["status"] for pc in docs_pc}
+    status = "conflict" if clashes or "conflict" in statuses else "overwritable" if "overwritable" in statuses else "ok"
+    return {"status": status, "details": details, "existing": existing, "docs": docs_pc}
+
+
+def _batch_slug_clashes(items: list[dict]) -> list[str]:
+    """批内 slug 冲突：逐份预检只看盘上 `raw/`，看不到同批其它份**将要写**的文件（沿 `ingest._reject_source_slug_collision`）。"""
+    seen: dict[str, str] = {}
+    out: list[str] = []
+    for it in items:
+        slug = raw_slug(Path(it["raw"]).stem)
+        first = seen.setdefault(slug, it["raw"])
+        if first != it["raw"]:
+            out.append(f"批内：{first} 与 {it['raw']} 的 source 页 slug 相同（`{slug}`）")
+    return out
+
+
+def _precheck_doc(root: Path, task: dict) -> dict:
+    """单份的冲突预检（§5、决策P4.30-12）。`raw/<sample>.md` 与 `raw/<sample>/` 作为一个整体检查。
+
+    输入是单份形状的字典（`task_id`、`sample`、`split`、这一份的 `items`）。
+    返回 `{"status": "ok" | "overwritable" | "conflict", "details": [...], "existing": [...]}`。
     """
     sample = task["sample"]
     raw = root / "raw"
@@ -338,7 +386,8 @@ def precheck(root: Path, task: dict) -> dict:
 
 
 def _precheck_signature(pc: dict) -> list:
-    return [pc["status"], sorted(pc.get("existing", [])), pc.get("details", [])]
+    # 批量：逐份状态按序纳入（明细已带份名并入 details），任一份变化都使旧确认失效
+    return [pc["status"], sorted(pc.get("existing", [])), pc.get("details", []), [d.get("status") for d in pc.get("docs", [])]]
 
 
 # ── ①–④ 准备 ────────────────────────────────────────────────────────────────
@@ -399,6 +448,8 @@ def progress_info(root: Path, task: dict) -> dict:
         it = items[cur_idx]
         cur_elapsed = _elapsed_since(it.get("started"))
         current = {"index": cur_idx + 1, "raw": it.get("raw"), "chars": it.get("chars"), "elapsed_seconds": round(cur_elapsed)}
+        if task.get("kind") == "batch" and isinstance(it.get("doc"), int):
+            current["doc"] = it["doc"] + 1  # 第几份原件（P4.32），与 `docs_total` 配对显示
     left = [it for it in items if it.get("state") != "done"]
     rate = _rate(items)
     basis = "task"
@@ -414,7 +465,7 @@ def progress_info(root: Path, task: dict) -> dict:
     if rate is None:
         basis = "default"
     spent = sum(float(it["seconds"]) for it in items if it.get("state") == "done" and isinstance(it.get("seconds"), (int, float)))
-    return {
+    out = {
         "total": total,
         "done": done,
         "remaining": len(left),
@@ -423,6 +474,9 @@ def progress_info(root: Path, task: dict) -> dict:
         "eta_seconds": round(eta) if left else 0,
         "eta_basis": basis,
     }
+    if task.get("kind") == "batch":
+        out["docs_total"] = len(task.get("docs", []))
+    return out
 
 
 def _write_parsed_images(target: Path, images: tuple) -> None:
@@ -681,25 +735,12 @@ def prepare(
     src = Path(src).expanduser()
     if not src.is_file():
         raise OneClickError(f"输入文件不存在：{src}")
-    existing = active_task(root)
-    if existing is not None:
-        raise OneClickError(
-            f"已有未完成的入库任务 {existing['task_id']}（{_STATE_LABEL.get(existing['state'], existing['state'])}）；"
-            "请先继续（--resume）或放弃（--cancel）它。"
-        )
-    # sample 会拼进任务清单 / 日志 / `parsed/<sample>.origin.md` 等文件名：按 UTF-8 字节截短（Linux 文件名按字节计 255）
-    sample = cap_utf8(raw_slug(src.stem), NAME_STEM_MAX_BYTES) or "import"
-    if sample.lower() == "images":  # raw/images/ 是所有未拆文档共用的图片根，不能当本任务的分卷目录
-        sample = f"{sample}-doc"
-    base = f"{time.strftime('%Y%m%d-%H%M%S')}-{sample}"
-    task_id, n = base, 1
-    while _task_file(root, task_id).exists():  # 同一秒内的第二个任务不能覆盖第一个的清单
-        n += 1
-        task_id = f"{base}-{n}"
+    _reject_if_active(root)
+    sample = doc_sample(src.stem)
+    task_id = _new_task_id(root, sample)
     upload_sha = sha256_file(src)
     if upload_sha is None:
         raise OneClickError(f"输入文件读不出：{src}")
-    source = read_source_record(src, sha256=upload_sha, discard_stale=not dry_run)  # 网址导入的出处记录；哈希对不上（被同名上传覆盖）即作废
     task: dict = {
         "task_id": task_id,
         "sample": sample,
@@ -712,18 +753,71 @@ def prepare(
         "items": [],
         "dry_run": dry_run,
     }
-    if source is not None:
-        # 任务清单与 raw/ 只记去掉凭据参数的网址（签名链接）；完整记录只作参数传给 `_prepare_steps`、不进清单
-        task["source_url"] = redact_url(source.get("url") or source["final_url"])
+    source = _attach_source(task, src, dry_run=dry_run)
     if html_extract != "auto":
         task["html_extract"] = html_extract
     log = TaskLog(root, None if dry_run else task_id, emit)
     if not dry_run:
         save_task(root, task)
         task["log"] = _rel(root, _log_file(root, task_id))
+    return _guarded_prepare(
+        root,
+        task,
+        log,
+        dry_run=dry_run,
+        stop=stop,
+        body=lambda: _prepare_steps(root, src, task, backend=backend, log=log, toc_reviewer=toc_reviewer, source=source),
+    )
+
+
+def doc_sample(stem: str) -> str:
+    """原件 stem → 样本名 `<sample>`。准备（`prepare` / `prepare_batch`）与目录扫描的撞车检查共用，
+    保证扫描查的就是准备实际要写的路径（决策P4.32-8）。
+
+    `<sample>` 会拼进任务清单 / 日志 / `parsed/<sample>.origin.md` 等文件名：按 UTF-8 字节截短（Linux 文件名按字节计 255）。
+    """
+    sample = cap_utf8(raw_slug(stem), NAME_STEM_MAX_BYTES) or "import"
+    if sample.lower() == "images":  # raw/images/ 是所有未拆文档共用的图片根，不能当本任务的分卷目录
+        sample = f"{sample}-doc"
+    return sample
+
+
+def _reject_if_active(root: Path) -> None:
+    existing = active_task(root)
+    if existing is not None:
+        raise OneClickError(
+            f"已有未完成的入库任务 {existing['task_id']}（{_STATE_LABEL.get(existing['state'], existing['state'])}）；"
+            "请先继续（--resume）或放弃（--cancel）它。"
+        )
+
+
+def _new_task_id(root: Path, name: str) -> str:
+    base = f"{time.strftime('%Y%m%d-%H%M%S')}-{name}"
+    task_id, n = base, 1
+    while _task_file(root, task_id).exists():  # 同一秒内的第二个任务不能覆盖第一个的清单
+        n += 1
+        task_id = f"{base}-{n}"
+    return task_id
+
+
+def _attach_source(task: dict, src: Path, *, dry_run: bool) -> dict | None:
+    """读网址导入的出处记录（P4.31 §2.5）；哈希对不上（被同名上传覆盖）即作废。须先算好 `task["upload_sha256"]`。
+
+    有效时把去掉凭据参数的网址（签名链接）记进 `task["source_url"]`；完整记录只作返回值传给 `_prepare_steps`、不进清单。
+    """
+    source = read_source_record(src, sha256=task["upload_sha256"], discard_stale=not dry_run)
+    if source is not None:
+        task["source_url"] = redact_url(source.get("url") or source["final_url"])
+    return source
+
+
+def _guarded_prepare(
+    root: Path, task: dict, log: TaskLog, *, dry_run: bool, stop: threading.Event | None, body: Callable[[], None]
+) -> dict:
+    """跑准备主体 `body`；停止记 `cancelled`、出错记 `failed`（`dry_run` 不落清单），成功停在 `awaiting_confirm`。"""
     try:
         with stop_scope(stop):
-            _prepare_steps(root, src, task, backend=backend, log=log, toc_reviewer=toc_reviewer, source=source)
+            body()
     except (StopRequested, KeyboardInterrupt):
         # 用户要求停止（Web「停止」/ CLI Ctrl+C）：不是失败，记已放弃，调用方随即释放写锁
         if not dry_run:
@@ -743,6 +837,217 @@ def prepare(
     if not dry_run:
         save_task(root, task)
     return task
+
+
+# ── P4.32 目录批量入库：扫描 → 逐份准备并归并 ─────────────────────────────────
+
+BATCH_MAX_FILES = 50  # 准备阶段全程持锁：封顶最坏情况，超出请分批（§10 Q1）
+
+
+def _doc_footprint(sample: str) -> list[tuple[str, bool]]:
+    """一份原件准备与落盘会写的路径（相对库根，`_prepare_steps` 与 ⑤ 的现状）→ (路径, 是否目录)。
+
+    分卷文件名由拆分决定、扫描时还不知道，但都落在 `parsed/<s>/`、`raw/<s>/` 之下，由目录项覆盖。
+    """
+    return [
+        (f"workspace/parsed/{sample}.md", False),
+        (f"workspace/parsed/{sample}.origin.md", False),
+        (f"workspace/parsed/{sample}.toc.json", False),
+        (f"workspace/parsed/{sample}", True),
+        (f"workspace/parsed/images/{sample}", True),
+        (f"raw/{sample}.md", False),
+        (f"raw/{sample}", True),
+        (f"raw/images/{sample}", True),
+    ]
+
+
+def _footprint_clash(a: str, b: str) -> str | None:
+    """两个样本名的准备产物是否相撞：任一路径相等，或一方落在另一方的目录之下。返回撞上的路径。
+
+    统一 `casefold()`：macOS 默认文件系统不分大小写（区分大小写的文件系统上会多拒一些，宁可多拒）。
+    """
+    for p, p_dir in _doc_footprint(a):
+        pk = p.casefold()
+        for q, q_dir in _doc_footprint(b):
+            qk = q.casefold()
+            if pk == qk or (p_dir and qk.startswith(pk + "/")):
+                return p
+            if q_dir and pk.startswith(qk + "/"):
+                return q
+    return None
+
+
+def scan_dir(folder: Path) -> tuple[list[Path], list[str]]:
+    """目录批量入库的扫描（零 LLM、只读目录项、不读内容，§2）。返回 (要导入的原件, 跳过说明)。
+
+    只收第一层常规文件、扩展名在 `BATCH_IMPORT_EXTS` 内、非空；按文件名码位排序。隐藏文件（含网址导入的
+    出处记录 `.<名>.source.json`、`.DS_Store`）静默跳过；子目录、符号链接、不支持的格式、空文件列进跳过说明。
+    0 份、超过 `BATCH_MAX_FILES`、准备产物路径相撞 → `OneClickError`。
+    """
+    files: list[Path] = []
+    skipped: list[str] = []
+    for p in sorted(folder.iterdir(), key=lambda x: x.name):
+        name = p.name
+        if name.startswith("."):
+            continue
+        try:
+            if p.is_symlink():
+                skipped.append(f"{name}（符号链接，不跟随）")
+            elif p.is_dir():
+                skipped.append(f"{name}/（子目录，不递归）")
+            elif not p.is_file():
+                skipped.append(f"{name}（不是普通文件）")
+            elif p.suffix.lower() not in BATCH_IMPORT_EXTS:
+                skipped.append(f"{name}（不支持的格式）")
+            elif p.stat().st_size == 0:
+                skipped.append(f"{name}（空文件）")
+            else:
+                files.append(p)
+        except OSError as exc:
+            skipped.append(f"{name}（读不出：{exc.strerror or exc}）")
+    if not files:
+        exts = " ".join(sorted(BATCH_IMPORT_EXTS))
+        raise OneClickError(f"目录里没有可导入的文件：{folder}（只收第一层的 {exts}）")
+    if len(files) > BATCH_MAX_FILES:
+        raise OneClickError(
+            f"目录里有 {len(files)} 份可导入的文件，超过单批上限 {BATCH_MAX_FILES} 份；"
+            "准备阶段会一直占着库的写锁，请分成几个目录分批导入。"
+        )
+    samples = [doc_sample(p.stem) for p in files]
+    clashes: list[str] = []
+    for i in range(len(files)):
+        for j in range(i + 1, len(files)):
+            hit = _footprint_clash(samples[i], samples[j])
+            if hit is not None:
+                clashes.append(f"{files[i].name} 与 {files[j].name}：都会写 {hit}")
+    if clashes:
+        raise OneClickError(
+            "以下原件准备时会写到同一位置，请改名或挪走后再导入：\n  - " + "\n  - ".join(clashes)
+        )
+    return files, skipped
+
+
+# 逐份准备后归并进 `docs[i]` 的字段（准备期字段；逐份预检不存，统一由 `precheck` 现算）
+_DOC_KEYS = ("upload_sha256", "split", "source_url", "title", "pages", "chars", "normalized", "warnings")
+_DOC_STAGES = ("parse", "normalize", "split")
+
+
+def prepare_batch(
+    root: Path,
+    folder: Path,
+    *,
+    origin_kind: str,
+    backend: str = "auto",
+    emit: Emit | None = None,
+    dry_run: bool = False,
+    toc_reviewer: TocReviewer | None = None,
+    stop: threading.Event | None = None,
+) -> dict:
+    """P4.32：一个目录 = 一个批量任务（**调用方持锁**）。扫描一次 → 逐份 ①–④ 并归并 → 整批预检 → `awaiting_confirm`。
+
+    任何一份准备失败 → 整批 `failed`，一篇都不落 `raw/`（决策P4.32-2）；停止 → 整批 `cancelled`。
+    `dry_run=True`：照跑、写 `parsed/`，但不创建任务记录（同 `prepare`）。
+    """
+    if stop is not None and stop.is_set():
+        raise StopRequested
+    folder = Path(folder).expanduser()
+    if not folder.is_dir():
+        raise OneClickError(f"输入目录不存在：{folder}")
+    _reject_if_active(root)
+    files, skipped = scan_dir(folder)
+    name = doc_sample(folder.resolve().name)
+    task_id = _new_task_id(root, f"{name}-批量")
+    task: dict = {
+        "task_id": task_id,
+        "kind": "batch",
+        "sample": name,  # 只用于任务号和日志；不对应任何 parsed/ 或 raw/ 路径
+        "upload": _origin_label(root, folder),
+        "origin": origin_kind,
+        "state": "preparing",
+        "created": _now(),
+        "stages": {"confirm": "pending", "land": "pending"},
+        # 扫描结果在建任务时就固定（含每份的样本名）：`--status` 与 Web 看得到要准备哪些原件，之后不再重扫
+        "docs": [
+            {"upload": _origin_label(root, p), "sample": doc_sample(p.stem), "stages": dict.fromkeys(_DOC_STAGES, "pending")}
+            for p in files
+        ],
+        "skipped": skipped,
+        "items": [],
+        "prepared_sha256": {},
+        "dry_run": dry_run,
+    }
+    log = TaskLog(root, None if dry_run else task_id, emit)
+    if not dry_run:
+        save_task(root, task)
+        task["log"] = _rel(root, _log_file(root, task_id))
+    log(
+        f"批量入库：{len(files)} 份原件" + (f"，跳过 {len(skipped)} 项" if skipped else "")
+        + "；准备期间本库的其它写操作会被拒绝"
+    )
+
+    def body() -> None:
+        for i, src in enumerate(files):
+            _prepare_doc(root, task, i, src, backend=backend, log=log, toc_reviewer=toc_reviewer, dry_run=dry_run)
+        task["precheck"] = precheck(root, task)
+        task["estimate_seconds"] = round(_average_item_seconds(root) * len(task["items"]))
+        for d in _batch_slug_clashes(task["items"]):  # 逐份的明细已由各份准备记进日志，这里只补批内的
+            log("  ✋ " + d)
+
+    return _guarded_prepare(root, task, log, dry_run=dry_run, stop=stop, body=body)
+
+
+def _prepare_doc(
+    root: Path,
+    task: dict,
+    i: int,
+    src: Path,
+    *,
+    backend: str,
+    log: TaskLog,
+    toc_reviewer: TocReviewer | None,
+    dry_run: bool,
+) -> None:
+    """批量的第 i 份：建一个与单份任务同形的普通字典交给 `_prepare_steps`（它原地改字典），再归并进批量清单（§3.2）。"""
+    entry = task["docs"][i]
+    n = len(task["docs"])
+    log(f"── [{i + 1}/{n}] {src.name}")
+    try:
+        sha = sha256_file(src)
+        if sha is None:
+            raise OneClickError("读不出（已被删除或无权限）")
+        doc: dict = {
+            "task_id": task["task_id"],
+            "sample": entry["sample"],
+            "upload": entry["upload"],
+            "upload_sha256": sha,
+            "origin": task["origin"],
+            "stages": {"parse": "pending", "normalize": "pending", "split": "pending", "confirm": "pending", "land": "pending"},
+            "items": [],
+        }
+        # 网址下载来的原件：沿用单份的出处记录读取，否则出处退回本地路径、Markdown 相对图片被当成本地附件（复审）
+        source = _attach_source(doc, src, dry_run=dry_run)
+        _prepare_steps(root, src, doc, backend=backend, log=log, toc_reviewer=toc_reviewer, source=source)
+    except (StopRequested, KeyboardInterrupt):
+        raise
+    except Exception as exc:  # 一份失败即整批失败（决策P4.32-2）：原因指明是哪一份
+        raise OneClickError(f"第 {i + 1}/{n} 份 {src.name} 准备失败：{exc}") from exc
+    for k in _DOC_KEYS:
+        if k in doc:
+            entry[k] = doc[k]
+    entry["stages"] = {k: doc["stages"][k] for k in _DOC_STAGES}
+    for it in doc["items"]:
+        it["doc"] = i
+    task["items"] += doc["items"]
+    task["prepared_sha256"].update(doc["prepared_sha256"])
+    if not dry_run:
+        save_task(root, task)
+
+
+def doc_entries(task: dict) -> list[dict]:
+    """只读：任务里的各份原件。批量任务即 `docs`；单份任务从顶层字段拼出一项（摘要、Web、`upload_in_use` 用，不写回）。"""
+    if task.get("kind") == "batch":
+        return list(task.get("docs", []))
+    return [{k: task.get(k) for k in ("upload", "upload_sha256", "sample", "split", "source_url")}]
 
 
 def _prepare_steps(
@@ -1203,7 +1508,8 @@ def _ingest_items(
         save_task(root, task)
         pi = progress_info(root, task)
         eta = f"，预计剩余约 {_fmt_duration(pi['eta_seconds'])}" if pi["eta_seconds"] else ""
-        log(f"[{k}/{n}] 入库 {it['raw']}（{it.get('chars', 0)} 字；已完成 {pi['done']} 篇、剩 {pi['remaining']} 篇{eta}）…")
+        where = f"第 {it['doc'] + 1}/{len(task['docs'])} 份原件；" if task.get("kind") == "batch" and isinstance(it.get("doc"), int) else ""
+        log(f"[{k}/{n}] 入库 {it['raw']}（{where}{it.get('chars', 0)} 字；已完成 {pi['done']} 篇、剩 {pi['remaining']} 篇{eta}）…")
         before = wiki_now if wiki_now is not None else _wiki_state(root)
         t0 = time.monotonic()
         try:
@@ -1263,11 +1569,15 @@ def summary_lines(task: dict, *, detail: bool = False, root: Path | None = None)
     items = task.get("items", [])
     est = task.get("estimate_seconds")
     label = "预演，未建任务" if task.get("dry_run") else _STATE_LABEL.get(task.get("state"), task.get("state"))
-    lines = [
-        f"任务 {task['task_id']}（{label}）",
-        f"  文件：{task.get('upload')}",
-        f"  分份：{len(items)} 份" + (f" · 预计耗时约 {_fmt_duration(est)}" if est else ""),
-    ]
+    lines = [f"任务 {task['task_id']}（{label}）"]
+    if task.get("kind") == "batch":
+        lines += _batch_doc_lines(task)
+        lines.append(f"  合计：{len(items)} 篇" + (f" · 预计耗时约 {_fmt_duration(est)}" if est else ""))
+    else:
+        lines += [
+            f"  文件：{task.get('upload')}",
+            f"  分份：{len(items)} 份" + (f" · 预计耗时约 {_fmt_duration(est)}" if est else ""),
+        ]
     done = sum(1 for it in items if it.get("state") == "done")
     if task.get("state") in ("running", "paused", "done"):
         lines.append(f"  进度：{done}/{len(items)} 篇已入库")
@@ -1275,7 +1585,8 @@ def summary_lines(task: dict, *, detail: bool = False, root: Path | None = None)
             pi = progress_info(root, task)
             cur = pi["current"]
             if cur:
-                lines.append(f"  当前：第 {cur['index']} 篇 {cur['raw']}（已用 {_fmt_duration(cur['elapsed_seconds'])}）")
+                where = f"（第 {cur['doc']}/{pi['docs_total']} 份原件）" if cur.get("doc") else ""
+                lines.append(f"  当前：第 {cur['index']} 篇 {cur['raw']}{where}（已用 {_fmt_duration(cur['elapsed_seconds'])}）")
             lines.append(
                 f"  耗时：已用 {_fmt_duration(pi['elapsed_seconds'])} · 预计剩余约 {_fmt_duration(pi['eta_seconds'])}"
                 f"（{pi['remaining']} 篇）"
@@ -1289,19 +1600,59 @@ def summary_lines(task: dict, *, detail: bool = False, root: Path | None = None)
         lines.append("  ✋ 冲突（不可覆盖，只能放弃）：")
         lines += [f"    - {d}" for d in pc.get("details", [])]
     if detail:
-        s = task.get("normalized") or {}
+        s = task.get("normalized") or _normalized_total(task)
         if s:
             lines.append(
                 f"  整理：页眉页脚 {s.get('headers_removed', 0)}、页码 {s.get('page_numbers_removed', 0)}、"
                 f"水印 {s.get('watermarks_removed', 0)}、接句 {s.get('sentences_joined', 0)}"
             )
-        if task.get("warnings"):
-            lines.append(f"  图片：{len(task['warnings'])} 处引用找不到，原样保留")
+        warnings = task.get("warnings") or [w for d in task.get("docs", []) for w in d.get("warnings") or []]
+        if warnings:
+            lines.append(f"  图片：{len(warnings)} 处引用找不到，原样保留")
         for k, it in enumerate(items, 1):
             pages = f"第 {it['pages'][0]}–{it['pages'][1]} 页 · " if it.get("pages") else ""
             path = " / ".join(it.get("path") or []) or "—"
             lines.append(f"  {k:>3}. {it['raw']}  [{pages}{it.get('chars', 0)} 字]  {path}  ({it.get('state')})")
     return lines
+
+
+def _batch_doc_lines(task: dict) -> list[str]:
+    """批量任务的摘要：目录、逐份原件（拆分结果、逐份预检标记）、跳过项（P4.32 §6）。"""
+    docs = task.get("docs", [])
+    items = task.get("items", [])
+    skipped = task.get("skipped") or []
+    n = len(docs)
+    lines = [f"  目录：{task.get('upload')}（{n} 份原件" + (f"，跳过 {len(skipped)} 项" if skipped else "") + "）"]
+    docs_pc = (task.get("precheck") or {}).get("docs") or []
+    for i, d in enumerate(docs):
+        its = [it for it in items if it.get("doc") == i]
+        if not its:
+            desc = "未准备"
+        elif d.get("split"):
+            cs = [it.get("chars") or 0 for it in its]
+            desc = f"拆 {len(its)} 份（{min(cs)}–{max(cs)} 字），raw/{d['sample']}/"
+        else:
+            desc = f"不拆（{its[0].get('chars') or 0} 字），{its[0]['raw']}"
+        st = docs_pc[i].get("status") if i < len(docs_pc) else None
+        mark = "   ⚠ 可覆盖" if st == "overwritable" else "   ✋ 冲突" if st == "conflict" else ""
+        lines.append(f"  [{i + 1}/{n}] {Path(d['upload']).name} → {desc}{mark}")
+    if skipped:
+        lines.append("  已跳过：" + "、".join(skipped))
+    return lines
+
+
+def _normalized_total(task: dict) -> dict:
+    """批量：各份整理统计的合计（只合计摘要里显示的几项）。"""
+    keys = ("headers_removed", "page_numbers_removed", "watermarks_removed", "sentences_joined")
+    total = dict.fromkeys(keys, 0)
+    found = False
+    for d in task.get("docs", []):
+        s = d.get("normalized") or {}
+        if s:
+            found = True
+            for k in keys:
+                total[k] += s.get(k) or 0
+    return total if found else {}
 
 
 # ── CLI：guanlan import ──────────────────────────────────────────────────────
@@ -1400,10 +1751,13 @@ def _progress(line: str) -> None:
 
 def _receipt(task: dict, json_output: bool, *, root: Path | None = None) -> None:
     if json_output:
-        keep = ("task_id", "state", "reason", "upload", "sample", "split", "precheck", "warnings", "estimate_seconds", "links_before", "links_after")
+        keep = (
+            "task_id", "kind", "state", "reason", "upload", "sample", "split", "docs", "skipped",
+            "precheck", "warnings", "estimate_seconds", "links_before", "links_after",
+        )
         out = {k: task.get(k) for k in keep if k in task}
         out["items"] = [
-            {k: it.get(k) for k in ("raw", "parsed", "chars", "pages", "path", "land", "state", "exit_code", "seconds")}
+            {k: it.get(k) for k in ("doc", "raw", "parsed", "chars", "pages", "path", "land", "state", "exit_code", "seconds") if k != "doc" or "doc" in it}
             for it in task.get("items", [])
         ]
         if root is not None and task.get("state") in ("running", "paused"):
@@ -1488,10 +1842,10 @@ def _import_main(
 ) -> int:
     modes = sum(bool(x) for x in (src, do_resume, status, do_cancel))
     if modes != 1:
-        _stderr("用法：guanlan import <file> | --resume | --status | --cancel（四选一）。")
+        _stderr("用法：guanlan import <文件或目录> | --resume | --status | --cancel（四选一）。")
         return EXIT_USAGE
     if dry_run and not src:  # --dry-run 只对 `import <file>` 有意义：别让 `--resume --dry-run` 悄悄真跑入库 / 真放弃
-        _stderr("--dry-run 只能与 `import <file>` 同用（--resume / --status / --cancel 不支持预演）。")
+        _stderr("--dry-run 只能与 `import <文件或目录>` 同用（--resume / --status / --cancel 不支持预演）。")
         return EXIT_USAGE
     try:
         root = require_kb_root(root_dir, writable=not status)
@@ -1695,10 +2049,12 @@ def _cli_import(
     toc_reviewer: TocReviewer | None = None,
 ) -> int:
     origin = "cli: import --dry-run" if dry_run else "cli: import"
+    # 目录 = 一个批量任务（P4.32）；其后的确认、落盘、入库与单份同一条路
+    prep = prepare_batch if src.expanduser().is_dir() else prepare
     try:
         with acquire(root, origin) as lock:
             _recover_if_owner(root, lock)
-            task = prepare(
+            task = prep(
                 root, src, origin_kind="cli", backend=backend, emit=_progress, dry_run=dry_run, toc_reviewer=toc_reviewer
             )
     except KeyboardInterrupt:

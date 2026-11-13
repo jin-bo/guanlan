@@ -543,7 +543,7 @@ def _add_import_parser(sub, dir_parent) -> None:
         parents=[dir_parent],
         help="一键入库：解析、整理、拆分后落 raw/ 并依次 ingest（确认后执行；可暂停、可续跑）",
     )
-    p.add_argument("src", nargs="?", default=None, help="待导入的文件（PDF/DOCX/…/.md）")
+    p.add_argument("src", nargs="?", default=None, help="待导入的文件（PDF/DOCX/…/.md），或一个目录（第一层的这些文件排成一个任务，统一确认、逐篇入库）")
     p.add_argument("--dry-run", action="store_true", help="只跑解析/整理/拆分并打印确认摘要；不写 raw/、不建任务、不 ingest（有目录时仍交模型审校一次）")
     p.add_argument("--yes", action="store_true", help="跳过交互确认（非交互终端必须给）")
     p.add_argument("--overwrite", action="store_true", help="允许覆盖旧一键入库任务写入的同一组 raw/ 文件")
