@@ -284,10 +284,11 @@ def test_batch_writes_totals_at_top_level(kb: Path, batch_dir: Path, capsys):
     for k in ("headers_removed", "sentences_joined"):
         assert task["normalized"][k] == sum(d["normalized"][k] for d in task["docs"])
     assert not any(isinstance(v, (bool, str)) for v in task["normalized"].values())  # 只合计计数项
+    assert not any(k.startswith("toc_") for k in task["normalized"])  # 目录计数是逐份性质
     assert load_task(kb, task["task_id"])["warnings"] == task["warnings"]  # 落进清单
     assert oneclick.import_entrypoint(kb, src=None, status=True, json_output=True, interactive=False) == EXIT_OK
     out = json.loads(capsys.readouterr().out)
-    assert out["warnings"] == task["warnings"]
+    assert out["warnings"] == task["warnings"] and out["normalized"] == task["normalized"]
 
 
 def test_scan_paths_match_what_prepare_writes(kb: Path, batch_dir: Path):
@@ -324,6 +325,17 @@ def test_one_failed_doc_fails_whole_batch(kb: Path, batch_dir: Path, monkeypatch
     assert active_task(kb) is None and list((kb / "raw").iterdir()) == []
     (batch_dir / "丙.pdf").unlink()
     assert _prep(kb, batch_dir)["state"] == "awaiting_confirm"  # 处理后重新导入
+
+
+def test_failed_batch_keeps_partial_totals(kb: Path, batch_dir: Path, monkeypatch):
+    """#198 审查：中途失败的批量，顶层仍有已准备那几份的合计（摘要与 Web 只读顶层）。"""
+    (batch_dir / "丙.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(oneclick, "convert_to_markdown", lambda src, **kw: (_ for _ in ()).throw(ConvertError("坏")))
+    with pytest.raises(OneClickError):
+        _prep(kb, batch_dir)
+    failed = max(oneclick.iter_tasks(kb), key=lambda t: t["created"])
+    assert failed["state"] == "failed" and "headers_removed" in failed["normalized"]
+    assert "整理：" in "\n".join(oneclick.summary_lines(failed, detail=True))
 
 
 def test_file_removed_after_scan_fails_batch(kb: Path, batch_dir: Path, monkeypatch):

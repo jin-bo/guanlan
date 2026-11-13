@@ -1026,9 +1026,6 @@ def prepare_batch(
     def body() -> None:
         for i, src in enumerate(files):
             _prepare_doc(root, task, i, src, backend=backend, log=log, toc_reviewer=toc_reviewer, dry_run=dry_run)
-        # 整批合计写进顶层（#198）：摘要、Web、`--json` 与单份任务读同名字段；只在这里写一次，之后不变
-        task["normalized"] = _normalized_total(task)
-        task["warnings"] = [w for d in task["docs"] for w in d.get("warnings") or []]
         task["precheck"] = precheck(root, task)
         task["estimate_seconds"] = round(_average_item_seconds(root) * len(task["items"]))
         if task["precheck"]["status"] != "ok":  # 逐份明细已带份名，批内 slug 冲突也在其中
@@ -1096,6 +1093,10 @@ def _prepare_doc(
         it["doc"] = i
     task["items"] += doc["items"]
     task["prepared_sha256"].update(doc["prepared_sha256"])
+    # 整批合计写进顶层（#198）：摘要、Web、`--json` 与单份任务读同名字段。每份归并后更新——中途失败或停止的批量
+    # 也看得到已准备那几份的合计；准备结束后不再变
+    task["normalized"] = _normalized_total(task)
+    task["warnings"] = [w for d in task["docs"] for w in d.get("warnings") or []]
     if not dry_run:
         save_task(root, task)
 
@@ -1711,12 +1712,13 @@ def _unit(task: dict) -> str:
 def _normalized_total(task: dict) -> dict:
     """批量：各份整理统计（`docs[i].normalized`）的合计，准备结束时写进顶层 `normalized`（#198）。
 
-    只合计计数项（整数；`bool` 与字符串如 `toc_applied` / `toc_source` 是逐份的性质，合计无意义，不进顶层）。
+    只合计整理动作的计数（删了多少页眉、接了多少句……）。目录相关的 `toc_*`（条目数、命中数、是否采用、来源）
+    是逐份的性质——两份目录的条目数相加说明不了哪份按目录改了层级——不进顶层，看 `docs[i]`。
     """
     total: dict[str, int] = {}
     for d in task.get("docs", []):
         for k, v in (d.get("normalized") or {}).items():
-            if isinstance(v, int) and not isinstance(v, bool):
+            if isinstance(v, int) and not isinstance(v, bool) and not k.startswith("toc_"):
                 total[k] = total.get(k, 0) + v
     return total
 
@@ -1819,7 +1821,7 @@ def _receipt(task: dict, json_output: bool, *, root: Path | None = None) -> None
     if json_output:
         keep = (
             "task_id", "kind", "state", "reason", "upload", "sample", "split", "docs", "skipped",
-            "precheck", "warnings", "estimate_seconds", "links_before", "links_after",
+            "precheck", "normalized", "warnings", "estimate_seconds", "links_before", "links_after",
         )
         out = {k: task.get(k) for k in keep if k in task}
         out["items"] = [
