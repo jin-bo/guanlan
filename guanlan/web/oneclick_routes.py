@@ -34,7 +34,6 @@ from ..oneclick import (
     confirm,
     doc_entries,
     load_task,
-    normalized_total,
     prepare,
     progress_info,
     recover_stale,
@@ -143,9 +142,6 @@ def task_view(root: Path, task: dict, *, job_id: str | None = None, pausing: boo
         "skipped",
     )
     out = {k: task.get(k) for k in keep}
-    if task.get("kind") == "batch":  # 批量没有顶层整理统计 / 图片警告：合计各份（与 CLI 摘要同口径），前端不再各算一遍
-        out["normalized"] = normalized_total(task)
-        out["warnings"] = [w for d in task.get("docs", []) for w in d.get("warnings") or []]
     out["items"] = [
         {k: it.get(k) for k in ("doc", "raw", "parsed", "chars", "pages", "path", "method", "land", "state", "exit_code", "seconds")}
         for it in task.get("items", [])

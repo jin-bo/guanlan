@@ -438,6 +438,7 @@ def test_batch_task_shown_but_confirm_refused(kb, ingest):
         active = client.get("/api/oneclick").json()["active"]
         assert active["kind"] == "batch" and [d["sample"] for d in active["docs"]] == ["上册", "下篇"]
         assert [it["doc"] for it in active["items"]] == [0, 0, 0, 1]
+        assert isinstance(active["normalized"], dict) and active["warnings"] == []  # 顶层整批合计（#198），清单原样透出
         r = client.post(f"/api/oneclick/{task['task_id']}/confirm", json={})
         assert r.status_code == 409 and "--resume" in r.json()["detail"]
         assert oneclick.load_task(kb, task["task_id"])["state"] == "awaiting_confirm"

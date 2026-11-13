@@ -275,6 +275,21 @@ def test_prepare_batch_merges_docs_and_items(kb: Path, batch_dir: Path):
     assert load_task(kb, task["task_id"])["docs"] == task["docs"]
 
 
+def test_batch_writes_totals_at_top_level(kb: Path, batch_dir: Path, capsys):
+    """#198：整批的整理统计与图片警告在准备结束时写进顶层，`--json` 读同名字段即可，不必再去 `docs[*]` 里拼。"""
+    (batch_dir / "下篇.md").write_text(_short("下篇") + "\n![图](不存在.png)\n", encoding="utf-8")
+    task = _prep(kb, batch_dir)
+    assert task["warnings"] and all("下篇" in w for w in task["warnings"])
+    assert task["warnings"] == [w for d in task["docs"] for w in d.get("warnings") or []]
+    for k in ("headers_removed", "sentences_joined"):
+        assert task["normalized"][k] == sum(d["normalized"][k] for d in task["docs"])
+    assert not any(isinstance(v, (bool, str)) for v in task["normalized"].values())  # 只合计计数项
+    assert load_task(kb, task["task_id"])["warnings"] == task["warnings"]  # 落进清单
+    assert oneclick.import_entrypoint(kb, src=None, status=True, json_output=True, interactive=False) == EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["warnings"] == task["warnings"]
+
+
 def test_scan_paths_match_what_prepare_writes(kb: Path, batch_dir: Path):
     """扫描查撞车用的路径 = 准备实际写下的路径（同一个 `doc_sample`，防两边各算一套）。"""
     task = _prep(kb, batch_dir)

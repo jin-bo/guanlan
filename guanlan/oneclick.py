@@ -1026,6 +1026,9 @@ def prepare_batch(
     def body() -> None:
         for i, src in enumerate(files):
             _prepare_doc(root, task, i, src, backend=backend, log=log, toc_reviewer=toc_reviewer, dry_run=dry_run)
+        # 整批合计写进顶层（#198）：摘要、Web、`--json` 与单份任务读同名字段；只在这里写一次，之后不变
+        task["normalized"] = _normalized_total(task)
+        task["warnings"] = [w for d in task["docs"] for w in d.get("warnings") or []]
         task["precheck"] = precheck(root, task)
         task["estimate_seconds"] = round(_average_item_seconds(root) * len(task["items"]))
         if task["precheck"]["status"] != "ok":  # 逐份明细已带份名，批内 slug 冲突也在其中
@@ -1657,13 +1660,13 @@ def summary_lines(task: dict, *, detail: bool = False, root: Path | None = None)
         lines.append("  ✋ 冲突（不可覆盖，只能放弃）：")
         lines += [f"    - {d}" for d in pc.get("details", [])]
     if detail:
-        s = task.get("normalized") or normalized_total(task)
+        s = task.get("normalized") or {}
         if s:
             lines.append(
                 f"  整理：页眉页脚 {s.get('headers_removed', 0)}、页码 {s.get('page_numbers_removed', 0)}、"
                 f"水印 {s.get('watermarks_removed', 0)}、接句 {s.get('sentences_joined', 0)}"
             )
-        warnings = task.get("warnings") or [w for d in task.get("docs", []) for w in d.get("warnings") or []]
+        warnings = task.get("warnings") or []
         if warnings:
             lines.append(f"  图片：{len(warnings)} 处引用找不到，原样保留")
         for k, it in enumerate(items, 1):
@@ -1705,18 +1708,17 @@ def _unit(task: dict) -> str:
     return "篇" if task.get("kind") == "batch" else "份"
 
 
-def normalized_total(task: dict) -> dict:
-    """批量：各份整理统计的合计（只合计摘要里显示的几项）。"""
-    keys = ("headers_removed", "page_numbers_removed", "watermarks_removed", "sentences_joined")
-    total = dict.fromkeys(keys, 0)
-    found = False
+def _normalized_total(task: dict) -> dict:
+    """批量：各份整理统计（`docs[i].normalized`）的合计，准备结束时写进顶层 `normalized`（#198）。
+
+    只合计计数项（整数；`bool` 与字符串如 `toc_applied` / `toc_source` 是逐份的性质，合计无意义，不进顶层）。
+    """
+    total: dict[str, int] = {}
     for d in task.get("docs", []):
-        s = d.get("normalized") or {}
-        if s:
-            found = True
-            for k in keys:
-                total[k] += s.get(k) or 0
-    return total if found else {}
+        for k, v in (d.get("normalized") or {}).items():
+            if isinstance(v, int) and not isinstance(v, bool):
+                total[k] = total.get(k, 0) + v
+    return total
 
 
 # ── CLI：guanlan import ──────────────────────────────────────────────────────
