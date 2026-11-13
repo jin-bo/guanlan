@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import unicodedata
 from pathlib import Path
 
@@ -213,8 +214,8 @@ def test_precheck_slug_clash_ignores_nfc_nfd(kb: Path, tmp_path: Path):
 def test_precheck_does_not_flag_target_typed_in_other_form(kb: Path, tmp_path: Path):
     """macOS：盘上 `raw/` 存 NFD 名、本次目标是 NFC 名——是同一个文件，不能报「与自己 slug 相同」（#197 审查发现的回归）。"""
     (kb / "raw" / f"{_NFD}.md").write_text("旧\n", encoding="utf-8")
-    if not (kb / "raw" / f"{_NFC}.md").exists():
-        pytest.skip("文件系统区分 Unicode 规范化（Linux），NFC 路径到不了 NFD 文件")
+    if not (kb / "raw" / f"{_NFC}.md").exists():  # 区分写法的文件系统（Linux CI）：硬链接造出「两个路径串、同一个文件」，CI 不许跳过
+        os.link(kb / "raw" / f"{_NFD}.md", kb / "raw" / f"{_NFC}.md")
     src = tmp_path / "src" / f"{_NFC}.md"
     src.parent.mkdir()
     src.write_text(_short("한글"), encoding="utf-8")
@@ -224,13 +225,16 @@ def test_precheck_does_not_flag_target_typed_in_other_form(kb: Path, tmp_path: P
 
 
 def test_scan_rejects_nfc_nfd_twins_on_disk(tmp_path: Path):
-    """真文件：同一目录里只差 NFC / NFD 的两个名字。只在能建出两者的文件系统（Linux）上跑。"""
+    """真文件：同一目录里只差 NFC / NFD 的两个名字。两种平台都真跑（CI 不许跳过）：
+    区分写法的文件系统（Linux）建得出两者 → 扫描拒绝；macOS 建不出（第二个就是第一个）→ 只有一份、照常收下。
+    """
     d = tmp_path / "in"
     d.mkdir()
     (d / f"{_NFC}.md").write_bytes(b"x")
     twin = d / f"{_NFD}.md"
     if twin.exists():
-        pytest.skip("文件系统对 Unicode 规范化不敏感（macOS），同一目录里建不出两者")
+        assert [p.name for p in scan_dir(d)[0]] and len(scan_dir(d)[0]) == 1
+        return
     twin.write_bytes(b"x")
     with pytest.raises(OneClickError, match="写到同一位置"):
         scan_dir(d)

@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import pytest
 
 from conftest import make_runner, write_page
 
@@ -194,14 +193,19 @@ def test_ingest_rejects_nfc_nfd_slug_collision(kb: Path, capsys):
 
 
 def test_slug_collision_check_skips_target_typed_in_other_form(kb: Path):
-    """#197 回归：macOS 上盘里存 NFD、命令行按 NFC 键入的是同一个文件，不能把目标自己当成撞车的另一篇。"""
+    """#197 回归：macOS 上盘里存 NFD、命令行按 NFC 键入的是同一个文件，不能把目标自己当成撞车的另一篇。
+
+    macOS 文件系统本身就让两种写法指向同一个文件；区分写法的文件系统（Linux CI）上用硬链接造出同样的情形——
+    两个路径串、同一个文件，`resolve()` 各自保留原样（符号链接会被 resolve 跟随，测不出回归）。CI 不许跳过。
+    """
+    import os
     import unicodedata
 
     nfc, nfd = unicodedata.normalize("NFC", "한글보고서"), unicodedata.normalize("NFD", "한글보고서")
     (kb / "raw" / f"{nfd}.md").write_text("甲\n", encoding="utf-8")
     typed = kb / "raw" / f"{nfc}.md"
     if not typed.is_file():
-        pytest.skip("文件系统区分 NFC / NFD（Linux），换种写法找不到同一个文件")
+        os.link(kb / "raw" / f"{nfd}.md", typed)
     _reject_source_slug_collision(kb / "raw", typed.resolve(), kb / "wiki" / "sources")  # 不抛
 
 
