@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -179,6 +180,47 @@ def test_footprint_clash_ignores_case():
     """macOS 默认文件系统不分大小写：`A` 与 `a` 同盘位置（同一目录里建不出两者，直接测判定）。"""
     assert oneclick._footprint_clash("A", "a") == "workspace/parsed/A.md"
     assert oneclick._footprint_clash("A", "B") is None
+
+
+_NFC = unicodedata.normalize("NFC", "한글보고서")
+_NFD = unicodedata.normalize("NFD", "한글보고서")  # 音节拆成字母（仍是 `\w`），`raw_slug` 照样保留，与 NFC 只差写法
+
+
+def test_footprint_clash_ignores_nfc_nfd():
+    """#197：只差 NFC / NFD 写法的样本名在 macOS 上是同一批文件，须判相撞（修复前漏报）。"""
+    assert _NFC != _NFD and doc_sample(_NFC) != doc_sample(_NFD)
+    assert oneclick._footprint_clash(doc_sample(_NFC), doc_sample(_NFD)) == f"workspace/parsed/{_NFC}.md"
+
+
+def test_batch_slug_clash_ignores_nfc_nfd():
+    clashes = oneclick._batch_slug_clashes([{"raw": f"raw/{_NFC}.md"}, {"raw": f"raw/{_NFD}/{_NFD}-01.md"}, {"raw": f"raw/x/{_NFD}.md"}])
+    assert len(clashes) == 1 and clashes[0].startswith("批内：")
+
+
+def test_precheck_slug_clash_ignores_nfc_nfd(kb: Path, tmp_path: Path):
+    """盘上已有 NFD 名的 raw（放子目录：macOS 同目录建不出两者），单份导入 NFC 同名 → 预检报冲突。"""
+    (kb / "raw" / "旧").mkdir()
+    (kb / "raw" / "旧" / f"{_NFD}.md").write_text("旧\n", encoding="utf-8")
+    src = tmp_path / "src" / f"{_NFC}.md"
+    src.parent.mkdir()
+    src.write_text(_short("한글"), encoding="utf-8")
+    with acquire(kb, "test"):
+        task = prepare(kb, src, origin_kind="cli", dry_run=True)
+    assert task["precheck"]["status"] == "conflict"
+    assert any("source 页 slug 相同" in d for d in task["precheck"]["details"])
+
+
+def test_scan_rejects_nfc_nfd_twins_on_disk(tmp_path: Path):
+    """真文件：同一目录里只差 NFC / NFD 的两个名字。只在能建出两者的文件系统（Linux）上跑。"""
+    d = tmp_path / "in"
+    d.mkdir()
+    (d / f"{_NFC}.md").write_bytes(b"x")
+    twin = d / f"{_NFD}.md"
+    if twin.exists():
+        pytest.skip("文件系统对 Unicode 规范化不敏感（macOS），同一目录里建不出两者")
+    twin.write_bytes(b"x")
+    with pytest.raises(OneClickError, match="写到同一位置"):
+        scan_dir(d)
 
 
 def test_scan_rejects_names_that_clash_only_after_byte_truncation(tmp_path: Path):

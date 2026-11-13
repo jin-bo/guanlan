@@ -110,6 +110,17 @@ def raw_slug(stem: str) -> str:
     return _RAW_SLUG_DASHES.sub("-", _RAW_SLUG_STRIP.sub("-", stem)).strip("-.")
 
 
+def same_name_key(name: str) -> str:
+    """判断两个 slug / 文件名「是不是同一个」时用的比较键：Unicode NFC 规范化（#197）。
+
+    只用于比较，**不改盘上名字**：已有库的 `raw/` 与 source 页名照旧。`é` 可写成一个码位（NFC）或
+    `e` + 组合重音两个码位（NFD）；macOS 文件系统把两种写法当同一个文件，Linux 当两个——不规范化就比，
+    原件来自 Linux / 网络盘时，同一个名字会被判成两个，撞车与 slug 冲突都查不出来。
+    用 NFC 而非 NFKC：文件系统只认标准等价，全角 `Ａ` 与半角 `A` 在盘上是两个文件，不该判成同一个。
+    """
+    return unicodedata.normalize("NFC", name)
+
+
 def find_source_page(sources_dir: Path, raw_stem: str) -> Path | None:
     """按 raw 文件名 stem 定位其 source 摘要页路径；容忍 `.`/`-` 归一分歧，无则 None。
 

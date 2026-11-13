@@ -172,6 +172,25 @@ def test_ingest_rejects_source_slug_collision(kb: Path, capsys):
     assert "report" in err and "raw/a/report.md" in err and "raw/b/report.md" in err
 
 
+def test_ingest_rejects_nfc_nfd_slug_collision(kb: Path, capsys):
+    """#197 漏报用例：两篇只差 NFC / NFD 写法（韩文 NFD 拆成字母后 `raw_slug` 仍保留）→ macOS 上是同一张 source 页，须拒。
+
+    放在不同子目录：macOS 文件系统同一目录里建不出两者，分开放两边都建得出，Linux CI 与本机都能跑。
+    """
+    import unicodedata
+
+    nfc, nfd = unicodedata.normalize("NFC", "한글보고서"), unicodedata.normalize("NFD", "한글보고서")
+    assert nfc != nfd
+    (kb / "raw" / "a").mkdir()
+    (kb / "raw" / "b").mkdir()
+    (kb / "raw" / "a" / f"{nfc}.md").write_text("甲\n", encoding="utf-8")
+    (kb / "raw" / "b" / f"{nfd}.md").write_text("乙\n", encoding="utf-8")
+
+    rc = run_ingest(f"raw/a/{nfc}.md", root=kb, runner=make_runner(None))
+    assert rc == EXIT_USAGE
+    assert "raw/b/" in capsys.readouterr().err
+
+
 def test_ingest_rejects_slug_fold_collision(kb: Path, capsys):
     """异 basename 但 `raw_slug` 相同（空格↔连字符）仍会撞同一张页 → 也须拒（review §1：按 basename 判太窄）。"""
     (kb / "raw" / "a").mkdir()

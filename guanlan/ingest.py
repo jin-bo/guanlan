@@ -28,7 +28,7 @@ from .provenance import (
     parse_digest_value,
     stamp_raw_digest,
 )
-from .rawio import find_source_page, raw_slug
+from .rawio import find_source_page, raw_slug, same_name_key
 from .runtime import AgentRunner
 from .sourcepage import locate_source_page, source_slug
 
@@ -230,11 +230,12 @@ def _reject_source_slug_collision(raw_dir: Path, tpath: Path, sources_dir: Path)
     target_slug = raw_slug(tpath.stem)
     if not target_slug:
         return
+    key = same_name_key(target_slug)  # NFC / NFD 只差写法的也算同一个（#197）
     dups = [
         p
         for p in raw_dir.rglob("*")
         if p.suffix.lower() == ".md"
-        and raw_slug(p.stem) == target_slug
+        and same_name_key(raw_slug(p.stem)) == key
         and p.is_file()
         and p.resolve() != tpath
     ]
