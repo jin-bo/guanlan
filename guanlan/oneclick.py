@@ -280,6 +280,9 @@ def precheck(root: Path, task: dict) -> dict:
     docs_pc: list[dict] = []
     details: list[str] = []
     existing: list[str] = []
+    # 整扫 raw/ 与读全部旧任务清单与份数无关：整批只做一次，逐份共用（否则 50 份 = 扫 50 遍）
+    raw_md = _raw_md_files(root)
+    owned_cache: dict[str, dict[str, set[str | None]]] = {}
     for i, d in enumerate(task.get("docs", [])):
         view = {
             "task_id": task["task_id"],
@@ -287,7 +290,7 @@ def precheck(root: Path, task: dict) -> dict:
             "split": d.get("split", False),
             "items": [it for it in items if it.get("doc") == i],
         }
-        pc = _precheck_doc(root, view)
+        pc = _precheck_doc(root, view, raw_md=raw_md, owned_cache=owned_cache)
         docs_pc.append(pc)
         existing += pc.get("existing", [])
         name = Path(d["upload"]).name
@@ -311,11 +314,26 @@ def _batch_slug_clashes(items: list[dict]) -> list[str]:
     return out
 
 
-def _precheck_doc(root: Path, task: dict) -> dict:
+def _raw_md_files(root: Path) -> list[str]:
+    """`raw/` 下全部 `.md` 文件（相对库根，排序）。后缀不分大小写：与 ingest 的 slug 冲突检查同口径（`X.MD` 同样建 source 页）。"""
+    raw = root / "raw"
+    if not raw.is_dir():
+        return []
+    return [_rel(root, p) for p in sorted(raw.rglob("*")) if p.suffix.lower() == ".md" and p.is_file()]
+
+
+def _precheck_doc(
+    root: Path,
+    task: dict,
+    *,
+    raw_md: list[str] | None = None,
+    owned_cache: dict[str, dict[str, set[str | None]]] | None = None,
+) -> dict:
     """单份的冲突预检（§5、决策P4.30-12）。`raw/<sample>.md` 与 `raw/<sample>/` 作为一个整体检查。
 
     输入是单份形状的字典（`task_id`、`sample`、`split`、这一份的 `items`）。
     返回 `{"status": "ok" | "overwritable" | "conflict", "details": [...], "existing": [...]}`。
+    `raw_md` / `owned_cache`：批量预检逐份共用的 `raw/` 扫描结果与旧任务归属表（不给则现算）。
     """
     sample = task["sample"]
     raw = root / "raw"
@@ -347,23 +365,24 @@ def _precheck_doc(root: Path, task: dict) -> dict:
 
     # slug 冲突（沿 ingest._reject_source_slug_collision）：在预检阶段就查，不留到 ⑥ 才炸。
     target_slugs = {raw_slug(Path(t).stem): t for t in targets}
-    if raw.is_dir():
-        for p in sorted(raw.rglob("*")):  # 排序：明细进 `_precheck_signature`，次序须稳定；后缀不分大小写：与 ingest 的 slug 冲突检查同口径（`X.MD` 同样建 source 页）
-            if p.suffix.lower() != ".md":
-                continue
-            rel = _rel(root, p)
-            if rel in targets or not p.is_file():
-                continue
-            slug = raw_slug(p.stem)
-            if slug in target_slugs:
-                details.append(f"{rel} 与 {target_slugs[slug]} 的 source 页 slug 相同（`{slug}`）")
+    for rel in raw_md if raw_md is not None else _raw_md_files(root):  # 已排序：明细进 `_precheck_signature`，次序须稳定
+        if rel in targets:
+            continue
+        slug = raw_slug(Path(rel).stem)
+        if slug in target_slugs:
+            details.append(f"{rel} 与 {target_slugs[slug]} 的 source 页 slug 相同（`{slug}`）")
 
     remaining = [e for e in existing if e not in self_ok]
     if details:
         return {"status": "conflict", "details": details, "existing": existing}
     if not remaining:
         return {"status": "ok", "details": [], "existing": existing}
-    owned = _owned_by_other_tasks(root, task["task_id"])
+    if owned_cache is None:
+        owned = _owned_by_other_tasks(root, task["task_id"])
+    else:
+        if "owned" not in owned_cache:
+            owned_cache["owned"] = _owned_by_other_tasks(root, task["task_id"])
+        owned = owned_cache["owned"]
     md_existing = {e for e in existing if e.endswith(".md") and "/images/" not in e}
     unowned = [e for e in remaining if e not in owned]
     modified = _modified_since_written(root, [e for e in remaining if e in owned], owned)
@@ -907,7 +926,8 @@ def scan_dir(folder: Path) -> tuple[list[Path], list[str]]:
             skipped.append(f"{name}（读不出：{exc.strerror or exc}）")
     if not files:
         exts = " ".join(sorted(BATCH_IMPORT_EXTS))
-        raise OneClickError(f"目录里没有可导入的文件：{folder}（只收第一层的 {exts}）")
+        why = ("；已跳过：" + "、".join(skipped)) if skipped else ""
+        raise OneClickError(f"目录里没有可导入的文件：{folder}（只收第一层的 {exts}）{why}")
     if len(files) > BATCH_MAX_FILES:
         raise OneClickError(
             f"目录里有 {len(files)} 份可导入的文件，超过单批上限 {BATCH_MAX_FILES} 份；"
@@ -953,6 +973,7 @@ def prepare_batch(
     folder = Path(folder).expanduser()
     if not folder.is_dir():
         raise OneClickError(f"输入目录不存在：{folder}")
+    _reject_own_dir(root, folder)
     _reject_if_active(root)
     files, skipped = scan_dir(folder)
     name = doc_sample(folder.resolve().name)
@@ -994,6 +1015,19 @@ def prepare_batch(
             log("  ✋ " + d)
 
     return _guarded_prepare(root, task, log, dry_run=dry_run, stop=stop, body=body)
+
+
+def _reject_own_dir(root: Path, folder: Path) -> None:
+    """库根与库自己的 `raw/`、`wiki/`、`workspace/parsed/` 不能当批量入库的输入目录：库根第一层的
+    `AGENTAO.md` / `SCHEMA.md` 是配置、会被当原件收进来；`raw/`、`wiki/` 是落点与生成层；`parsed/`
+    是准备阶段的写入处——前一份的产物（如 `parsed/A.origin.md`）会在后一份读到它之前被改写。"""
+    real_root = root.resolve()
+    target = folder.resolve()
+    if target == real_root:
+        raise OneClickError(f"不能把库根当输入目录导入：{folder}（第一层的 AGENTAO.md / SCHEMA.md 是配置，不是原件）")
+    for own in (real_root / "raw", real_root / "wiki", _ws(root).resolve() / "parsed"):
+        if target == own or own in target.parents:
+            raise OneClickError(f"不能导入库自己的 {_rel(real_root, own)}/ 目录：{folder}")
 
 
 def _prepare_doc(
@@ -1283,7 +1317,7 @@ def confirm(
     task["state"] = "running"
     task["confirmed"] = _now()
     save_task(root, task)
-    log(f"✓ 已确认，开始入库（{len(task['items'])} 份）")
+    log(f"✓ 已确认，开始入库（{len(task['items'])} {_unit(task)}）")
     # 刚复检过、其间 raw/ 未动：把结果交给 ⑤，不再整扫 raw/、重哈希本任务已写文件一遍
     return _execute(root, task, log=log, ingest=ingest, should_pause=should_pause, pc=pc)
 
@@ -1398,7 +1432,7 @@ def _land(root: Path, task: dict, log: TaskLog, pc: dict | None = None) -> int:
         log(f"  ⑤ [{k}/{n}] 已写 {it['raw']}" + (f"（{len(col.images)} 张图片）" if col.images else ""), detail=True)
     task["stages"]["land"] = "done"
     save_task(root, task)
-    log(f"⑤ 已落 raw/：{n} 份")
+    log(f"⑤ 已落 raw/：{n} {_unit(task)}")
     return EXIT_OK
 
 
@@ -1545,7 +1579,7 @@ def _ingest_items(
     task.pop("reason", None)
     task["links_after"] = _broken_links(root)
     save_task(root, task)
-    log(f"✓ 一键入库完成：{n} 份")
+    log(f"✓ 一键入库完成：{n} {_unit(task)}")
     lb, la = task.get("links_before"), task.get("links_after")
     if lb is not None and la is not None:
         log(f"断链：入库前 {lb} 处 → 入库后 {la} 处" + ("；可运行 `guanlan heal --dry-run` 查看可补的页面" if la else ""))
@@ -1636,9 +1670,16 @@ def _batch_doc_lines(task: dict) -> list[str]:
         st = docs_pc[i].get("status") if i < len(docs_pc) else None
         mark = "   ⚠ 可覆盖" if st == "overwritable" else "   ✋ 冲突" if st == "conflict" else ""
         lines.append(f"  [{i + 1}/{n}] {Path(d['upload']).name} → {desc}{mark}")
+        if d.get("source_url"):  # 网址导入来的原件（P4.31 §5，已去凭据参数）
+            lines.append(f"        🔗 {d['source_url']}")
     if skipped:
         lines.append("  已跳过：" + "、".join(skipped))
     return lines
+
+
+def _unit(task: dict) -> str:
+    """篇数的量词：批量任务里「份」指原件（第 i/n 份原件），篇目改称「篇」；单份任务沿用「份」（P4.30 原样）。"""
+    return "篇" if task.get("kind") == "batch" else "份"
 
 
 def _normalized_total(task: dict) -> dict:

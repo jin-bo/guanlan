@@ -1004,13 +1004,14 @@ function renderOneclickPanel(panel, data) {
   }
   // 批量：篇目按原件分组，每组一个标题 + 一个列表；单份只有一组、没有标题
   const groups = batch
-    ? (task.docs || []).map((d, i) => ({ head: (d.upload || "").split("/").pop(), items: task.items.filter((it) => it.doc === i) }))
+    ? (task.docs || []).map((d, i) => ({ head: (d.upload || "").split("/").pop(), sourceUrl: d.source_url, items: task.items.filter((it) => it.doc === i) }))
     : [{ head: null, items: task.items }];
   for (const g of groups) {
     if (g.head !== null) {
       const h = document.createElement("p");
       h.className = "muted";
       h.textContent = g.head;
+      if (g.sourceUrl) h.appendChild(linkMark(g.sourceUrl)); // 网址导入来的原件（P4.31）：🔗 悬停显示原网址
       det.appendChild(h);
     }
     const list = document.createElement("ol");

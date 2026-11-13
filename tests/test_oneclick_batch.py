@@ -283,6 +283,29 @@ def test_stop_during_batch_cancels(kb: Path, batch_dir: Path, monkeypatch):
     assert task["state"] == "cancelled" and active_task(kb) is None
 
 
+@pytest.mark.parametrize("rel", [".", "raw", "wiki", "workspace/parsed", "workspace/parsed/sub"])
+def test_kb_own_dirs_are_rejected_as_input(kb: Path, rel: str):
+    d = kb / rel
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "下篇.md").write_text(_short("下篇"), encoding="utf-8")
+    with pytest.raises(OneClickError, match="不能"):
+        _prep(kb, d, dry_run=True)
+
+
+def test_uploads_dir_is_still_accepted(kb: Path):
+    d = kb / "workspace" / "uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "下篇.md").write_text(_short("下篇"), encoding="utf-8")
+    task = _prep(kb, d, dry_run=True)
+    assert [x["sample"] for x in task["docs"]] == ["下篇"]
+
+
+def test_empty_scan_error_lists_skipped(tmp_path: Path):
+    (tmp_path / "空.md").write_text("", encoding="utf-8")
+    with pytest.raises(OneClickError, match="已跳过：空.md（空文件）"):
+        scan_dir(tmp_path)
+
+
 def test_dry_run_batch_writes_parsed_but_no_task(kb: Path, batch_dir: Path):
     task = _prep(kb, batch_dir, dry_run=True)
     assert task["state"] == "awaiting_confirm" and len(task["items"]) == 4
@@ -302,6 +325,7 @@ def test_confirm_lands_and_ingests_docs_in_order(kb: Path, batch_dir: Path):
     assert ingest.calls[-1] == "raw/下篇.md" and ingest.calls[0].startswith("raw/上册/")
     log = (kb / task["log"]).read_text(encoding="utf-8")
     assert "第 1/2 份原件" in log and "第 2/2 份原件" in log
+    assert "开始入库（4 篇）" in log and "已落 raw/：4 篇" in log and "一键入库完成：4 篇" in log
 
 
 def test_confirm_rechecks_every_doc(kb: Path, batch_dir: Path):
@@ -395,6 +419,7 @@ def test_batch_reads_source_record_per_doc(kb: Path, tmp_path: Path):
     assert not list(parsed.rglob("*.png"))
     text = (parsed / "readme.md").read_text(encoding="utf-8")
     assert "[图](https://e.org/img/shot.png)" in text and "![" not in text
+    assert "🔗 https://e.org/readme.md" in "\n".join(oneclick.summary_lines(task))
     assert _confirm(kb, task, FakeIngest())[0] == EXIT_OK
     meta = yaml.safe_load(split_frontmatter((kb / "raw" / "readme.md").read_text(encoding="utf-8"))[0])
     assert meta["origin"] == "https://e.org/readme.md"
