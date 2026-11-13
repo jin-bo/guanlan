@@ -43,7 +43,7 @@ class SourceLocation:
 def locate_source_page(kb: Path, rel: str) -> SourceLocation:
     """定位 `raw/<rel>` 的 source 页（`rel` 相对 `raw/`、posix）。读不出的页跳过，不抛。"""
     sources_dir = kb / "wiki" / "sources"
-    by_name = find_source_page(sources_dir, Path(rel).stem)
+    by_name = find_source_page(sources_dir, Path(rel).stem, f"raw/{rel}")
     if by_name is not None:
         return SourceLocation(by_name, "文件名")
     if not sources_dir.is_dir():

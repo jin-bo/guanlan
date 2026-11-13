@@ -236,7 +236,7 @@ def _list_raw(root: Path) -> list[dict]:
     files: list[dict] = []
     for path in sorted(raw.glob("*.md")):
         if path.is_file():
-            ingested = find_source_page(sources, path.stem) is not None
+            ingested = find_source_page(sources, path.stem, f"raw/{path.name}") is not None
             files.append(
                 {"name": path.name, "size": path.stat().st_size, "ingested": ingested}
             )

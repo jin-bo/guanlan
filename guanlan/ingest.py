@@ -184,6 +184,14 @@ def _resolve_raw_target(root: Path, target: str) -> Path:
     return tpath
 
 
+def _raw_rel(raw_dir: Path, path: Path) -> str | None:
+    """`raw/…` 形的相对路径（认旧名页时按完整路径核归属，#203）；不在 `raw_dir` 下 → None（退回比文件名）。"""
+    try:
+        return f"raw/{path.relative_to(raw_dir).as_posix()}"
+    except ValueError:
+        return None
+
+
 def _target_page_owned_by(sources_dir: Path, tpath: Path, raw_dir: Path) -> bool:
     """目标 source 页是否**已确证归属**正被摄入的这个 raw 文件（=合法重摄，可豁免撞名拒绝）。
 
@@ -192,7 +200,7 @@ def _target_page_owned_by(sources_dir: Path, tpath: Path, raw_dir: Path) -> bool
     `raw_digest`（未 stamp / 手写页 / stamp 曾失败）/ 指纹指向**别的** raw 文件 → False：**宁保守拒**
     （所有权未确证时不放行，绝不因一个未 stamp 的同 slug 页而放任另一个 raw 覆盖它）。
     """
-    page = find_source_page(sources_dir, tpath.stem)
+    page = find_source_page(sources_dir, tpath.stem, _raw_rel(raw_dir, tpath))
     if page is None:
         return False
     meta, _body = load_page(page)  # 容错档：坏/缺 frontmatter → meta=None
@@ -231,8 +239,9 @@ def _reject_source_slug_collision(raw_dir: Path, tpath: Path, sources_dir: Path)
     # 比的是 source 页身份：通常即 `raw_slug`；按旧算法建的页确证属于某篇时是旧名（#201）——旧页被另一篇的
     # 新名命中（NFD `café` 的旧页 `cafe` ↔ `cafe.md`）也算撞
     # 新名与身份两个键都比（`source_identity_keys`）；键按 NFC：只差 NFC / NFD 写法的也算同一个（#197）
-    target_slug = source_identity(sources_dir, tpath.stem)
-    keys = source_identity_keys(sources_dir, tpath.stem)
+    target_rel = _raw_rel(raw_dir, tpath)
+    target_slug = source_identity(sources_dir, tpath.stem, target_rel)
+    keys = source_identity_keys(sources_dir, tpath.stem, target_rel)
     if not keys:
         return
     dups = [
@@ -240,7 +249,7 @@ def _reject_source_slug_collision(raw_dir: Path, tpath: Path, sources_dir: Path)
         for p in raw_dir.rglob("*")
         if p.suffix.lower() == ".md"
         and p.is_file()
-        and source_identity_keys(sources_dir, p.stem) & keys
+        and source_identity_keys(sources_dir, p.stem, _raw_rel(raw_dir, p)) & keys
         # samefile 而非比路径串：macOS 上按 NFC 键入、盘上存 NFD 的同一个文件，路径串不等（#197）
         and not p.samefile(tpath)
     ]

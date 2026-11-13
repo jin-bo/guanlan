@@ -335,7 +335,7 @@ def _raw_md_files(root: Path) -> list[tuple[str, frozenset[str]]]:
         return []
     sources = root / "wiki" / "sources"
     return [
-        (_rel(root, p), source_identity_keys(sources, p.stem))
+        (_rel(root, p), source_identity_keys(sources, p.stem, _rel(root, p)))
         for p in sorted(raw.rglob("*"))
         if p.suffix.lower() == ".md" and p.is_file()
     ]
@@ -385,7 +385,7 @@ def _precheck_doc(
     # slug 冲突（沿 ingest._reject_source_slug_collision）：在预检阶段就查，不留到 ⑥ 才炸。
     # 键按 NFC 规范化：只差 NFC / NFD 写法的也算同一个（#197）
     sources = root / "wiki" / "sources"
-    target_slugs = {k: t for t in targets for k in source_identity_keys(sources, Path(t).stem)}
+    target_slugs = {k: t for t in targets for k in source_identity_keys(sources, Path(t).stem, t)}
     for rel, keys in raw_md if raw_md is not None else _raw_md_files(root):  # 已排序：明细进 `_precheck_signature`，次序须稳定
         if rel in targets:
             continue
