@@ -212,11 +212,8 @@ def _raw_anchor_stems(root: Path) -> tuple[frozenset[str], list[str]]:
                 if os.path.islink(path) and not os.path.exists(path):
                     unreachable.append(_rel(path))
                 continue
-            stem = Path(name).stem
-            # 原名与其 NFC 形各推一遍：`raw_slug` 会把 NFD 的组合记号（`é` 拆出的 U+0301）当非词字符折成
-            # `-`，故 NFD 原名推出的是 `Cafe-…`、NFC 原名推出的是 `Café-…`，两种页名都可能存在。
-            for form in {stem, unicodedata.normalize("NFC", stem)}:
-                stems.update(unicodedata.normalize("NFC", s) for s in source_page_stems(form))
+            # `source_page_stems` 已含 NFD 原名在旧算法下的页名（`re-sume` ↔ `résumé`，#201）：两种页名都可能存在
+            stems.update(unicodedata.normalize("NFC", s) for s in source_page_stems(Path(name).stem))
     return frozenset(stems), sorted(unreachable)
 
 
