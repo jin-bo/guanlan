@@ -28,7 +28,7 @@ from .provenance import (
     parse_digest_value,
     stamp_raw_digest,
 )
-from .rawio import find_source_page, same_name_key, source_identity
+from .rawio import find_source_page, source_identity, source_identity_keys
 from .runtime import AgentRunner
 from .sourcepage import locate_source_page, source_slug
 
@@ -229,16 +229,17 @@ def _reject_source_slug_collision(raw_dir: Path, tpath: Path, sources_dir: Path)
     """
     # 比的是 source 页身份：通常即 `raw_slug`；按旧算法建的页确证属于某篇时是旧名（#201）——旧页被另一篇的
     # 新名命中（NFD `café` 的旧页 `cafe` ↔ `cafe.md`）也算撞
+    # 新名与身份两个键都比（`source_identity_keys`）；键按 NFC：只差 NFC / NFD 写法的也算同一个（#197）
     target_slug = source_identity(sources_dir, tpath.stem)
-    if not target_slug:
+    keys = source_identity_keys(sources_dir, tpath.stem)
+    if not keys:
         return
-    key = same_name_key(target_slug)  # NFC / NFD 只差写法的也算同一个（#197）
     dups = [
         p
         for p in raw_dir.rglob("*")
         if p.suffix.lower() == ".md"
-        and same_name_key(source_identity(sources_dir, p.stem)) == key
         and p.is_file()
+        and source_identity_keys(sources_dir, p.stem) & keys
         # samefile 而非比路径串：macOS 上按 NFC 键入、盘上存 NFD 的同一个文件，路径串不等（#197）
         and not p.samefile(tpath)
     ]

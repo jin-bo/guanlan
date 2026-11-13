@@ -178,3 +178,42 @@ def test_import_precheck_sees_legacy_page_hit(kb: Path, tmp_path: Path):
         task = prepare(kb, src, origin_kind="cli", dry_run=True)
     assert task["precheck"]["status"] == "conflict"
     assert any("source 页 slug 相同（`cafe`）" in d for d in task["precheck"]["details"]), task["precheck"]
+
+
+def test_legacy_owner_still_clashes_with_same_new_name(kb: Path):
+    """NFD `café` 的身份是旧名 `cafe`，另一篇 NFC `café` 的新名与它的 `raw_slug` 相同：两篇会抢 `café.md`，须判撞。"""
+    owner = f"raw/x/{nfd('café')}.md"
+    _raw(kb, f"x/{nfd('café')}.md")
+    _raw(kb, f"y/{nfc('café')}.md")
+    _source_page(kb, "cafe", owner=owner)
+    sources = kb / "wiki" / "sources"
+    from guanlan.errors import GuanlanError
+
+    with pytest.raises(GuanlanError):
+        _reject_source_slug_collision(kb / "raw", (kb / "raw" / "y" / f"{nfc('café')}.md").resolve(), sources)
+
+
+def test_legacy_digest_matches_across_nfc_nfd(kb: Path):
+    """`raw_digest` 里记的是 NFC 写法、盘上名是 NFD：归属确证照样成立。"""
+    _raw(kb, f"x/{nfd('résumé')}.md")
+    page = _source_page(kb, "re-sume")
+    raw = kb / "raw" / "x" / f"{nfd('résumé')}.md"
+    assert stamp_raw_digest(page, format_digest_value(f"raw/x/{nfc('résumé')}.md", compute_raw_digest(raw)))
+    assert find_source_page(kb / "wiki" / "sources", nfd("résumé")) == page
+
+
+def test_nfc_typed_stem_still_finds_legacy_page(kb: Path):
+    """macOS 上按 NFC 键入、盘上存 NFD：键入形推不出旧名，按 NFD 再推一遍认回旧页（仍须 raw_digest 确证）。"""
+    rel = f"raw/x/{nfd('résumé')}.md"
+    _raw(kb, f"x/{nfd('résumé')}.md")
+    page = _source_page(kb, "re-sume", owner=rel)
+    sources = kb / "wiki" / "sources"
+    assert find_source_page(sources, nfc("résumé")) == page
+    assert source_identity(sources, nfc("résumé")) == "re-sume"
+    assert "re-sume" not in source_page_stems(nfc("résumé"))  # health 读盘上真名，不加这一形
+
+
+def test_nfc_typed_stem_does_not_claim_others_legacy_page(kb: Path):
+    _raw(kb, "re-sume.md")
+    _source_page(kb, "re-sume", owner="raw/re-sume.md")  # 属于另一篇（真叫 re-sume 的资料）
+    assert find_source_page(kb / "wiki" / "sources", nfc("résumé")) is None

@@ -57,7 +57,7 @@ from .rawio import (
     raw_slug,
     same_name_key,
     sha256_file,
-    source_identity,
+    source_identity_keys,
 )
 from .sourcepage import locate_source_page
 from .stopscope import StopRequested, stop_scope
@@ -324,8 +324,8 @@ def _batch_slug_clashes(items: list[dict]) -> list[str]:
     return out
 
 
-def _raw_md_files(root: Path) -> list[tuple[str, str]]:
-    """`raw/` 下全部 `.md` 文件（相对库根，排序）及其 source 页身份（`source_identity`）。
+def _raw_md_files(root: Path) -> list[tuple[str, frozenset[str]]]:
+    """`raw/` 下全部 `.md` 文件（相对库根，排序）及其撞名键集（`source_identity_keys`）。
 
     后缀不分大小写：与 ingest 的 slug 冲突检查同口径（`X.MD` 同样建 source 页）。身份不总是 `raw_slug`：
     按旧算法建的页确证属于这篇时是旧名（#201），这样旧页被本次目标的新名命中时才查得出来。
@@ -335,7 +335,7 @@ def _raw_md_files(root: Path) -> list[tuple[str, str]]:
         return []
     sources = root / "wiki" / "sources"
     return [
-        (_rel(root, p), source_identity(sources, p.stem))
+        (_rel(root, p), source_identity_keys(sources, p.stem))
         for p in sorted(raw.rglob("*"))
         if p.suffix.lower() == ".md" and p.is_file()
     ]
@@ -345,7 +345,7 @@ def _precheck_doc(
     root: Path,
     task: dict,
     *,
-    raw_md: list[tuple[str, str]] | None = None,
+    raw_md: list[tuple[str, frozenset[str]]] | None = None,
     owned_cache: dict[str, dict[str, set[str | None]]] | None = None,
 ) -> dict:
     """单份的冲突预检（§5、决策P4.30-12）。`raw/<sample>.md` 与 `raw/<sample>/` 作为一个整体检查。
@@ -385,11 +385,12 @@ def _precheck_doc(
     # slug 冲突（沿 ingest._reject_source_slug_collision）：在预检阶段就查，不留到 ⑥ 才炸。
     # 键按 NFC 规范化：只差 NFC / NFD 写法的也算同一个（#197）
     sources = root / "wiki" / "sources"
-    target_slugs = {same_name_key(source_identity(sources, Path(t).stem)): t for t in targets}
-    for rel, slug in raw_md if raw_md is not None else _raw_md_files(root):  # 已排序：明细进 `_precheck_signature`，次序须稳定
+    target_slugs = {k: t for t in targets for k in source_identity_keys(sources, Path(t).stem)}
+    for rel, keys in raw_md if raw_md is not None else _raw_md_files(root):  # 已排序：明细进 `_precheck_signature`，次序须稳定
         if rel in targets:
             continue
-        hit = target_slugs.get(same_name_key(slug))
+        slug = next((k for k in sorted(keys) if k in target_slugs), None)
+        hit = target_slugs[slug] if slug is not None else None
         if hit is not None and not _same_file(root / rel, root / hit):  # macOS：只差 NFC / NFD 的是目标自己
             details.append(f"{rel} 与 {hit} 的 source 页 slug 相同（`{slug}`）")
 

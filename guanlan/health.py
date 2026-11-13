@@ -283,7 +283,7 @@ def _check_source_without_raw(
 ) -> Finding | None:
     """source 页无原文检查：文件名 / `raw_digest` / 原始资料声明三路都没指向现存 raw 文件即报。
 
-    **能力上限**：文件名一路按 `source_page_stems` 的三种形精确比（NFC 后），不折大小写——Linux 上
+    **能力上限**：文件名一路按 `source_page_stems` 的各形精确比（NFC 后），不折大小写——Linux 上
     `Report.md` 与 `raw/report.md` 本就互不认领，macOS 大小写不敏感 FS 上 ingest 会认而这里会报，
     这类页手动改名或补一行声明即可。只扫 `wiki/sources/` 目录，不看 `type`：`type: source` 却放错
     目录的页归 `type_dir_mismatch`。
