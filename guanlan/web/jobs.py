@@ -1,6 +1,6 @@
 """单后台 worker + 作业表（P4，见 docs/P4-Web宿主.md §4.2 决策P4-5）。
 
-写作业（`ingest`、P4.1 投喂、P4.3 `heal`）进一个 `queue.Queue`，由**单条** worker 线程（与
+写作业（`ingest`、P4.1 投喂、P4.3 `heal`）进一个按提交序号排序的队列，由**单条** worker 线程（与
 uvicorn 事件循环并存）FIFO 取出串行执行。串行保两件事：① 至多一个写作业，`raw/` 前后快照不被
 并发写互踩（P2 门禁假设单写者）；② 写作业用模块级 `print` 输出人读文本，串行 + `redirect_stdout`
 捕获**无跨线程竞态**。**红线：`redirect_stdout` 捕获只许单 worker 做**——故零 LLM 报告与问答
@@ -47,6 +47,14 @@ ProgressCb = Callable[[float], str]
 # = 共用节拍 HEARTBEAT_INTERVAL_S 的本模块别名（保留独立名便于测试 monkeypatch）。
 _JOB_HEARTBEAT_INTERVAL_S = HEARTBEAT_INTERVAL_S
 
+# P4.33 T2 取锁：后台任务等进程内写锁时按此间隔轮询取消标志；库被命令行占用时按退避重试，累计超过上限判失败。
+LOCK_POLL_S = 0.2
+LOCK_BACKOFF_START_S = 5.0
+LOCK_BACKOFF_MAX_S = 60.0
+LOCK_WAIT_LIMIT_S = 30 * 60
+# 开始前被取消的作业输出 / 任务信封 error 共用的说明。
+CANCELLED_BEFORE_START = "已取消：任务还没开始，没有写入任何内容。"
+
 
 class JobObserver(Protocol):
     """作业生命周期观察者（P4.33）：只对带 `task_id` 的作业回调。实现方须自行保证线程安全——
@@ -55,6 +63,8 @@ class JobObserver(Protocol):
     def on_start(self, job: Job) -> None: ...
 
     def on_output(self, job: Job, text: str) -> None: ...
+
+    def on_waiting(self, job: Job, holder: str) -> None: ...
 
     def on_finish(self, job: Job) -> None: ...
 
@@ -247,6 +257,20 @@ class Job:
     output_lock: threading.Lock = field(default_factory=threading.Lock)
     # P4.33：关联的后台任务信封 id（`TaskStore` 建的）；None = 不持久化的作业（投喂、上传、解析等）。
     task_id: str | None = None
+    # P4.33 T2 取消（只对还没开始的作业）：`started` = 已取得写锁、即将执行；`cancel_requested` 由
+    # `JobQueue.cancel_task` 置位；worker 见到后不执行 fn，置 `cancelled` 并照常收尾（exit_code 为 None）。
+    # 三者的读写都在 `JobQueue._lock` 内，「取消」与「开始」不会同时成立。
+    started: bool = False
+    cancel_requested: bool = False
+    cancelled: bool = False
+    # P4.33 T2 等命令行释放库：等待截止时刻、下次退避间隔、上次看到的占用者。等待期间作业**不占 worker**，
+    # 而是「停放」起来、到点按原提交顺序放回队列（见 `JobQueue._park`）。
+    lock_wait_deadline: float | None = None
+    lock_wait_delay: float = 0.0
+    lock_holder: str | None = None
+    # 截止时刻属于哪一段等待（`JobQueue._lock_epoch`）：期间有作业取到过写锁，说明那次占用已经结束，再遇到占用
+    # 是新的一段等待，截止时刻重新算——否则停放在前面任务后面时记下的截止时刻会被带到很久以后，一遇占用立即判失败。
+    lock_wait_epoch: int = -1
 
 
 class JobQueue:
@@ -258,9 +282,16 @@ class JobQueue:
         on_job_done: Callable[[str], None] | None = None,
         observer: JobObserver | None = None,
     ) -> None:
-        self._queue: queue.Queue[
-            tuple[Job, Callable[[Emit], object], ProgressCb | None]
-        ] = queue.Queue()
+        # 按提交序号排序的优先队列（P4.33 T2）：停放后放回的任务回到它原来的位置，不被后提交的超过。
+        # 未停放过的作业序号单调递增，行为与 FIFO 相同。
+        self._queue: queue.PriorityQueue[
+            tuple[int, tuple[Job, Callable[[Emit], object], ProgressCb | None]]
+        ] = queue.PriorityQueue()
+        # 等命令行释放库而停放的任务作业：序号 → 队列项；一个共用定时器到点把它们一起按序放回。
+        self._parked: dict[int, tuple] = {}
+        self._by_task: dict[str, Job] = {}  # task_id → 作业（取消时直接查，不扫整张作业表）
+        self._park_timer: threading.Timer | None = None
+        self._lock_epoch = 0  # 每有作业取到写锁 +1：区分不同的「库被占用」等待段（见 Job.lock_wait_epoch）
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()  # 仅护 _jobs / _counter；worker 改 job 字段无并发读写竞态点
         self._counter = 0
@@ -294,7 +325,9 @@ class JobQueue:
             self._counter += 1
             job = Job(id=str(self._counter), kind=kind, task_id=task_id)
             self._jobs[job.id] = job
-        self._queue.put((job, fn, progress))
+            if task_id is not None:
+                self._by_task[task_id] = job
+        self._put((job, fn, progress))
         return job
 
     def enqueue(
@@ -328,6 +361,19 @@ class JobQueue:
         job.done_event.wait()
         return job
 
+    def cancel_task(self, task_id: str) -> bool:
+        """取消一个**还没开始**（未取得写锁）的任务作业：置取消标志，worker 取到或等锁时见到即跳过。
+        已开始 / 已结束 / 找不到 → False。"""
+        with self._lock:
+            job = self._by_task.get(task_id)
+            if job is None or job.started or job.state == "done":
+                return False
+            job.cancel_requested = True
+            item = self._parked.pop(int(job.id), None)
+            if item is not None:  # 正停放着等命令行释放库：立即放回，worker 取到即按取消收尾
+                self._put(item)
+            return True
+
     def get_job(self, job_id: str) -> Job | None:
         """取作业快照；未知 id → None（端点据此 404）。"""
         with self._lock:
@@ -340,10 +386,139 @@ class JobQueue:
         with contextlib.suppress(Exception):
             getattr(self._observer, method)(job, *args)
 
+    def _mark_started(self, job: Job) -> bool:
+        """取得写锁（或无锁）后、执行前：在表锁内二选一——已请求取消则返回 False，否则记 started。"""
+        with self._lock:
+            if job.cancel_requested:
+                return False
+            job.started = True
+            return True
+
+    def _acquire_for(self, job: Job) -> tuple[Exception | None, bool, float | None]:
+        """为作业取写锁，返回 `(lock_error, cancelled, retry_after)`；三者皆空（`(None, False, None)`）时**已持锁**。
+
+        - 非任务作业（投喂、上传等，`task_id is None`）：与 P4.33 之前相同——阻塞取，库被占用立即失败。
+        - 任务作业：等**进程内**写锁（可写会话等）时每 LOCK_POLL_S 查一次取消。库被**命令行**占用（`KBLockBusy`）
+          时不在这里等：记 waiting_lock（占用者换了就更新），返回 `retry_after` 让 worker 把它定时重新入队、先去跑
+          后面的作业——否则一个等锁的任务会占住唯一的 worker 长达 LOCK_WAIT_LIMIT_S，后面的投喂、上传都跟着卡住。
+          退避从 LOCK_BACKOFF_START_S 起翻倍、封顶 LOCK_BACKOFF_MAX_S；累计超过 LOCK_WAIT_LIMIT_S 判失败。
+        """
+        lock = self._write_lock
+        if job.task_id is None:
+            try:
+                lock.acquire()
+            except Exception as exc:  # noqa: BLE001 — 取锁的任何意外都不能让 worker 死
+                return exc, False, None
+            job.started = True  # 非任务作业：取到锁即开始（不经取消检查，它们没有取消入口）
+            self._lock_epoch += 1
+            return None, False, None
+        while True:
+            if job.cancel_requested:
+                return None, True, None
+            try:
+                got = lock.acquire(timeout=LOCK_POLL_S)
+            except kblock.KBLockBusy as exc:
+                now = time.monotonic()
+                self._begin_wait(job, now)
+                holder = kblock.describe_holder(exc.holder)
+                if holder != job.lock_holder:  # 占用者换了（上一个命令结束、下一个接上）也要如实更新
+                    job.lock_holder = holder
+                    self._notify("on_waiting", job, holder)
+                if now >= job.lock_wait_deadline:
+                    return exc, False, None
+                retry = min(job.lock_wait_delay, max(0.0, job.lock_wait_deadline - now))
+                job.lock_wait_delay = min(job.lock_wait_delay * 2, LOCK_BACKOFF_MAX_S)
+                return None, False, retry
+            except Exception as exc:  # noqa: BLE001
+                return exc, False, None
+            if got:
+                self._lock_epoch += 1
+                if self._mark_started(job):
+                    return None, False, None
+                lock.release()  # 取到锁的同一刻被取消：放回去，不执行
+                return None, True, None
+
+    def _begin_wait(self, job: Job, now: float) -> None:
+        """进入（或延续）一段「等命令行释放库」：同一段内截止时刻不变；上一段之后有作业取到过写锁则重新起算。"""
+        if job.lock_wait_deadline is None or job.lock_wait_epoch != self._lock_epoch:
+            job.lock_wait_deadline = now + LOCK_WAIT_LIMIT_S
+            job.lock_wait_delay = LOCK_BACKOFF_START_S
+            job.lock_wait_epoch = self._lock_epoch
+            # 新的一段等待：上一段记下的占用者已过时（期间信封可能已被 on_start 改回 queued），清掉，
+            # 好让再遇到占用时（哪怕描述相同，如「执行者未知」）照样回调 on_waiting、把信封记回 waiting_lock。
+            job.lock_holder = None
+
+    def _put(self, item: tuple) -> None:
+        self._queue.put((int(item[0].id), item))
+
+    def _parked_ahead(self, job: Job) -> Job | None:
+        """停放着的、比 `job` 更早提交的任务里最早的一个；没有则 None。"""
+        with self._lock:
+            seqs = [seq for seq in self._parked if seq < int(job.id)]
+            return self._parked[min(seqs)][0] if seqs else None
+
+    def _park(self, item: tuple, delay: float) -> None:
+        """把等命令行释放库的任务作业停放起来，`delay` 秒后（与已停放的共用一个定时器）一起按序放回。
+
+        已请求取消的不停放、直接放回（worker 取到即按取消收尾）。定时器已在走时不重设：放回时序号最小的那个先
+        取锁，其余按序跟上；各自的退避间隔与截止时刻仍按自己真正去取锁的次数累计。"""
+        with self._lock:
+            if item[0].cancel_requested:
+                self._put(item)
+                return
+            self._parked[int(item[0].id)] = item
+            if self._park_timer is not None:
+                return
+            timer = threading.Timer(delay, self._release_parked)
+            timer.daemon = True
+            self._park_timer = timer
+        try:
+            timer.start()
+        except RuntimeError:  # 起不了线程：不能让 _park_timer 停在一个没启动的定时器上，否则停放的任务永远放不回
+            self._release_parked()
+
+    def _release_parked(self) -> None:
+        # 放回队列，信封**不**在这里改回 queued：命令行多半还占着，worker 马上又会撞上、再停放，每个退避周期
+        # 来回翻「排队中 / 等待写锁」只是噪声。什么时候真不再等命令行了？——有任务取得写锁的那一刻：
+        # TaskStore.on_start 把本进程其余 waiting_lock 信封改回 queued（见那里）。
+        with self._lock:
+            items, self._parked = list(self._parked.values()), {}
+            self._park_timer = None
+            for item in items:
+                self._put(item)
+
     def _run(self) -> None:
         while True:
-            job, fn, progress = self._queue.get()
-            job.state = "running"
+            _, item = self._queue.get()
+            job, fn, progress = item
+
+            # 单写者写锁（P4.5）：包住真正的写执行 `fn(emit)`，与可写 chat turn / 撤销 / GET /graph
+            # 串行。在 worker 线程上阻塞 acquire 无碍（非事件循环线程）；None 时退回无锁（P4 行为）。
+            # 库被 CLI 等其它进程占用（P4.30 库级锁）：非任务作业直接以 EXIT_USAGE 完成、说明谁在写；
+            # 任务作业定时重新入队（P4.33 T2），不占着 worker 等。
+            lock_error: Exception | None = None
+            cancelled = False
+            if self._write_lock is not None:
+                # 有更早提交的任务正停放着等命令行释放库：这个任务也停放，不超车（依赖顺序如「先 ingest 再 heal」）。
+                ahead = self._parked_ahead(job) if job.task_id is not None and not job.cancel_requested else None
+                if ahead is not None:
+                    # 它其实也在等同一个命令行释放库：照样记 waiting_lock（写明占用者），30 分钟的等待上限从现在算，
+                    # 而不是等前面的放弃后才开始——否则排在第三个的任务要等上 90 分钟才判失败。
+                    self._begin_wait(job, time.monotonic())
+                    if ahead.lock_holder and ahead.lock_holder != job.lock_holder:
+                        job.lock_holder = ahead.lock_holder
+                        self._notify("on_waiting", job, job.lock_holder)
+                    self._park(item, LOCK_BACKOFF_START_S)
+                    continue
+                lock_error, cancelled, retry_after = self._acquire_for(job)
+                if retry_after is not None:
+                    self._park(item, retry_after)
+                    continue
+            else:
+                cancelled = not self._mark_started(job)
+            job.cancelled = cancelled
+            job.state = "running"  # 取得写锁（或确定不执行）之后才算 running：等锁、停放期间 /api/jobs 仍是 queued
+
             on_write = None
             if self._observer is not None and job.task_id is not None:
                 on_write = lambda s, _job=job: self._notify("on_output", _job, s)  # noqa: E731
@@ -354,7 +529,7 @@ class JobQueue:
             # running 态实时渲染）。worker 收尾会清空 progress，故不污染最终 output。无回调 → 不起线程。
             hb_stop: threading.Event | None = None
             hb_thread: threading.Thread | None = None
-            if progress is not None:
+            if progress is not None and not cancelled:  # 开始前取消的作业不执行，不起心跳
                 hb_stop = threading.Event()
                 hb_start = time.monotonic()
 
@@ -381,22 +556,15 @@ class JobQueue:
                     _buf.write(line + "\n")
                     _job.output = _buf.getvalue()
 
-            # 单写者写锁（P4.5）：包住真正的写执行 `fn(emit)`，与可写 chat turn / 撤销 / GET /graph
-            # 串行。在 worker 线程上阻塞 acquire 无碍（非事件循环线程）；None 时退回无锁（P4 行为）。
-            # 库被 CLI 等其它进程占用（P4.30 库级锁）→ 本作业直接以 EXIT_USAGE 完成、说明谁在写，不排队。
-            lock_error: Exception | None = None
-            if self._write_lock is not None:
-                try:
-                    self._write_lock.acquire()
-                except Exception as exc:  # noqa: BLE001 — 取锁的任何意外都不能让 worker 死（否则此后作业全卡死）
-                    lock_error = exc
             # 任务信封翻 running 放在**取得写锁之后**（P4.33）：等锁期间信封仍是 queued——等待提示不会把一个
             # 还在排队的任务说成「正在写」，服务在等锁时退出也不会把它记成「可能已写入一部分」的 interrupted。
             # 取锁失败（库被 CLI 占用等）不翻 running，直接由收尾记 failed。
-            if lock_error is None:
+            if lock_error is None and not cancelled:
                 self._notify("on_start", job)
             try:
-                if lock_error is not None:
+                if cancelled:
+                    buf.write(CANCELLED_BEFORE_START)
+                elif lock_error is not None:
                     if isinstance(lock_error, kblock.KBLockBusy):
                         buf.write(str(lock_error))
                         job.exit_code = EXIT_USAGE
@@ -429,7 +597,7 @@ class JobQueue:
                     if hb_thread is not None:
                         hb_thread.join(timeout=1.0)
                 job.progress = ""  # 清瞬时进度：最终结果只看 output（干净摘要，不含心跳历史）
-                if self._write_lock is not None and lock_error is None:
+                if self._write_lock is not None and lock_error is None and not cancelled:
                     self._write_lock.release()  # 写执行收尾即释放，早于状态翻转/唤醒
                 # 顺序要紧：先写 output、再翻 state="done"，最后 set()。轮询读者只在见到
                 # state=="done" 后读 output（同线程程序序 + GIL 原子赋值保证"见 done 必见完整
@@ -440,11 +608,14 @@ class JobQueue:
                 with job.output_lock:
                     job.output = buf.getvalue()
                 job.state = "done"
+                if job.task_id is not None:
+                    with self._lock:  # 已结束的不能再取消：不必再按 task_id 查到它（免得这张表随任务数只增不减）
+                        self._by_task.pop(job.task_id, None)
                 # 任务信封收尾（P4.33）：在 set() 之前，submit_and_wait 的等待者醒来时信封已是终态。
                 self._notify("on_finish", job)
                 job.done_event.set()
             # 完工回调在 write_lock 释放后调（不在临界区内做额外工作）；best-effort：异常不能
             # 让 worker 死（它已捕获作业本体异常，这里再裹一层只为隔离回调意外）。
-            if self._on_job_done is not None:
+            if self._on_job_done is not None and not cancelled:  # 开始前取消的作业没写任何东西
                 with contextlib.suppress(Exception):
                     self._on_job_done(job.kind)

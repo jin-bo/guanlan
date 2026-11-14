@@ -131,6 +131,11 @@ async function postTask(url, body) {
     e.busy = true;
     throw e;
   }
+  if (res.status === 429) {
+    const e = new Error("HTTP 429");
+    e.limit = true;
+    throw e;
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -147,7 +152,9 @@ function showOverlayError(message) {
 }
 
 function submitErrorText(e) {
-  return e.busy ? t("task.busyWritable") : t("common.submitFail", e.message);
+  if (e.busy) return t("task.busyWritable");
+  if (e.limit) return t("task.limit");
+  return t("common.submitFail", e.message);
 }
 
 // 提交一个后台任务。`fallback(job_id)`：没有 task_id 时在浮层内轮询的旧路径。
@@ -166,7 +173,7 @@ async function submitBackgroundTask(url, body, kind, params, fallback) {
   }
   if (data.task_id) {
     $("#overlay").classList.add("hidden");
-    trackSubmittedTask(data.task_id, kind, params);
+    trackSubmittedTask(data.task_id, kind, params, data.deduplicated);
     return;
   }
   try {

@@ -21,6 +21,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -31,14 +32,17 @@ from .. import kblock
 from ..oneclick import ACTIVE_STATES as IMPORT_ACTIVE_STATES
 from ..oneclick import iter_tasks as iter_import_tasks
 from ..rawio import atomic_write_text
-from .jobs import Job
+from .jobs import CANCELLED_BEFORE_START, Job
 
 TASK_KINDS = ("ingest", "backfill", "heal", "audit")
-ACTIVE_STATES = ("queued", "running")
+PENDING_STATES = ("queued", "waiting_lock")  # 还没开始（未取得写锁）：可取消
+ACTIVE_STATES = (*PENDING_STATES, "running")
 ATTENTION_STATES = ("interrupted",)  # T2 加 rollback_failed
 TERMINAL_STATES = ("succeeded", "failed", "cancelled")  # 参与保留策略的终态
 
 MAX_HISTORY = 200  # 终态信封保留条数（决策 D8）
+MAX_ACTIVE = 50  # 未结束任务上限（§4.7），超出提交 429
+DELETABLE_STATES = (*TERMINAL_STATES, "interrupted")
 RECENT_LIMIT = 20  # /api/tasks「最近完成」条数（决策 D7）
 LOG_CHUNK_BYTES = 256 * 1024  # 详情接口单次返回的日志上限
 
@@ -47,12 +51,25 @@ _ID_RE = re.compile(r"^\d{8}-\d{6}-[a-z]+-[0-9a-f]{4}$")
 _BOOT_ID = secrets.token_hex(8)
 
 
+class TaskLimitError(Exception):
+    """未结束的任务已达上限。"""
+
+
+class TaskStateError(Exception):
+    """任务当前状态不允许这个操作。"""
+
+
 def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def jobs_dir(root: Path) -> Path:
     return Path(root) / "workspace" / "jobs"
+
+
+def _owned_here(env: dict) -> bool:
+    """信封是本进程（本次启动）建的。"""
+    return env.get("owner_pid") == os.getpid() and env.get("owner_boot") == _BOOT_ID
 
 
 def _brief_import(task: dict) -> dict:
@@ -106,6 +123,8 @@ class TaskStore:
         self._envs: dict[str, dict] = {}
         self._live: dict[str, Job] = {}  # task_id → 本进程的在途作业（读心跳行用）
         self._logs: dict[str, IO[str]] = {}
+        # 已建信封、还没确认入队的 id：入队前的层③ 复查可能把它撤掉，查重不能把别的提交并到它上面。
+        self._pending: set[str] = set()
         self._load_all()
 
     # ── 持久化 ────────────────────────────────────────────────────────────────
@@ -115,6 +134,16 @@ class TaskStore:
 
     def _log_file(self, task_id: str) -> Path:
         return self._dir / f"{task_id}.log"
+
+    def _task_dir(self, task_id: str) -> Path:
+        return self._dir / task_id
+
+    def _remove_locked(self, task_id: str) -> None:
+        self._envs.pop(task_id, None)
+        for path in (self._file(task_id), self._log_file(task_id)):
+            with contextlib.suppress(OSError):
+                path.unlink()
+        shutil.rmtree(self._task_dir(task_id), ignore_errors=True)
 
     def _save(self, env: dict) -> None:
         env["updated"] = _now()
@@ -160,6 +189,7 @@ class TaskStore:
                 else:
                     env["state"] = "cancelled"
                     env["error"] = "服务重启时任务尚未开始，已取消；需要时可重试。"
+                env["holder"] = None  # 等锁中被恢复的：占用者描述已过时
                 env["finished"] = env.get("finished") or _now()
                 with contextlib.suppress(OSError):
                     self._save(env)
@@ -169,9 +199,35 @@ class TaskStore:
     # ── 创建 ──────────────────────────────────────────────────────────────────
 
     def create(self, kind: str, title: str, params: dict) -> str:
+        """总是新建一份信封并立即视为已入队：不查重、不受上限（不经 Web 提交路径的调用方与测试用）。"""
+        task_id = self.create_or_reuse(kind, title, params, reuse=False)[0]
+        self.committed(task_id)
+        return task_id
+
+    def create_or_reuse(
+        self, kind: str, title: str, params: dict, *, retry_of: str | None = None, reuse: bool = True
+    ) -> tuple[str, bool]:
+        """建信封，返回 `(task_id, created)`。查重与上限和建信封在同一把锁里，并发提交不会各建一份。
+
+        - 同 kind + 同 params 的任务还没结束（排队 / 等锁 / 运行中）→ 不新建，返回 `(已有 id, False)`。
+        - 未结束任务已有 `MAX_ACTIVE` 个 → `TaskLimitError`。
+        """
         if kind not in TASK_KINDS:
             raise ValueError(f"未知任务类型：{kind}")
         with self._lock:
+            # 只算本进程建的：别的进程（或 pid 被复用后认不出的旧进程）留下的未结束信封不在本进程的队列里，
+            # 拿它查重会让新提交被并到一个永远不会跑的任务上，拿它算上限会把配额白白占掉。
+            active = [
+                e
+                for e in self._envs.values()
+                if e.get("state") in ACTIVE_STATES and _owned_here(e)
+            ]
+            settled = [e for e in active if e["id"] not in self._pending]
+            for env in settled if reuse else ():
+                if env.get("kind") == kind and env.get("params") == params:
+                    return env["id"], False
+            if reuse and len(active) >= MAX_ACTIVE:
+                raise TaskLimitError(f"未结束的后台任务已有 {len(active)} 个（上限 {MAX_ACTIVE}），请等一些完成后再提交。")
             while True:
                 task_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{kind}-{secrets.token_hex(2)}"
                 if task_id not in self._envs and not self._file(task_id).exists():
@@ -188,17 +244,71 @@ class TaskStore:
                 "exit_code": None,
                 "summary": None,
                 "error": None,
+                "holder": None,
+                "retry_of": retry_of,
                 "owner_pid": os.getpid(),
                 "owner_boot": _BOOT_ID,
             }
             self._save(env)  # 先落盘再入队：入队后的回调一定找得到信封
             self._envs[task_id] = env
-        return task_id
+            self._pending.add(task_id)
+        return task_id, True
+
+    def committed(self, task_id: str) -> None:
+        """信封对应的作业已入队：此后才参与查重。"""
+        with self._lock:
+            self._pending.discard(task_id)
+
+    def envelope(self, task_id: str) -> dict | None:
+        with self._lock:
+            env = self._envs.get(task_id)
+            return dict(env) if env is not None else None
+
+    def cancel(self, task_id: str, cancel_job: Callable[[str], bool]) -> bool:
+        """取消一个还没开始的任务：在本类的锁里先让执行层撤下作业（`cancel_job`，即 `JobQueue.cancel_task`），
+        成功就立即把信封记 cancelled。两步在同一把锁里，期间到达的同参数提交不会被查重并到这个将被取消的任务上。
+        锁序：本类锁 → JobQueue 表锁（JobQueue 持表锁时从不回调本类）。"""
+        with self._lock:
+            env = self._envs.get(task_id)
+            if env is None or env.get("state") not in PENDING_STATES:
+                return False
+            if not cancel_job(task_id):
+                return False
+            # 作业已撤下：信封落盘失败也算取消成功（内存里已是 cancelled，worker 收尾时 on_finish 再存一次）。
+            with contextlib.suppress(OSError):
+                self.mark_cancelled(task_id)
+            return True
+
+    def mark_cancelled(self, task_id: str) -> None:
+        """排队 / 等锁中的任务被取消：信封立即记 cancelled（worker 之后取到它时只是跳过）。"""
+        with self._lock:
+            env = self._envs.get(task_id)
+            if env is None or env.get("state") not in PENDING_STATES:
+                return
+            env["state"] = "cancelled"
+            env["holder"] = None
+            env["finished"] = _now()
+            env["error"] = CANCELLED_BEFORE_START
+            self._save(env)
+            self._prune_locked()
+
+    def delete(self, task_id: str) -> None:
+        """删一条已结束任务的记录：信封、日志、任务目录。有前像目录（T2 回滚所需）→ `TaskStateError`。"""
+        with self._lock:
+            env = self._envs.get(task_id)
+            if env is None:
+                return
+            if env.get("state") not in DELETABLE_STATES:
+                raise TaskStateError(f"任务当前状态为 {env.get('state')}，不能删除记录。")
+            if (self._task_dir(task_id) / "before").exists():
+                raise TaskStateError("任务还有未处理的前像，先选择「回滚」或「保留现状」。")
+            self._remove_locked(task_id)
 
     def discard(self, task_id: str) -> None:
         """入队失败时撤掉刚建的信封（只用于提交路径的异常回滚）。"""
         with self._lock:
             self._envs.pop(task_id, None)
+            self._pending.discard(task_id)
             with contextlib.suppress(OSError):
                 self._file(task_id).unlink()
 
@@ -211,7 +321,25 @@ class TaskStore:
                 return
             self._live[env["id"]] = job
             env["state"] = "running"
+            env["holder"] = None
             env["started"] = _now()
+            self._save(env)
+            # 有任务取得了写锁 ⇒ 库已不被命令行占着：本进程其余「等待写锁」的任务其实只是排在它后面，
+            # 改回 queued、清掉已经不在的占用者（再撞上命令行时会重新报）。
+            for other in self._envs.values():
+                if other.get("state") == "waiting_lock" and _owned_here(other):
+                    other["state"] = "queued"
+                    other["holder"] = None
+                    self._save(other)
+
+    def on_waiting(self, job: Job, holder: str) -> None:
+        """库被命令行等外部写者占用：worker 退避重试期间信封记 waiting_lock，并写明是谁在写。"""
+        with self._lock:
+            env = self._envs.get(job.task_id or "")
+            if env is None or env.get("state") not in PENDING_STATES:
+                return
+            env["state"] = "waiting_lock"
+            env["holder"] = holder
             self._save(env)
 
     def on_output(self, job: Job, text: str) -> None:
@@ -242,8 +370,19 @@ class TaskStore:
             env = self._envs.get(task_id)
             if env is None:
                 return
+            if job.cancelled or env.get("state") == "cancelled":
+                # 取消在开始前生效：mark_cancelled 已记过终态；worker 跳过它时只补齐字段，不改判成失败。
+                if env.get("state") != "cancelled":
+                    env["state"] = "cancelled"
+                    env["error"] = CANCELLED_BEFORE_START
+                env["holder"] = None
+                env["finished"] = env.get("finished") or _now()
+                self._save(env)
+                self._prune_locked()
+                return
             env["state"] = "succeeded" if job.exit_code == 0 else "failed"
             env["exit_code"] = job.exit_code
+            env["holder"] = None
             env["finished"] = _now()
             env["summary"] = summary
             self._save(env)
@@ -257,10 +396,9 @@ class TaskStore:
             return
         done.sort(key=lambda e: (e.get("finished") or "", e["id"]))
         for env in done[: len(done) - MAX_HISTORY]:
-            self._envs.pop(env["id"], None)
-            for path in (self._file(env["id"]), self._log_file(env["id"])):
-                with contextlib.suppress(OSError):
-                    path.unlink()
+            if (self._task_dir(env["id"]) / "before").exists():
+                continue  # 还有前像：要等用户处理，不自动清
+            self._remove_locked(env["id"])
 
     # ── 读 ────────────────────────────────────────────────────────────────────
 
@@ -288,6 +426,8 @@ class TaskStore:
             "exit_code": env.get("exit_code"),
             "progress": live.progress if live is not None and state == "running" else "",
             "error": env.get("error"),
+            "holder": env.get("holder"),
+            "retry_of": env.get("retry_of"),
         }
 
     def running_brief(self) -> dict | None:

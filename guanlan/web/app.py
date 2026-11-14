@@ -79,7 +79,7 @@ from .helpers import (
     _workspace_image_src,
 )
 from .jobs import Job, JobQueue, WriteGate
-from .tasks import TaskStore
+from .tasks import DELETABLE_STATES, PENDING_STATES, TaskLimitError, TaskStateError, TaskStore
 
 # 整模块导入（不 from-import 具体函数）：端点内经 `mcpdiag.<fn>` 取属性，测试可 monkeypatch
 # 单飞/慢检查而不必真起上游进程。模块本身零 mcp SDK 依赖（只导 agentao.mcp.config）。
@@ -960,41 +960,104 @@ def create_app(
 
         return _progress
 
-    async def _submit_task(kind: str, title: str, params: dict, fn, verb: str) -> dict:
-        """P4.33：先建任务信封、再带 task_id 入队，返回 `{job_id, task_id}`。建信封失败（workspace 写不了）
-        仍照常入队、`task_id` 为 None——任务中心看不到它，但作业照跑，与 P4.33 之前的行为相同。"""
-        task_id: str | None = None
-        if tasks is not None:
+    # P4.33：四类后台任务的「标题 · 参数 · 作业」统一在这里由请求体构造。提交端点与重试（T2）共用——重试按
+    # 信封里存的 params 重建请求体（经同一 pydantic 模型校验），再走同一条路。请求显式给了 `model` 才进 params。
+    _TASK_BODIES = {"ingest": IngestBody, "heal": HealBody, "backfill": BackfillBody, "audit": AuditBody}
+
+    def _with_model(params: dict, body) -> dict:
+        """请求里显式指定了（且不同于服务默认的）模型才记进 params：查重区分不同模型，重试沿用同一个模型。
+        显式写成默认模型与不写是同一件事，不记，免得同一篇资料因此被当成两个任务各跑一遍。"""
+        return {**params, "model": body.model} if body.model and body.model != model else params
+
+    def _task_spec(kind: str, body) -> tuple[str, dict, object, str]:
+        if kind == "ingest":
+            # target 不在此预校验：run_ingest 内部 _resolve_raw_target 是单一归口（须在 raw/、是 .md、
+            # 存在），Web 不旁路 P2 入口校验；非法 target → 作业以 EXIT_USAGE 完成，轮询可见。
+            def _job(emit) -> int:  # thunk 收 emit（决策P4.6.1-11）；ingest 仍靠 print() 经 redirect
+                return run_ingest(body.target, root=root, model=body.model or model, runner=runner)
+
+            return f"补录：{body.target}", _with_model({"target": body.target}, body), _job, "摄入"
+        if kind == "heal":
+            # targets 只作过滤器、顺序无关：去重排序后存，查重时 [a,b] 与 [b,a] 算同一个任务；作业也用这一份。
+            targets = sorted(set(body.targets)) if body.targets else body.targets
+
+            # worklist 由作业**服务端重算**（targets 只作过滤器，决策P4.3-3）；走子进程 runner、过 P2 写门禁。
+            def _job(emit) -> HealRun:  # 返回结构化结果（非 int）→ worker 鸭子分流存 result
+                run = run_heal_result(
+                    root=root,
+                    limit=body.limit,
+                    min_refs=body.min_refs,
+                    targets=targets,
+                    model=body.model or model,
+                    runner=runner,
+                )
+                if run.final_text:  # agent 散文 → worker 的 redirect 捕获进 job.output（与 ingest 同口径）
+                    print(run.final_text)
+                return run
+
+            n = len(targets) if targets is not None else None  # [] = 勾选了空集（一个都不物化），不是「整批」
+            title = f"提取概念/实体：{n} 个目标" if n is not None else f"提取概念/实体：至多 {body.limit} 个高频缺页"
+            params = {"limit": body.limit, "min_refs": body.min_refs, "targets": targets}
+            return title, _with_model(params, body), _job, "物化"
+        if kind == "backfill":
+            # 整体复用 run_query(backfill=True)，答案 + 门禁回执经 stdout 捕获进 job.output（决策P4.8-2）。
+            def _job(emit) -> int:
+                return run_query(body.question, root=root, backfill=True, model=body.model or model, runner=runner)
+
+            q = body.question.strip()  # 查重按 strip 后的问句：首尾空白不同的同一问题不各跑一遍
+            return f"沉淀：{q[:40]}{'…' if len(q) > 40 else ''}", _with_model({"question": q}, body), _job, "沉淀"
+        # audit：走子进程 runner、过 P2 写门禁 + P2.1 源不回退闸（page_guard=True 由 core 内写死，决策P3.7-4）。
+        def _job(emit) -> AuditRun:
+            run = run_audit_result(root=root, limit=body.limit, model=body.model or model, runner=runner)
+            if run.final_text:
+                print(run.final_text)
+            return run
+
+        return f"语义审计：至多 {body.limit} 组漂移源", _with_model({"limit": body.limit}, body), _job, "审计"
+
+    submit_lock = asyncio.Lock()  # P4.33：后台任务提交路径的串行锁（见 _submit_task）
+
+    async def _submit_task(kind: str, body, *, retry_of: str | None = None) -> dict:
+        """P4.33：先建任务信封、再带 task_id 入队，返回 `{job_id, task_id, deduplicated}`。
+
+        - 同类型同参数的任务还没结束 → 不新建，返回已有的 `task_id`（`deduplicated: true`，`job_id` 为 None）。
+        - 未结束任务已达上限 → 429。
+        - 建信封失败（workspace 写不了）→ 照常入队、`task_id` 为 None：任务中心看不到它，但作业照跑。
+        """
+        # 整段串行：并发的同参数提交（连点两下、两个标签页）依次经过「建信封 → 层③ 复查 → 入队 → committed」，
+        # 后一个必定看到前一个已入队的信封、被查重并过去，而不是两个都入队；与此同时也不会被并到一个将被撤掉的信封上。
+        async with submit_lock:
+            title, params, fn, verb = _task_spec(kind, body)
+            task_id: str | None = None
+            if tasks is not None:
+                try:
+                    task_id, created = await anyio.to_thread.run_sync(
+                        functools.partial(tasks.create_or_reuse, kind, title, params, retry_of=retry_of)
+                    )
+                except TaskLimitError as exc:
+                    raise HTTPException(status_code=429, detail=str(exc)) from None
+                except OSError:
+                    task_id, created = None, True
+                if not created:
+                    return {"job_id": None, "task_id": task_id, "deduplicated": True}
             try:
-                task_id = await anyio.to_thread.run_sync(tasks.create, kind, title, params)
-            except OSError:
-                task_id = None
-        try:
-            # 建信封的 await 让出了事件循环：端点入口查过的层③ 可能已被期间起跑的可写 turn 推翻。入队前
-            # 再查一次（同步、紧贴 enqueue），保持 P4.33 之前「查完即入队、中间无让出点」的原子性。
-            _reject_if_writable_active()
-            job_id = jobs.enqueue(kind, fn, progress=_wiki_job_progress(verb), task_id=task_id)
-        except BaseException:
+                # 建信封的 await 让出了事件循环：端点入口查过的层③ 可能已被期间起跑的可写 turn 推翻。入队前
+                # 再查一次（同步、紧贴 enqueue），保持 P4.33 之前「查完即入队、中间无让出点」的原子性。
+                _reject_if_writable_active()
+                job_id = jobs.enqueue(kind, fn, progress=_wiki_job_progress(verb), task_id=task_id)
+            except BaseException:
+                if task_id is not None:
+                    tasks.discard(task_id)
+                raise
             if task_id is not None:
-                tasks.discard(task_id)
-            raise
-        return {"job_id": job_id, "task_id": task_id}
+                tasks.committed(task_id)  # 入队成功之后才参与查重：免得把并发的同参数提交并到一个将被撤掉的信封上
+            return {"job_id": job_id, "task_id": task_id, "deduplicated": False}
 
     # 写（唯一写入口 = ingest）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
     @_writer_only(app.post("/api/ingest"))  # reader 下不注册（入库是写，决策P4.9-2）
     async def ingest(body: IngestBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
-        # target 不在此预校验：run_ingest 内部 _resolve_raw_target 是单一归口（须在 raw/、是 .md、
-        # 存在），Web 不旁路 P2 入口校验；非法 target → 作业以 EXIT_USAGE 完成，轮询可见。
-        def _job(emit) -> int:  # thunk 收 emit（决策P4.6.1-11）；ingest 仍靠 print() 经 redirect
-            return run_ingest(
-                body.target,
-                root=root,
-                model=body.model or model,
-                runner=runner,
-            )
-
-        return await _submit_task("ingest", f"补录：{body.target}", {"target": body.target}, _job, "摄入")
+        return await _submit_task("ingest", body)
 
     # heal 预览（零 LLM 读，决策P4.3-4）：只算 worklist（== heal --dry-run），不入队、不触 Agentao、
     # 不取 raw/ 快照；阻塞跑 to_thread。limit 默认用 Web 专属值（=5）、min_refs 与 CLI 同源，
@@ -1007,48 +1070,16 @@ def create_app(
         return await anyio.to_thread.run_sync(_heal_preview, root, limit, min_refs)
 
     # heal 物化（写，决策P4.3-2）：入单写者 FIFO 队列、即时返回 job_id、前端轮询（与 ingest 同构）。
-    # worklist 由作业**服务端重算**（不收 target 列表，决策P4.3-3）；走子进程 runner、过 P2 写门禁。
     @_writer_only(app.post("/api/heal"))  # reader 下不注册（物化是写，决策P4.9-2）
     async def heal(body: HealBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
+        return await _submit_task("heal", body)
 
-        def _job(emit) -> HealRun:  # 收 emit、忽略；返回结构化结果（非 int）→ worker 鸭子分流存 result
-            run = run_heal_result(
-                root=root,
-                limit=body.limit,
-                min_refs=body.min_refs,
-                targets=body.targets,
-                model=body.model or model,
-                runner=runner,
-            )
-            if run.final_text:  # agent 散文 → worker 的 redirect 捕获进 job.output（与 ingest 同口径）
-                print(run.final_text)
-            return run
-
-        n = len(body.targets) if body.targets else None
-        title = f"提取概念/实体：{n} 个目标" if n else f"提取概念/实体：至多 {body.limit} 个高频缺页"
-        params = {"limit": body.limit, "min_refs": body.min_refs, "targets": body.targets}
-        return await _submit_task("heal", title, params, _job, "物化")
-
-    # 写（唯一写入口之一 = backfill，P4.8）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
-    # 与 ingest 端点逐行同构——整体复用 run_query(backfill=True)，答案 + 门禁回执经 stdout 捕获进 job.output。
-    # 比 ingest 还薄：_job 返回退出码 int → worker 走既有 int 鸭子分流分支、result 恒 None（决策P4.8-2）。
+    # 写（唯一写入口之一 = backfill，P4.8）：即时入队、立刻返回 job_id。
     @_writer_only(app.post("/api/backfill"))  # reader 下不注册（回填是 gated 写，决策P4.9-2）
     async def backfill(body: BackfillBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10 / P4.8-5）
-
-        def _job(emit) -> int:  # 收 emit、忽略；返回退出码 int（与 ingest 同形）→ result 恒 None
-            return run_query(
-                body.question,
-                root=root,
-                backfill=True,
-                model=body.model or model,
-                runner=runner,
-            )
-
-        q = body.question.strip()
-        title = f"沉淀：{q[:40]}{'…' if len(q) > 40 else ''}"
-        return await _submit_task("backfill", title, {"question": body.question}, _job, "沉淀")
+        return await _submit_task("backfill", body)
 
     # audit 预览（零 LLM 读，决策P4.12-4）：只算漂移源组（== audit --dry-run），不入队、不触 Agentao、
     # 不取 raw/ 快照；阻塞跑 to_thread。limit 默认 import 自 CLI 的 audit.DEFAULT_LIMIT、越界 422（Query ge=1）。
@@ -1059,24 +1090,10 @@ def create_app(
         return await anyio.to_thread.run_sync(_audit_preview, root, limit)
 
     # audit 审计（写，决策P4.12-2）：入单写者 FIFO 队列、即时返回 job_id、前端轮询（与 heal 同构）。
-    # 走子进程 runner、过 P2 写门禁 + P2.1 源不回退闸（page_guard=True 由 core 内写死，决策P3.7-4）；
-    # 返回结构化 AuditRun → worker 鸭子分流存 job.result（决策P4.12-1，零 jobs.py 改动）。
     @_writer_only(app.post("/api/audit"))  # reader 下不注册（审计是 gated 写，决策P4.9-2）
     async def audit(body: AuditBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10 / P4.12-6）
-
-        def _job(emit) -> AuditRun:  # 收 emit、忽略；返回结构化结果（非 int）→ worker 鸭子分流存 result
-            run = run_audit_result(
-                root=root,
-                limit=body.limit,
-                model=body.model or model,
-                runner=runner,
-            )
-            if run.final_text:  # agent 散文 → worker 的 redirect 捕获进 job.output（与 heal 同口径）
-                print(run.final_text)
-            return run
-
-        return await _submit_task("audit", f"语义审计：至多 {body.limit} 组漂移源", {"limit": body.limit}, _job, "审计")
+        return await _submit_task("audit", body)
 
     @app.get("/api/jobs/{job_id}")
     async def job_status(job_id: str) -> dict:
@@ -1113,6 +1130,54 @@ def create_app(
         if out is None:
             raise HTTPException(status_code=404, detail=f"未知任务：{task_id}")
         return out
+
+    def _envelope_or_404(task_id: str) -> dict:
+        env = None if tasks is None else tasks.envelope(task_id)
+        if env is None:
+            # 一键入库任务也会被列出来，但它的控制在「导入」面板原卡上（决策 D7）。
+            if tasks is not None and tasks.detail(task_id) is not None:
+                raise HTTPException(status_code=409, detail="一键入库任务请在「导入」面板操作。")
+            raise HTTPException(status_code=404, detail=f"未知任务：{task_id}")
+        return env
+
+    # P4.33 T2：取消。排队中 / 等锁中的任务直接取消（worker 取到时跳过，没有写入）；运行中的取消要回滚，
+    # 在后续 PR 实现，现在返回 409。取消只会让写入**更少**，不受层③ 限制。
+    @_writer_only(app.post("/api/tasks/{task_id}/cancel"))
+    async def task_cancel(task_id: str) -> dict:
+        env = await anyio.to_thread.run_sync(_envelope_or_404, task_id)
+        if not await anyio.to_thread.run_sync(tasks.cancel, task_id, jobs.cancel_task):
+            # 取消前读的状态可能已过时（期间 worker 已开始）：报此刻的状态。
+            now = await anyio.to_thread.run_sync(tasks.envelope, task_id) or env
+            if now["state"] in PENDING_STATES:  # 记录还显示未开始：要么刚取得写锁开跑，要么属于别的 Web 进程
+                raise HTTPException(status_code=409, detail="任务刚开始执行，或不是本服务进程提交的，不能取消。")
+            raise HTTPException(status_code=409, detail=f"任务当前状态为 {now['state']}，不能取消。")
+        return {"task_id": task_id, "state": "cancelled"}
+
+    # 重试：按信封里存的参数新建一个任务（新 id，`retry_of` 指回原任务）。是一次新的提交，受层③ 423。
+    @_writer_only(app.post("/api/tasks/{task_id}/retry"))
+    async def task_retry(task_id: str) -> dict:
+        env = await anyio.to_thread.run_sync(_envelope_or_404, task_id)  # 先 404，再 423
+        _reject_if_writable_active()
+        if env["state"] not in DELETABLE_STATES:  # 已结束（含中断）的才能重试
+            raise HTTPException(status_code=409, detail=f"任务当前状态为 {env['state']}，不能重试。")
+        model_cls = _TASK_BODIES.get(env.get("kind"))
+        if model_cls is None:
+            raise HTTPException(status_code=409, detail="这种任务不能重试。")
+        try:
+            body = model_cls(**(env.get("params") or {}))
+        except (TypeError, ValueError) as exc:  # 信封参数不合法（被手改过、不是对象等）
+            raise HTTPException(status_code=409, detail=f"任务参数无效，不能重试：{exc}") from None
+        return await _submit_task(env["kind"], body, retry_of=task_id)
+
+    # 删除记录：只删已结束的任务的信封、日志与任务目录；不碰 wiki/ 与 .trash/。有未处理的前像（T2）→ 409。
+    @_writer_only(app.delete("/api/tasks/{task_id}"))
+    async def task_delete(task_id: str) -> dict:
+        env = await anyio.to_thread.run_sync(_envelope_or_404, task_id)
+        try:
+            await anyio.to_thread.run_sync(tasks.delete, task_id)
+        except TaskStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return {"deleted": env["id"]}
 
     # 问答 / 多轮会话（只读嵌入，决策P4-8）：POST 直接返回 text/event-stream，前端 fetch 读 body。
     @app.post("/api/chat")

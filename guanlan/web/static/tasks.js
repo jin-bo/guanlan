@@ -31,7 +31,8 @@ function taskIsRunning(row) {
 
 // 需要快轮询的状态：真在推进中。一键入库的「待确认 / 已暂停」也归「进行中」组，但可能一停数天，不该 1s 轮询。
 function taskIsMoving(row) {
-  return row && (row.state === "queued" || row.state === "running" || row.state === "preparing");
+  // 等待写锁（命令行占着库）可能长达 30 分钟、期间没有进展：按空闲间隔轮询即可。
+  return row && ["queued", "running", "preparing"].includes(row.state);
 }
 
 // 任务标题：按 kind + params 用当前语言拼（服务端 title 只作 CLI/日志用的中文兜底）。t() 首参须为字面量（决策P4.7-8）。
@@ -56,6 +57,7 @@ function taskTitle(row) {
 function taskStateLabel(state) {
   switch (state) {
     case "queued": return t("task.state.queued");
+    case "waiting_lock": return t("task.state.waitingLock");
     case "running": return t("task.state.running");
     case "succeeded": return t("task.state.succeeded");
     case "failed": return t("task.state.failed");
@@ -78,12 +80,13 @@ function taskStateClass(state) {
 
 // ── 提交入口用：登记一个刚提交的任务，立即切到快轮询 ─────────────────────────────
 
-function trackSubmittedTask(taskId, kind, params) {
+function trackSubmittedTask(taskId, kind, params, deduplicated = false) {
   if (!taskId) return;
-  const row = { id: taskId, source: "jobs", kind, params: params || {}, state: "queued", group: "active" };
+  const row = taskTable.get(taskId) || { id: taskId, source: "jobs", kind, params: params || {}, state: "queued", group: "active" };
   taskTable.set(taskId, row);
   taskTracked.add(taskId);
-  showToast(t("task.toast.submitted", taskTitle(row)), "info");
+  // 查重命中（同样的任务还没结束）：不新建，提示已在队列里（P4.33 §4.7）。
+  showToast(deduplicated ? t("task.toast.deduplicated", taskTitle(row)) : t("task.toast.submitted", taskTitle(row)), "info");
   renderTaskBadge();
   if (taskDrawerOpen()) renderTaskDrawer();
   scheduleTaskPoll(0);
@@ -184,7 +187,7 @@ function renderTaskBadge() {
   // 刚提交、还没出现在列表里的任务也算排队，免得提交后徽标空一拍。
   for (const id of taskTracked) if (!rows.some((r) => r.id === id) && taskTable.get(id)) rows.push(taskTable.get(id));
   const running = rows.filter(taskIsRunning).length;
-  const queued = rows.filter((r) => r.state === "queued").length;
+  const queued = rows.filter((r) => r.state === "queued" || r.state === "waiting_lock").length;
   const attention = taskView.attention.length;
   const parts = [];
   if (running) parts.push(t("task.badge.running", running));
@@ -286,6 +289,7 @@ function renderTaskRow(row) {
   meta.className = "task-meta";
   const bits = [];
   if (row.kind === "import" && row.total) bits.push(t("task.importProgress", row.done || 0, row.total));
+  if (row.state === "waiting_lock" && row.holder) bits.push(t("task.waitingHolder", row.holder)); // 谁占着库
   if (row.progress) bits.push(row.progress); // 心跳行（服务端中文，同既有 pollJob 口径）
   const when = row.finished || row.started || row.created;
   if (when) bits.push(when);
@@ -344,8 +348,66 @@ async function refreshExpandedTask() {
   } catch { /* 网络抖动 / 已被清理：保留已拉到的日志，下一轮再试 */ }
 }
 
+// 详情顶部的操作按钮（P4.33 T2）：还没开始的（排队 / 等锁）可取消；已结束的可重试、可删除记录。
+// 运行中的取消要回滚，在后续版本提供。
+function renderTaskActions(row, box) {
+  const actions = [];
+  if (row.state === "queued" || row.state === "waiting_lock") actions.push(["cancel", t("task.action.cancel")]);
+  if (["succeeded", "failed", "cancelled", "interrupted"].includes(row.state)) {
+    actions.push(["retry", t("task.action.retry")]);
+    actions.push(["delete", t("task.action.delete")]);
+  }
+  if (!actions.length) return;
+  const bar = document.createElement("div");
+  bar.className = "task-actions";
+  for (const [act, label] of actions) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.addEventListener("click", (e) => { e.stopPropagation(); taskAction(row, act, b); });
+    bar.appendChild(b);
+  }
+  box.appendChild(bar);
+}
+
+async function taskAction(row, act, btn) {
+  btn.disabled = true;
+  const id = encodeURIComponent(row.id);
+  const url = act === "delete" ? `/api/tasks/${id}` : `/api/tasks/${id}/${act}`;
+  try {
+    const res = await fetch(url, { method: act === "delete" ? "DELETE" : "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 423) throw new Error(t("task.busyWritable"));
+    if (!res.ok) throw new Error(apiDetail(data, res.status));
+    if (act === "retry") {
+      // 服务端建不了任务记录（workspace 写不了）时作业照跑、只是不进任务中心：也要告诉用户已提交，免得再点一次。
+      if (data.task_id) trackSubmittedTask(data.task_id, row.kind, row.params, data.deduplicated);
+      else showToast(t("task.toast.submittedUntracked", taskTitle(row)), "info");
+    }
+    if (act === "delete") {
+      taskTable.delete(row.id);
+      taskTracked.delete(row.id);
+      taskExpanded = null;
+      for (const g of ["attention", "active", "recent"]) taskView[g] = taskView[g].filter((r) => r.id !== row.id);
+    }
+    if (act === "cancel") {
+      taskTracked.delete(row.id); // 自己取消的：不再弹「任务已取消」toast
+      const cur = taskTable.get(row.id);
+      if (cur) taskTable.set(row.id, { ...cur, state: "cancelled", group: "recent" });
+      taskLog.final = false; // 让展开的详情再拉一次终态
+    }
+  } catch (e) {
+    showToast(t("task.actionFail", e.message), "bad");
+  } finally {
+    btn.disabled = false;
+  }
+  renderTaskDrawer();
+  scheduleTaskPoll(0);
+}
+
 function renderTaskDetail(row, box) {
   if (taskLog.id !== row.id) return;
+  renderTaskActions(row, box);
   if (row.state === "interrupted") {
     const p = document.createElement("p");
     p.className = "report-bad";
@@ -355,6 +417,11 @@ function renderTaskDetail(row, box) {
     const p = document.createElement("p");
     p.className = "muted";
     p.textContent = t("task.cancelledHint");
+    box.appendChild(p);
+  } else if (row.state === "waiting_lock") {
+    const p = document.createElement("p");
+    p.className = "muted";
+    p.textContent = t("task.waitingLockHint");
     box.appendChild(p);
   }
   // 终态：复用既有回执渲染（heal/audit 结构化回执 + 退出码徽标 + agent 散文）。
