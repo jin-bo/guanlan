@@ -118,7 +118,7 @@ def _rel(root: Path, path: Path) -> str:
 
 
 def _under_root(root: Path, path: Path) -> Path:
-    """相对路径按库根解释（docstring 里的 `workspace/jobs/<id>/before`、`.trash/job-<id>@…` 都是相对库根的），
+    """相对路径按库根解释（如 `.trash/job-<id>@…`；Web 任务层传的前像目录是库外的绝对路径），
     不按进程 cwd——Web 宿主 `-C` 启动时 cwd 不是库根。"""
     path = Path(path)
     return path if path.is_absolute() else Path(root) / path
@@ -206,7 +206,7 @@ def _dump(obj: object) -> bytes:
 
 
 def take(root: Path, dest: Path) -> Preimage:
-    """拍前像到 `dest`（如 `workspace/jobs/<id>/before`）。`dest` 已存在则先清掉（上次残缺的）。
+    """拍前像到 `dest`（Web 任务层用库外的 `~/.guanlan/jobs/<库摘要>/<id>/before`）。`dest` 已存在则先清掉（上次残缺的）。
 
     依次写 `files/`、`manifest.json`、`raw.json`、`baseline.json`，各自 fsync，**最后**写 `READY`。
     任一步失败直接上抛：此时没有 `READY`，调用方不得启动 Agent。
@@ -479,7 +479,7 @@ def rollback(root: Path, pre: Preimage, trash_dir: Path, *, meta: dict | None = 
         p = root / rel
         if p.is_symlink():
             continue
-        # 前像放在 workspace/ 下，清单可能被改过：只补回目标仍在库内的链接，指向库外的不建，列进回执由人处理。
+        # 清单可能被改过（前像放在库外也不是 Agent 写不到）：只补回目标仍在库内的链接，指向库外的不建，列进回执由人处理。
         if not _link_target_inside(root, rel, target):
             result.links_skipped.append(rel)
             continue

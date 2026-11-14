@@ -610,7 +610,9 @@ class JobQueue:
                 job.state = "done"
                 if job.task_id is not None:
                     with self._lock:  # 已结束的不能再取消：不必再按 task_id 查到它（免得这张表随任务数只增不减）
-                        self._by_task.pop(job.task_id, None)
+                        # 只摘自己：同一 task_id 可能已登记了新作业（撤下的回滚还在队列里时又点了回滚）。
+                        if self._by_task.get(job.task_id) is job:
+                            del self._by_task[job.task_id]
                 # 任务信封收尾（P4.33）：在 set() 之前，submit_and_wait 的等待者醒来时信封已是终态。
                 self._notify("on_finish", job)
                 job.done_event.set()

@@ -25,14 +25,24 @@ function taskIsActive(row) {
   return row && row.group === "active";
 }
 
+// 持写锁在写的：运行中、取消后回滚中、中断任务回滚中（一键入库的「准备中」同列）。
+const TASK_RUNNING_STATES = ["running", "cancelling", "rolling_back", "preparing"];
+
+// 回滚作业还没开始执行：排在别的写任务后面，或在等命令行释放库（服务端 rollback_queued 两种都算）。
+function taskIsWaitingRollback(row) {
+  return row && row.state === "rolling_back" && !!row.rollback_queued;
+}
+
 function taskIsRunning(row) {
-  return row && (row.state === "running" || row.state === "preparing");
+  return row && TASK_RUNNING_STATES.includes(row.state) && !taskIsWaitingRollback(row);
 }
 
 // 需要快轮询的状态：真在推进中。一键入库的「待确认 / 已暂停」也归「进行中」组，但可能一停数天，不该 1s 轮询。
 function taskIsMoving(row) {
   // 等待写锁（命令行占着库）可能长达 30 分钟、期间没有进展：按空闲间隔轮询即可。
-  return row && ["queued", "running", "preparing"].includes(row.state);
+  // 回滚在等命令行释放库（带占用者）时同理。
+  if (taskIsWaitingRollback(row)) return false;
+  return row && (row.state === "queued" || TASK_RUNNING_STATES.includes(row.state));
 }
 
 // 任务标题：按 kind + params 用当前语言拼（服务端 title 只作 CLI/日志用的中文兜底）。t() 首参须为字面量（决策P4.7-8）。
@@ -63,6 +73,10 @@ function taskStateLabel(state) {
     case "failed": return t("task.state.failed");
     case "cancelled": return t("task.state.cancelled");
     case "interrupted": return t("task.state.interrupted");
+    case "cancelling": return t("task.state.cancelling");
+    case "rolling_back": return t("task.state.rollingBack");
+    case "rollback_failed": return t("task.state.rollbackFailed");
+    case "abandoned": return t("task.state.abandoned");
     case "preparing": return t("task.state.preparing");
     case "awaiting_confirm": return t("task.state.awaitingConfirm");
     case "paused": return t("task.state.paused");
@@ -73,8 +87,8 @@ function taskStateLabel(state) {
 
 function taskStateClass(state) {
   if (state === "succeeded" || state === "done") return "ok";
-  if (state === "failed" || state === "interrupted") return "bad";
-  if (state === "running" || state === "preparing") return "run";
+  if (state === "failed" || state === "interrupted" || state === "rollback_failed") return "bad";
+  if (TASK_RUNNING_STATES.includes(state)) return "run";
   return "idle";
 }
 
@@ -173,6 +187,8 @@ function noteTaskRow(row) {
 function onTaskFinished(row) {
   const title = taskTitle(row);
   if (row.state === "succeeded" || row.state === "done") showToast(t("task.toast.succeeded", title), "ok");
+  // 取消后回滚、中断任务回滚：都提示「已回滚」（详情里有回执与 .trash/ 位置）。
+  else if (row.state === "cancelled" && row.rollback) showToast(t("task.toast.rolledBack", title), "info");
   else if (row.state === "cancelled") showToast(t("task.toast.cancelled", title), "info");
   else showToast(t("task.toast.failed", title, taskStateLabel(row.state)), "bad");
   loadPages(); // 写任务可能新建/改了页：刷新右栏列表
@@ -187,7 +203,7 @@ function renderTaskBadge() {
   // 刚提交、还没出现在列表里的任务也算排队，免得提交后徽标空一拍。
   for (const id of taskTracked) if (!rows.some((r) => r.id === id) && taskTable.get(id)) rows.push(taskTable.get(id));
   const running = rows.filter(taskIsRunning).length;
-  const queued = rows.filter((r) => r.state === "queued" || r.state === "waiting_lock").length;
+  const queued = rows.filter((r) => r.state === "queued" || r.state === "waiting_lock" || taskIsWaitingRollback(r)).length;
   const attention = taskView.attention.length;
   const parts = [];
   if (running) parts.push(t("task.badge.running", running));
@@ -289,7 +305,7 @@ function renderTaskRow(row) {
   meta.className = "task-meta";
   const bits = [];
   if (row.kind === "import" && row.total) bits.push(t("task.importProgress", row.done || 0, row.total));
-  if (row.state === "waiting_lock" && row.holder) bits.push(t("task.waitingHolder", row.holder)); // 谁占着库
+  if ((row.state === "waiting_lock" || row.state === "rolling_back") && row.holder) bits.push(t("task.waitingHolder", row.holder)); // 谁占着库
   if (row.progress) bits.push(row.progress); // 心跳行（服务端中文，同既有 pollJob 口径）
   const when = row.finished || row.started || row.created;
   if (when) bits.push(when);
@@ -348,14 +364,24 @@ async function refreshExpandedTask() {
   } catch { /* 网络抖动 / 已被清理：保留已拉到的日志，下一轮再试 */ }
 }
 
-// 详情顶部的操作按钮（P4.33 T2）：还没开始的（排队 / 等锁）可取消；已结束的可重试、可删除记录。
-// 运行中的取消要回滚，在后续版本提供。
+// 详情顶部的操作按钮（P4.33 T2）：排队 / 等锁 / 运行中的可取消（运行中的取消会回滚）；中断 / 回滚失败的
+// 可回滚或保留现状（有前像时）；已结束的可重试；没有前像的可删除记录。
 function renderTaskActions(row, box) {
   const actions = [];
-  if (row.state === "queued" || row.state === "waiting_lock") actions.push(["cancel", t("task.action.cancel")]);
-  if (["succeeded", "failed", "cancelled", "interrupted"].includes(row.state)) {
-    actions.push(["retry", t("task.action.retry")]);
-    actions.push(["delete", t("task.action.delete")]);
+  // 回滚中：只有还没开始的（排队或等命令行释放库）可撤下；已开始执行的不给按钮（服务端也会 409）。
+  if (["queued", "waiting_lock", "running"].includes(row.state) || taskIsWaitingRollback(row)) {
+    actions.push(["cancel", t("task.action.cancel")]);
+  }
+  if ((row.state === "interrupted" || row.state === "rollback_failed") && row.has_preimage) {
+    actions.push(["rollback", t("task.action.rollback")]);
+  }
+  if (row.state === "interrupted" || row.state === "rollback_failed") actions.push(["abandon", t("task.action.abandon")]);
+  if (["succeeded", "failed", "cancelled", "interrupted", "rollback_failed", "abandoned"].includes(row.state)) {
+    // 有前像的先回滚或保留现状：先重试再回滚旧任务，会把重试的写入一并移走。
+    if (!row.has_preimage) {
+      actions.push(["retry", t("task.action.retry")]);
+      actions.push(["delete", t("task.action.delete")]);
+    }
   }
   if (!actions.length) return;
   const bar = document.createElement("div");
@@ -370,7 +396,18 @@ function renderTaskActions(row, box) {
   box.appendChild(bar);
 }
 
+// 需要确认的操作：运行中取消（会回滚）、回滚、保留现状。
+function taskActionConfirm(row, act) {
+  if (act === "cancel" && row.state === "running") return window.confirm(t("task.confirm.cancelRunning"));
+  if (act === "rollback") return window.confirm(t("task.confirm.rollback"));
+  if (act === "abandon") {
+    return window.confirm(row.has_preimage ? t("task.confirm.abandon") : t("task.confirm.abandonNoPreimage"));
+  }
+  return true;
+}
+
 async function taskAction(row, act, btn) {
+  if (!taskActionConfirm(row, act)) return;
   btn.disabled = true;
   const id = encodeURIComponent(row.id);
   const url = act === "delete" ? `/api/tasks/${id}` : `/api/tasks/${id}/${act}`;
@@ -390,12 +427,29 @@ async function taskAction(row, act, btn) {
       taskExpanded = null;
       for (const g of ["attention", "active", "recent"]) taskView[g] = taskView[g].filter((r) => r.id !== row.id);
     }
-    if (act === "cancel") {
+    if (act === "cancel" && data.state === "cancelled") {
       taskTracked.delete(row.id); // 自己取消的：不再弹「任务已取消」toast
       const cur = taskTable.get(row.id);
       if (cur) taskTable.set(row.id, { ...cur, state: "cancelled", group: "recent" });
-      taskLog.final = false; // 让展开的详情再拉一次终态
     }
+    // 运行中取消（回滚中）/ 回滚：继续跟踪，结束时按结果弹 toast（回滚失败要让人看到）。
+    if (data.state === "cancelling" || data.state === "rolling_back") {
+      const cur = taskTable.get(row.id);
+      if (cur) taskTable.set(row.id, { ...cur, state: data.state, group: "active" });
+      taskTracked.add(row.id);
+    }
+    if (act === "cancel" && (data.state === "interrupted" || data.state === "rollback_failed")) {
+      // 撤下了排队中的回滚：回到「需要处理」。
+      const cur = taskTable.get(row.id);
+      if (cur) taskTable.set(row.id, { ...cur, state: data.state, group: "attention", holder: null });
+      taskTracked.delete(row.id);
+    }
+    if (act === "abandon") {
+      const cur = taskTable.get(row.id);
+      if (cur) taskTable.set(row.id, { ...cur, state: "abandoned", group: "recent", has_preimage: false });
+      for (const g of ["attention", "active"]) taskView[g] = taskView[g].filter((r) => r.id !== row.id);
+    }
+    if (act !== "delete" && act !== "retry") taskLog.final = false; // 让展开的详情再拉一次新状态
   } catch (e) {
     showToast(t("task.actionFail", e.message), "bad");
   } finally {
@@ -405,24 +459,43 @@ async function taskAction(row, act, btn) {
   scheduleTaskPoll(0);
 }
 
+function taskHint(box, text, cls = "muted") {
+  const p = document.createElement("p");
+  p.className = cls;
+  p.textContent = text;
+  box.appendChild(p);
+}
+
+// 回滚回执（取消后的回滚、中断任务的回滚）：写回 / 移走多少、trash 在哪、raw/ 与 check 的复核结果。
+function renderRollbackReceipt(rb, box) {
+  if (!rb) return;
+  if (rb.error) { taskHint(box, t("task.rollback.error", rb.error), "report-bad"); return; }
+  const restored = (rb.restored || []).length, removed = (rb.removed || []).length;
+  taskHint(box, restored + removed ? t("task.rollback.done", restored, removed, rb.trash || "") : t("task.rollback.nothing"));
+  if (rb.raw_ok === false) taskHint(box, t("task.rollback.rawChanged", (rb.raw_changes || []).join(", ")), "report-bad");
+  if (rb.check_ok === false) taskHint(box, t("task.rollback.newViolations", (rb.new_violations || []).length), "report-bad");
+  if ((rb.links_skipped || []).length) taskHint(box, t("task.rollback.linksSkipped", rb.links_skipped.join(", ")), "report-bad");
+}
+
 function renderTaskDetail(row, box) {
   if (taskLog.id !== row.id) return;
   renderTaskActions(row, box);
   if (row.state === "interrupted") {
-    const p = document.createElement("p");
-    p.className = "report-bad";
-    p.textContent = t("task.interruptedHint");
-    box.appendChild(p);
+    taskHint(box, t("task.interruptedHint"), "report-bad");
+    if (row.has_preimage) taskHint(box, t("task.interruptedRollbackHint"));
+  } else if (row.state === "rollback_failed") {
+    taskHint(box, t("task.rollbackFailedHint"), "report-bad");
+    renderRollbackReceipt(row.rollback, box);
+  } else if (row.state === "cancelling") {
+    taskHint(box, t("task.cancellingHint"));
+  } else if (row.state === "rolling_back") {
+    taskHint(box, t("task.rollingBackHint"));
+  } else if (row.state === "cancelled" && row.rollback) {
+    renderRollbackReceipt(row.rollback, box);
   } else if (row.state === "cancelled") {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = t("task.cancelledHint");
-    box.appendChild(p);
+    taskHint(box, t("task.cancelledHint"));
   } else if (row.state === "waiting_lock") {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = t("task.waitingLockHint");
-    box.appendChild(p);
+    taskHint(box, t("task.waitingLockHint"));
   }
   // 终态：复用既有回执渲染（heal/audit 结构化回执 + 退出码徽标 + agent 散文）。
   if (row.state === "succeeded" || row.state === "failed") {

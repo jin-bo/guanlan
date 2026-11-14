@@ -458,7 +458,7 @@ def create_app(
         try:
             tasks = TaskStore(root, summarize=_job_result_dict)
             tasks.recover()
-        except OSError:
+        except (OSError, RuntimeError):  # RuntimeError：确定不了家目录（前像放 ~/.guanlan/jobs/）
             tasks = None  # 端点退化：列表为空、详情 404，提交照常入队（_submit_task 不建信封）
         if tasks is not None:
             write_gate.describe_writer = tasks.running_brief
@@ -468,7 +468,7 @@ def create_app(
         write_lock=write_gate.write_lock,
         on_job_done=lambda kind: (
             write_gate.bump_wiki_generation()
-            if kind in ("ingest", "heal", "backfill", "audit", "oneclick")
+            if kind in ("ingest", "heal", "backfill", "audit", "oneclick", "rollback")
             else None
         ),
     )
@@ -1044,6 +1044,8 @@ def create_app(
                 # 建信封的 await 让出了事件循环：端点入口查过的层③ 可能已被期间起跑的可写 turn 推翻。入队前
                 # 再查一次（同步、紧贴 enqueue），保持 P4.33 之前「查完即入队、中间无让出点」的原子性。
                 _reject_if_writable_active()
+                if task_id is not None:  # P4.33 T2：取得写锁后先拍前像，运行中可取消、按前像回滚
+                    fn = tasks.guarded(task_id, fn)
                 job_id = jobs.enqueue(kind, fn, progress=_wiki_job_progress(verb), task_id=task_id)
             except BaseException:
                 if task_id is not None:
@@ -1140,18 +1142,52 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"未知任务：{task_id}")
         return env
 
-    # P4.33 T2：取消。排队中 / 等锁中的任务直接取消（worker 取到时跳过，没有写入）；运行中的取消要回滚，
-    # 在后续 PR 实现，现在返回 409。取消只会让写入**更少**，不受层③ 限制。
+    # P4.33 T2：取消。排队中 / 等锁中的任务直接取消（worker 取到时跳过，没有写入）；运行中的任务置停止标志、
+    # 记 cancelling，作业随即整组结束 Agent 子进程并按前像回滚（§4.4）。取消只会让写入**更少**，不受层③ 限制。
     @_writer_only(app.post("/api/tasks/{task_id}/cancel"))
     async def task_cancel(task_id: str) -> dict:
         env = await anyio.to_thread.run_sync(_envelope_or_404, task_id)
-        if not await anyio.to_thread.run_sync(tasks.cancel, task_id, jobs.cancel_task):
-            # 取消前读的状态可能已过时（期间 worker 已开始）：报此刻的状态。
+        if await anyio.to_thread.run_sync(tasks.cancel, task_id, jobs.cancel_task):
+            # 排队 / 等锁的任务记 cancelled；排队中的回滚撤下后退回 interrupted / rollback_failed。
             now = await anyio.to_thread.run_sync(tasks.envelope, task_id) or env
-            if now["state"] in PENDING_STATES:  # 记录还显示未开始：要么刚取得写锁开跑，要么属于别的 Web 进程
-                raise HTTPException(status_code=409, detail="任务刚开始执行，或不是本服务进程提交的，不能取消。")
-            raise HTTPException(status_code=409, detail=f"任务当前状态为 {now['state']}，不能取消。")
-        return {"task_id": task_id, "state": "cancelled"}
+            return {"task_id": task_id, "state": now["state"]}
+        if await anyio.to_thread.run_sync(tasks.request_stop, task_id):
+            return {"task_id": task_id, "state": "cancelling"}
+        # 取消前读的状态可能已过时（期间 worker 已开始或已收尾）：报此刻的状态。
+        now = await anyio.to_thread.run_sync(tasks.envelope, task_id) or env
+        if now["state"] in (*PENDING_STATES, "running"):  # 刚取得写锁 / 正在收尾，或属于别的 Web 进程
+            raise HTTPException(status_code=409, detail="任务正处在开始或收尾的瞬间，或不是本服务进程提交的，暂时不能取消。")
+        if now["state"] == "rolling_back":
+            raise HTTPException(status_code=409, detail="回滚已经开始执行，不能取消。")
+        raise HTTPException(status_code=409, detail=f"任务当前状态为 {now['state']}，不能取消。")
+
+    # P4.33 T2：中断 / 回滚失败的任务——回滚到任务开始前（作为写作业入队，持写锁），或保留现状（删前像）。
+    # 残留 Agent 进程的自动探测（§4.6）暂缓：前端确认框提示用户先自查。回滚是写，受层③ 423。
+    @_writer_only(app.post("/api/tasks/{task_id}/rollback"))
+    async def task_rollback(task_id: str) -> dict:
+        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423
+        await anyio.to_thread.run_sync(_envelope_or_404, task_id)
+
+        def _enqueue(tid: str, fn) -> str:
+            return jobs.enqueue("rollback", fn, task_id=tid)
+
+        # 查信封的 await 让出了事件循环，入口查过的层③ 可能已被期间起跑的可写 turn 推翻：紧贴入队再查一次，
+        # 且入队同步执行（只是加锁改一份信封），与 `_submit_task` 一样「查完即入队、中间无让出点」。
+        _reject_if_writable_active()
+        try:
+            tasks.start_rollback(task_id, _enqueue)
+        except TaskStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return {"task_id": task_id, "state": "rolling_back"}
+
+    @_writer_only(app.post("/api/tasks/{task_id}/abandon"))
+    async def task_abandon(task_id: str) -> dict:
+        await anyio.to_thread.run_sync(_envelope_or_404, task_id)
+        try:
+            await anyio.to_thread.run_sync(tasks.abandon, task_id)
+        except TaskStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return {"task_id": task_id, "state": "abandoned"}
 
     # 重试：按信封里存的参数新建一个任务（新 id，`retry_of` 指回原任务）。是一次新的提交，受层③ 423。
     @_writer_only(app.post("/api/tasks/{task_id}/retry"))
@@ -1160,6 +1196,9 @@ def create_app(
         _reject_if_writable_active()
         if env["state"] not in DELETABLE_STATES:  # 已结束（含中断）的才能重试
             raise HTTPException(status_code=409, detail=f"任务当前状态为 {env['state']}，不能重试。")
+        if await anyio.to_thread.run_sync(tasks.has_preimage, task_id):
+            # 还有前像：先决定回滚还是保留现状。否则重试写入之后再回滚旧任务，会把重试的写入一并移进 .trash/。
+            raise HTTPException(status_code=409, detail="这个任务还有前像，先选择「回滚」或「保留现状」，再重试。")
         model_cls = _TASK_BODIES.get(env.get("kind"))
         if model_cls is None:
             raise HTTPException(status_code=409, detail="这种任务不能重试。")
