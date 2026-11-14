@@ -49,7 +49,7 @@ Web 四处消费者同序**。
   宣称强于此。
 - **决策（跨命令不合并）**：gbrain 例「`index_missing` → `orphan`/`broken`」跨 `health` 与 `lint` 两条独立命令、
   各出独立报告，**无法在单份报告里合并**；故只在**各命令报告内**排序，并守住命令内那对真因果
-  （lint 的 `missing_entity → broken_link`）。真要跨命令统一根因视图属更大的口子（候选并入未来 `doctor` 聚合，非本条）。
+  （lint 的 `missing_entity → broken_link`）。真要跨命令统一根因视图属更大的口子（候选并入未来 `doctor` 聚合，非本条；Web 侧已由 [P4.34 体检](P4.34-Web体检.md) 的 `/api/doctor` 承接分组与去重）。
 - **决策（落 `run_*` 而非仅 `format_report`）**：排序在报告构造期一次完成，使文本/JSON/MCP/Web 同序；
   `format_report` 不再各自排序、零分叉。`check` 的 `Violation`（门禁、非建议）**不**走此排序。
 

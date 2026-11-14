@@ -46,10 +46,11 @@ function setModeBadge(mode) {
 function applyReaderMode() {
   const hideIds = [
     "history-btn",                                          // 枚举他人会话 → 破隔离（决策P4.9-3）
-    "feed-btn", "ingest-btn", "heal-btn", "backfill-btn", "audit-btn", "staging-btn", // 写端点（reader 下 404）
+    "feed-btn", "ingest-btn", "backfill-btn", "staging-btn",  // 写端点（reader 下 404）；补全/审计入口在体检里，reader 下不渲染
     "attach-btn",                                           // 上传是写（404）
     // graph-btn 自 P4.27 起保留：图谱面板走只读 /api/graph（reader 下注册）；面板内「静态列表」链接
     // 指向写者专属的 /graph，reader 下由 graph_view.js 不渲染（决策P4.27-2，原决策P4.9-11 的死链顾虑随之消解）。
+    "doctor-btn",                                           // 体检：维护诊断对只读读者无用（沿用决策P4.9-10；/api/doctor 只读、保留，P4.34）
     "mcp-btn",                                              // MCP 诊断：连接检查有外部副作用（404，决策P4.19-6）
     "tasks-btn",                                            // 后台任务中心：任务记录属写宿主（404，P4.33）
     "mode-badge",                                           // 姿态恒只读、/mode 整条禁用 → 冻结隐藏（决策P4.9-4 修订）
@@ -58,8 +59,6 @@ function applyReaderMode() {
     const el = document.getElementById(id);
     if (el) el.style.display = "none";
   }
-  // check/health/lint 维护诊断按钮（决策P4.9-10）：端点只读保留、仅隐藏按钮。
-  for (const el of document.querySelectorAll("[data-report]")) el.style.display = "none";
   // 收掉顶栏分隔符，避免隐藏后留连续竖线。
   for (const el of document.querySelectorAll(".topbar .act-sep")) el.style.display = "none";
 }

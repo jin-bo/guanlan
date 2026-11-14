@@ -3726,10 +3726,11 @@ def test_heal_serial_behind_ingest(kb) -> None:
 
 
 def test_heal_frontend_wired(client) -> None:
-    """前端接线（C2）：顶栏有 heal 按钮，前端拉 preview/POST heal 并按 result 渲染回执。"""
+    """前端接线（C2）：入口在体检「高频缺页」的修复按钮（P4.34 起顶栏无 heal 按钮），前端拉 preview/POST heal 并按 result 渲染回执。"""
     index = client.get("/").text
-    assert 'id="heal-btn"' in index
+    assert 'id="heal-btn"' not in index
     js = _FRONTEND_JS_SRC
+    assert 'action === "heal") openHealPreview(' in js
     assert "/api/heal/preview" in js
     assert '"/api/heal"' in js  # POST 物化
     assert "renderHealDone" in js and "job.result" in js  # 按结构化 result 渲染
@@ -3900,16 +3901,16 @@ def test_audit_reader_trims_post_keeps_preview(kb) -> None:
 
 
 def test_audit_frontend_wired(client) -> None:
-    """前端接线（C2）：顶栏有 audit 按钮，前端拉 preview/POST audit 并按 result 渲染回执。"""
+    """前端接线（C2）：入口在体检「漂移源」的修复按钮（P4.34 起顶栏无 audit 按钮），前端拉 preview/POST audit 并按 result 渲染回执。"""
     index = client.get("/").text
-    assert 'id="audit-btn"' in index
+    assert 'id="audit-btn"' not in index
     js = _FRONTEND_JS_SRC
+    assert 'action === "audit") openAuditPreview()' in js
     assert "/api/audit/preview" in js
     assert '"/api/audit"' in js  # POST 审计
     assert "renderAuditDone" in js and "job.result" in js  # 按结构化 result 渲染
-    # reader 部署须隐藏 audit 写按钮（与 feed/ingest/heal/backfill 同列，决策P4.9-9）：
-    # 字面 "audit-btn"（带引号、无 #）只命中 applyReaderMode 的 hideIds 项，不命中 $("#audit-btn") 监听器。
-    assert '"audit-btn"' in js
+    # reader 部署不渲染体检里的写入口（只留「打开图谱」，决策P4.9-9 / P4.34）。
+    assert 'action === "graph" || !readerMode' in js
 
 
 def test_audit_no_sse_no_path_param(client) -> None:

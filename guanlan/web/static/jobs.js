@@ -227,12 +227,10 @@ async function pollJob(jobId, label, renderDone, outClass = "", footer = null) {
 
 // ── heal：缺失实体物化（预览 worklist → 一键物化 → 轮询结构化回执，P4.3）─────────────
 //
-// 顶栏「heal」→ 浮层先拉零-LLM 预览（可调 limit / min-refs），列本批将物化的高频缺页 + 推迟项；
+// 体检「高频缺页 → 补全」（P4.34 起顶栏不再单设按钮）→ 浮层先拉零-LLM 预览（可调 limit / min-refs），列本批将物化的高频缺页 + 推迟项；
 // 「物化」→ POST /api/heal（入单写者队列，与 ingest 同 worker 串行）→ 复用 pollJob 骨架，但因
 // heal 有结构化 result，完成分支按 job.result 渲染回执（resolved / 仍断 / 非预期写 / 推迟 /
 // 退出码徽标），agent 散文取自 job.output（同 ingest）。
-
-$("#heal-btn").addEventListener("click", () => openHealPreview());
 
 async function openHealPreview(limit, minRefs) {
   showOverlay("overlay.heal", `<p class="muted">${escapeHtml(t("heal.computing"))}</p>`);
@@ -439,13 +437,11 @@ function renderHealDone(job, box) {
 
 // ── audit：语义审计（预览漂移源组 → 一键复核 → 轮询结构化回执，P4.12）──────────────
 //
-// 顶栏「审计」→ 浮层先拉零-LLM 预览（可调 limit），列本批将复核的漂移源组（raw 已变但 wiki 未重综合）
+// 体检「漂移源 → 审计」（P4.34 起顶栏不再单设按钮）→ 浮层先拉零-LLM 预览（可调 limit），列本批将复核的漂移源组（raw 已变但 wiki 未重综合）
 // + 推迟项；「审计」→ POST /api/audit（入单写者队列，与 ingest/heal/backfill 同 worker 串行）→ 复用
 // pollJob 骨架，因 audit 有结构化 result，完成分支按 job.result 渲染回执（已刷新指纹 / 未完成 / 推迟 /
 // 退出码徽标），agent 散文取自 job.output（同 heal）。无子集勾选（决策P4.12-3，唯一旋钮是 limit）；
 // 复用 heal-* 样式类（决策P4-3 克制，不引新 CSS）。
-$("#audit-btn").addEventListener("click", () => openAuditPreview());
-
 async function openAuditPreview(limit) {
   showOverlay("overlay.audit", `<p class="muted">${escapeHtml(t("audit.computing"))}</p>`);
   const suffix = limit ? `?limit=${encodeURIComponent(limit)}` : "";

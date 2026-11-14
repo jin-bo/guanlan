@@ -67,6 +67,7 @@ __all__ = [
     "index_md_links",
     "index_sync_state",
     "FINDING_CAUSAL_ORDER",
+    "TOPOLOGY_FINDING_KINDS",
     "order_findings",
     "report_dict",
     "report_json",
@@ -791,6 +792,16 @@ def validate_page_arg(arg: str) -> str | None:
     return name
 
 
+# 第三档拓扑优化建议（结构 nice-to-have，非坏数据）：lint 新增拓扑类型只在这里登记一处，
+# 下面的因果排序与 Web 体检（P4.34）的「结构提示」分组共用，免两份清单分叉。
+TOPOLOGY_FINDING_KINDS: tuple[str, ...] = (
+    "lint.hub_node",
+    "lint.thin_intercommunity_link",
+    "lint.isolated_community",
+    "lint.bridge_edge",
+    "lint.cut_vertex",
+)
+
 # finding 因果排序（gbrain 反向评审 §3「doctor-cause-rank」借形状；纯展示层、零 LLM、确定性）。
 # `health`/`lint` 默认平铺输出 findings，让人/Agent 可能先去手修**症状**而非**根因**。这里按
 # 「根因/数据完整性 → 内容质量 → 拓扑优化」三档给每个 kind 一个稳定 rank，输出时据此重排——
@@ -817,11 +828,7 @@ FINDING_CAUSAL_ORDER: tuple[str, ...] = (
     "health.uncharted_page",
     "health.overview_large",
     # 第三档 · 拓扑优化建议（结构 nice-to-have，非坏数据）
-    "lint.hub_node",
-    "lint.thin_intercommunity_link",
-    "lint.isolated_community",
-    "lint.bridge_edge",
-    "lint.cut_vertex",
+    *TOPOLOGY_FINDING_KINDS,
 )
 _FINDING_RANK = {kind: i for i, kind in enumerate(FINDING_CAUSAL_ORDER)}
 # 未登记 kind 的兜底 rank：排在所有已登记 kind 之后（恒大于任一已登记 rank）。
