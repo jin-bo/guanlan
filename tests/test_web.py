@@ -8156,3 +8156,14 @@ def test_mode_toggle_frontend_wired(client) -> None:
     assert "return switchMode(arg);" in js  # /mode <值> 走同一实现
     assert 'addEventListener("click"' in js and "switchMode(seg.dataset.mode)" in js
     assert '"mode-badge"' in js  # applyReaderMode 的 hideIds
+
+
+def test_composer_placeholder_follows_mode() -> None:
+    """输入框占位文案随姿态：setModeBadge 按 currentMode 选只读 / 可写两条文案，两种语言都有。"""
+    from guanlan.web.app import STATIC_DIR
+
+    js = _FRONTEND_JS_SRC
+    assert 't("composer.placeholderWrite") : t("composer.placeholder")' in js
+    i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
+    assert i18n.count('"composer.placeholderWrite":') == 2  # zh + en
+
