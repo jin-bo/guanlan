@@ -82,6 +82,8 @@ loadPages().then(() => {
     }
     if (readerMode) applyReaderMode(); // 隐藏写/历史/维护 chrome（决策P4.9-9/10/11/17）
   }
+  // 后台任务中心（P4.33）：reader 下 /api/tasks 不注册，不轮询。
+  if (!readerMode) startTaskPolling();
 
   // 按 ?c=<id> 懒恢复会话（刷新保留当前会话）：仅当该 id 仍可达才恢复，否则抹掉 ?c= 另起新会话——
   // 避免握着一个已删 / 进程重启后不存在的 id（下条提问会撞 404 未知会话）。

@@ -27,6 +27,8 @@
   <symbol id="i-graph" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></symbol>
   <!-- MCP 配置诊断（P4.19）：插头（外接工具接进来的意象）。 -->
   <symbol id="i-mcp" viewBox="0 0 24 24"><line x1="9" y1="2" x2="9" y2="8"/><line x1="15" y1="2" x2="15" y2="8"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><line x1="12" y1="17" x2="12" y2="22"/></symbol>
+  <!-- 后台任务中心（P4.33）：清单 + 进行中的环。 -->
+  <symbol id="i-tasks" viewBox="0 0 24 24"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><polyline points="3.5 6 4.5 7 6.5 5"/><polyline points="3.5 12 4.5 13 6.5 11"/><circle cx="5" cy="18" r="1.6"/></symbol>
   <!-- composer 图标（＋ / ↑ / ■）：粗描边，stroke=currentColor。 -->
   <symbol id="i-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
   <symbol id="i-up" viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="5"/><polyline points="6 11 12 5 18 11"/></symbol>
@@ -77,6 +79,9 @@
       <svg class="ico"><use href="#i-backfill"/></svg><span class="btn-zh" data-i18n="btn.backfill">回填</span></button>
     <button id="audit-btn" class="btn" data-i18n-title="tip.audit" title="audit：复核 raw 已变但 wiki 未重综合的漂移源，走写门禁">
       <svg class="ico"><use href="#i-audit"/></svg><span class="btn-zh" data-i18n="btn.audit">审计</span></button>
+    <!-- 后台任务中心（P4.33）：补录/沉淀/heal/审计提交后在后台跑，这里看进度与结果；徽标 = 运行 + 排队 + 需处理。 -->
+    <button id="tasks-btn" class="btn" data-i18n-title="tip.tasks" title="任务：后台运行的补录、回填、补全、审计与一键入库">
+      <svg class="ico"><use href="#i-tasks"/></svg><span class="btn-zh" data-i18n="btn.tasks">任务</span><span id="task-badge" class="task-badge" hidden></span></button>
     <span class="act-sep" aria-hidden="true"></span>
     <button data-report="check" class="btn" data-i18n-title="tip.check" title="check：确定性校验（frontmatter / 断链 / 源）">
       <svg class="ico"><use href="#i-check"/></svg><span class="btn-zh" data-i18n="btn.check">校验</span></button>
@@ -146,6 +151,15 @@
   </div>
 </div>
 
+<!-- 后台任务中心抽屉（P4.33）：右侧非模态面板，不遮挡聊天区。 -->
+<aside id="task-drawer" class="task-drawer hidden" aria-labelledby="task-drawer-title">
+  <div class="task-drawer-head">
+    <h3 id="task-drawer-title" data-i18n="task.drawerTitle">后台任务</h3>
+    <button id="task-drawer-close" data-i18n-aria="aria.overlayClose" aria-label="关闭">×</button>
+  </div>
+  <div id="task-drawer-body" class="task-drawer-body"></div>
+</aside>
+
 <script src="/static/i18n.js"></script>
 <!-- 原 app.js 按关注点拆分为多个经典脚本，共享全局作用域（非 ES module）。
      硬性次序仅两条：① core 必须最先（其 `const $` 等被各文件在载入期顶层 $(...) 接线时引用，
@@ -168,6 +182,7 @@
 <script src="/static/reports.js"></script>
 <script src="/static/graph_view.js"></script>
 <script src="/static/jobs.js"></script>
+<script src="/static/tasks.js"></script>
 <script src="/static/staging.js"></script>
 <script src="/static/attach.js"></script>
 <script src="/static/chat.js"></script>

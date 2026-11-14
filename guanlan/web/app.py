@@ -78,7 +78,8 @@ from .helpers import (
     _wiki_image_src,
     _workspace_image_src,
 )
-from .jobs import JobQueue, WriteGate
+from .jobs import Job, JobQueue, WriteGate
+from .tasks import TaskStore
 
 # 整模块导入（不 from-import 具体函数）：端点内经 `mcpdiag.<fn>` 取属性，测试可 monkeypatch
 # 单飞/慢检查而不必真起上游进程。模块本身零 mcp SDK 依赖（只导 agentao.mcp.config）。
@@ -371,6 +372,15 @@ class _NoCacheStatic(StaticFiles):
         return resp
 
 
+def _job_result_dict(job: Job) -> dict | None:
+    """作业的结构化回执（heal / audit 经既有序列化器；其余 None）。`/api/jobs/{id}` 与任务信封 `summary` 共用。"""
+    if isinstance(job.result, HealRun):
+        return heal_result_dict(job.result.result, job.result.postponed)
+    if isinstance(job.result, AuditRun):
+        return audit_result_dict(job.result.result, list(job.result.postponed))
+    return None
+
+
 def create_app(
     root: Path,
     *,
@@ -440,7 +450,21 @@ def create_app(
     # on_job_done：ingest/heal/backfill/audit 写 wiki/ → bump 代际，使可写会话缓存的 check 基线失效、下轮重拍
     # （投喂/上传写 raw//workspace、不动 wiki，不 bump，P4.5-4 缓存基线；backfill 写 syntheses/，决策P4.8-5；
     # audit 刷 source 页 raw_digest + LLM 可能重写正文，改 wiki/，决策P4.12-6）。
+    # P4.33 后台任务信封（决策 D1/D2）：补录/沉淀/heal/审计提交时建 `workspace/jobs/<id>.json`，JobQueue 经
+    # observer 回调翻状态、落日志。reader 不写，不建。启动即恢复：原执行进程已退出的在途信封改 interrupted/cancelled
+    # （决策 D5）；读不了/写不了 workspace（如只读介质）只是没有任务记录，不让 Web 因此起不来。
+    tasks: TaskStore | None = None
+    if not reader:
+        try:
+            tasks = TaskStore(root, summarize=_job_result_dict)
+            tasks.recover()
+        except OSError:
+            tasks = None  # 端点退化：列表为空、详情 404，提交照常入队（_submit_task 不建信封）
+        if tasks is not None:
+            write_gate.describe_writer = tasks.running_brief
+    app.state.tasks = tasks
     jobs = JobQueue(
+        observer=tasks,
         write_lock=write_gate.write_lock,
         on_job_done=lambda kind: (
             write_gate.bump_wiki_generation()
@@ -936,6 +960,26 @@ def create_app(
 
         return _progress
 
+    async def _submit_task(kind: str, title: str, params: dict, fn, verb: str) -> dict:
+        """P4.33：先建任务信封、再带 task_id 入队，返回 `{job_id, task_id}`。建信封失败（workspace 写不了）
+        仍照常入队、`task_id` 为 None——任务中心看不到它，但作业照跑，与 P4.33 之前的行为相同。"""
+        task_id: str | None = None
+        if tasks is not None:
+            try:
+                task_id = await anyio.to_thread.run_sync(tasks.create, kind, title, params)
+            except OSError:
+                task_id = None
+        try:
+            # 建信封的 await 让出了事件循环：端点入口查过的层③ 可能已被期间起跑的可写 turn 推翻。入队前
+            # 再查一次（同步、紧贴 enqueue），保持 P4.33 之前「查完即入队、中间无让出点」的原子性。
+            _reject_if_writable_active()
+            job_id = jobs.enqueue(kind, fn, progress=_wiki_job_progress(verb), task_id=task_id)
+        except BaseException:
+            if task_id is not None:
+                tasks.discard(task_id)
+            raise
+        return {"job_id": job_id, "task_id": task_id}
+
     # 写（唯一写入口 = ingest）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
     @_writer_only(app.post("/api/ingest"))  # reader 下不注册（入库是写，决策P4.9-2）
     async def ingest(body: IngestBody) -> dict:
@@ -950,7 +994,7 @@ def create_app(
                 runner=runner,
             )
 
-        return {"job_id": jobs.enqueue("ingest", _job, progress=_wiki_job_progress("摄入"))}
+        return await _submit_task("ingest", f"补录：{body.target}", {"target": body.target}, _job, "摄入")
 
     # heal 预览（零 LLM 读，决策P4.3-4）：只算 worklist（== heal --dry-run），不入队、不触 Agentao、
     # 不取 raw/ 快照；阻塞跑 to_thread。limit 默认用 Web 专属值（=5）、min_refs 与 CLI 同源，
@@ -981,7 +1025,10 @@ def create_app(
                 print(run.final_text)
             return run
 
-        return {"job_id": jobs.enqueue("heal", _job, progress=_wiki_job_progress("物化"))}
+        n = len(body.targets) if body.targets else None
+        title = f"提取概念/实体：{n} 个目标" if n else f"提取概念/实体：至多 {body.limit} 个高频缺页"
+        params = {"limit": body.limit, "min_refs": body.min_refs, "targets": body.targets}
+        return await _submit_task("heal", title, params, _job, "物化")
 
     # 写（唯一写入口之一 = backfill，P4.8）：即时入队、立刻返回 job_id；前端轮询 /api/jobs/{id}（无 SSE）。
     # 与 ingest 端点逐行同构——整体复用 run_query(backfill=True)，答案 + 门禁回执经 stdout 捕获进 job.output。
@@ -999,7 +1046,9 @@ def create_app(
                 runner=runner,
             )
 
-        return {"job_id": jobs.enqueue("backfill", _job, progress=_wiki_job_progress("沉淀"))}
+        q = body.question.strip()
+        title = f"沉淀：{q[:40]}{'…' if len(q) > 40 else ''}"
+        return await _submit_task("backfill", title, {"question": body.question}, _job, "沉淀")
 
     # audit 预览（零 LLM 读，决策P4.12-4）：只算漂移源组（== audit --dry-run），不入队、不触 Agentao、
     # 不取 raw/ 快照；阻塞跑 to_thread。limit 默认 import 自 CLI 的 audit.DEFAULT_LIMIT、越界 422（Query ge=1）。
@@ -1027,7 +1076,7 @@ def create_app(
                 print(run.final_text)
             return run
 
-        return {"job_id": jobs.enqueue("audit", _job, progress=_wiki_job_progress("审计"))}
+        return await _submit_task("audit", f"语义审计：至多 {body.limit} 组漂移源", {"limit": body.limit}, _job, "审计")
 
     @app.get("/api/jobs/{job_id}")
     async def job_status(job_id: str) -> dict:
@@ -1036,12 +1085,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"未知作业：{job_id}")
         # heal / audit 作业多回一个 `result`（机器回执，经既有序列化器）；ingest/投喂/backfill 为 null、
         # 前端忽略（决策P4.3-1 / P4.12-1）。agent 散文一律在 `output`，不进 `result`。
-        if isinstance(job.result, HealRun):
-            result = heal_result_dict(job.result.result, job.result.postponed)
-        elif isinstance(job.result, AuditRun):
-            result = audit_result_dict(job.result.result, list(job.result.postponed))
-        else:
-            result = None
+        result = _job_result_dict(job)
         return {
             "id": job.id,
             "kind": job.kind,
@@ -1050,7 +1094,25 @@ def create_app(
             "output": job.output,
             "progress": job.progress,  # 瞬时进度（A+ 心跳）：running 期活跃提示，done 后恒为 ""
             "result": result,
+            "task_id": job.task_id,
         }
+
+    # P4.33 任务中心（决策 D7）：全部「需要处理」+ 全部活跃 + 最近完成 20 条，含一键入库（只读展示）。
+    # reader 下不注册（任务记录属写宿主）。读信封走内存缓存、读一键入库清单是盘读 → 卸到线程池。
+    @_writer_only(app.get("/api/tasks"))
+    async def tasks_list() -> dict:
+        if tasks is None:  # 启动时 workspace 读写不了：没有任务记录可列
+            return {"attention": [], "active": [], "recent": []}
+        return await anyio.to_thread.run_sync(tasks.list_view)
+
+    # 单个任务详情 + 日志增量（`log_after` = 上次拿到的字节偏移）。前端对「本地还在跟踪、却已不在列表里」的
+    # 任务也用它补查终态；404 = 已被保留策略清掉（或从未存在）。
+    @_writer_only(app.get("/api/tasks/{task_id}"))
+    async def task_detail(task_id: str, log_after: int = Query(0, ge=0)) -> dict:
+        out = None if tasks is None else await anyio.to_thread.run_sync(tasks.detail, task_id, log_after)
+        if out is None:
+            raise HTTPException(status_code=404, detail=f"未知任务：{task_id}")
+        return out
 
     # 问答 / 多轮会话（只读嵌入，决策P4-8）：POST 直接返回 text/event-stream，前端 fetch 读 body。
     @app.post("/api/chat")

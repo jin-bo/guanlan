@@ -4516,6 +4516,81 @@ def test_chat_writable_turn_subject_to_423(chat_env) -> None:
             app.state.write_gate.exit_writable()
 
 
+def _stream_frames_in_thread(client, body, frames):
+    """后台线程里跑一轮 chat，结束后把 `(event, payload)` 全部追加进 `frames`。
+
+    注：TestClient 会把整条 SSE 流缓冲到结束才交出来，读不到「流到一半」的帧；需要断言时序的用例
+    靠「线程是否已结束」判断本轮是否卡在写锁上，帧顺序在流结束后整体核对。"""
+
+    def run():
+        with client.stream("POST", "/api/chat", json=body) as resp:
+            event = None
+            for line in resp.iter_lines():
+                if line.startswith("event:"):
+                    event = line.split(":", 1)[1].strip()
+                elif line.startswith("data:"):
+                    frames.append((event, json.loads(line.split(":", 1)[1].strip())))
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    return th
+
+
+def test_writable_turn_announces_wait_for_background_task(chat_env) -> None:
+    """P4.33 决策 D6：可写 turn 等写锁时先推 `waiting_for_task`（带在跑任务的摘要），取得锁后推 `waiting:false`，
+    然后照常完成——不再无声卡住。"""
+    app, kb, captured = _writable_app(chat_env)
+    brief = {"task_id": "20261114-100000-ingest-abcd", "kind": "ingest", "title": "补录：raw/a.md", "params": {"target": "raw/a.md"}}
+    with TestClient(app) as client:
+        gate = app.state.write_gate
+        gate.describe_writer = lambda: brief
+        gate.write_lock.acquire()  # 模拟后台任务正持写锁
+        frames: list = []
+        try:
+            th = _stream_frames_in_thread(client, {"message": "写点东西"}, frames)
+            th.join(timeout=0.5)
+            assert th.is_alive()  # 锁还在别人手里：本轮卡在取锁上
+        finally:
+            gate.write_lock.release()
+        th.join(timeout=5)
+    assert not th.is_alive()
+    waits = [p for e, p in frames if e == "waiting_for_task"]
+    assert waits == [{"waiting": True, "task": brief}, {"waiting": False}]
+    kinds = [e for e, _ in frames]
+    assert kinds.index("start") < kinds.index("waiting_for_task") < kinds.index("token") < kinds.index("done")
+
+
+def test_writable_turn_no_wait_frame_when_lock_free(chat_env) -> None:
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        frames = _chat_interactive(client, "写点东西")
+    assert "waiting_for_task" not in _frame_kinds(frames)
+    assert "done" in _frame_kinds(frames)
+
+
+def test_stop_while_waiting_takes_effect_after_lock(chat_env) -> None:
+    """等写锁期间点停止：只记待停，取得写锁后才以 stopped 收尾（P4.33 §5 如实说明的行为）。"""
+    app, kb, captured = _writable_app(chat_env)
+    with TestClient(app) as client:
+        _, done, _ = _chat(client, "建会话")  # 锁空闲时先建好会话，拿到 id
+        cid = done["conversation_id"]
+        gate = app.state.write_gate
+        gate.write_lock.acquire()
+        frames: list = []
+        try:
+            th = _stream_frames_in_thread(client, {"message": "写点东西", "conversation_id": cid}, frames)
+            time.sleep(0.3)  # 让本轮进到取锁等待
+            assert client.post(f"/api/chat/{cid}/stop").status_code == 200
+            th.join(timeout=0.3)
+            assert th.is_alive()  # 停止只记了待停：锁没拿到，本轮还没收尾
+        finally:
+            gate.write_lock.release()
+        th.join(timeout=5)
+    kinds = [e for e, _ in frames]
+    assert "waiting_for_task" in kinds
+    assert "stopped" in kinds and "done" not in kinds
+
+
 def test_chat_readonly_turn_not_rejected_during_writable(chat_env) -> None:
     """**只读** turn 不受层③（评审 P2）：只读 turn 不取 write_lock、跑各自 conv.lock，与活跃写者
     无锁交集、不死锁，故活跃可写期间仍放行——不误伤并发只读 chat / 默认只读姿态。"""

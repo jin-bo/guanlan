@@ -116,14 +116,71 @@ async function previewRawFile(name, files) {
   box.append(back, title, view);
 }
 
-async function triggerIngest(target) {
-  showOverlay("overlay.ingest", `<p class="muted">${escapeHtml(t("ingest.submitted", target))}</p>`);
+// ── 后台任务提交（P4.33）────────────────────────────────────────────────────────
+// 提交成功且服务端建了任务信封（task_id）→ 关浮层、交给任务中心（tasks.js）跟踪，用户接着问答；
+// 没有 task_id（workspace 写不了等）→ 退回旧路径：浮层内 pollJob。423（可写会话进行中）→ 在**当前**浮层顶部
+// 报一句、表单原样保留（决策：表单内容不清空），不先把浮层换成「已提交」。
+async function postTask(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 423) {
+    const e = new Error("HTTP 423");
+    e.busy = true;
+    throw e;
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function showOverlayError(message) {
+  const box = $("#overlay-body");
+  let el = box.querySelector(":scope > .overlay-err");
+  if (!el) {
+    el = document.createElement("p");
+    el.className = "report-bad overlay-err";
+    box.prepend(el);
+  }
+  el.textContent = message;
+}
+
+function submitErrorText(e) {
+  return e.busy ? t("task.busyWritable") : t("common.submitFail", e.message);
+}
+
+// 提交一个后台任务。`fallback(job_id)`：没有 task_id 时在浮层内轮询的旧路径。
+async function submitBackgroundTask(url, body, kind, params, fallback) {
+  // 提交飞行中禁用浮层内按钮：旧路径一点击就把浮层换成「已提交」，按钮随之消失；现在表单要留到响应回来
+  // （423 时原样保留），不禁用的话连点两下就是两个后台任务、两份模型开销。失败时恢复原禁用态。
+  const btns = [...$("#overlay-body").querySelectorAll("button")].map((b) => [b, b.disabled]);
+  for (const [b] of btns) b.disabled = true;
+  let data;
   try {
-    const { job_id } = await postJSON("/api/ingest", { target });
-    await pollJob(job_id, target);
+    data = await postTask(url, body);
+  } catch (e) {
+    for (const [b, was] of btns) b.disabled = was;
+    showOverlayError(submitErrorText(e));
+    return;
+  }
+  if (data.task_id) {
+    $("#overlay").classList.add("hidden");
+    trackSubmittedTask(data.task_id, kind, params);
+    return;
+  }
+  try {
+    await fallback(data.job_id);
   } catch (e) {
     $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.submitFail", e.message))}</p>`;
   }
+}
+
+async function triggerIngest(target) {
+  await submitBackgroundTask("/api/ingest", { target }, "ingest", { target }, async (jobId) => {
+    showOverlay("overlay.ingest", `<p class="muted">${escapeHtml(t("ingest.submitted", target))}</p>`);
+    await pollJob(jobId, target);
+  });
 }
 
 // 通用作业轮询骨架（ingest / heal 共用）。`renderDone(job)` 可选：heal 有结构化 result，传入
@@ -288,23 +345,37 @@ function renderHealPreview(data, limit, minRefs) {
 }
 
 async function triggerHeal(limit, minRefs, targets) {
-  showOverlay("overlay.heal", `<p class="muted">${escapeHtml(t("heal.submitted"))}</p>`);
   const body = {};
   if (limit) body.limit = Number(limit);
   if (minRefs) body.min_refs = Number(minRefs);
   // 勾选子集随请求发出；服务端仍重算 worklist 再取交集（陈旧/越界目标被丢弃，决策P4.3-3 修订）。
   if (targets && targets.length) body.targets = targets;
-  try {
-    const { job_id } = await postJSON("/api/heal", body);
-    await pollJob(job_id, "heal", renderHealDone);
-  } catch (e) {
-    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.submitFail", e.message))}</p>`;
-  }
+  const params = { limit: body.limit, targets: body.targets };
+  await submitBackgroundTask("/api/heal", body, "heal", params, async (jobId) => {
+    showOverlay("overlay.heal", `<p class="muted">${escapeHtml(t("heal.submitted"))}</p>`);
+    await pollJob(jobId, "heal", renderHealDone);
+  });
 }
 
-function renderHealDone(job) {
-  const box = $("#overlay-body");
-  box.innerHTML = "";
+// 作业/任务的默认收尾渲染：退出码徽标 + 输出（ingest / backfill；任务中心详情也用）。
+function renderJobDefault(job, box) {
+  const ok = job.exit_code === 0;
+  const p = document.createElement("p");
+  p.innerHTML = ok
+    ? `<span class="report-ok">${escapeHtml(t("common.passed"))}</span>`
+    : `<span class="report-bad">${escapeHtml(t("common.exitCode", job.exit_code))}</span>`;
+  box.appendChild(p);
+  const pre = document.createElement("pre");
+  pre.innerHTML = jobLogHtml(job.output || t("common.noOutput"));
+  box.appendChild(pre);
+}
+
+// `box` 缺省 = 浮层（旧 pollJob 路径，先清空）；任务中心传入详情容器时追加渲染、不清空（P4.33）。
+function renderHealDone(job, box) {
+  if (!box) {
+    box = $("#overlay-body");
+    box.innerHTML = "";
+  }
   const ok = job.exit_code === 0;
   const badge = document.createElement("p");
   badge.innerHTML = ok
@@ -453,20 +524,19 @@ function renderAuditPreview(data, limit) {
 }
 
 async function triggerAudit(limit) {
-  showOverlay("overlay.audit", `<p class="muted">${escapeHtml(t("audit.submitted"))}</p>`);
   const body = {};
   if (limit) body.limit = Number(limit);
-  try {
-    const { job_id } = await postJSON("/api/audit", body);
-    await pollJob(job_id, "audit", renderAuditDone);
-  } catch (e) {
-    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.submitFail", e.message))}</p>`;
-  }
+  await submitBackgroundTask("/api/audit", body, "audit", { limit: body.limit }, async (jobId) => {
+    showOverlay("overlay.audit", `<p class="muted">${escapeHtml(t("audit.submitted"))}</p>`);
+    await pollJob(jobId, "audit", renderAuditDone);
+  });
 }
 
-function renderAuditDone(job) {
-  const box = $("#overlay-body");
-  box.innerHTML = "";
+function renderAuditDone(job, box) {
+  if (!box) {
+    box = $("#overlay-body");
+    box.innerHTML = "";
+  }
   const ok = job.exit_code === 0;
   const badge = document.createElement("p");
   badge.innerHTML = ok
@@ -551,25 +621,11 @@ function renderBackfillForm(prefillQuestion) {
 }
 
 async function triggerBackfill(question) {
-  showOverlay("overlay.backfill", `<p class="muted">${escapeHtml(t("backfill.submitted"))}</p>`);
-  try {
-    // 不用 postJSON（它只 throw `url → status`、丢 detail，无法分流 423）：用裸 fetch 显式特判
-    // 423（可写 turn 活跃）→ 本地化 backfill.busy；其余非 2xx → common.submitFail（带状态码）。
-    const res = await fetch("/api/backfill", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question }),
-    });
-    if (res.status === 423) {
-      $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("backfill.busy"))}</p>`;
-      return;
-    }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { job_id } = await res.json();
-    await pollJob(job_id, "backfill"); // 复用默认渲染：退出码徽标 + job.output（答案 + 门禁回执）
-  } catch (e) {
-    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.submitFail", e.message))}</p>`;
-  }
+  // 经 postTask 提交：423（可写 turn 活跃）在当前浮层顶部报错、问题文本域原样保留（P4.33）。
+  await submitBackgroundTask("/api/backfill", { question }, "backfill", { question }, async (jobId) => {
+    showOverlay("overlay.backfill", `<p class="muted">${escapeHtml(t("backfill.submitted"))}</p>`);
+    await pollJob(jobId, "backfill"); // 复用默认渲染：退出码徽标 + job.output（答案 + 门禁回执）
+  });
 }
 
 // 给一条问答气泡尾部挂「沉淀」小按钮：点击预填该轮用户问题、打开 backfill 浮层（决策P4.8-3）。

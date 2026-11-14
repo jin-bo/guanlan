@@ -31,6 +31,9 @@ function rerenderDynamic() {
   // 姿态徽标 tooltip（随 currentMode）+ 发送/停止按钮文案（随 chatStreaming）。
   setModeBadge(currentMode);
   setChatSending(chatStreaming);
+  // 后台任务中心（P4.33）：徽标 tooltip + 开着的抽屉按当前语言重画（吃缓存，不重拉）。
+  renderTaskBadge();
+  if (taskDrawerOpen()) renderTaskDrawer();
 }
 
 function applyLang(lang) {

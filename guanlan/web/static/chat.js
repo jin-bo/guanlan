@@ -51,6 +51,7 @@ function applyReaderMode() {
     // graph-btn 自 P4.27 起保留：图谱面板走只读 /api/graph（reader 下注册）；面板内「静态列表」链接
     // 指向写者专属的 /graph，reader 下由 graph_view.js 不渲染（决策P4.27-2，原决策P4.9-11 的死链顾虑随之消解）。
     "mcp-btn",                                              // MCP 诊断：连接检查有外部副作用（404，决策P4.19-6）
+    "tasks-btn",                                            // 后台任务中心：任务记录属写宿主（404，P4.33）
     "mode-badge",                                           // 姿态恒只读、/mode 整条禁用 → 冻结隐藏（决策P4.9-4 修订）
   ];
   for (const id of hideIds) {
@@ -600,6 +601,11 @@ function setChatSending(sending) {
 async function stopChat() {
   const btn = $("#chat-send");
   btn.disabled = true; // 停止请求飞行中先禁用防重复点（图标保持 ■，禁用态即反馈）
+  // 正在等后台任务释放写锁：停止要等取得锁后才兑现（P4.33 §5），如实告诉用户。
+  if (waitingTaskEl) {
+    const text = waitingTaskEl.querySelector(".chat-wait-text");
+    if (text) text.textContent = t("chat.waitStopRequested");
+  }
   // 首轮 id 由 start 帧回填，可能尚未到：标记待停，start 处理处一拿到 id 就补发本请求，
   // 而不是静默放弃（否则用户点了停止却毫无反应）。按钮已显示「停止中…」给出反馈。
   if (!conversationId) { pendingStop = true; return; }
@@ -954,9 +960,42 @@ async function sendChat(message, attachments) {
     botEl.textContent = t("chat.fail", e.message);
   } finally {
     clearHeartbeat(botEl); // 兜底：任何退出路径都不留下「处理中」残影
+    clearWaitingForTask(); // 同上：流结束不留等待提示（P4.33）
     finishSubagents(botEl); // 断流也收：仍在跑的行标「未收到结束」
     setChatSending(false); // 复位：按钮切回「发送」、清 chatStreaming/禁用
   }
+}
+
+// P4.33（决策 D6）：可写 turn 取写锁前若锁被占，服务端推 `waiting_for_task {waiting:true, task}`，取得锁后推
+// `{waiting:false}`。气泡下挂一行提示 + 「打开任务中心」；等待期间点停止只记待停、要等取得锁后才生效，
+// 故 stopChat 把提示改成「已请求停止，等待后台任务结束」，不承诺即时停止。
+let waitingTaskEl = null;
+
+function handleWaitingForTask(botEl, payload) {
+  if (!payload || !payload.waiting) {
+    clearWaitingForTask();
+    return;
+  }
+  clearWaitingForTask();
+  const el = document.createElement("div");
+  el.className = "chat-wait";
+  const text = document.createElement("span");
+  text.className = "chat-wait-text";
+  text.textContent = payload.task ? t("chat.waitingTask", taskTitle(payload.task)) : t("chat.waitingWriter");
+  const link = document.createElement("button");
+  link.type = "button";
+  link.className = "chat-wait-link";
+  link.textContent = t("chat.waitingOpenTasks");
+  link.addEventListener("click", openTaskDrawer);
+  el.append(text, link);
+  botEl.after(el);
+  waitingTaskEl = el;
+  $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+}
+
+function clearWaitingForTask() {
+  if (waitingTaskEl) waitingTaskEl.remove();
+  waitingTaskEl = null;
 }
 
 function handleSSE(frame, botEl) {
@@ -985,6 +1024,8 @@ function handleSSE(frame, botEl) {
     handleSubagent(botEl, payload);
   } else if (event === "compaction") {
     handleCompaction(botEl, payload);
+  } else if (event === "waiting_for_task") {
+    handleWaitingForTask(botEl, payload); // P4.33：可写 turn 在等写锁（多半是后台任务）
   } else if (event === "stopped") {
     clearHeartbeat(botEl);
     finishSubagents(botEl);
@@ -1808,6 +1849,7 @@ async function sendGoalRun(attachments) {
     if (ctx.botEl) clearHeartbeat(ctx.botEl);
     setGoalBannerNote(banner, t("goal.fail", e.message));
   } finally {
+    clearWaitingForTask(); // 断流也不留等待提示（P4.33）
     if (ctx.botEl) {
       clearHeartbeat(ctx.botEl);
       finishSubagents(ctx.botEl);
@@ -1854,7 +1896,11 @@ function handleGoalSSE(frame, ctx) {
     }
   } else if (event === "compaction") {
     handleCompaction(ctx.botEl, payload);
+  } else if (event === "waiting_for_task") {
+    // 可写 goal 的每一轮同样复用 turn()，等写锁时也会推这帧（P4.33）：不接就是无声卡住。
+    if (ctx.botEl) handleWaitingForTask(ctx.botEl, payload);
   } else if (event === "turn_done") {
+    clearWaitingForTask();
     const el = ctx.botEl;
     if (el) {
       clearHeartbeat(el);
