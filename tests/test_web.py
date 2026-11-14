@@ -8144,3 +8144,15 @@ def test_writer_startup_sweeps_stale_upload_tmp(kb) -> None:
     os.utime(leftover, (1.0, 1.0))
     create_app(kb)
     assert not leftover.exists()
+
+
+def test_mode_toggle_frontend_wired(client) -> None:
+    """顶栏姿态开关（决策P4.5-14）：两段按钮各带 data-mode，点击与 /mode 共用 switchMode；reader 下整体隐藏。"""
+    index = client.get("/").text
+    assert 'id="mode-badge"' in index
+    assert 'data-mode="read-only"' in index and 'data-mode="workspace-write"' in index
+    js = _FRONTEND_JS_SRC
+    assert "async function switchMode(" in js
+    assert "return switchMode(arg);" in js  # /mode <值> 走同一实现
+    assert 'addEventListener("click"' in js and "switchMode(seg.dataset.mode)" in js
+    assert '"mode-badge"' in js  # applyReaderMode 的 hideIds

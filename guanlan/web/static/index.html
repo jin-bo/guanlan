@@ -56,7 +56,13 @@
     </span>
   </div>
   <nav class="actions">
-    <span id="mode-badge" class="mode-badge" data-i18n-title="tip.modeBadge" title="当前会话姿态（/mode 切换）">read-only</span>
+    <!-- 姿态开关（原 P4.5 徽标）：两段式，点一下即切换，与 /mode 同一条路径；可写段高亮为橙色。 -->
+    <div id="mode-badge" class="mode-toggle" role="group" data-i18n-title="tip.modeBadge" title="当前会话姿态：点击切换（也可用 /mode）">
+      <button type="button" class="mode-seg" data-mode="read-only" aria-pressed="true">
+        <svg class="ico"><use href="#i-eye"/></svg><span data-i18n="mode.ro">只读</span></button>
+      <button type="button" class="mode-seg" data-mode="workspace-write" aria-pressed="false">
+        <svg class="ico"><use href="#i-pencil"/></svg><span data-i18n="mode.rw">可写</span></button>
+    </div>
     <span class="act-sep" aria-hidden="true"></span>
     <button id="chat-new" class="btn" data-i18n-title="tip.newChat" title="开启新会话（清空上下文）">
       <svg class="ico"><use href="#i-new"/></svg><span class="btn-zh" data-i18n="btn.newChat">新会话</span></button>

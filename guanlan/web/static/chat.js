@@ -30,13 +30,12 @@ function setConversation(id) {
   syncConversationUrl();
 }
 
-// 姿态徽标（P4.5）：随 /mode 翻转更新；workspace-write 用醒目色提示「Agent 可写」。
+// 姿态开关（P4.5 徽标改两段式）：随 /mode 或点击翻转更新；当前段 aria-pressed=true，可写段高亮橙色。
 function setModeBadge(mode) {
   currentMode = mode || "read-only";
   const el = $("#mode-badge");
   if (!el) return;
-  el.textContent = currentMode;
-  el.classList.toggle("writable", currentMode === "workspace-write");
+  el.querySelectorAll(".mode-seg").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === currentMode)));
   el.title = currentMode === "workspace-write" ? t("mode.writeTip") : t("mode.readonlyTip");
 }
 
@@ -359,6 +358,11 @@ async function slashSetMode(arg) {
   if (arg !== "read-only" && arg !== "workspace-write") {
     return noteLines([t("slash.modeInvalidArg", arg)]);
   }
+  return switchMode(arg);
+}
+
+// 切姿态的唯一实现：/mode <值> 与顶栏开关共用（开关点击见下方监听）。
+async function switchMode(arg) {
   if (!conversationId) {
     if (!(await ensureActiveConversation())) return; // 无会话先开一个空活会话再切姿态（决策P4.4-7 反转）
   }
@@ -381,6 +385,24 @@ async function slashSetMode(arg) {
     mode === "workspace-write" ? t("slash.modeToWrite") : t("slash.modeToRead"),
   ]);
 }
+
+// 顶栏姿态开关：点非当前段即切换，走 switchMode（与 /mode 同一路径、同一提示）。流式中拒绝（同 /mode 的
+// 生命周期守卫，评审 #1）；在飞期间禁用两段，防连点发两次。reader 下开关整体隐藏（决策P4.9-4 修订）。
+let modeSwitching = false;
+$("#mode-badge").addEventListener("click", async (e) => {
+  const seg = e.target.closest(".mode-seg");
+  if (!seg || readerMode || modeSwitching || seg.dataset.mode === currentMode) return;
+  if (chatStreaming) return noteLines([t("slash.busyLifecycle", "mode")]);
+  const segs = $("#mode-badge").querySelectorAll(".mode-seg");
+  modeSwitching = true;
+  segs.forEach((b) => { b.disabled = true; });
+  try {
+    await switchMode(seg.dataset.mode);
+  } finally {
+    modeSwitching = false;
+    segs.forEach((b) => { b.disabled = false; });
+  }
+});
 
 // /model <provider>[/<model>]：运行时切换模型（P4.29）；只给 provider 时服务端取该 provider 的 {P}_MODEL。只在 workspace-write 会话可切——前端先挡一道给出明确
 // 提示，服务端仍按会话真实姿态判（409）。只把**名字**发给服务端，凭据由服务端从环境解析。
