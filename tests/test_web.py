@@ -1056,6 +1056,17 @@ def _wait_job(client, job_id: str, timeout: float = 5.0) -> dict:
     raise AssertionError(f"作业 {job_id} 未在 {timeout}s 内完成")
 
 
+def _await_first(order: list, timeout: float = 3.0, settle: float = 0.1) -> None:
+    """等第一个作业真正起跑（`order` 非空），再留 `settle` 秒让排在后面的作业——若被错误地并发——
+    来得及现形。原先只 `sleep(0.1)` 就断言顺序：CI 慢机上第一个作业 0.1 秒内还没起跑，`order` 为空而偶发失败。"""
+    deadline = time.monotonic() + timeout
+    while not order:
+        if time.monotonic() > deadline:
+            raise AssertionError(f"第一个作业未在 {timeout}s 内起跑")
+        time.sleep(0.01)
+    time.sleep(settle)
+
+
 def _ingest_once(kb, runner, target) -> dict:
     with TestClient(create_app(kb, runner=runner)) as client:
         resp = client.post("/api/ingest", json={"target": target})
@@ -1514,7 +1525,7 @@ def test_jobqueue_submit_and_wait_is_fifo_behind_prior(kb) -> None:
 
     t = threading.Thread(target=submit)
     t.start()
-    time.sleep(0.1)
+    _await_first(order)
     assert order == ["ingest-start"]  # 投喂被挡在在飞 ingest 之后（同一 FIFO worker）
     gate.set()
     t.join(timeout=3)
@@ -3713,7 +3724,7 @@ def test_heal_serial_behind_ingest(kb) -> None:
     with TestClient(create_app(kb, runner=runner)) as client:
         ing_id = client.post("/api/ingest", json={"target": "raw/src.md"}).json()["job_id"]
         heal_id = client.post("/api/heal", json={}).json()["job_id"]
-        time.sleep(0.1)
+        _await_first(order)
         assert order == ["ingest"]  # heal 被挡在在飞 ingest 之后（同 FIFO worker）
         gate.set()
         ing = _wait_job(client, ing_id)
@@ -3880,7 +3891,7 @@ def test_audit_serial_behind_ingest(kb) -> None:
     with TestClient(create_app(kb, runner=runner)) as client:
         ing_id = client.post("/api/ingest", json={"target": "raw/src.md"}).json()["job_id"]
         aud_id = client.post("/api/audit", json={}).json()["job_id"]
-        time.sleep(0.1)
+        _await_first(order)
         assert order == ["ingest"]  # audit 被挡在在飞 ingest 之后（同 FIFO worker）
         gate.set()
         ing = _wait_job(client, ing_id)
@@ -4026,7 +4037,7 @@ def test_backfill_serial_behind_ingest(kb) -> None:
     with TestClient(create_app(kb, runner=runner)) as client:
         ing_id = client.post("/api/ingest", json={"target": "raw/src.md"}).json()["job_id"]
         bf_id = client.post("/api/backfill", json={"question": "q"}).json()["job_id"]
-        time.sleep(0.1)
+        _await_first(order)
         assert order == ["ingest"]  # backfill 被挡在在飞 ingest 之后（同 FIFO worker）
         gate.set()
         ing = _wait_job(client, ing_id)
