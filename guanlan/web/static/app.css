@@ -714,3 +714,7 @@ body.hide-thinking .chat-think { display: none; }
 .chat-wait { align-self: flex-start; display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; font-size: .82rem; color: var(--lan-ink-soft); padding: .15rem .25rem; }
 .chat-wait-link { background: none; border: 0; padding: 0; color: var(--lan-ripple); cursor: pointer; text-decoration: underline; font-size: .8rem; }
 @media (max-width: 600px) { .task-drawer { top: 0; } }
+.task-actions { display: flex; gap: .4rem; margin-bottom: .4rem; }
+.task-actions button { font-size: .72rem; padding: .15rem .55rem; border: 1px solid var(--lan-mist); border-radius: 4px; background: #fff; color: var(--lan-deep); cursor: pointer; }
+.task-actions button:hover { border-color: var(--lan-ripple); color: var(--lan-ripple); }
+.task-actions button:disabled { opacity: .5; cursor: default; }
