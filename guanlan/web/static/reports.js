@@ -86,7 +86,7 @@ function renderDoctor(data, openKeys = null) {
   let html = nBlock
     ? `<p class="report-bad">${escapeHtml(t("doctor.bad", nBlock, data.pages_checked))}</p>`
     : `<p class="report-ok">${escapeHtml(t("doctor.ok", data.pages_checked))}</p>`;
-  html += `<p class="muted">${escapeHtml(nSuggest ? t("doctor.suggest", nSuggest) : t("doctor.clean"))} · ${escapeHtml(t("doctor.elapsed", data.elapsed_s))}</p>`;
+  html += `<p class="muted">${escapeHtml(nSuggest ? t("doctor.suggest", nSuggest) : t("doctor.clean"))} · ${escapeHtml(t("doctor.elapsed", fmtElapsed(data.elapsed_s)))}</p>`;
   let section = null;
   for (const cat of cats) {
     // 为零的类别（含必须修）不显示：必须修为零时，上面的总评已说明。
@@ -126,6 +126,12 @@ function paintDoctor() {
     $("#overlay").classList.add("hidden");
     navigate({ kind: "raw", name: a.dataset.raw });
   }));
+}
+
+// 用时保留一位小数；不足 0.1 秒显示「<0.1」，免得出现「用时 0 秒」。
+function fmtElapsed(s) {
+  const n = Number(s) || 0;
+  return n < 0.1 ? "<0.1" : n.toFixed(1);
 }
 
 let doctorToken = 0; // 每次打开体检递增：关掉再开时，先发的那次迟到响应不得覆盖后发的
