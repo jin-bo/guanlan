@@ -673,3 +673,44 @@ body.hide-thinking .chat-think { display: none; }
 .page-meta .graph-here { margin-left: .4rem; background: none; border: 1px solid var(--lan-mist); border-radius: 4px;
   padding: 0 .4rem; font: inherit; font-size: .8em; color: var(--lan-ripple); cursor: pointer; }
 .page-meta .graph-here:hover { background: var(--lan-foam); }
+
+/* ── 后台任务中心（P4.33）：顶栏徽标 + 右侧非模态抽屉 + toast ─────────────────────── */
+.actions .btn#tasks-btn { position: relative; }
+.task-badge {
+  position: absolute; top: -.35rem; right: -.35rem; min-width: 1rem; height: 1rem; padding: 0 .22rem;
+  border-radius: .5rem; background: var(--lan-ripple); color: #fff; font-size: .6rem; line-height: 1rem;
+  text-align: center; font-weight: 600; box-shadow: 0 0 0 2px var(--lan-deep);
+}
+.task-badge.warn { background: #b4532a; }
+.task-badge[hidden] { display: none; }
+.task-drawer {
+  position: fixed; top: 3.4rem; right: 0; bottom: 0; width: min(26rem, 100vw); z-index: 40;
+  display: flex; flex-direction: column; background: var(--lan-surface);
+  border-left: 1px solid var(--lan-mist); box-shadow: -6px 0 24px rgba(6,48,59,.18);
+}
+.task-drawer.hidden { display: none; }
+.task-drawer-head { display: flex; align-items: center; justify-content: space-between; padding: .6rem .9rem; border-bottom: 1px solid var(--lan-mist); }
+.task-drawer-head h3 { margin: 0; font-size: 1rem; color: var(--lan-deep); }
+.task-drawer-head button { background: none; border: 0; font-size: 1.3rem; cursor: pointer; color: var(--lan-ink-soft); }
+.task-drawer-body { overflow-y: auto; padding: .4rem .7rem 1rem; }
+.task-group { margin: .8rem 0 .3rem; font-size: .72rem; font-weight: 600; color: var(--lan-ink-soft); letter-spacing: .04em; }
+.task-group-attention { color: #8a1f1f; }
+.task-row { border: 1px solid var(--lan-mist); border-radius: 6px; padding: .45rem .6rem; margin-bottom: .4rem; background: #fff; }
+.task-row.clickable .task-head, .task-row.clickable[title] { cursor: pointer; }
+.task-head { display: flex; align-items: flex-start; justify-content: space-between; gap: .5rem; }
+.task-title { font-size: .82rem; color: var(--lan-ink); word-break: break-word; }
+.task-state { flex: none; font-size: .68rem; padding: .05rem .4rem; border-radius: 3px; background: var(--lan-foam); color: var(--lan-ink-soft); }
+.task-state.run { background: #e3f1f5; color: var(--lan-deep); }
+.task-state.ok { background: #e4f3e9; color: #1b6e3a; }
+.task-state.bad { background: #f8e6e6; color: #8a1f1f; }
+.task-meta { margin-top: .2rem; font-size: .7rem; color: var(--lan-ink-soft); word-break: break-word; }
+.task-detail { margin-top: .45rem; border-top: 1px dashed var(--lan-mist); padding-top: .4rem; font-size: .78rem; }
+.task-detail pre { white-space: pre-wrap; word-break: break-word; max-height: 22rem; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .7rem; line-height: 1.45; background: var(--lan-foam); padding: .4rem .5rem; border-radius: 4px; }
+/* toast 放顶栏下方居中：底部是满宽输入框，右侧是抽屉，都不能挡。 */
+.toast-box { position: fixed; top: 3.9rem; left: 50%; transform: translateX(-50%); z-index: 60; display: flex; flex-direction: column; align-items: center; gap: .4rem; max-width: min(28rem, calc(100vw - 2rem)); }
+.toast { padding: .5rem .75rem; border-radius: 6px; font-size: .8rem; color: #fff; background: var(--lan-deep); box-shadow: 0 4px 16px rgba(6,48,59,.25); cursor: pointer; word-break: break-word; }
+.toast.ok { background: #1b6e3a; }
+.toast.bad { background: #8a1f1f; }
+.chat-wait { align-self: flex-start; display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; font-size: .82rem; color: var(--lan-ink-soft); padding: .15rem .25rem; }
+.chat-wait-link { background: none; border: 0; padding: 0; color: var(--lan-ripple); cursor: pointer; text-decoration: underline; font-size: .8rem; }
+@media (max-width: 600px) { .task-drawer { top: 0; } }

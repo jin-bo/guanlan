@@ -11,6 +11,9 @@ uvicorn 事件循环并存）FIFO 取出串行执行。串行保两件事：① 
 **域无关**（只碰 `.exit_code`、不 import heal 类型），`result` 的序列化落在端点。
 
 作业表只在内存（单进程、单用户，进程退出即清）；`job_id` 用自增计数器 + 进程内字典，不引外部存储。
+需要持久化的作业（P4.33 后台任务：ingest/backfill/heal/audit）由注入的 `observer`（`web/tasks.py` 的
+`TaskStore`）在入队前建任务信封、经 `task_id` 关联到本作业；worker 在起跑 / 每次输出 / 收尾三处回调它。
+worker 仍域无关：只认 `task_id` 与观察者接口，不知道信封长什么样；观察者异常一律吞掉，不影响作业本身。
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from .. import kblock
 from ..errors import EXIT_AGENT_ERROR, EXIT_USAGE
@@ -43,6 +46,32 @@ Emit = Callable[[str], None]
 ProgressCb = Callable[[float], str]
 # = 共用节拍 HEARTBEAT_INTERVAL_S 的本模块别名（保留独立名便于测试 monkeypatch）。
 _JOB_HEARTBEAT_INTERVAL_S = HEARTBEAT_INTERVAL_S
+
+
+class JobObserver(Protocol):
+    """作业生命周期观察者（P4.33）：只对带 `task_id` 的作业回调。实现方须自行保证线程安全——
+    `on_output` 可能来自 worker 线程（`print` 经 redirect）或解析作业的 drain 线程（`emit`）。"""
+
+    def on_start(self, job: Job) -> None: ...
+
+    def on_output(self, job: Job, text: str) -> None: ...
+
+    def on_finish(self, job: Job) -> None: ...
+
+
+class _ObservedIO(io.StringIO):
+    """`StringIO` 外加写入回调：worker 的捕获缓冲区，每段写入同时转给观察者（落任务日志）。"""
+
+    def __init__(self, on_write: Callable[[str], None] | None) -> None:
+        super().__init__()
+        self._on_write = on_write
+
+    def write(self, s: str) -> int:
+        n = super().write(s)
+        if self._on_write is not None and s:
+            with contextlib.suppress(Exception):  # 日志写失败绝不能拖垮作业
+                self._on_write(s)
+        return n
 
 
 class KBWriteLock:
@@ -126,6 +155,9 @@ class WriteGate:
         # 首轮 → 重新拍。纯软优化：漏/多 bump 至多多查一次基线，绝不影响守卫（收尾 check 仍每轮全跑）。
         self._wiki_generation = 0
         self._gen_lock = threading.Lock()  # 独立小锁：只护代际计数原子自增
+        # P4.33：「此刻谁在写」的描述回调（create_app 注入 TaskStore.running_brief）。可写 turn 等写锁前
+        # 用它给前端推一帧等待提示；只用于显示，不参与锁的正确性。None = 不推（reader / 旧测试）。
+        self.describe_writer: Callable[[], dict | None] | None = None
 
     def bump_wiki_generation(self) -> None:
         """标记 wiki/ 可能已变（ingest/heal 作业完成、或改了 violation 集的可写 turn 收尾时调）。"""
@@ -177,6 +209,19 @@ class WriteGate:
 
         return _acq
 
+    def try_acquire_thunk(self, held: list[bool]) -> Callable[[], bool]:
+        """`acquire_thunk` 的非阻塞版（P4.33）：在调用线程内**试一次**取写锁，取到则置 `held[0]=True` 并返回 True，
+        被占返回 False。可写 turn 先试一次、取不到再推等待提示并阻塞取——避免「先查 locked() 再阻塞取」之间
+        锁被别人抢走、这一轮无声卡住。置位守法同 `acquire_thunk`（取消安全）。库被 CLI 占用照样抛 `KBLockBusy`。"""
+
+        def _try() -> bool:
+            if self.write_lock.acquire(blocking=False):
+                held[0] = True
+                return True
+            return False
+
+        return _try
+
 
 @dataclass
 class Job:
@@ -200,6 +245,8 @@ class Job:
     # 非线程安全的 `StringIO buf` + `job.output`、又与 worker finally 的 `job.output` 赋值竞态。故 emit
     # 的 buf.write+getvalue+赋值 与 finally 的 getvalue 全取这把锁。非流式作业单线程、不触锁外并发。
     output_lock: threading.Lock = field(default_factory=threading.Lock)
+    # P4.33：关联的后台任务信封 id（`TaskStore` 建的）；None = 不持久化的作业（投喂、上传、解析等）。
+    task_id: str | None = None
 
 
 class JobQueue:
@@ -209,6 +256,7 @@ class JobQueue:
         self,
         write_lock: threading.Lock | None = None,
         on_job_done: Callable[[str], None] | None = None,
+        observer: JobObserver | None = None,
     ) -> None:
         self._queue: queue.Queue[
             tuple[Job, Callable[[Emit], object], ProgressCb | None]
@@ -223,11 +271,16 @@ class JobQueue:
         # turn / 撤销回放 / GET /graph 串行。None = 未注入（旧测试 / 纯读场景）→ 不串行（沿用 P4
         # 行为：唯一写者就是本 worker，自带 FIFO 串行）。绝不与 `_lock`（只护作业表）混用。
         self._write_lock = write_lock
+        self._observer = observer  # P4.33 任务信封观察者；None = 不持久化（旧测试 / reader）
         self._worker = threading.Thread(target=self._run, name="guanlan-jobs", daemon=True)
         self._worker.start()
 
     def _register(
-        self, kind: str, fn: Callable[[Emit], object], progress: ProgressCb | None = None
+        self,
+        kind: str,
+        fn: Callable[[Emit], object],
+        progress: ProgressCb | None = None,
+        task_id: str | None = None,
     ) -> Job:
         """建表 + 入队的内部归口，返回 Job 本体（enqueue / submit_and_wait 共用）。
 
@@ -239,13 +292,18 @@ class JobQueue:
         """
         with self._lock:
             self._counter += 1
-            job = Job(id=str(self._counter), kind=kind)
+            job = Job(id=str(self._counter), kind=kind, task_id=task_id)
             self._jobs[job.id] = job
         self._queue.put((job, fn, progress))
         return job
 
     def enqueue(
-        self, kind: str, fn: Callable[[Emit], object], *, progress: ProgressCb | None = None
+        self,
+        kind: str,
+        fn: Callable[[Emit], object],
+        *,
+        progress: ProgressCb | None = None,
+        task_id: str | None = None,
     ) -> str:
         """登记一个作业并入队，立即返回 `job_id`（不阻塞）。
 
@@ -254,8 +312,9 @@ class JobQueue:
         job_id，前端轮询 `/api/jobs/{id}`（parse 期间即可见 emit 推上的增量 backend 日志）。
 
         `progress`（可选）：长跑作业（如 ingest）附心跳回调，running 期把活跃提示刷进 `job.progress`。
+        `task_id`（可选，P4.33）：关联已建好的任务信封，worker 据此回调 `observer`。
         """
-        return self._register(kind, fn, progress).id
+        return self._register(kind, fn, progress, task_id).id
 
     def submit_and_wait(self, kind: str, fn: Callable[[Emit], object]) -> Job:
         """入队一个作业并**阻塞到它完成**，返回 Job 本体（直接持 Job，无 Optional）。
@@ -274,11 +333,21 @@ class JobQueue:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def _notify(self, method: str, job: Job, *args: object) -> None:
+        """回调观察者（只对带 task_id 的作业）；观察者的任何异常都吞掉——worker 绝不能因它而死。"""
+        if self._observer is None or job.task_id is None:
+            return
+        with contextlib.suppress(Exception):
+            getattr(self._observer, method)(job, *args)
+
     def _run(self) -> None:
         while True:
             job, fn, progress = self._queue.get()
             job.state = "running"
-            buf = io.StringIO()
+            on_write = None
+            if self._observer is not None and job.task_id is not None:
+                on_write = lambda s, _job=job: self._notify("on_output", _job, s)  # noqa: E731
+            buf = _ObservedIO(on_write)
 
             # 进度心跳（A+ 心跳，决策：瞬时进度行）：附了 progress 回调的作业（ingest）起一条守护
             # 线程，running 期每隔间隔把 `progress(elapsed)` 刷进 **瞬时** `job.progress`（pollJob
@@ -307,7 +376,7 @@ class JobQueue:
             # 增量进度 sink（决策P4.6.1-11/14）：thunk 经它把一行进度实时累加进 job.output，running
             # 期即可被轮询看见。buf 写 + 整串赋值在 job.output_lock 内（parse 的 drain 线程并发调时
             # 不撕裂、不与 finally 竞态）。既有 thunk 不调它（仍 print() 经 redirect）；仅 parse 用。
-            def emit(line: str, _job: Job = job, _buf: io.StringIO = buf) -> None:
+            def emit(line: str, _job: Job = job, _buf: _ObservedIO = buf) -> None:
                 with _job.output_lock:
                     _buf.write(line + "\n")
                     _job.output = _buf.getvalue()
@@ -321,6 +390,11 @@ class JobQueue:
                     self._write_lock.acquire()
                 except Exception as exc:  # noqa: BLE001 — 取锁的任何意外都不能让 worker 死（否则此后作业全卡死）
                     lock_error = exc
+            # 任务信封翻 running 放在**取得写锁之后**（P4.33）：等锁期间信封仍是 queued——等待提示不会把一个
+            # 还在排队的任务说成「正在写」，服务在等锁时退出也不会把它记成「可能已写入一部分」的 interrupted。
+            # 取锁失败（库被 CLI 占用等）不翻 running，直接由收尾记 failed。
+            if lock_error is None:
+                self._notify("on_start", job)
             try:
                 if lock_error is not None:
                     if isinstance(lock_error, kblock.KBLockBusy):
@@ -366,6 +440,8 @@ class JobQueue:
                 with job.output_lock:
                     job.output = buf.getvalue()
                 job.state = "done"
+                # 任务信封收尾（P4.33）：在 set() 之前，submit_and_wait 的等待者醒来时信封已是终态。
+                self._notify("on_finish", job)
                 job.done_event.set()
             # 完工回调在 write_lock 释放后调（不在临界区内做额外工作）；best-effort：异常不能
             # 让 worker 死（它已捕获作业本体异常，这里再裹一层只为隔离回调意外）。

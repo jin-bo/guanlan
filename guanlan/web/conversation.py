@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import queue
 import re
 import threading
@@ -792,9 +793,26 @@ class Conversation:
                         # 阻塞（否则 read-only turn / job 轮询 / UI 全卡死）。锁序：已持 self.lock。
                         # 持有标志经 acquire_thunk 在线程函数内置位（见 lock_held 注释），不依赖 await
                         # 之后的赋值——与 /graph、/undo 同一抗取消守法（评审 P1）。
-                        await anyio.to_thread.run_sync(
-                            self._write_gate.acquire_thunk(lock_held)
+                        # P4.33（决策 D6）：写锁被占（多半是后台任务）时先推一帧等待提示，取得锁后再推一帧
+                        # 收起——否则后台 ingest 跑多久，这一轮就无声卡多久。只显示、不改锁序；停止请求仍要
+                        # 等取得锁后才兑现（见下方 `_stop_requested`），文案在前端如实说明。
+                        # 先非阻塞试一次：取不到才推等待提示再阻塞取（不用「先查 locked() 再取」，两步之间锁可能被抢）。
+                        waiting = not await anyio.to_thread.run_sync(
+                            self._write_gate.try_acquire_thunk(lock_held)
                         )
+                        if waiting:
+                            brief = None
+                            describe = self._write_gate.describe_writer
+                            if describe is not None:
+                                # 卸到线程池：running_brief 取 TaskStore 的锁，而 worker 的 on_output 持同一把锁
+                                # 写盘 + flush——在事件循环线程上等它会把整个 UI 卡在磁盘 I/O 上。
+                                with contextlib.suppress(Exception):
+                                    brief = await anyio.to_thread.run_sync(describe)
+                            thread_safe_emit("waiting_for_task", {"waiting": True, "task": brief})
+                            await anyio.to_thread.run_sync(
+                                self._write_gate.acquire_thunk(lock_held)
+                            )
+                            thread_safe_emit("waiting_for_task", {"waiting": False})
                     # 层②（决策P4.5-3/c）：只拍 AGENTAO.md 一个文件（近免费）；raw/ 树不扫。
                     before_agentao = snapshot_agentao(self._kb)
                     # check 基线（决策P4.5-4 修订）：收尾只 surface 本轮**新增**的 violations——否则
