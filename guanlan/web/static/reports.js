@@ -1,34 +1,156 @@
 "use strict";
 // 由原 app.js 按关注点拆分（经典脚本，共享全局作用域；非 ES module）。
-// 载入顺序见 index.html；boot.js 最后载入。 零-LLM 报告（check/health/lint）+ MCP 诊断。
-// ── 零 LLM 报告 / graph ─────────────────────────────────────────────────────
+// 载入顺序见 index.html；boot.js 最后载入。 体检（P4.34，合并原 check/health/lint）+ MCP 诊断。
+// ── 体检（P4.34，见 docs/P4.34-Web体检.md）──────────────────────────────────
+// 合并原「校验 / 健康 / 巡检」：GET /api/doctor 一次取回分组清单（分组、去重、计数都在服务端），这里只渲染。
+// 每类一行「类别 · 条数 · 修复入口」，点开看明细；修复入口只打开既有浮层，不在这里直接提交写任务。
+// 全部外部文本（页名、目标、detail）一律 escapeHtml。
 
-function renderReport(name, data) {
-  const itemsKey = "violations" in data ? "violations" : "findings";
-  const items = data[itemsKey] || [];
-  const word = itemsKey === "violations" ? t("report.violation") : t("report.finding");
-  const head = data.ok
-    ? `<p class="report-ok">${escapeHtml(t("report.ok", name, data.pages_checked, word))}</p>`
-    : `<p class="report-bad">${escapeHtml(t("report.bad", name, data.pages_checked, items.length))}</p>`;
-  const body = items.map((it) =>
-    `<div class="finding"><span class="kind">[${escapeHtml(it.kind)}]</span> ${escapeHtml(it.page || t("report.global"))}: ${escapeHtml(it.detail)}</div>`
-  ).join("");
-  return head + body;
+const DOCTOR_SHOW = 50; // 每类明细最多渲染这么多条，余下只报数（几千条一次渲染会卡）
+let doctorData = null;
+
+// t() 首参须为字面量（决策P4.7-8）：类别 / 段 / 入口的文案按 key 分支取。
+function doctorCatLabel(key) {
+  switch (key) {
+    case "blocking": return t("doctor.cat.blocking");
+    case "missing_entity": return t("doctor.cat.missing_entity");
+    case "broken_link": return t("doctor.cat.broken_link");
+    case "pending_raw": return t("doctor.cat.pending_raw");
+    case "drift": return t("doctor.cat.drift");
+    case "index": return t("doctor.cat.index");
+    case "quality": return t("doctor.cat.quality");
+    case "topology": return t("doctor.cat.topology");
+    default: return key;
+  }
 }
 
-document.querySelectorAll(".actions button[data-report]").forEach((btn) => {
-  btn.addEventListener("click", async () => {
-    const name = btn.dataset.report; // 命令名（check/health/lint）：标题用双语 key overlay.<name>，报告正文仍用命令名
-    showOverlay("overlay." + name, `<p class="muted">${escapeHtml(t("common.running"))}</p>`);
-    try {
-      const data = await getJSON(`/api/report/${name}`);
-      $("#overlay-body").innerHTML = renderReport(name, data);
-      overlayRepaint = () => { $("#overlay-body").innerHTML = renderReport(name, data); }; // 语言切换纯重渲染（吃缓存 data）
-    } catch (e) {
-      $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.fail", e.message))}</p>`;
+function doctorSectionLabel(key) {
+  if (key === "blocking") return t("doctor.section.blocking");
+  if (key === "structure") return t("doctor.section.structure");
+  return t("doctor.section.suggest");
+}
+
+function doctorActionLabel(action) {
+  switch (action) {
+    case "heal": return t("doctor.action.heal");
+    case "ingest": return t("doctor.action.ingest");
+    case "audit": return t("doctor.action.audit");
+    case "graph": return t("doctor.action.graph");
+    default: return "";
+  }
+}
+
+// 修复入口：只打开既有浮层（预览与确认仍在那里）。reader 下体检按钮已隐藏（决策P4.9-10）；这里再兜一层：写入口不显示（端点未注册）。
+function doctorActionAllowed(action) {
+  return !!action && (action === "graph" || !readerMode);
+}
+
+// 「其余断链」也给补全入口，以 min-refs=1 打开 heal 预览：顶栏 heal 按钮收进体检后（D10），
+// 只有单页引用的断链时「高频缺页」一行不显示，不留这个入口就到不了 min-refs=1。
+function runDoctorAction(action, key) {
+  if (action === "heal") openHealPreview(undefined, key === "broken_link" ? 1 : undefined);
+  else if (action === "ingest") openIngestPicker();
+  else if (action === "audit") openAuditPreview();
+  else if (action === "graph") openGraph({ view: "overview" });
+}
+
+function doctorPageLink(path) {
+  if (!path) return escapeHtml(t("doctor.global"));
+  if (path.startsWith("raw/")) return `<a href="#" class="doctor-raw" data-raw="${escapeHtml(path.slice(4))}">${escapeHtml(path)}</a>`;
+  if (path.startsWith("wiki/")) return `<a href="#" class="doctor-page" data-page="${escapeHtml(path)}">${escapeHtml(path)}</a>`;
+  return escapeHtml(path);
+}
+
+function doctorItemHtml(cat, it) {
+  if (it.target !== undefined) {
+    // 按目标聚合的断链 / 缺页：「[[X]] ← N 页引用」+ 前几页链接。
+    const refs = it.ref_pages || [];
+    const shown = refs.slice(0, 5).map(doctorPageLink).join(escapeHtml(t("doctor.sep")));
+    const more = refs.length > 5 ? ` …` : "";
+    return `<div class="finding"><span class="kind">[[${escapeHtml(it.target)}]]</span> ${escapeHtml(t("doctor.refs", refs.length))}${shown}${more}` +
+      (it.suggestion ? `<div class="muted">${escapeHtml(it.detail)}</div>` : "") + `</div>`;
+  }
+  if (cat.key === "drift") {
+    return `<div class="finding"><span class="kind">${escapeHtml(it.slug || "")}</span> ${doctorPageLink(it.source_page)}</div>`;
+  }
+  const kind = it.kind ? `<span class="kind">[${escapeHtml(it.kind)}]</span> ` : "";
+  return `<div class="finding">${kind}${doctorPageLink(it.page)}${it.detail ? ": " + escapeHtml(it.detail) : ""}</div>`;
+}
+
+// openKeys：重画时沿用的展开类别（语言切换不该把用户点开的类别收起）；首画为 null，只展开必须修。
+function renderDoctor(data, openKeys = null) {
+  const cats = data.categories || [];
+  const blocking = cats.find((c) => c.key === "blocking");
+  const nBlock = blocking ? blocking.count : 0;
+  const nSuggest = data.total - nBlock; // 服务端 total = 必须修 + 建议处理（不含结构提示）
+  let html = nBlock
+    ? `<p class="report-bad">${escapeHtml(t("doctor.bad", nBlock, data.pages_checked))}</p>`
+    : `<p class="report-ok">${escapeHtml(t("doctor.ok", data.pages_checked))}</p>`;
+  html += `<p class="muted">${escapeHtml(nSuggest ? t("doctor.suggest", nSuggest) : t("doctor.clean"))} · ${escapeHtml(t("doctor.elapsed", data.elapsed_s))}</p>`;
+  let section = null;
+  for (const cat of cats) {
+    // 为零的类别（含必须修）不显示：必须修为零时，上面的总评已说明。
+    if (!cat.count) continue;
+    if (cat.section !== section) {
+      section = cat.section;
+      html += `<h4 class="doctor-section">${escapeHtml(doctorSectionLabel(section))}</h4>`;
     }
-  });
-});
+    const act = doctorActionAllowed(cat.action)
+      ? ` <button type="button" class="doctor-act" data-action="${escapeHtml(cat.action)}" data-cat="${escapeHtml(cat.key)}">${escapeHtml(doctorActionLabel(cat.action))}</button>`
+      : "";
+    const items = (cat.items || []).slice(0, DOCTOR_SHOW).map((it) => doctorItemHtml(cat, it)).join("");
+    const more = cat.count > DOCTOR_SHOW ? `<p class="muted">${escapeHtml(t("doctor.more", cat.count - DOCTOR_SHOW))}</p>` : "";
+    const hint = cat.key === "index" ? `<p class="muted">${escapeHtml(t("doctor.indexHint"))}</p>` : "";
+    const open = (openKeys ? openKeys.has(cat.key) : cat.section === "blocking") ? " open" : "";
+    html += `<details class="doctor-cat" data-key="${escapeHtml(cat.key)}"${open}><summary><span>${escapeHtml(doctorCatLabel(cat.key))}</span> <b>${cat.count}</b>${act}</summary>${hint}${items}${more}</details>`;
+  }
+  return html;
+}
+
+function paintDoctor() {
+  const body = $("#overlay-body");
+  const shown = body.querySelectorAll("details.doctor-cat");
+  const openKeys = shown.length ? new Set([...shown].filter((d) => d.open).map((d) => d.dataset.key)) : null;
+  body.innerHTML = renderDoctor(doctorData, openKeys);
+  body.querySelectorAll(".doctor-act").forEach((b) => b.addEventListener("click", (e) => {
+    e.preventDefault(); // 按钮在 <summary> 里：不要顺带折叠 / 展开
+    runDoctorAction(b.dataset.action, b.dataset.cat);
+  }));
+  body.querySelectorAll("a.doctor-page").forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault();
+    $("#overlay").classList.add("hidden");
+    navigate({ kind: "page", path: a.dataset.page });
+  }));
+  body.querySelectorAll("a.doctor-raw").forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault();
+    $("#overlay").classList.add("hidden");
+    navigate({ kind: "raw", name: a.dataset.raw });
+  }));
+}
+
+let doctorToken = 0; // 每次打开体检递增：关掉再开时，先发的那次迟到响应不得覆盖后发的
+
+// 取数期间用户可能已关浮层、开了别的浮层或重开了体检：不是最新一次、或标题 key 不再是体检就不覆盖。
+function doctorOverlayGone(tok) {
+  return tok !== doctorToken || $("#overlay").classList.contains("hidden") || $("#overlay-title").dataset.i18n !== "overlay.doctor";
+}
+
+async function openDoctor() {
+  const tok = ++doctorToken;
+  showOverlay("overlay.doctor", `<p class="muted">${escapeHtml(t("common.running"))}</p>`);
+  try {
+    const data = await getJSON("/api/doctor");
+    if (doctorOverlayGone(tok)) return;
+    doctorData = data;
+    paintDoctor();
+    overlayRepaint = paintDoctor; // 语言切换纯重渲染（吃缓存 data）
+  } catch (e) {
+    if (doctorOverlayGone(tok)) return;
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.fail", e.message))}</p>`;
+  }
+}
+
+$("#doctor-btn").addEventListener("click", openDoctor);
 
 // 图谱按钮自 P4.27 起打开 Web 内图谱面板，接线见 graph_view.js。
 

@@ -229,7 +229,7 @@ class Smoke:
     def other_overlay_disposes(self) -> str:
         self._open_overview()
         # 别的 opener 在图谱打开时接管浮层（如作业收尾自动开报告）：直接触发其按钮的 click。
-        self.page.evaluate("() => document.querySelector(\"button[data-report='check']\").click()")
+        self.page.evaluate("() => document.querySelector('#doctor-btn').click()")
         self.page.wait_for_function("() => !document.querySelector('#graph-canvas')")
         assert self.page.evaluate("graphChart") is None, "开别的浮层后画布未释放"
         wide = self.page.evaluate("document.querySelector('#overlay .overlay-card').classList.contains('overlay-graph')")

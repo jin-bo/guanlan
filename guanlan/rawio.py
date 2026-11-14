@@ -150,6 +150,19 @@ def find_source_page(sources_dir: Path, raw_stem: str, raw_rel: str | None = Non
     return None
 
 
+def raw_ingest_status(root: Path) -> list[tuple[Path, bool]]:
+    """列 `root/raw/*.md`（顶层普通文件、按名排序）及其是否「已收录」（有对应 source 页，判据 `find_source_page`）。
+
+    Web 补录列表（`web.helpers._list_raw`）与 Web 体检的「待入库」（P4.34）共用此一处判据，免两边分叉。
+    """
+    sources = Path(root) / "wiki" / "sources"
+    return [
+        (path, find_source_page(sources, path.stem, f"raw/{path.name}") is not None)
+        for path in sorted((Path(root) / "raw").glob("*.md"))
+        if path.is_file()
+    ]
+
+
 def _claim_candidates(raw_stem: str) -> list[tuple[str, bool]]:
     """`find_source_page` / `source_identity` 认领用的候选：`_page_stem_candidates` 再加按 NFD 推的旧算法形。
 

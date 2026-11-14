@@ -39,6 +39,7 @@ from ..audit import (
     audit_result_dict,
     run_audit_result,
 )
+from ..doctor import run_doctor
 from ..check import format_report as _format_check
 from ..check import run_check
 from ..errors import EXIT_OK, EXIT_USAGE, GuanlanError
@@ -854,6 +855,12 @@ def create_app(
         run_fn, format_fn = entry
         result = await anyio.to_thread.run_sync(run_fn, wiki)
         return _report_response(format_fn(result, json_output=True))
+
+    # P4.34 体检：check / health / lint + 待入库 / 漂移源 / 高频缺页汇成一张分组清单（零 LLM、只读，reader 下照常注册）。
+    # 分组、去重与计数都在 `doctor.run_doctor` 里做；`/api/report/{name}` 保留（CLI `--json` 字节对齐红线）。
+    @app.get("/api/doctor")
+    async def doctor() -> dict:
+        return await anyio.to_thread.run_sync(run_doctor, root)
 
     # graph：构建（写派生 graph/）后 302 到自包含静态视图。json_only 时改跳 graph.json。
     @_writer_only(app.get("/graph"))  # reader 下不注册（重建写 graph/，决策P4.9-11）

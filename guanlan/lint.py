@@ -50,6 +50,10 @@ __all__ = [
     "LintReport",
     "MissingEntity",
     "missing_entities",
+    "missing_entities_from_graph",
+    "lint_from_graph",
+    "broken_link_detail",
+    "missing_entity_detail",
     "run_lint",
     "format_report",
     "lint_entrypoint",
@@ -102,7 +106,14 @@ def missing_entities(
     wiki: Path, *, min_refs: int = MISSING_ENTITY_MIN_REFS
 ) -> list[MissingEntity]:
     """对 `wiki/` 建图后聚合缺失实体（结构化，零 LLM）。供 `heal` worklist 与 `lint` 共用。"""
-    return _aggregate_missing(build_graph(Path(wiki)), min_refs=min_refs)
+    return missing_entities_from_graph(build_graph(Path(wiki)), min_refs=min_refs)
+
+
+def missing_entities_from_graph(
+    g: Graph, *, min_refs: int = MISSING_ENTITY_MIN_REFS
+) -> list[MissingEntity]:
+    """同 `missing_entities`，但用已建好的图（Web 体检 P4.34 与 lint 共用一张图）。"""
+    return _aggregate_missing(g, min_refs=min_refs)
 
 
 def _build_suggestion_index(
@@ -178,8 +189,28 @@ class LintReport:
 
 def run_lint(wiki: Path) -> LintReport:
     """对 `wiki/` 跑图级质量 lint，返回 `LintReport`（孤儿 / 断链 / 缺失实体）。"""
-    wiki = Path(wiki)
-    g = build_graph(wiki)
+    return lint_from_graph(build_graph(Path(wiki)))
+
+
+def broken_link_detail(target: str, suggestion: str | None) -> str:
+    """断链 finding 的人读文案（lint 与 Web 体检 P4.34 共用，免两处拼法分叉）。"""
+    detail = f"[[{target}]] 无对应页面"
+    if suggestion:
+        detail += _suggestion_suffix(suggestion)
+    return detail
+
+
+def missing_entity_detail(target: str, ref_count: int, suggestion: str | None) -> str:
+    """缺失实体 finding 的人读文案（lint 与 Web 体检 P4.34 共用，免两处拼法分叉）。"""
+    detail = f"[[{target}]] 被 {ref_count} 页引用却无页面，建议建 entities/{target}.md"
+    if suggestion:
+        detail += _suggestion_suffix(suggestion)
+    return detail
+
+
+def lint_from_graph(g: Graph, *, suggestions: dict[str, str | None] | None = None) -> LintReport:
+    """在已建好的图上跑 lint（`run_lint` 的本体）。Web 体检（P4.34）要用同一张图的结构化断链边，
+    借此只建一次图。`suggestions` 给出时填入「断链目标 → 疑似已有页」（与 finding 里的同一份）。"""
     node_path = {n.id: n.path for n in g.nodes}
 
     findings: list[Finding] = []
@@ -201,14 +232,14 @@ def run_lint(wiki: Path) -> LintReport:
         target: _suggest_nearest(target, sugg_index, exclude=frozenset(srcs))
         for target, srcs in refs_by_target.items()
     }
+    if suggestions is not None:
+        suggestions.update(suggestion_by_target)
 
     # 断链：源自 graph.broken（与 check.wikilink.broken 同口径，决策P3-6）。
     for edge in sorted(g.broken, key=lambda e: (e.source, e.target)):
         source_page = node_path.get(edge.source, edge.source)
         suggestion = suggestion_by_target.get(edge.target)
-        detail = f"[[{edge.target}]] 无对应页面"
-        if suggestion:
-            detail += _suggestion_suffix(suggestion)
+        detail = broken_link_detail(edge.target, suggestion)
         findings.append(
             Finding(source_page, "lint.broken_link", detail, suggestion=suggestion)
         )
@@ -217,11 +248,7 @@ def run_lint(wiki: Path) -> LintReport:
     # 走与 heal 共用的 `_aggregate_missing`（决策P3.2-1），target 升序输出不变。
     for me in _aggregate_missing(g, min_refs=MISSING_ENTITY_MIN_REFS):
         suggestion = suggestion_by_target.get(me.target)
-        detail = (
-            f"[[{me.target}]] 被 {me.ref_count} 页引用却无页面，建议建 entities/{me.target}.md"
-        )
-        if suggestion:
-            detail += _suggestion_suffix(suggestion)
+        detail = missing_entity_detail(me.target, me.ref_count, suggestion)
         findings.append(
             Finding("", "lint.missing_entity", detail, suggestion=suggestion)
         )

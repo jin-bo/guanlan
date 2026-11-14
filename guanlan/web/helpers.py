@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, Response
 from ..audit import audit_preview
 from ..heal import compute_worklist
 from ..pages import iter_pages, load_page, page_title, page_type
-from ..rawio import find_source_page
+from ..rawio import raw_ingest_status
 from .chat_support import _message_text  # noqa: F401 — app.py 自此取用（定义见 chat_support）
 from .uploads import _IMAGE_EXT_TO_MIME
 
@@ -231,13 +231,7 @@ def _list_raw(root: Path) -> list[dict]:
     `1.` 命成 `1-`），免得已建好的页被误判「未收录」。前端默认只显未收录、
     一键可切看已收录（非破坏：永不隐藏磁盘文件、已收录源仍可预览/重投 ingest）。
     """
-    raw = root / "raw"
-    sources = root / "wiki" / "sources"
-    files: list[dict] = []
-    for path in sorted(raw.glob("*.md")):
-        if path.is_file():
-            ingested = find_source_page(sources, path.stem, f"raw/{path.name}") is not None
-            files.append(
-                {"name": path.name, "size": path.stat().st_size, "ingested": ingested}
-            )
-    return files
+    return [
+        {"name": path.name, "size": path.stat().st_size, "ingested": ingested}
+        for path, ingested in raw_ingest_status(root)
+    ]
