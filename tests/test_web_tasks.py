@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -36,10 +37,20 @@ def _wait_task(client, task_id: str, timeout: float = 5.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         data = client.get(f"/api/tasks/{task_id}").json()
-        if data["state"] not in ("queued", "waiting_lock", "running"):
+        if data["state"] not in ("queued", "waiting_lock", "running", "cancelling", "rolling_back"):
             return data
         time.sleep(0.02)
     raise AssertionError(f"任务 {task_id} 未在 {timeout}s 内结束")
+
+
+def _drain(client, timeout: float = 5.0) -> None:
+    """等本应用里所有任务结束。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not client.get("/api/tasks").json()["active"]:
+            return
+        time.sleep(0.02)
+    raise AssertionError("仍有任务未结束")
 
 
 def _dead_pid() -> int:
@@ -424,19 +435,10 @@ def test_cancel_queued_and_lock_waiting_tasks(kb) -> None:
     assert runner.calls == []
 
 
-def test_cancel_running_is_409_for_now(kb) -> None:
+def test_cancel_finished_or_unknown_is_rejected(kb) -> None:
     target = _put_raw(kb)
-    release = threading.Event()
-
-    def action(root):
-        release.wait(5)
-        _ingest_writes(root, "wiki/concepts/New.md")
-
-    with TestClient(create_app(kb, runner=make_runner(action))) as client:
+    with TestClient(create_app(kb, runner=make_runner(lambda r: _ingest_writes(r, "wiki/concepts/New.md")))) as client:
         tid = client.post("/api/ingest", json={"target": target}).json()["task_id"]
-        _wait_state(client, tid, ("running",))
-        assert client.post(f"/api/tasks/{tid}/cancel").status_code == 409
-        release.set()
         assert _wait_task(client, tid)["state"] == "succeeded"
         assert client.post(f"/api/tasks/{tid}/cancel").status_code == 409  # 已结束
         assert client.post("/api/tasks/20261101-100000-ingest-abcd/cancel").status_code == 404
@@ -566,6 +568,7 @@ def test_active_task_limit(kb, monkeypatch) -> None:
             assert r.status_code == 429 and "上限" in r.json()["detail"]
         finally:
             app.state.write_gate.write_lock.release()
+        _drain(client)  # 等排队的作业跑完：别让这个 worker 拖进下一个用例（redirect 是进程级的）
     assert len(list(jobs_dir(kb).glob("*.json"))) == 2  # 被拒的没留信封
 
 
@@ -610,8 +613,9 @@ def test_delete_task_record(kb) -> None:
     _write_env(kb, "20261101-100000-ingest-aaaa")
     (jobs_dir(kb) / "20261101-100000-ingest-aaaa.log").write_text("x\n", encoding="utf-8")
     (jobs_dir(kb) / "20261101-100000-ingest-aaaa").mkdir()
-    _write_env(kb, "20261101-100001-ingest-bbbb", state="interrupted")
-    (jobs_dir(kb) / "20261101-100001-ingest-bbbb" / "before").mkdir(parents=True)  # 还有未处理的前像
+    pre = TaskStore(kb).preimage_dir("20261101-100001-ingest-bbbb")
+    pre.mkdir(parents=True)  # 还有未处理的前像（在库外）
+    _write_env(kb, "20261101-100001-ingest-bbbb", state="interrupted", preimage=str(pre))
     _write_env(kb, "20261101-100002-ingest-cccc", state="running", finished=None, owner_pid=os.getppid())
     with TestClient(create_app(kb)) as client:
         assert client.delete("/api/tasks/20261101-100000-ingest-aaaa").status_code == 200
@@ -630,10 +634,24 @@ def test_recover_waiting_lock_as_cancelled(kb) -> None:
     assert d["state"] == "cancelled"
 
 
+def test_recover_sweeps_orphan_preimages(kb) -> None:
+    """信封文件不在（workspace/jobs/ 被删掉等）的库外前像目录在启动恢复时清掉；有信封的不动。"""
+    store = TaskStore(kb)
+    orphan = store.preimage_dir("20261101-100000-ingest-aaaa")
+    kept = store.preimage_dir("20261101-100001-ingest-bbbb")
+    orphan.mkdir(parents=True)
+    kept.mkdir(parents=True)
+    _write_env(kb, "20261101-100001-ingest-bbbb", state="interrupted", preimage=str(kept))
+    TaskStore(kb).recover()
+    assert not orphan.parent.exists()
+    assert kept.is_dir()
+
+
 def test_prune_keeps_tasks_with_preimage(kb, monkeypatch) -> None:
     monkeypatch.setattr(tasks_mod, "MAX_HISTORY", 1)
-    _write_env(kb, "20261101-100000-ingest-aaaa", finished="2026-11-01 10:00:00")
-    (jobs_dir(kb) / "20261101-100000-ingest-aaaa" / "before").mkdir(parents=True)
+    pre = TaskStore(kb).preimage_dir("20261101-100000-ingest-aaaa")
+    pre.mkdir(parents=True)
+    _write_env(kb, "20261101-100000-ingest-aaaa", finished="2026-11-01 10:00:00", preimage=str(pre))
     _write_env(kb, "20261101-100001-ingest-bbbb", finished="2026-11-01 10:00:01")
     (jobs_dir(kb) / "20261101-100001-ingest-bbbb").mkdir()
     store = TaskStore(kb)
@@ -766,6 +784,7 @@ def test_explicit_default_model_dedupes_with_omitted(kb) -> None:
             b = client.post("/api/ingest", json={"target": target, "model": "prov/default-m"}).json()
         finally:
             app.state.write_gate.write_lock.release()
+        _drain(client)  # 等排队的作业跑完：别让这个 worker 拖进下一个用例（redirect 是进程级的）
     assert b["deduplicated"] and b["task_id"] == a["task_id"]
 
 
@@ -841,6 +860,7 @@ def test_concurrent_identical_submissions_dedupe(kb) -> None:
                 results = list(ex.map(lambda _: client.post("/api/ingest", json={"target": target}).json(), range(4)))
         finally:
             app.state.write_gate.write_lock.release()
+        _drain(client)  # 等排队的作业跑完：别让这个 worker 拖进下一个用例（redirect 是进程级的）
     assert len({r["task_id"] for r in results}) == 1
     assert sum(not r["deduplicated"] for r in results) == 1
     assert len([j for j in app.state.jobs._jobs.values() if j.kind == "ingest"]) == 1
@@ -883,4 +903,283 @@ def test_backfill_question_whitespace_dedupes(kb) -> None:
             b = client.post("/api/backfill", json={"question": "  某个问题 \n"}).json()
         finally:
             app.state.write_gate.write_lock.release()
+        _drain(client)  # 等排队的作业跑完：别让这个 worker 拖进下一个用例（redirect 是进程级的）
     assert b["deduplicated"] and b["task_id"] == a["task_id"]
+
+
+# ───────────────────────── T2 第二部分：运行中取消回滚、中断任务处理 ─────────────────────────
+
+from guanlan import preimage as preimage_mod  # noqa: E402
+from guanlan import stopscope  # noqa: E402
+from guanlan.runtime import AgentRunResult  # noqa: E402
+
+
+def _stoppable_runner(writes, *, raise_on_stop=True, started=None):
+    """Agent 写完后等停止标志：置位即像真子进程被整组结束那样抛 StopRequested（或照常返回，模拟「已返回、收尾前取消」）。"""
+
+    def runner(prompt, **kwargs):
+        root = kwargs["working_directory"]
+        writes(root)
+        if started is not None:
+            started.set()
+        ev = stopscope.current()
+        assert ev is not None  # 任务作业在 stop_scope 里跑
+        ev.wait(5)
+        if raise_on_stop and ev.is_set():
+            raise stopscope.StopRequested
+        return AgentRunResult(ok=True, final_text="done")
+
+    return runner
+
+
+def _messy_writes(root) -> None:
+    _ingest_writes(root, "wiki/concepts/New.md")
+    (root / "wiki" / "index.md").write_text("# 索引\n被 Agent 改过\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("raise_on_stop", [True, False])
+def test_cancel_running_rolls_back(kb, _jobs_home, raise_on_stop) -> None:
+    target = _put_raw(kb)
+    started = threading.Event()
+    runner = _stoppable_runner(_messy_writes, raise_on_stop=raise_on_stop, started=started)
+    with TestClient(create_app(kb, runner=runner)) as client:
+        tid = client.post("/api/ingest", json={"target": target}).json()["task_id"]
+        assert started.wait(5)
+        env = client.get(f"/api/tasks/{tid}").json()
+        assert env["state"] == "running" and env["has_preimage"]
+        pre_dir = TaskStore(kb).preimage_dir(tid)
+        assert pre_dir.is_dir() and _jobs_home in pre_dir.parents and kb not in pre_dir.parents  # 前像在库外
+        r = client.post(f"/api/tasks/{tid}/cancel")
+        assert r.status_code == 200 and r.json()["state"] == "cancelling"
+        done = _wait_task(client, tid)
+    assert done["state"] == "cancelled", done
+    assert not (kb / "wiki" / "concepts" / "New.md").exists()
+    assert (kb / "wiki" / "index.md").read_text(encoding="utf-8") == "# 索引\n"
+    rb = done["rollback"]
+    assert "wiki/concepts/New.md" in rb["removed"] and "wiki/index.md" in rb["restored"]
+    assert rb["trash"].startswith(f".trash/job-{tid}@") and (kb / rb["trash"] / "wiki" / "concepts" / "New.md").is_file()
+    assert not done["has_preimage"] and not pre_dir.exists()
+
+
+def test_succeeded_task_drops_preimage(kb) -> None:
+    target = _put_raw(kb)
+    with TestClient(create_app(kb, runner=make_runner(lambda r: _ingest_writes(r, "wiki/concepts/New.md")))) as client:
+        tid = client.post("/api/ingest", json={"target": target}).json()["task_id"]
+        done = _wait_task(client, tid)
+    assert done["state"] == "succeeded" and not done["has_preimage"]
+    assert not TaskStore(kb).preimage_dir(tid).parent.exists()
+    assert not (kb / "workspace" / "jobs" / tid).exists()
+
+
+def test_preimage_failure_does_not_start_agent(kb, monkeypatch) -> None:
+    target = _put_raw(kb)
+    runner = make_runner(lambda r: _ingest_writes(r, "wiki/concepts/New.md"))
+
+    def boom(root, dest):
+        raise preimage_mod.PreimageError("磁盘满")
+
+    monkeypatch.setattr(preimage_mod, "take", boom)
+    with TestClient(create_app(kb, runner=runner)) as client:
+        tid = client.post("/api/ingest", json={"target": target}).json()["task_id"]
+        done = _wait_task(client, tid)
+    assert done["state"] == "failed" and "拍前像失败" in done["log"]["text"]
+    assert runner.calls == [] and not (kb / "wiki" / "concepts" / "New.md").exists()
+
+
+def test_tampered_preimage_refuses_rollback(kb) -> None:
+    """Agent 改了前像清单：摘要对不上 → rollback_failed，不动 wiki/，前像保留；之后可选保留现状。"""
+    target = _put_raw(kb)
+    started = threading.Event()
+    store_for_path = TaskStore(kb)
+
+    def writes(root):
+        _messy_writes(root)
+        for tid_dir in store_for_path._pre_base.iterdir():  # 本测试只有一个任务
+            manifest = tid_dir / "before" / "manifest.json"
+            manifest.write_text(manifest.read_text(encoding="utf-8").replace('"files"', '"files" '), encoding="utf-8")
+
+    with TestClient(create_app(kb, runner=_stoppable_runner(writes, started=started))) as client:
+        tid = client.post("/api/ingest", json={"target": target}).json()["task_id"]
+        assert started.wait(5)
+        assert client.post(f"/api/tasks/{tid}/cancel").status_code == 200
+        done = _wait_task(client, tid)
+        assert done["state"] == "rollback_failed" and done["group"] == "attention"
+        assert "不一致" in done["rollback"]["error"] and done["has_preimage"]
+        assert (kb / "wiki" / "concepts" / "New.md").is_file()  # 没动
+        assert client.delete(f"/api/tasks/{tid}").status_code == 409  # 有前像
+        assert client.post(f"/api/tasks/{tid}/rollback").status_code == 200  # 再试照样失败
+        assert _wait_task(client, tid)["state"] == "rollback_failed"
+        r = client.post(f"/api/tasks/{tid}/abandon")
+        assert r.status_code == 200
+        d = client.get(f"/api/tasks/{tid}").json()
+        assert d["state"] == "abandoned" and not d["has_preimage"]
+        assert client.delete(f"/api/tasks/{tid}").status_code == 200
+
+
+def _interrupted_with_preimage(kb, task_id: str, *, ready: bool = True) -> None:
+    store = TaskStore(kb)
+    dest = store.preimage_dir(task_id)
+    preimage_mod.take(kb, dest)
+    digest = tasks_mod.preimage_digest(dest)
+    if not ready:
+        (dest / preimage_mod.READY).unlink()
+    _write_env(kb, task_id, state="running", finished=None, preimage=str(dest), preimage_digest=digest)
+
+
+def test_recover_distinguishes_unready_preimage(kb) -> None:
+    _interrupted_with_preimage(kb, "20261101-100000-ingest-aaaa", ready=False)
+    _interrupted_with_preimage(kb, "20261101-100001-ingest-bbbb")
+    with TestClient(create_app(kb)) as client:
+        a = client.get("/api/tasks/20261101-100000-ingest-aaaa").json()
+        b = client.get("/api/tasks/20261101-100001-ingest-bbbb").json()
+    assert a["state"] == "cancelled" and not a["has_preimage"]  # 没有 READY ⇒ Agent 没启动
+    assert not TaskStore(kb).preimage_dir("20261101-100000-ingest-aaaa").exists()
+    assert b["state"] == "interrupted" and b["has_preimage"] and "回滚" in b["error"]
+
+
+def test_rollback_interrupted_task(kb) -> None:
+    tid = "20261101-100000-ingest-aaaa"
+    _interrupted_with_preimage(kb, tid)
+    _messy_writes(kb)  # 中断前 Agent 写了一半
+    with TestClient(create_app(kb)) as client:
+        assert client.get(f"/api/tasks/{tid}").json()["state"] == "interrupted"
+        assert client.delete(f"/api/tasks/{tid}").status_code == 409  # 有前像：先回滚或保留现状
+        r = client.post(f"/api/tasks/{tid}/rollback")
+        assert r.status_code == 200 and r.json()["state"] == "rolling_back"
+        done = _wait_task(client, tid)
+        assert done["state"] == "cancelled" and done["rollback"]["raw_ok"] and done["rollback"]["check_ok"]
+        assert client.post(f"/api/tasks/{tid}/rollback").status_code == 409  # 已处理
+        assert client.post(f"/api/tasks/{tid}/abandon").status_code == 409
+    assert not (kb / "wiki" / "concepts" / "New.md").exists()
+    assert (kb / "wiki" / "index.md").read_text(encoding="utf-8") == "# 索引\n"
+
+
+def test_abandon_and_rollback_preconditions(kb) -> None:
+    _write_env(kb, "20261101-100000-ingest-aaaa", state="interrupted")  # T1 留下的：没有前像
+    _write_env(kb, "20261101-100001-ingest-bbbb")  # succeeded
+    with TestClient(create_app(kb)) as client:
+        r = client.post("/api/tasks/20261101-100000-ingest-aaaa/rollback")
+        assert r.status_code == 409 and "前像" in r.json()["detail"]
+        assert client.post("/api/tasks/20261101-100001-ingest-bbbb/rollback").status_code == 409
+        assert client.post("/api/tasks/20261101-100001-ingest-bbbb/abandon").status_code == 409
+        assert client.post("/api/tasks/20261101-100000-ingest-aaaa/abandon").status_code == 200
+        assert client.get("/api/tasks/20261101-100000-ingest-aaaa").json()["state"] == "abandoned"
+
+
+def test_recover_rolling_back_returns_to_attention(kb) -> None:
+    tid = "20261101-100000-ingest-aaaa"
+    _interrupted_with_preimage(kb, tid)
+    env_path = jobs_dir(kb) / f"{tid}.json"
+    env = json.loads(env_path.read_text(encoding="utf-8"))
+    env.update(state="rolling_back", rollback_from="rollback_failed")
+    env_path.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+    with TestClient(create_app(kb)) as client:
+        d = client.get(f"/api/tasks/{tid}").json()
+    assert d["state"] == "rollback_failed" and d["has_preimage"]
+
+
+def test_rollback_waiting_for_cli_shows_holder_and_can_be_cancelled(kb, monkeypatch) -> None:
+    """回滚作业在等命令行释放库：显示占用者；还没开始可以撤下，退回原状态、前像保留、库不动。"""
+    monkeypatch.setattr(jobs_mod, "LOCK_BACKOFF_START_S", 5.0)
+    tid = "20261101-100000-ingest-aaaa"
+    _interrupted_with_preimage(kb, tid)
+    _messy_writes(kb)
+    holder = _hold_kb_lock(kb)
+    try:
+        with TestClient(create_app(kb)) as client:
+            assert client.post(f"/api/tasks/{tid}/rollback").status_code == 200
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                d = client.get(f"/api/tasks/{tid}").json()
+                if d.get("holder"):
+                    break
+                time.sleep(0.02)
+            assert d["state"] == "rolling_back" and "cli" in d["holder"]
+            r = client.post(f"/api/tasks/{tid}/cancel")
+            assert r.status_code == 200 and r.json()["state"] == "interrupted"
+            d = client.get(f"/api/tasks/{tid}").json()
+            assert d["state"] == "interrupted" and d["has_preimage"] and not d["holder"]
+            assert "已取消回滚" in d["error"]
+            _drain(client)
+            assert client.get(f"/api/tasks/{tid}").json()["state"] == "interrupted"  # worker 跳过后不改判
+    finally:
+        _release(holder)
+    assert (kb / "wiki" / "concepts" / "New.md").is_file()  # 库没动
+
+
+def test_retry_refused_while_preimage_pending(kb) -> None:
+    """还有前像的中断任务不能直接重试：先重试再回滚旧任务，会把重试的写入一并移走。"""
+    tid = "20261101-100000-ingest-aaaa"
+    _interrupted_with_preimage(kb, tid)
+    with TestClient(create_app(kb)) as client:
+        r = client.post(f"/api/tasks/{tid}/retry")
+        assert r.status_code == 409 and "前像" in r.json()["detail"]
+        assert client.post(f"/api/tasks/{tid}/abandon").status_code == 200
+        assert client.post(f"/api/tasks/{tid}/retry").status_code == 200
+
+
+def test_recover_missing_preimage_dir_is_interrupted(kb) -> None:
+    """前像目录整个不见了（库被移动、~/.guanlan 被清）：不能断定没写过，保守记已中断。"""
+    tid = "20261101-100000-ingest-aaaa"
+    _interrupted_with_preimage(kb, tid)
+    shutil.rmtree(TaskStore(kb).preimage_dir(tid).parent)
+    with TestClient(create_app(kb)) as client:
+        d = client.get(f"/api/tasks/{tid}").json()
+    assert d["state"] == "interrupted" and not d["has_preimage"] and "找不到" in d["error"]
+
+
+def test_cancel_rollback_records_final_state_before_dropping_preimage(kb) -> None:
+    """取消后的回滚成功：终态与「前像已删」同一次落盘，崩在收尾前重启也不会被记成已中断。"""
+    target = _put_raw(kb)
+    started = threading.Event()
+    with TestClient(create_app(kb, runner=_stoppable_runner(_messy_writes, started=started))) as client:
+        tid = client.post("/api/ingest", json={"target": target}).json()["task_id"]
+        assert started.wait(5)
+        client.post(f"/api/tasks/{tid}/cancel")
+        _wait_task(client, tid)
+    env = json.loads((jobs_dir(kb) / f"{tid}.json").read_text(encoding="utf-8"))
+    assert env["state"] == "cancelled" and env["preimage"] is None and env["rollback"]["raw_ok"]
+
+
+def test_rollback_requeued_after_cancel_is_not_clobbered(kb) -> None:
+    """回滚排队时撤下、再点回滚：被撤下的旧作业收尾不能把新回滚改判或摘掉，新回滚照常执行。"""
+    tid = "20261101-100000-ingest-aaaa"
+    target = _put_raw(kb)  # 先放 raw/：前像之后再动 raw/ 会让回滚的 raw 核对失败
+    _interrupted_with_preimage(kb, tid)
+    write_page(kb, "wiki/concepts/Half.md")
+    started = threading.Event()
+    with TestClient(create_app(kb, runner=_stoppable_runner(lambda r: None, started=started))) as client:
+        busy = client.post("/api/ingest", json={"target": target}).json()["task_id"]
+        assert started.wait(5)  # worker 被占着：回滚作业只能排队
+        assert client.post(f"/api/tasks/{tid}/rollback").status_code == 200
+        assert client.post(f"/api/tasks/{tid}/cancel").json()["state"] == "interrupted"
+        assert client.post(f"/api/tasks/{tid}/rollback").status_code == 200
+        client.post(f"/api/tasks/{busy}/cancel")  # 放开 worker：先跳过旧回滚，再跑新回滚
+        done = _wait_task(client, tid)
+        assert done["state"] == "cancelled" and done["rollback"] and done["rollback_from"] == "interrupted"
+    assert not (kb / "wiki" / "concepts" / "Half.md").exists()
+
+
+def test_recover_ready_preimage_without_digest_is_cancelled(kb) -> None:
+    """前像拍完、摘要还没记进信封就退出：摘要没落盘时不会启动 Agent，所以记已取消、删前像。"""
+    tid = "20261101-100000-ingest-aaaa"
+    _interrupted_with_preimage(kb, tid)
+    env_path = jobs_dir(kb) / f"{tid}.json"
+    env = json.loads(env_path.read_text(encoding="utf-8"))
+    env["preimage_digest"] = None
+    env_path.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+    with TestClient(create_app(kb)) as client:
+        d = client.get(f"/api/tasks/{tid}").json()
+    assert d["state"] == "cancelled" and not d["has_preimage"]
+    assert not TaskStore(kb).preimage_dir(tid).exists()
+
+
+@pytest.mark.parametrize("settled", ["succeeded", "cancelled"])
+def test_recover_uses_settled_outcome(kb, settled) -> None:
+    """作业已定下结局、前像已删，on_finish 前服务退出：重启照结局记终态，不误判已中断。"""
+    _write_env(kb, "20261101-100000-ingest-aaaa", state="running", finished=None, preimage=None, settled=settled)
+    with TestClient(create_app(kb)) as client:
+        d = client.get("/api/tasks/20261101-100000-ingest-aaaa").json()
+    assert d["state"] == settled
+    env = json.loads((jobs_dir(kb) / "20261101-100000-ingest-aaaa.json").read_text(encoding="utf-8"))
+    assert "settled" not in env

@@ -9,6 +9,14 @@ from guanlan.runtime import AgentRunResult
 _FM = '---\ntitle: "T"\ntype: {type}\ntags: []\nsources: {sources}\nlast_updated: 2026-06-03\n---\n\n{body}\n'
 
 
+@pytest.fixture(autouse=True)
+def _jobs_home(tmp_path_factory, monkeypatch) -> Path:
+    """P4.33 后台任务的前像放在库外（默认 `~/.guanlan/jobs/`）：测试一律改到临时目录，不碰真实家目录。"""
+    home = tmp_path_factory.mktemp("jobs-home")
+    monkeypatch.setenv("GUANLAN_JOBS_HOME", str(home))
+    return home
+
+
 @pytest.fixture
 def kb(tmp_path: Path) -> Path:
     """最小但合法的知识库根（满足 require_kb_root 写入口）。"""
