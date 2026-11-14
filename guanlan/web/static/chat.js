@@ -30,13 +30,17 @@ function setConversation(id) {
   syncConversationUrl();
 }
 
-// 姿态开关（P4.5 徽标改两段式）：随 /mode 或点击翻转更新；当前段 aria-pressed=true，可写段高亮橙色。
+// 姿态开关（P4.5 徽标改两段式）：随 /mode 或点击翻转更新；当前段 aria-pressed=true，可写段高亮橙色；
+// 顺带同步输入框占位文案（只读 / 可写）。
 function setModeBadge(mode) {
   currentMode = mode || "read-only";
   const el = $("#mode-badge");
   if (!el) return;
   el.querySelectorAll(".mode-seg").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === currentMode)));
   el.title = currentMode === "workspace-write" ? t("mode.writeTip") : t("mode.readonlyTip");
+  // 输入框占位文案随姿态走：原先恒写「只读」，切到可写后仍显示只读，与开关矛盾。
+  const input = $("#chat-input");
+  if (input) input.placeholder = currentMode === "workspace-write" ? t("composer.placeholderWrite") : t("composer.placeholder");
 }
 
 // 只读多会话部署（P4.9）：隐藏写 / 历史枚举 / 维护诊断 chrome——纯 UX（安全边界是端点 404、不是隐藏）。

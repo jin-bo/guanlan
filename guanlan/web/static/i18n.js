@@ -62,6 +62,7 @@ window.I18N = {
     "search.fail": "搜索失败：{0}",
     // —— composer ——
     "composer.placeholder": "向 agent 提问（只读，跨轮保留上下文）… 回车发送，Shift-Enter 换行，输入 / 看命令",
+    "composer.placeholderWrite": "向 agent 提问或让它改 wiki（可写，跨轮保留上下文）… 回车发送，Shift-Enter 换行，输入 / 看命令",
     "tip.attach": "上传文件作附件：以 <attachment> 标签随消息发给 agent；图像直接给模型看（不支持视觉时自动降级为文本引用）",
     "aria.attach": "添加附件",
     "chat.send": "发送",
@@ -650,6 +651,7 @@ window.I18N = {
     "search.fail": "Search failed: {0}",
     // —— composer ——
     "composer.placeholder": "Ask the agent (read-only, context kept across turns)… Enter to send, Shift-Enter for newline, type / for commands",
+    "composer.placeholderWrite": "Ask the agent or have it edit the wiki (writable, context kept across turns)… Enter to send, Shift-Enter for newline, type / for commands",
     "tip.attach": "Upload files as attachments: sent with your message as an <attachment> tag; images go straight to the model (auto-downgraded to a text reference when vision is unsupported)",
     "aria.attach": "Add attachment",
     "chat.send": "Send",
