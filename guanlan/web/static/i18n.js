@@ -407,9 +407,10 @@ window.I18N = {
     "staging.viewMd": "Markdown",
     "staging.viewSrc": "源码",
     // —— 姿态徽标 ——
-    "tip.modeBadge": "当前会话姿态：点击切换（也可用 /mode）",
     "mode.ro": "只读",
     "mode.rw": "可写",
+    "mode.busy": "有一轮正在进行：请先按停止再切换姿态。",
+    "mode.switching": "正在切换姿态，请稍候。",
     "mode.readonlyTip": "只读会话：Agent 仅问答。点「可写」（或 /mode workspace-write）切到可写",
     "mode.writeTip": "可写会话：Agent 可写 wiki/workspace（raw/ 与 AGENTAO.md 仍只读）。点「只读」（或 /mode read-only）切回",
     // —— 历史会话（P4.2）——
@@ -992,9 +993,10 @@ window.I18N = {
     "staging.viewMd": "Markdown",
     "staging.viewSrc": "Source",
     // —— Mode badge ——
-    "tip.modeBadge": "Current session mode: click to switch (or /mode)",
     "mode.ro": "Read-only",
     "mode.rw": "Writable",
+    "mode.busy": "A turn is in progress — stop it first, then switch mode.",
+    "mode.switching": "Switching mode, please wait.",
     "mode.readonlyTip": "Read-only session: agent answers only. Click Writable (or /mode workspace-write) to enable writing",
     "mode.writeTip": "Writable session: agent may write wiki/workspace (raw/ & AGENTAO.md stay read-only). Click Read-only (or /mode read-only) to switch back",
     // —— Past sessions (P4.2) ——

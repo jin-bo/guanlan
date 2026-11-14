@@ -361,10 +361,27 @@ async function slashSetMode(arg) {
   return switchMode(arg);
 }
 
-// 切姿态的唯一实现：/mode <值> 与顶栏开关共用（开关点击见下方监听）。
+// 切姿态的唯一实现：/mode <值> 与顶栏开关共用（开关点击见下方监听）。在飞标志与按钮禁用都在这里，
+// 两条入口一起受防连点保护：切换未回时再来一次（点击或 /mode）落提示、不发第二个 POST。
+let modeSwitching = false;
 async function switchMode(arg) {
+  if (modeSwitching) return noteLines([t("mode.switching")]);
+  const segs = $("#mode-badge").querySelectorAll(".mode-seg");
+  modeSwitching = true;
+  segs.forEach((b) => { b.disabled = true; });
+  try {
+    return await switchModeInner(arg);
+  } finally {
+    modeSwitching = false;
+    segs.forEach((b) => { b.disabled = false; });
+  }
+}
+
+async function switchModeInner(arg) {
   if (!conversationId) {
     if (!(await ensureActiveConversation())) return; // 无会话先开一个空活会话再切姿态（决策P4.4-7 反转）
+    // 开会话期间用户可能已发出一轮：此时再切会在 turn 中途翻姿态（生命周期守卫，评审 #1），先拒。
+    if (chatStreaming) return noteLines([t("mode.busy")]);
   }
   let res;
   try {
@@ -379,29 +396,25 @@ async function switchMode(arg) {
   if (res.status === 409) return noteLines([t("slash.modeInactive")]);
   if (res.status === 422) return noteLines([t("slash.modeIllegal")]);
   if (!res.ok) return noteLines([t("slash.modeFailHttp", res.status)]);
-  const { mode } = await res.json();
+  let mode;
+  try {
+    ({ mode } = await res.json()); // 200 但响应体损坏（代理截断）：落提示，不抛未捕获 reject（开关点击路径无人兜）
+  } catch (e) {
+    return noteLines([t("slash.modeFail", e.message)]);
+  }
   setModeBadge(mode);
   return noteLines([
     mode === "workspace-write" ? t("slash.modeToWrite") : t("slash.modeToRead"),
   ]);
 }
 
-// 顶栏姿态开关：点非当前段即切换，走 switchMode（与 /mode 同一路径、同一提示）。流式中拒绝（同 /mode 的
-// 生命周期守卫，评审 #1）；在飞期间禁用两段，防连点发两次。reader 下开关整体隐藏（决策P4.9-4 修订）。
-let modeSwitching = false;
-$("#mode-badge").addEventListener("click", async (e) => {
+// 顶栏姿态开关：点非当前段即切换，走 switchMode（与 /mode 同一路径、同一提示与防连点）。流式中拒绝
+// （同 /mode 的生命周期守卫，评审 #1；提示说「切换姿态」而非 /mode，用户没敲命令）。reader 下开关整体隐藏（决策P4.9-4 修订）。
+$("#mode-badge").addEventListener("click", (e) => {
   const seg = e.target.closest(".mode-seg");
   if (!seg || readerMode || modeSwitching || seg.dataset.mode === currentMode) return;
-  if (chatStreaming) return noteLines([t("slash.busyLifecycle", "mode")]);
-  const segs = $("#mode-badge").querySelectorAll(".mode-seg");
-  modeSwitching = true;
-  segs.forEach((b) => { b.disabled = true; });
-  try {
-    await switchMode(seg.dataset.mode);
-  } finally {
-    modeSwitching = false;
-    segs.forEach((b) => { b.disabled = false; });
-  }
+  if (chatStreaming) return noteLines([t("mode.busy")]);
+  switchMode(seg.dataset.mode);
 });
 
 // /model <provider>[/<model>]：运行时切换模型（P4.29）；只给 provider 时服务端取该 provider 的 {P}_MODEL。只在 workspace-write 会话可切——前端先挡一道给出明确
