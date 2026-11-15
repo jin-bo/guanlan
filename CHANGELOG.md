@@ -3,6 +3,12 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [Unreleased]
+
+### 变更
+
+- **agentao 下限抬到 0.5.21**（`agentao[cli]>=0.5.21,<0.6`）：`TAVILY_API_KEY` / `JINA_API_KEY` 不再传给 Agent 的 shell / MCP / hook 子进程。Web 宿主为 jina 后备把 `.env` 里的 `JINA_API_KEY` 补进进程环境，旧版下嵌入的 Agent 执行 shell 命令就能读到它。同版 `web_search` 的后端链改为 deepseek → tavily → jina、没有 key 时不注册该工具、退役 bocha 与 duckduckgo；观澜不自建 `WebSearchTool`，无需改动。若知识库的 MCP 服务器自己调用 Tavily / Jina，要在其 `env` 里显式传 key。
+
 ## [0.1.38] - 2026-11-15
 
 ### 新增

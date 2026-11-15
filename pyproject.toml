@@ -95,7 +95,11 @@ dependencies = [
     # 历史变大时不再执行（#629、#623）；一批并行工具调用不再阻塞压缩（#625）；压缩切在一轮中间时保留本轮请求，
     # 长提示末尾的目标与硬约束不再被摘要的 2,000 字截断吞掉；`complete_task` 结束子 Agent 本轮、父 Agent
     # 拿到的是那份答案。同版删除 `[PIN]` 消息前缀、默认上下文窗口改为 256K（0.5.19），观澜都不涉及。
-    "agentao[cli]>=0.5.20,<0.6",
+    # >=0.5.21：`TAVILY_API_KEY` / `JINA_API_KEY` 不再传给 Agent 的 shell / MCP / hook 子进程。观澜的
+    # `fetch.py` 会把 `.env` 里的 JINA_API_KEY 补进 Web 宿主进程环境（供 agentao 的 jina 后备读），旧版下
+    # 嵌入的 Agent 一条 `run_shell_command("env")` 就能把它打印出来。同版 `web_search` 改为 deepseek → tavily
+    # → jina、无 key 时不注册、退役 bocha / duckduckgo——观澜不构造 `WebSearchTool`，不受影响。
+    "agentao[cli]>=0.5.21,<0.6",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
     # P4.31 网址导入：`guanlan/fetch.py` 用 httpx 下载（固定解析地址、逐跳检查）。它本已随 agentao 传递安装，
     # 显式声明是因为 fetch.py 是核心模块（将来 CLI `import <url>` 复用），不靠传递依赖。
