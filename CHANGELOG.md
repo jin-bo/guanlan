@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **Web 体检·深查：引文核对**：体检浮层末尾新增「深查（可选，点击才跑）」，点「开始核对」在后台跑一遍全库引文核对（同 `guanlan quotes`，零 LLM、只读），结果分三类：疑似改字、缩写或拼接（计入 `--strict` 的那一档，默认展开）、需人判断（OCR、标签样引语、原文中找不到）、未能核对。设计见 `docs/P4.34-Web体检.md` §6.1。
+  - 核对期间可关掉浮层，回来接着看进度或结果；结果只留最近一次、只在内存，服务重启后重新点一次即可。
+  - 不进任务中心、不取写锁：不会排在入库后面，也不挡可写会话（决策 D12）。不能中途停止。
+  - 每类明细最多列 50 条，计数是全量；完整清单用 `guanlan quotes --json`。一个 1741 页的真实库约 12–14 秒。
+  - 新接口 `POST` / `GET /api/doctor/quotes`；`--reader` 部署不注册。
+
 ### 变更
 
 - **agentao 下限抬到 0.5.21**（`agentao[cli]>=0.5.21,<0.6`）：`TAVILY_API_KEY` / `JINA_API_KEY` 不再传给 Agent 的 shell / MCP / hook 子进程。Web 宿主为 jina 后备把 `.env` 里的 `JINA_API_KEY` 补进进程环境，旧版下嵌入的 Agent 执行 shell 命令就能读到它。同版 `web_search` 的后端链改为 deepseek → tavily → jina、没有 key 时不注册该工具、退役 bocha 与 duckduckgo；观澜不自建 `WebSearchTool`，无需改动。若知识库的 MCP 服务器自己调用 Tavily / Jina，要在其 `env` 里显式传 key。

@@ -148,3 +148,120 @@ def test_doctor_endpoint_and_old_reports_kept(kb) -> None:
     # reader 部署隐藏体检按钮（沿用决策P4.9-10）：字面 "doctor-btn"（带引号、无 #）只命中 applyReaderMode 的 hideIds。
     chat_js = (STATIC_DIR / "chat.js").read_text(encoding="utf-8")
     assert '"doctor-btn"' in chat_js
+
+
+# ---------- 体检深查 · 引文核对（P4.34 §6.1）----------
+def _quotes_kb(tmp_path: Path) -> Path:
+    from test_quotes import Q_OK, RAW_A, _concept, _kb, _src
+
+    altered = Q_OK.replace("丙", "甲")  # 改一个字：计入 strict
+    unsupported = "这一整句话在原文里根本就找不到出处的引语"  # 原文中找不到
+    label = "甲乙丙丁戊己庚辛壬癸→子丑寅卯辰巳午未"  # 含结构符号：标签样，不计入 strict
+    return _kb(
+        tmp_path,
+        {"raw/a.md": RAW_A},
+        {
+            "sources/a.md": _src("raw/a.md", f'正文说"{Q_OK}"。又说"{altered}"。还说"{unsupported}"。另有"{label}"。'),
+            "concepts/c.md": _concept('没有出处的页说"天地玄黄宇宙洪荒日月盈昃辰宿列张"。', []),
+        },
+    )
+
+
+def test_doctor_quotes_groups_strict_review_unchecked(tmp_path) -> None:
+    from guanlan.doctor import run_doctor_quotes
+    from guanlan.quotes import format_report, run_quotes
+
+    kb = _quotes_kb(tmp_path)
+    r = run_doctor_quotes(kb)
+    cats = {c["key"]: c for c in r["categories"]}
+    assert list(cats) == ["strict", "review", "unchecked"]
+    for c in r["categories"]:
+        assert c["count"] == len(c["items"])  # 未超上限时明细即全量
+    assert [i["reason"] for i in cats["strict"]["items"]] == ["strict"]
+    assert cats["strict"]["items"][0]["best_raw"] == "raw/a.md"
+    assert {(i["kind"], i["reason"]) for i in cats["review"]["items"]} == {("unsupported", "unsupported"), ("altered", "label_like")}
+    assert [(i["page"], i["kind"]) for i in cats["unchecked"]["items"]] == [("wiki/concepts/c.md", "no_source")]
+    # 汇总与 `guanlan quotes --json` 同口径
+    import json
+
+    summary = json.loads(format_report(run_quotes(kb), json_output=True))["summary"]
+    assert (r["candidates"], r["passed"]) == (summary["candidates"], summary["passed"])
+    assert cats["strict"]["count"] == summary["strict_findings"]
+
+
+def test_doctor_quotes_items_capped_but_count_full(tmp_path, monkeypatch) -> None:
+    from guanlan import doctor
+
+    monkeypatch.setattr(doctor, "QUOTE_ITEMS_LIMIT", 1)
+    review = {c["key"]: c for c in doctor.run_doctor_quotes(_quotes_kb(tmp_path))["categories"]}["review"]
+    assert review["count"] == 2 and len(review["items"]) == 1
+
+
+def test_doctor_quotes_reason_codes_cover_every_quotes_reason() -> None:
+    # 前端按原因代号取文案：quotes 新增 / 改写原因文案时，代号表必须跟上（否则一律落成 unchecked）。
+    from guanlan import doctor
+    from guanlan.quotes import _REASONS
+
+    assert doctor._QUOTE_REASON_KEY == {v: k for k, v in _REASONS.items()}
+    assert len(doctor._QUOTE_REASON_KEY) == len(_REASONS)  # 文案两两不同，反查不丢键
+    i18n = (Path(doctor.__file__).parent / "web" / "static" / "i18n.js").read_text(encoding="utf-8")
+    for key in _REASONS:
+        assert i18n.count(f'"doctor.quotes.reason.{key}"') == 2  # 中英各一份
+
+
+def test_deepcheck_single_flight_and_failure() -> None:
+    import threading
+
+    from guanlan.web.deepcheck import DeepCheck
+
+    gate = threading.Event()
+    calls: list[int] = []
+
+    def run() -> dict:
+        calls.append(1)
+        gate.wait(5)
+        return {"n": len(calls)}
+
+    dc = DeepCheck(run)
+    assert dc.snapshot()["state"] == "idle"
+    first = dc.start()
+    assert first["state"] == "running" and first["running_s"] is not None
+    assert dc.start()["started_at"] == first["started_at"]  # 在跑时再点：不另起一份
+    gate.set()
+    dc.join(5)
+    done = dc.snapshot()
+    assert done["state"] == "done" and done["result"] == {"n": 1} and done["finished_at"]
+    assert calls == [1]
+
+    def boom() -> dict:
+        raise ValueError("坏了")
+
+    bad = DeepCheck(boom)
+    bad.start()
+    bad.join(5)
+    snap = bad.snapshot()
+    assert snap["state"] == "failed" and "坏了" in snap["error"] and snap["result"] is None
+
+
+def test_doctor_quotes_endpoint_writer_only(tmp_path) -> None:
+    import pytest
+
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from guanlan.web.app import create_app
+
+    kb = _quotes_kb(tmp_path)
+    for name in ("AGENTAO.md", "SCHEMA.md"):  # create_app 才认得出知识库（同 conftest 的 kb）
+        (kb / name).write_text("# x\n", encoding="utf-8")
+    with TestClient(create_app(kb)) as client:
+        assert client.get("/api/doctor/quotes").json()["state"] == "idle"
+        assert client.post("/api/doctor/quotes").json()["state"] in ("running", "done")
+        client.app.state.quotes_check.join(30)
+        snap = client.get("/api/doctor/quotes").json()
+        assert snap["state"] == "done"
+        cats = {c["key"]: c["count"] for c in snap["result"]["categories"]}
+        assert cats == {"strict": 1, "review": 2, "unchecked": 1}
+    with TestClient(create_app(kb, reader=True)) as client:  # reader：不注册（体检按钮本就隐藏）
+        assert client.get("/api/doctor/quotes").status_code in (404, 405)
+        assert client.post("/api/doctor/quotes").status_code in (404, 405)

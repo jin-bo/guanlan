@@ -39,7 +39,7 @@ from ..audit import (
     audit_result_dict,
     run_audit_result,
 )
-from ..doctor import run_doctor
+from ..doctor import run_doctor, run_doctor_quotes
 from ..check import format_report as _format_check
 from ..check import run_check
 from ..errors import EXIT_OK, EXIT_USAGE, GuanlanError
@@ -80,6 +80,7 @@ from .helpers import (
     _workspace_image_src,
 )
 from .jobs import Job, JobQueue, WriteGate
+from .deepcheck import DeepCheck
 from .tasks import DELETABLE_STATES, PENDING_STATES, TaskLimitError, TaskStateError, TaskStore
 
 # 整模块导入（不 from-import 具体函数）：端点内经 `mcpdiag.<fn>` 取属性，测试可 monkeypatch
@@ -861,6 +862,20 @@ def create_app(
     @app.get("/api/doctor")
     async def doctor() -> dict:
         return await anyio.to_thread.run_sync(run_doctor, root)
+
+    # 体检深查·引文核对（P4.34 §6.1）：全库 `quotes` 一遍（真实库约 12 秒），点击才跑。单飞的进程内只读作业，
+    # **不进任务中心**（不取写锁、不拍前像、不落盘）；结果只留最近一次。reader 下不注册：体检按钮本就隐藏，
+    # 也不让匿名读者反复触发全库扫描。POST 起跑（在跑则原样返回状态），GET 取状态与结果，前端轮询。
+    quotes_check = DeepCheck(functools.partial(run_doctor_quotes, root))
+    app.state.quotes_check = quotes_check
+
+    @_writer_only(app.post("/api/doctor/quotes"))
+    async def doctor_quotes_start() -> dict:
+        return quotes_check.start()
+
+    @_writer_only(app.get("/api/doctor/quotes"))
+    async def doctor_quotes_status() -> dict:
+        return quotes_check.snapshot()
 
     # graph：构建（写派生 graph/）后 302 到自包含静态视图。json_only 时改跳 graph.json。
     @_writer_only(app.get("/graph"))  # reader 下不注册（重建写 graph/，决策P4.9-11）
