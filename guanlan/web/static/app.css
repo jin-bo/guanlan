@@ -742,3 +742,11 @@ body.hide-thinking .chat-think { display: none; }
 .doctor-cat[open] > summary::before { content: "▾"; }
 .doctor-page, .doctor-raw { color: var(--lan-ripple); text-decoration: none; }
 .doctor-page:hover, .doctor-raw:hover { color: var(--lan-deep); text-decoration: underline; }
+/* 体检深查（P4.34 §6.1）：一行「检查名 + 按钮」，按钮沿用修复入口的药丸样式。 */
+.doctor-deep { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; padding: .3rem 0; }
+.doctor-deep .doctor-act {
+  padding: .05rem .6rem; font: inherit; font-size: .78rem; line-height: 1.5;
+  color: var(--lan-ripple); background: transparent; border: 1px solid var(--lan-ripple); border-radius: 999px; cursor: pointer;
+}
+.doctor-deep .doctor-act:hover { background: var(--lan-foam); color: var(--lan-deep); border-color: var(--lan-deep); }
+.doctor-deep .doctor-act:disabled { opacity: .5; cursor: default; }

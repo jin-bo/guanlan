@@ -111,7 +111,8 @@ function paintDoctor() {
   const body = $("#overlay-body");
   const shown = body.querySelectorAll("details.doctor-cat");
   const openKeys = shown.length ? new Set([...shown].filter((d) => d.open).map((d) => d.dataset.key)) : null;
-  body.innerHTML = renderDoctor(doctorData, openKeys);
+  body.innerHTML = renderDoctor(doctorData, openKeys) + `<div id="doctor-quotes"></div>`;
+  paintDoctorQuotes(openKeys);
   body.querySelectorAll(".doctor-act").forEach((b) => b.addEventListener("click", (e) => {
     e.preventDefault(); // 按钮在 <summary> 里：不要顺带折叠 / 展开
     runDoctorAction(b.dataset.action, b.dataset.cat);
@@ -145,11 +146,18 @@ async function openDoctor() {
   const tok = ++doctorToken;
   showOverlay("overlay.doctor", `<p class="muted">${escapeHtml(t("common.running"))}</p>`);
   try {
-    const data = await getJSON("/api/doctor");
+    // 深查的上次状态一并取回：关掉体检再打开，进行中的核对接着显示进度、做完的直接显示结果。
+    // reader 下端点未注册（体检按钮本也隐藏），不去取；取不到就当没跑过，不影响体检本身。
+    const [data, quotes] = await Promise.all([
+      getJSON("/api/doctor"),
+      readerMode ? Promise.resolve(null) : getJSON("/api/doctor/quotes").catch(() => null),
+    ]);
     if (doctorOverlayGone(tok)) return;
     doctorData = data;
-    paintDoctor();
+    doctorQuotes = quotes;
+    // 先注册再画：深查在跑时 paintDoctor 要据「浮层归体检」接着轮询（取数已成功，不违背「成功后才注册」）。
     overlayRepaint = paintDoctor; // 语言切换纯重渲染（吃缓存 data）
+    paintDoctor();
   } catch (e) {
     if (doctorOverlayGone(tok)) return;
     $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("common.fail", e.message))}</p>`;
@@ -157,6 +165,128 @@ async function openDoctor() {
 }
 
 $("#doctor-btn").addEventListener("click", openDoctor);
+
+// ── 体检深查 · 引文核对（P4.34 §6.1）────────────────────────────────────────
+// 点击才跑：POST /api/doctor/quotes 在服务端起一个单飞的只读作业（不进任务中心、不取写锁），这里每秒轮询
+// GET 直到做完。结果只留服务端最近一次：关掉浮层再开仍在，重开体检时接着轮询。分组在服务端做，这里只渲染。
+// 引语、页名、raw 路径都是库内文本，一律 escapeHtml。
+
+const DOCTOR_QUOTES_POLL_MS = 1000;
+const DOCTOR_QUOTE_CHARS = 80; // 明细里每条引语最多显示这么多字
+let doctorQuotes = null; // 服务端最近一次状态 {state, started_at, finished_at, running_s, result, error}；null = 没取到
+let doctorQuotesTimer = null;
+
+function doctorQuotesCatLabel(key) {
+  switch (key) {
+    case "strict": return t("doctor.quotes.cat.strict");
+    case "review": return t("doctor.quotes.cat.review");
+    case "unchecked": return t("doctor.quotes.cat.unchecked");
+    default: return key;
+  }
+}
+
+// 原因代号 → 文案（t() 首参须为字面量，决策P4.7-8）。代号与 quotes._REASONS 的键一致。
+function doctorQuoteReason(r) {
+  switch (r) {
+    case "strict": return t("doctor.quotes.reason.strict");
+    case "label_like": return t("doctor.quotes.reason.label_like");
+    case "ocr": return t("doctor.quotes.reason.ocr");
+    case "unsupported": return t("doctor.quotes.reason.unsupported");
+    case "misattributed": return t("doctor.quotes.reason.misattributed");
+    default: return t("doctor.quotes.reason.unchecked");
+  }
+}
+
+function doctorQuoteItemHtml(it) {
+  const quote = it.quote.length > DOCTOR_QUOTE_CHARS ? it.quote.slice(0, DOCTOR_QUOTE_CHARS) + "…" : it.quote;
+  const where = it.best_raw || (it.checked_raw || []).join(t("doctor.sep"));
+  let note = where ? t("doctor.quotes.checked", where) : t("doctor.quotes.noRaw");
+  if (it.coverage !== null && it.coverage !== undefined) note += t("doctor.quotes.coverage", it.coverage);
+  return `<div class="finding"><span class="kind">[${escapeHtml(it.kind)}]</span> ${doctorPageLink(it.page)}:${escapeHtml(String(it.line))}` +
+    ` 「${escapeHtml(quote)}」<div class="muted">${escapeHtml(note)} — ${escapeHtml(doctorQuoteReason(it.reason))}</div></div>`;
+}
+
+function fmtClock(iso) {
+  const d = iso ? new Date(iso) : null;
+  return d && !isNaN(d) ? d.toLocaleTimeString() : "";
+}
+
+function renderDoctorQuotes(openKeys) {
+  const q = doctorQuotes || { state: "idle" };
+  const running = q.state === "running";
+  const btnLabel = q.state === "idle" ? t("doctor.quotes.run") : t("doctor.quotes.rerun");
+  let html = `<h4 class="doctor-section">${escapeHtml(t("doctor.section.deep"))}</h4>`;
+  html += `<div class="doctor-deep"><span>${escapeHtml(t("doctor.quotes.title"))}</span>` +
+    `<button type="button" id="doctor-quotes-run" class="doctor-act"${running ? " disabled" : ""}>${escapeHtml(btnLabel)}</button></div>`;
+  if (q.state === "idle") return html + `<p class="muted">${escapeHtml(t("doctor.quotes.hint"))}</p>`;
+  if (running) return html + `<p class="muted">${escapeHtml(t("doctor.quotes.running", fmtElapsed(q.running_s)))}</p>`;
+  if (q.state === "failed") return html + `<p class="report-bad">${escapeHtml(t("common.fail", q.error || ""))}</p>`;
+  const r = q.result || {};
+  const cats = r.categories || [];
+  const nStrict = (cats.find((c) => c.key === "strict") || { count: 0 }).count;
+  const pct = r.candidates ? ((100 * r.passed) / r.candidates).toFixed(1) : "100.0";
+  html += `<p class="${nStrict ? "report-bad" : "report-ok"}">${escapeHtml(t("doctor.quotes.summary", r.pages_checked, r.candidates, r.passed, pct))}</p>`;
+  html += `<p class="muted">${escapeHtml(t("doctor.quotes.meta", fmtClock(q.finished_at), fmtElapsed(r.elapsed_s), r.misattributed || 0))}</p>`;
+  if ((r.raw_unreachable || []).length) {
+    html += `<p class="report-bad">${escapeHtml(t("doctor.quotes.unreachable", r.raw_unreachable.length, r.raw_unreachable.slice(0, 5).join(t("doctor.sep"))))}</p>`;
+  }
+  for (const cat of cats) {
+    if (!cat.count) continue;
+    const key = `quotes_${cat.key}`;
+    const items = (cat.items || []).slice(0, DOCTOR_SHOW).map(doctorQuoteItemHtml).join("");
+    // 服务端每类只带回前 50 条（count 是全量）：其余去命令行看完整清单。
+    const more = cat.count > DOCTOR_SHOW ? `<p class="muted">${escapeHtml(t("doctor.quotes.more", cat.count - DOCTOR_SHOW))}</p>` : "";
+    const open = (openKeys ? openKeys.has(key) : cat.key === "strict") ? " open" : "";
+    html += `<details class="doctor-cat" data-key="${escapeHtml(key)}"${open}><summary><span>${escapeHtml(doctorQuotesCatLabel(cat.key))}</span> <b>${cat.count}</b></summary>${items}${more}</details>`;
+  }
+  return html;
+}
+
+// 只重画深查这一段（轮询每秒一次，不动上面的体检清单与其展开状态）。
+function paintDoctorQuotes(openKeys = null) {
+  const box = $("#doctor-quotes");
+  if (!box) return;
+  if (readerMode) { box.innerHTML = ""; return; }
+  if (openKeys === null) {
+    const shown = box.querySelectorAll("details.doctor-cat");
+    if (shown.length) openKeys = new Set([...shown].filter((d) => d.open).map((d) => d.dataset.key));
+  }
+  box.innerHTML = renderDoctorQuotes(openKeys);
+  const btn = $("#doctor-quotes-run");
+  if (btn) btn.addEventListener("click", startDoctorQuotes);
+  box.querySelectorAll("a.doctor-page").forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault();
+    $("#overlay").classList.add("hidden");
+    navigate({ kind: "page", path: a.dataset.page });
+  }));
+  scheduleDoctorQuotesPoll();
+}
+
+// 浮层已换主人（关掉、开了别的浮层）就停轮询：重开体检时 openDoctor 取回状态、paintDoctorQuotes 再接上。
+function scheduleDoctorQuotesPoll() {
+  clearTimeout(doctorQuotesTimer);
+  doctorQuotesTimer = null;
+  if (!doctorQuotes || doctorQuotes.state !== "running" || overlayRepaint !== paintDoctor) return;
+  doctorQuotesTimer = setTimeout(async () => {
+    doctorQuotesTimer = null;
+    if (overlayRepaint !== paintDoctor) return;
+    try {
+      doctorQuotes = await getJSON("/api/doctor/quotes");
+    } catch (e) {
+      doctorQuotes = { state: "failed", error: e.message };
+    }
+    if (overlayRepaint === paintDoctor) paintDoctorQuotes();
+  }, DOCTOR_QUOTES_POLL_MS);
+}
+
+async function startDoctorQuotes() {
+  try {
+    doctorQuotes = await postJSON("/api/doctor/quotes", {});
+  } catch (e) {
+    doctorQuotes = { state: "failed", error: e.message };
+  }
+  if (overlayRepaint === paintDoctor) paintDoctorQuotes();
+}
 
 // 图谱按钮自 P4.27 起打开 Web 内图谱面板，接线见 graph_view.js。
 

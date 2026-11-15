@@ -10,6 +10,9 @@
 3. **计数按最终展示项**：断链 / 缺页按目标数、漂移源按组数、待入库按文件数；`total` 不含结构提示。
 
 CLI 的 `check` / `health` / `lint` 不受影响（退出码契约不变）；本模块只供 Web `GET /api/doctor` 用。
+
+另有 `run_doctor_quotes`：体检的「引文核对」深查（P3.14 `run_quotes` 全库一遍，真实库约 12 秒），点击才跑，
+不进 `run_doctor`（见 P4.34 §6.1）。同样只分组、不新增规则。
 """
 
 from __future__ import annotations
@@ -30,9 +33,11 @@ from .lint import (
     missing_entity_detail,
 )
 from .pages import TOPOLOGY_FINDING_KINDS
+from .quotes import _REASONS as _QUOTE_REASONS
+from .quotes import run_quotes
 from .rawio import raw_ingest_status
 
-__all__ = ["run_doctor", "INDEX_KINDS", "TOPOLOGY_KINDS"]
+__all__ = ["run_doctor", "run_doctor_quotes", "INDEX_KINDS", "TOPOLOGY_KINDS", "QUOTE_UNCHECKED_KINDS"]
 
 INDEX_KINDS = ("health.index_missing_page", "health.index_dangling")
 # lint 里只是「图谱上值得看一眼」的拓扑建议：不参与总评。清单与 lint 因果排序的第三档同一份。
@@ -132,4 +137,56 @@ def run_doctor(root: Path) -> dict:
         "total": total,
         "elapsed_s": round(time.monotonic() - started, 2),
         "categories": categories,
+    }
+
+
+# 引文核对里「没能核对」的几类：没有出处、出处读不到、raw 遍历不完整。不是引语有错，是核对没做成。
+QUOTE_UNCHECKED_KINDS = ("no_source", "source_unreadable", "scan_incomplete")
+# 每类明细最多带回这么多条（= 前端每类渲染上限）；`count` 仍是全量。真实 1743 页库「需人判断」一类上千条，
+# 全量返回约 700 KB 且每次打开体检都要再取一遍；完整清单用 CLI `guanlan quotes --json`。
+QUOTE_ITEMS_LIMIT = 50
+# 文案 → 原因代号（strict / label_like / ocr / unsupported / misattributed / unchecked）：前端按代号取中英文，
+# 不转发 `quotes._REASONS` 的中文原文。与 `_strict_of` 同出一张表，新增原因时这里自动跟上。
+_QUOTE_REASON_KEY = {v: k for k, v in _QUOTE_REASONS.items()}
+
+
+def _quote_item(f) -> dict:
+    return {
+        "page": f.page,
+        "line": f.line,
+        "kind": f.kind,
+        "quote": f.quote,
+        "reason": _QUOTE_REASON_KEY.get(f.strict_reason, "unchecked"),
+        "best_raw": f.best_raw,
+        "coverage": f.coverage,
+        "checked_raw": list(f.checked_raw),
+    }
+
+
+def run_doctor_quotes(root: Path) -> dict:
+    """体检深查：全库引文核对（`quotes.run_quotes`，非 strict 模式、默认参数，同 `guanlan quotes`），按三类分组。
+
+    - `strict`：计入 `--strict` 的那一档（altered ∧ 无 OCR 提示 ∧ 非标签形态）——最值得先看。
+    - `review`：其余 altered 与 unsupported，要人判断（OCR 错字、标签样引语、转述）。
+    - `unchecked`：`QUOTE_UNCHECKED_KINDS`，核对没做成。
+    「措辞属实、出处未能核实」（misattributed）与 CLI 默认一样只计数、不列条目。`summary` 与 `quotes --json` 同口径。
+    与 `run_doctor` 不同，`items` 截到前 `QUOTE_ITEMS_LIMIT` 条（`count` 仍是全量）。
+    """
+    started = time.monotonic()
+    report = run_quotes(Path(root))
+    strict = [f for f in report.findings if f.strict]
+    review = [f for f in report.findings if not f.strict and f.kind in ("altered", "unsupported")]
+    unchecked = [f for f in report.findings if f.kind in QUOTE_UNCHECKED_KINDS]
+    counts = report.counts
+    return {
+        "pages_checked": report.pages_checked,
+        "candidates": counts.get("candidates", 0),
+        "passed": counts.get("passed", 0),
+        "misattributed": counts.get("misattributed", 0),
+        "raw_unreachable": report.raw_unreachable,
+        "elapsed_s": round(time.monotonic() - started, 2),
+        "categories": [
+            {"key": key, "count": len(items), "items": [_quote_item(f) for f in items[:QUOTE_ITEMS_LIMIT]]}
+            for key, items in (("strict", strict), ("review", review), ("unchecked", unchecked))
+        ],
     }
