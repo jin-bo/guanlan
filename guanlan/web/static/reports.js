@@ -35,6 +35,7 @@ function doctorActionLabel(action) {
     case "heal": return t("doctor.action.heal");
     case "ingest": return t("doctor.action.ingest");
     case "audit": return t("doctor.action.audit");
+    case "reindex": return t("doctor.action.reindex");
     case "graph": return t("doctor.action.graph");
     default: return "";
   }
@@ -51,6 +52,7 @@ function runDoctorAction(action, key) {
   if (action === "heal") openHealPreview(undefined, key === "broken_link" ? 1 : undefined);
   else if (action === "ingest") openIngestPicker();
   else if (action === "audit") openAuditPreview();
+  else if (action === "reindex") openReindexPreview();
   else if (action === "graph") openGraph({ view: "overview" });
 }
 
@@ -100,9 +102,8 @@ function renderDoctor(data, openKeys = null) {
       : "";
     const items = (cat.items || []).slice(0, DOCTOR_SHOW).map((it) => doctorItemHtml(cat, it)).join("");
     const more = cat.count > DOCTOR_SHOW ? `<p class="muted">${escapeHtml(t("doctor.more", cat.count - DOCTOR_SHOW))}</p>` : "";
-    const hint = cat.key === "index" ? `<p class="muted">${escapeHtml(t("doctor.indexHint"))}</p>` : "";
     const open = (openKeys ? openKeys.has(cat.key) : cat.section === "blocking") ? " open" : "";
-    html += `<details class="doctor-cat" data-key="${escapeHtml(cat.key)}"${open}><summary><span>${escapeHtml(doctorCatLabel(cat.key))}</span> <b>${cat.count}</b>${act}</summary>${hint}${items}${more}</details>`;
+    html += `<details class="doctor-cat" data-key="${escapeHtml(cat.key)}"${open}><summary><span>${escapeHtml(doctorCatLabel(cat.key))}</span> <b>${cat.count}</b>${act}</summary>${items}${more}</details>`;
   }
   return html;
 }

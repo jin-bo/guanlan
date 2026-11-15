@@ -750,3 +750,5 @@ body.hide-thinking .chat-think { display: none; }
 }
 .doctor-deep .doctor-act:hover { background: var(--lan-foam); color: var(--lan-deep); border-color: var(--lan-deep); }
 .doctor-deep .doctor-act:disabled { opacity: .5; cursor: default; }
+/* 索引修复预览（P4.34 §6.2）：删除悬空条目的勾选行。 */
+.reindex-prune { display: flex; align-items: center; gap: .35rem; margin: .8rem 0 .2rem; font-size: .88rem; cursor: pointer; }

@@ -161,7 +161,8 @@ function submitErrorText(e) {
 async function submitBackgroundTask(url, body, kind, params, fallback) {
   // 提交飞行中禁用浮层内按钮：旧路径一点击就把浮层换成「已提交」，按钮随之消失；现在表单要留到响应回来
   // （423 时原样保留），不禁用的话连点两下就是两个后台任务、两份模型开销。失败时恢复原禁用态。
-  const btns = [...$("#overlay-body").querySelectorAll("button")].map((b) => [b, b.disabled]);
+  // 勾选框一并禁用：改勾选会重画表单、换出一个可点的新按钮（索引修复的 prune），飞行中就能带不同参数再提交一次。
+  const btns = [...$("#overlay-body").querySelectorAll("button, input")].map((b) => [b, b.disabled]);
   for (const [b] of btns) b.disabled = true;
   let data;
   try {
@@ -532,6 +533,89 @@ async function triggerAudit(limit) {
   await submitBackgroundTask("/api/audit", body, "audit", { limit: body.limit }, async (jobId) => {
     showOverlay("overlay.audit", `<p class="muted">${escapeHtml(t("audit.submitted"))}</p>`);
     await pollJob(jobId, "audit", renderAuditDone);
+  });
+}
+
+// ── 索引修复（P4.34 §6.2）：体检「索引与磁盘不同步」的修复入口 ─────────────────────
+// GET /api/reindex/preview（零 LLM，== reindex --prune --dry-run）列出将登记的漏登页与可删除的悬空行；
+// 悬空行默认不删（同 CLI 默认），勾选后才带 prune 提交。提交后进任务中心，作业执行时服务端重算。
+async function openReindexPreview() {
+  showOverlay("overlay.reindex", `<p class="muted">${escapeHtml(t("common.running"))}</p>`);
+  let data;
+  try {
+    data = await getJSON("/api/reindex/preview");
+  } catch (e) {
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("reindex.previewFail", e.message))}</p>`;
+    return;
+  }
+  let prune = false;
+  const paint = () => renderReindexPreview(data, prune, (v) => { prune = v; paint(); });
+  paint();
+  overlayRepaint = paint; // 语言切换纯重渲染（吃缓存 data，保留勾选）
+}
+
+function renderReindexPreview(data, prune, setPrune) {
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  const added = data.added || [];
+  const pruned = data.pruned || [];
+  const manual = [...(data.manual_pages || []), ...(data.manual_links || [])];
+  const list = (head, items, render) => {
+    const h = document.createElement("p");
+    h.textContent = head;
+    box.appendChild(h);
+    for (const it of items) {
+      const row = document.createElement("div");
+      row.className = "heal-item postponed";
+      row.textContent = render(it); // textContent：页名、行文本按字面显示，无注入
+      box.appendChild(row);
+    }
+  };
+  // 体检报了、reindex 修不了的项（分区目录外的页、沾注释或混有有效链接的悬空行）：只能手动改 index.md。
+  const manualList = () => { if (manual.length) list(t("reindex.manualHead", manual.length), manual, (x) => `· ${x}`); };
+  if (!added.length && !pruned.length) {
+    if (!manual.length) {
+      const ok = document.createElement("p");
+      ok.className = "report-ok";
+      ok.textContent = t("reindex.none");
+      box.appendChild(ok);
+    }
+    manualList();
+    return;
+  }
+  const top = document.createElement("div");
+  top.className = "heal-top";
+  const go = document.createElement("button");
+  go.className = "heal-go";
+  go.textContent = prune && pruned.length ? t("reindex.goPrune", added.length, pruned.length) : t("reindex.go", added.length);
+  go.disabled = !added.length && !(prune && pruned.length); // 只有悬空行又没勾选：提交了也什么都不做
+  go.addEventListener("click", () => triggerReindex(prune));
+  top.appendChild(go);
+  box.appendChild(top);
+
+  if (added.length) list(t("reindex.addedHead", added.length), added, (e) => `+ [${e.section}] ${e.line}`);
+  if (pruned.length) {
+    const label = document.createElement("label");
+    label.className = "reindex-prune";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = prune;
+    cb.addEventListener("change", () => setPrune(cb.checked));
+    label.append(cb, document.createTextNode(" " + t("reindex.pruneLabel", pruned.length)));
+    box.appendChild(label);
+    list(t("reindex.prunedHead"), pruned, (ln) => `− ${ln}`);
+  }
+  manualList();
+  const note = document.createElement("p");
+  note.className = "muted";
+  note.textContent = t("reindex.note");
+  box.appendChild(note);
+}
+
+async function triggerReindex(prune) {
+  await submitBackgroundTask("/api/reindex", { prune }, "reindex", { prune }, async (jobId) => {
+    showOverlay("overlay.reindex", `<p class="muted">${escapeHtml(t("reindex.submitted"))}</p>`);
+    await pollJob(jobId, "reindex");
   });
 }
 

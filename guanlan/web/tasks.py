@@ -2,7 +2,7 @@
 
 `JobQueue` 仍是执行层（单写者 FIFO、写锁、redirect 捕获、心跳）；本模块只在它外面加一层**持久的任务信封**：
 
-- 补录 / 沉淀 / heal / 审计（`TASK_KINDS`）提交时先 `create()` 一份信封 `workspace/jobs/<id>.json`，再带
+- 补录 / 沉淀 / heal / 审计 / 索引修复（`TASK_KINDS`）提交时先 `create()` 一份信封 `workspace/jobs/<id>.json`，再带
   `task_id` 入队；`JobQueue` 在起跑 / 每次输出 / 收尾三处回调本类（`JobObserver` 接口），信封随之翻状态、
   输出追加写进 `workspace/jobs/<id>.log`。刷新页面或重启服务后，记录与日志都还在。
 - 一键入库的清单留在 `workspace/tasks/`，本类**只读**它来展示（决策 D2）：那些清单兼作 `raw/` 文件归属依据
@@ -41,7 +41,7 @@ from ..oneclick import iter_tasks as iter_import_tasks
 from ..rawio import atomic_write_text
 from .jobs import CANCELLED_BEFORE_START, Emit, Job
 
-TASK_KINDS = ("ingest", "backfill", "heal", "audit")
+TASK_KINDS = ("ingest", "backfill", "heal", "audit", "reindex")  # reindex：体检的索引修复（P4.34 §6.2）
 PENDING_STATES = ("queued", "waiting_lock")  # 还没开始（未取得写锁）：可取消
 # 持写锁在写的：运行中、取消后正在回滚、中断任务正在回滚。
 WRITING_STATES = ("running", "cancelling", "rolling_back")

@@ -70,7 +70,7 @@ def run_doctor(root: Path) -> dict:
     """跑一次体检，返回 `{ok, pages_checked, total, elapsed_s, categories: [...]}`。
 
     `categories` 按展示顺序排列，每项 `{key, section, count, items, action}`：`section` ∈ blocking / suggest / structure；
-    `action` 是修复入口（heal / ingest / audit / graph，或 None）。`count == len(items)`，即最终展示项数。
+    `action` 是修复入口（heal / ingest / audit / reindex / graph，或 None）。`count == len(items)`，即最终展示项数。
     """
     started = time.monotonic()
     root = Path(root)
@@ -126,7 +126,7 @@ def run_doctor(root: Path) -> dict:
         _category("broken_link", "suggest", broken_items, "heal"),  # 前端以 min_refs=1 打开 heal 预览（原顶栏 heal 可调到 1）
         _category("pending_raw", "suggest", _pending_raw(root), "ingest"),
         _category("drift", "suggest", drift_items, "audit"),
-        _category("index", "suggest", index_items),
+        _category("index", "suggest", index_items, "reindex"),  # Web 修复入口见 P4.34 §6.2
         _category("quality", "suggest", quality_items),
         _category("topology", "structure", topology_items, "graph"),
     ]

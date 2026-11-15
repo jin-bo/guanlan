@@ -43,6 +43,8 @@ from ..doctor import run_doctor, run_doctor_quotes
 from ..check import format_report as _format_check
 from ..check import run_check
 from ..errors import EXIT_OK, EXIT_USAGE, GuanlanError
+from ..pages import index_md_links, index_sync_state
+from ..reindex import reindex_entrypoint, run_reindex
 from ..kblock import KBLockBusy
 from ..graph import build_and_write_graph
 from ..health import format_report as _format_health
@@ -340,6 +342,13 @@ class AuditBody(BaseModel):
     model: str | None = None
 
 
+class ReindexBody(BaseModel):
+    """`POST /api/reindex` 请求体（P4.34 §6.2）。`prune` 同 CLI `guanlan reindex --prune`：另删指向不存在文件的悬空行。
+    登记哪些页、删哪些行由作业**执行时服务端重算**（同 heal 的 worklist），预览只给用户看。"""
+
+    prune: bool = False
+
+
 class McpCheckBody(BaseModel):
     """`POST /api/mcp/check` 请求体（P4.19）。`name` 可省（省略=查全部），给了则必须是当前配置里
     已存在的 server 名（否则 404）。
@@ -470,7 +479,7 @@ def create_app(
         write_lock=write_gate.write_lock,
         on_job_done=lambda kind: (
             write_gate.bump_wiki_generation()
-            if kind in ("ingest", "heal", "backfill", "audit", "oneclick", "rollback")
+            if kind in ("ingest", "heal", "backfill", "audit", "reindex", "oneclick", "rollback")
             else None
         ),
     )
@@ -982,9 +991,15 @@ def create_app(
 
         return _progress
 
-    # P4.33：四类后台任务的「标题 · 参数 · 作业」统一在这里由请求体构造。提交端点与重试（T2）共用——重试按
+    # P4.33：各类后台任务的「标题 · 参数 · 作业」统一在这里由请求体构造。提交端点与重试（T2）共用——重试按
     # 信封里存的 params 重建请求体（经同一 pydantic 模型校验），再走同一条路。请求显式给了 `model` 才进 params。
-    _TASK_BODIES = {"ingest": IngestBody, "heal": HealBody, "backfill": BackfillBody, "audit": AuditBody}
+    _TASK_BODIES = {
+        "ingest": IngestBody,
+        "heal": HealBody,
+        "backfill": BackfillBody,
+        "audit": AuditBody,
+        "reindex": ReindexBody,
+    }
 
     def _with_model(params: dict, body) -> dict:
         """请求里显式指定了（且不同于服务默认的）模型才记进 params：查重区分不同模型，重试沿用同一个模型。
@@ -1021,6 +1036,14 @@ def create_app(
             title = f"提取概念/实体：{n} 个目标" if n is not None else f"提取概念/实体：至多 {body.limit} 个高频缺页"
             params = {"limit": body.limit, "min_refs": body.min_refs, "targets": targets}
             return title, _with_model(params, body), _job, "物化"
+        if kind == "reindex":
+            # 零 LLM、只写 wiki/index.md（同 CLI `guanlan reindex`，决策P3.4-6：不起 Agentao、不过写门禁、不写 log.md）。
+            # 走任务中心是为了写锁与前像（P4.34 §6.2）：排在在途的 ingest 之后，不与它同写 index.md；可回滚。
+            def _job(emit) -> int:  # == CLI 的单一落地（算 → 写 → 回执），回执经 redirect 进 job.output
+                return reindex_entrypoint(root, prune=body.prune, dry_run=False, json_output=False)
+
+            title = "索引修复：登记漏登页" + ("、删除悬空条目" if body.prune else "")
+            return title, {"prune": body.prune}, _job, "修复索引"
         if kind == "backfill":
             # 整体复用 run_query(backfill=True)，答案 + 门禁回执经 stdout 捕获进 job.output（决策P4.8-2）。
             def _job(emit) -> int:
@@ -1098,6 +1121,36 @@ def create_app(
     async def heal(body: HealBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
         return await _submit_task("heal", body)
+
+    # 索引修复预览（P4.34 §6.2，零 LLM 读）：== `guanlan reindex --prune --dry-run`，不写盘、不入队。
+    # 一次算出两样：将登记的漏登页、可删除的悬空行（被 HTML 注释包住的行受保护，不在其中）；删不删由提交时的 prune 定。
+    @_writer_only(app.get("/api/reindex/preview"))  # reader 下不注册：只服务于写入口
+    async def reindex_preview() -> dict:
+        def _preview() -> dict:
+            wiki = root / "wiki"
+            result, _ = run_reindex(wiki, prune=True)
+            # 体检「索引」一项里有、reindex 却修不了的：不在四个分区目录下的页、沾注释或混有有效链接的悬空行。
+            # 单列出来，免得预览报「已同步」而体检仍报不同步（只能手动改 index.md）。
+            missing, dangling = index_sync_state(wiki)
+            added = {e.page for e in result.added}
+            covered = set().union(*(index_md_links(ln) for ln in result.pruned))
+            return {
+                "pages_checked": result.pages_checked,
+                "added": [{"page": e.page, "section": e.section, "line": e.line} for e in result.added],
+                "pruned": result.pruned,
+                "manual_pages": [
+                    rel for rel in (p.relative_to(root).as_posix() for p in missing) if rel not in added
+                ],
+                "manual_links": sorted(set(dangling) - covered),
+            }
+
+        return await anyio.to_thread.run_sync(_preview)
+
+    # 索引修复（写，P4.34 §6.2）：进任务中心，排单写者队列、拍前像，可取消回滚。
+    @_writer_only(app.post("/api/reindex"))  # reader 下不注册（写 index.md）
+    async def reindex(body: ReindexBody) -> dict:
+        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
+        return await _submit_task("reindex", body)
 
     # 写（唯一写入口之一 = backfill，P4.8）：即时入队、立刻返回 job_id。
     @_writer_only(app.post("/api/backfill"))  # reader 下不注册（回填是 gated 写，决策P4.9-2）

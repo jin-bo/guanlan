@@ -46,7 +46,7 @@ uv run pytest                            # run all tests
 uv run pytest tests/test_web.py          # P4 Web host tests (skipped if guanlan-wiki[web] absent)
 uv run pytest tests/test_mcp.py          # P4.10 MCP host tests (skipped if guanlan-wiki[mcp] absent)
 uv run pytest tests/test_web_tasks.py    # P4.33 background task center (TaskStore, /api/tasks, restart recovery, retention, cancel + rollback)
-uv run pytest tests/test_doctor.py        # P4.34 Web checkup aggregation (/api/doctor: grouping, broken-link dedup, counts; §6.1 quote deep check /api/doctor/quotes)
+uv run pytest tests/test_doctor.py        # P4.34 Web checkup aggregation (/api/doctor: grouping, broken-link dedup, counts; §6.1 quote deep check /api/doctor/quotes; §6.2 index fix = `reindex` task kind)
 uv run pytest tests/test_web_mcpdiag.py  # P4.19 Web MCP diagnostics (the reverse direction: external servers injected *into* this KB)
 uv run --extra web python scripts/smoke_p420.py  # P4.20 flint chart rendering — real-browser smoke (Playwright; not in pytest)
 uv run pytest tests/test_im.py           # P4.21 IM host core (FakeAdapter; zero network, zero SDK — never skipped)
