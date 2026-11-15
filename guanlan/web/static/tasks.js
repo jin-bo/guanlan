@@ -59,6 +59,7 @@ function taskTitle(row) {
         ? t("task.title.healTargets", p.targets.length)
         : t("task.title.heal", p.limit || "");
     case "audit": return t("task.title.audit", p.limit || "");
+    case "reindex": return p.prune ? t("task.title.reindexPrune") : t("task.title.reindex");
     case "import": return t("task.title.import", row.title || row.id);
     default: return (row && (row.title || row.id)) || "";
   }

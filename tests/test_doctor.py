@@ -265,3 +265,114 @@ def test_doctor_quotes_endpoint_writer_only(tmp_path) -> None:
     with TestClient(create_app(kb, reader=True)) as client:  # reader：不注册（体检按钮本就隐藏）
         assert client.get("/api/doctor/quotes").status_code in (404, 405)
         assert client.post("/api/doctor/quotes").status_code in (404, 405)
+
+
+# ---------- 索引修复（P4.34 §6.2）----------
+_INDEX = "# 索引\n\n## Sources\n\n## Entities\n\n- [死页](entities/Dead.md) — 悬空\n\n## Concepts\n\n## Syntheses\n"
+
+
+def _reindex_kb(kb: Path) -> Path:
+    (kb / "wiki" / "index.md").write_text(_INDEX, encoding="utf-8")
+    write_page(kb, "wiki/concepts/漏登.md", body="正文足够长，避免被判为桩页。")  # 磁盘有、index 没有
+    return kb
+
+
+def _client(kb, **kw):
+    import pytest
+
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from guanlan.web.app import create_app
+
+    return TestClient(create_app(kb, **kw))
+
+
+def _wait_task(client, task_id: str, timeout: float = 10.0) -> dict:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        data = client.get(f"/api/tasks/{task_id}").json()
+        if data["state"] not in ("queued", "waiting_lock", "running", "cancelling", "rolling_back"):
+            return data
+        time.sleep(0.02)
+    raise AssertionError(f"任务 {task_id} 未在 {timeout}s 内结束")
+
+
+def test_doctor_index_category_offers_reindex_action(kb) -> None:
+    cats = _cats(run_doctor(_reindex_kb(kb)))
+    assert cats["index"]["action"] == "reindex"
+    assert {i["kind"] for i in cats["index"]["items"]} == {"health.index_missing_page", "health.index_dangling"}
+
+
+def test_reindex_preview_lists_both_and_writes_nothing(kb) -> None:
+    _reindex_kb(kb)
+    with _client(kb) as client:
+        r = client.get("/api/reindex/preview").json()
+    assert [(e["page"], e["section"]) for e in r["added"]] == [("wiki/concepts/漏登.md", "Concepts")]
+    assert r["pruned"] == ["- [死页](entities/Dead.md) — 悬空"]
+    assert (kb / "wiki" / "index.md").read_text(encoding="utf-8") == _INDEX  # 预览不写盘
+
+
+def test_reindex_task_registers_and_prunes_only_when_asked(kb) -> None:
+    _reindex_kb(kb)
+    with _client(kb) as client:
+        r = client.post("/api/reindex", json={}).json()
+        env = _wait_task(client, r["task_id"])
+        assert env["state"] == "succeeded" and env["kind"] == "reindex" and env["params"] == {"prune": False}
+        idx = (kb / "wiki" / "index.md").read_text(encoding="utf-8")
+        assert "(concepts/漏登.md)" in idx and "entities/Dead.md" in idx  # 默认不删悬空（同 CLI）
+        assert "登记 1 页" in client.get(f"/api/tasks/{r['task_id']}").json()["log"]["text"]
+
+        r = client.post("/api/reindex", json={"prune": True}).json()
+        assert _wait_task(client, r["task_id"])["state"] == "succeeded"
+        idx = (kb / "wiki" / "index.md").read_text(encoding="utf-8")
+        assert "entities/Dead.md" not in idx and idx.count("(concepts/漏登.md)") == 1  # 不重复登记
+
+
+def test_reindex_job_bumps_wiki_generation(kb) -> None:
+    # 写了 wiki/：可写会话缓存的 check 基线要重拍。直接调完工回调——它在信封转终态之后才跑，等任务结束再看会有时序竞态。
+    with _client(kb) as client:
+        gate = client.app.state.write_gate
+        before = gate.wiki_generation
+        client.app.state.jobs._on_job_done("reindex")
+        assert gate.wiki_generation == before + 1
+
+
+def test_reindex_rejected_during_writable_turn_and_absent_for_reader(kb) -> None:
+    _reindex_kb(kb)
+    with _client(kb) as client:
+        client.app.state.write_gate.enter_writable()
+        try:
+            assert client.post("/api/reindex", json={}).status_code == 423  # 层③
+        finally:
+            client.app.state.write_gate.exit_writable()
+    with _client(kb, reader=True) as client:
+        assert client.get("/api/reindex/preview").status_code in (404, 405)
+        assert client.post("/api/reindex", json={}).status_code in (404, 405)
+    assert (kb / "wiki" / "index.md").read_text(encoding="utf-8") == _INDEX
+
+
+def test_reindex_task_can_be_retried(kb) -> None:
+    _reindex_kb(kb)
+    with _client(kb) as client:
+        tid = client.post("/api/reindex", json={"prune": True}).json()["task_id"]
+        assert _wait_task(client, tid)["state"] == "succeeded"
+        r = client.post(f"/api/tasks/{tid}/retry")
+        assert r.status_code == 200, r.text  # 参数按 ReindexBody 重建
+        assert _wait_task(client, r.json()["task_id"])["params"] == {"prune": True}
+
+
+def test_reindex_preview_lists_items_it_cannot_fix(kb) -> None:
+    # 体检报了、reindex 修不了的：分区目录外的页、与有效链接同行的悬空条目。预览不能报「已同步」。
+    (kb / "wiki" / "index.md").write_text(
+        "# 索引\n\n## Concepts\n\n- [活](concepts/活.md)、[死](concepts/死.md)\n", encoding="utf-8"
+    )
+    write_page(kb, "wiki/concepts/活.md", body="正文足够长，避免被判为桩页。")
+    write_page(kb, "wiki/notes/散页.md", body="正文足够长，避免被判为桩页。")
+    with _client(kb) as client:
+        r = client.get("/api/reindex/preview").json()
+    assert r["added"] == [] and r["pruned"] == []
+    assert r["manual_pages"] == ["wiki/notes/散页.md"]
+    assert r["manual_links"] == ["concepts/死.md"]
