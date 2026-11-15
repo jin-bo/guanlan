@@ -446,10 +446,15 @@ def test_upload_blocked_while_download_is_starting_oneclick(kb, monkeypatch, fak
     monkeypatch.setattr(fetch_routes, "fetch_url", FakeFetch())
     entered, release = threading.Event(), threading.Event()
     real = oneclick_routes.active_task
+    first = threading.Lock()
 
+    # 只卡第一次调用（下载提交后 start_prepare 查盘那次）。同名上传的冲突检查（upload_in_use → _preparing_on_disk）
+    # 也调 active_task：一并卡住的话两边都要等满 5 秒超时，之后谁先跑完看调度——准备作业若已做完、reserved 已撤，
+    # 上传就拿到 200（CI 3.11 上偶发）。
     def slow_active(root):
-        entered.set()
-        release.wait(5)
+        if first.acquire(blocking=False):
+            entered.set()
+            release.wait(5)
         return real(root)
 
     monkeypatch.setattr(oneclick_routes, "active_task", slow_active)
@@ -459,6 +464,7 @@ def test_upload_blocked_while_download_is_starting_oneclick(kb, monkeypatch, fak
         try:
             r = client.post("/api/upload", files={"file": ("report.pdf", b"%PDF other", "application/pdf")})
             assert r.status_code == 409
+            assert "正要开始一键入库" in r.json()["detail"]  # 拦下它的是登记前的 reserved，不是别的分支
         finally:
             release.set()
         v = _wait(client)
