@@ -3600,10 +3600,13 @@ def test_heal_job_emits_progress_heartbeat(kb, monkeypatch) -> None:
     monkeypatch.setattr(jobs_mod, "_JOB_HEARTBEAT_INTERVAL_S", 0.05)
     _ref_missing(kb, "a", "大模型")
     _ref_missing(kb, "b", "大模型")
+    # 同 test_ingest_job_emits_progress_heartbeat：静默到轮询方真看见一帧才放行，不睡固定时长
+    # （原 sleep(0.25) 在 CI 慢 runner 上整窗错过，main 上 3.11 红过）。心跳坏了则等满超时、seen 仍空。
+    observed = threading.Event()
 
     def action(root):
         write_page(root, "wiki/entities/大模型.md", type="entity")
-        time.sleep(0.25)  # 静默 > 数个心跳间隔，逼出 progress 帧
+        observed.wait(timeout=3.0)  # < 下方轮询 deadline，超时也能让作业先收尾
 
     runner = make_runner(action, final_text="已建大模型页")
     seen: list[str] = []
@@ -3614,6 +3617,7 @@ def test_heal_job_emits_progress_heartbeat(kb, monkeypatch) -> None:
             data = client.get(f"/api/jobs/{job_id}").json()
             if data.get("progress"):
                 seen.append(data["progress"])
+                observed.set()
             if data["state"] == "done":
                 break
             time.sleep(0.02)
