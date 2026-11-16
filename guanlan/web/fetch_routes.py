@@ -166,7 +166,7 @@ def register(app, *, root: Path, writer_only, reject_if_writable_active, start_p
                 "oneclick": body.oneclick,
                 "oneclick_job": None,
                 "oneclick_error": None,
-                "via": None,  # 403 后经 agentao 后备取得时：playwright / jina
+                "via": None,  # 403 后经 agentao 后备取得时：playwright / jina / deepseek
                 "started": time.time(),
                 "finished": None,
                 "_cancel": threading.Event(),

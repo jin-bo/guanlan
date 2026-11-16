@@ -99,7 +99,11 @@ dependencies = [
     # `fetch.py` 会把 `.env` 里的 JINA_API_KEY 补进 Web 宿主进程环境（供 agentao 的 jina 后备读），旧版下
     # 嵌入的 Agent 一条 `run_shell_command("env")` 就能把它打印出来。同版 `web_search` 改为 deepseek → tavily
     # → jina、无 key 时不注册、退役 bocha / duckduckgo——观澜不构造 `WebSearchTool`，不受影响。
-    "agentao[cli]>=0.5.21,<0.6",
+    # >=0.5.22：`web_fetch` 新增 `deepseek` 后备（`AGENTAO_WEB_FETCH_FALLBACK=deepseek`，经 DeepSeek Fetch API 代取）。
+    # 网址导入按用户的 agentao 后备在 403 后再取一次（决策P4.31-14），同一开关须同一口径，故接上它：复用私有的
+    # `_fetch_via_deepseek` / `_is_official_deepseek_base_url` / `_DEEPSEEK_FETCH_MAX_URL_CHARS`（契约测试守着）。
+    # 同版 jina 超时不再报空错误；只读模式拦不受信 MCP 服务器的「只读」工具时说明原因——观澜的 Web 会话照常透传。
+    "agentao[cli]>=0.5.22,<0.6",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
     # P4.31 网址导入：`guanlan/fetch.py` 用 httpx 下载（固定解析地址、逐跳检查）。它本已随 agentao 传递安装，
     # 显式声明是因为 fetch.py 是核心模块（将来 CLI `import <url>` 复用），不靠传递依赖。

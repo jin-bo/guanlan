@@ -31,7 +31,7 @@ from .check import run_check
 from .convert import _default_origin, convert_to_markdown
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .formats import BATCH_IMPORT_EXTS
-from .sourcerec import read_source_record, redact_url
+from .sourcerec import THIRD_PARTY_FALLBACKS, read_source_record, redact_url
 from .imageio import (
     ConvertError,
     ConvertResult,
@@ -1171,8 +1171,8 @@ def _prepare_steps(
         except ConvertError as exc:
             raise OneClickError(f"解析失败：{exc}") from None
         backend_used = res.backend
-    # 403 后经 jina 代取的网页按 .md 落盘（决策P4.31-14），本质仍是网页，同样可能只是个 JS 壳
-    if src.suffix.lower() in (".html", ".htm") or source.get("fetched_via") == "jina":
+    # 403 后经第三方（jina / deepseek）代取的网页按 .md 落盘（决策P4.31-14），本质仍是网页，同样可能只是个 JS 壳
+    if src.suffix.lower() in (".html", ".htm") or source.get("fetched_via") in THIRD_PARTY_FALLBACKS:
         n = body_chars(res.markdown)
         if n < MIN_HTML_BODY_CHARS:
             raise OneClickError(
@@ -1198,7 +1198,9 @@ def _prepare_steps(
                 "origin_url": first_url if first_url != final_url else None,
                 "fetched": (source.get("fetched_at") or "")[:10] or None,
                 # 403 后经 agentao 后备取得（决策P4.31-14）：浏览器渲染或第三方代取，内容未必与直接下载一致，记下来
-                "fetched_via": source.get("fetched_via") if source.get("fetched_via") in ("playwright", "jina") else None,
+                "fetched_via": source.get("fetched_via")
+                if source.get("fetched_via") == "playwright" or source.get("fetched_via") in THIRD_PARTY_FALLBACKS
+                else None,
             }
             if source
             else None

@@ -842,6 +842,100 @@ def test_fallback_jina_refuses_signed_url(tmp_path, monkeypatch):
     assert sent == [] and _leftovers(tmp_path) == []
 
 
+def _deepseek_env(monkeypatch, *, key="sk-test", base="https://api.deepseek.com"):
+    monkeypatch.setenv("AGENTAO_WEB_FETCH_FALLBACK", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", key)
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", base)
+
+
+def test_fallback_deepseek_gives_markdown_with_title(tmp_path, monkeypatch):
+    import agentao.tools.web as web
+
+    _deepseek_env(monkeypatch)
+    calls = []
+
+    async def fake_deepseek(url, api_key):
+        calls.append((url, api_key))
+        return "标题", "正文。\n"
+
+    monkeypatch.setattr(web, "_fetch_via_deepseek", fake_deepseek)
+    r = _get("https://e.org/p/1", tmp_path, _refusing_site())
+    assert r.kind == "md" and r.suggested_name.endswith(".md") and r.record["fetched_via"] == "deepseek"
+    assert r.tmp.read_text(encoding="utf-8") == "# 标题\n\n正文。\n"  # 没有一级标题：用 DeepSeek 的标题补
+    assert calls == [("https://e.org/p/1", "sk-test")]  # key 作参数传入
+    r.tmp.unlink()
+
+
+def test_fallback_deepseek_reads_key_from_kb_env_and_keeps_existing_heading(tmp_path, monkeypatch):
+    import agentao.tools.web as web
+
+    monkeypatch.setenv("AGENTAO_WEB_FETCH_FALLBACK", "deepseek")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    kb = tmp_path / "kb"
+    kb.mkdir()
+    (kb / ".env").write_text("DEEPSEEK_API_KEY=k-from-kb\nDEEPSEEK_BASE_URL=https://api.deepseek.com/v1\n", encoding="utf-8")
+    seen = []
+
+    async def fake_deepseek(url, api_key):
+        seen.append(api_key)
+        return "标题", "# 原有标题\n\n正文。\n"
+
+    monkeypatch.setattr(web, "_fetch_via_deepseek", fake_deepseek)
+    r = _get("https://e.org/p/1", tmp_path, _refusing_site(), env_root=kb)
+    assert seen == ["k-from-kb"] and "DEEPSEEK_API_KEY" not in os.environ  # 只读值、不写进进程环境
+    assert r.tmp.read_text(encoding="utf-8").startswith("# 原有标题")
+    r.tmp.unlink()
+
+
+@pytest.mark.parametrize(
+    "key,base",
+    [("", "https://api.deepseek.com"), ("sk-test", "https://gateway.example.com/deepseek"), ("sk-test", "")],
+)
+def test_fallback_deepseek_needs_official_key(tmp_path, monkeypatch, key, base):
+    """与 agentao 同规则：没有 key、或 key 在代理 / 网关后面（含未设 base URL）都不发。"""
+    import agentao.tools.web as web
+
+    _deepseek_env(monkeypatch, key=key, base=base)
+    monkeypatch.chdir(tmp_path)  # 库里没有 .env 时会从当前目录往上找：别读到开发机 ~/.env 里的真 key
+    if not key:
+        monkeypatch.delenv("DEEPSEEK_API_KEY")
+    if not base:
+        monkeypatch.delenv("DEEPSEEK_BASE_URL")
+    sent = []
+
+    async def fake_deepseek(url, api_key):  # pragma: no cover - 不该被调用
+        sent.append(url)
+        return "", ""
+
+    monkeypatch.setattr(web, "_fetch_via_deepseek", fake_deepseek)
+    with pytest.raises(FetchError, match="没有可用的 DeepSeek key"):
+        _get("https://e.org/p/1", tmp_path, _refusing_site(), env_root=tmp_path)
+    assert sent == [] and _leftovers(tmp_path) == []
+
+
+def test_fallback_deepseek_refuses_signed_url_and_reports_404(tmp_path, monkeypatch):
+    import agentao.tools.web as web
+
+    _deepseek_env(monkeypatch)
+    sent = []
+
+    async def not_found(url, api_key):
+        sent.append(url)
+        req = httpx.Request("POST", "https://api.deepseek.com/v1/tools/fetch")
+        raise httpx.HTTPStatusError("404", request=req, response=httpx.Response(404, request=req))
+
+    monkeypatch.setattr(web, "_fetch_via_deepseek", not_found)
+    signed = "/p/1?X-Amz-Signature=SECRET&X-Amz-Credential=AK"
+    site = Site({f"e.org{signed}": httpx.Response(403, content=b"<html>challenge</html>", headers={"content-type": "text/html"})})
+    with pytest.raises(FetchError, match="没有交给第三方 api.deepseek.com"):
+        _get(f"https://e.org{signed}", tmp_path, site)
+    assert sent == []
+    with pytest.raises(FetchError, match="DeepSeek 没有取到可用内容"):
+        _get("https://e.org/p/1", tmp_path, _refusing_site())
+    assert sent == ["https://e.org/p/1"] and _leftovers(tmp_path) == []
+
+
 def test_fallback_failure_reports_both(tmp_path, monkeypatch):
     import agentao.tools.web as web
 
@@ -872,7 +966,7 @@ def test_fallback_only_on_403(tmp_path, monkeypatch, code):
 
 
 def test_fallback_mode_follows_agentao_parsing(monkeypatch):
-    for raw, want in [("", "none"), ("none", "none"), ("playwright", "playwright"), ("JINA", "jina"), ("crawl4ai", "playwright"), ("bogus", "none")]:
+    for raw, want in [("", "none"), ("none", "none"), ("playwright", "playwright"), ("JINA", "jina"), ("DeepSeek", "deepseek"), ("crawl4ai", "playwright"), ("bogus", "none")]:
         monkeypatch.setenv("AGENTAO_WEB_FETCH_FALLBACK", raw)
         assert fetch.fallback_mode() == want, raw
 

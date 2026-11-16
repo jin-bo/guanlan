@@ -19,6 +19,11 @@
 
 ### 变更
 
+- **agentao 下限抬到 0.5.22**（`agentao[cli]>=0.5.22,<0.6`）；网址导入跟上它新增的 `deepseek` 后备：
+  - 用户在 agentao 里配了 `AGENTAO_WEB_FETCH_FALLBACK=deepseek` 时，网站拒绝直接下载（HTTP 403）后经 DeepSeek Fetch API 再取一次，得到 Markdown 按 `.md` 入库；下载完成提示写明经 DeepSeek 代取。此前观澜只认 `playwright` / `jina`，会把 `deepseek` 当成没配后备。
+  - key 的规则与 agentao 相同：`DEEPSEEK_API_KEY` 只在 `DEEPSEEK_BASE_URL` 指向 `https://api.deepseek.com` 时才用；可写在 `<库>/.env`。带签名或凭据参数的网址不发给第三方，与 jina 相同。DeepSeek 按次计费。
+  - 经 deepseek 代取的网页与 jina 一样做空壳检查，raw 出处记 `fetched_via: deepseek`。
+  - 同版上游修复：jina 后备超时不再报空错误；只读模式拦下不受信 MCP 服务器标为只读的工具时会说明原因。
 - **agentao 下限抬到 0.5.21**（`agentao[cli]>=0.5.21,<0.6`）：`TAVILY_API_KEY` / `JINA_API_KEY` 不再传给 Agent 的 shell / MCP / hook 子进程。Web 宿主为 jina 后备把 `.env` 里的 `JINA_API_KEY` 补进进程环境，旧版下嵌入的 Agent 执行 shell 命令就能读到它。同版 `web_search` 的后端链改为 deepseek → tavily → jina、没有 key 时不注册该工具、退役 bocha 与 duckduckgo；观澜不自建 `WebSearchTool`，无需改动。若知识库的 MCP 服务器自己调用 Tavily / Jina，要在其 `env` 里显式传 key。
 
 ## [0.1.38] - 2026-11-15

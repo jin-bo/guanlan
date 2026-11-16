@@ -15,6 +15,10 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 from .rawio import sha256_file
 
 # 隐藏临时文件与上传同前缀：中途被杀留下的残留由 Web 启动时的 `sweep_stale_upload_tmps` 一并清掉。
+# 403 后把网址交给第三方代取、得到 Markdown 按 `.md` 落盘的后备（`fetched_via` 的取值）→ 代取方。
+# 下载报错写明网址发给了谁；一键入库的空壳检查与 raw 出处记录据此认「本质仍是网页」的 `.md`（决策P4.31-14）。
+THIRD_PARTY_FALLBACKS = {"jina": "r.jina.ai", "deepseek": "api.deepseek.com"}
+
 TMP_PREFIX = ".upload-"
 TMP_SUFFIX = ".tmp"
 
