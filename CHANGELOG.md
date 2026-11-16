@@ -3,7 +3,7 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
-## [Unreleased]
+## [0.1.39] - 2026-11-16
 
 ### 新增
 
@@ -14,7 +14,8 @@
   - 新接口 `POST` / `GET /api/doctor/quotes`；`--reader` 部署不注册。
 - **Web 体检·索引一键修复**：「索引与磁盘不同步」一行新增「修复」入口，设计见 `docs/P4.34-Web体检.md` §6.2。
   - 预览列出将登记进 `index.md` 的漏登页和可删除的悬空条目；悬空条目默认不删（同 `guanlan reindex`），勾选后才删。
-  - 确认后作为后台任务执行（任务中心新增「索引修复」类型）：排在进行中的写任务之后，可取消并回滚，可重试；执行时按当时的磁盘重算。
+  - 确认后作为后台任务执行（任务中心新增「索引修复」类型）：排在进行中的写任务之后，开始执行前可取消（完成后没有撤销），可重试；执行时按当时的磁盘重算。
+  - reindex 修不了的条目（分区目录外的页、沾 HTML 注释或与有效链接同行的悬空条目）在预览里单列，提示手动编辑 `index.md`。
   - 仍是零 LLM、只改 `wiki/index.md`；一句话摘要留空待补。新接口 `GET /api/reindex/preview`、`POST /api/reindex`；`--reader` 部署不注册。
 
 ### 变更
@@ -24,7 +25,11 @@
   - key 的规则与 agentao 相同：`DEEPSEEK_API_KEY` 只在 `DEEPSEEK_BASE_URL` 指向 `https://api.deepseek.com` 时才用；可写在 `<库>/.env`。带签名或凭据参数的网址不发给第三方，与 jina 相同。DeepSeek 按次计费。
   - 经 deepseek 代取的网页与 jina 一样做空壳检查，raw 出处记 `fetched_via: deepseek`。
   - 同版上游修复：jina 后备超时不再报空错误；只读模式拦下不受信 MCP 服务器标为只读的工具时会说明原因。
-- **agentao 下限抬到 0.5.21**（`agentao[cli]>=0.5.21,<0.6`）：`TAVILY_API_KEY` / `JINA_API_KEY` 不再传给 Agent 的 shell / MCP / hook 子进程。Web 宿主为 jina 后备把 `.env` 里的 `JINA_API_KEY` 补进进程环境，旧版下嵌入的 Agent 执行 shell 命令就能读到它。同版 `web_search` 的后端链改为 deepseek → tavily → jina、没有 key 时不注册该工具、退役 bocha 与 duckduckgo；观澜不自建 `WebSearchTool`，无需改动。若知识库的 MCP 服务器自己调用 Tavily / Jina，要在其 `env` 里显式传 key。
+  - 0.5.21 起：`TAVILY_API_KEY` / `JINA_API_KEY` 不再传给 Agent 的 shell / MCP / hook 子进程。Web 宿主为 jina 后备把 `.env` 里的 `JINA_API_KEY` 补进进程环境，旧版下嵌入的 Agent 执行 shell 命令就能读到它。同版 `web_search` 的后端链改为 deepseek → tavily → jina、没有 key 时不注册该工具、退役 bocha 与 duckduckgo；观澜不自建 `WebSearchTool`，无需改动。若知识库的 MCP 服务器自己调用 Tavily / Jina，要在其 `env` 里显式传 key。
+
+### 修复
+
+- **Web 提交后台任务时防重复提交**：提交补录、补全、审计、索引修复等后台任务期间，浮层里的输入框与按钮一并禁用（此前只禁按钮），提交过程中改动表单不会再以不同参数排进第二个任务；提交失败时恢复原状。
 
 ## [0.1.38] - 2026-11-15
 
