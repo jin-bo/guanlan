@@ -1012,8 +1012,9 @@ def test_url_markdown_relative_links_resolved():
     assert out == "[文档](https://h.org/r/docs/x.md) [锚](#a) [外](https://o.org/) [[页面]]"
 
 
-def test_jina_fetched_markdown_shell_refused(kb: Path):
-    """403 后经 jina 代取的网页落成 .md，同样做空壳判断（代码评审发现）；普通下载的 .md 不判。"""
+@pytest.mark.parametrize("via", ["jina", "deepseek"])
+def test_jina_fetched_markdown_shell_refused(kb: Path, via: str):
+    """403 后经第三方（jina / deepseek）代取的网页落成 .md，同样做空壳判断（代码评审发现）；普通下载的 .md 不判。"""
     import hashlib
 
     uploads = kb / "workspace" / "uploads"
@@ -1025,7 +1026,7 @@ def test_jina_fetched_markdown_shell_refused(kb: Path):
         "final_url": "https://e.org/p/1",
         "sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
         "fetched_at": "2026-11-12T00:00:00+00:00",
-        "fetched_via": "jina",
+        "fetched_via": via,
     }
     (uploads / ".page.md.source.json").write_text(json.dumps(rec), encoding="utf-8")
     with acquire(kb, "test"), pytest.raises(OneClickError, match="空壳页"):

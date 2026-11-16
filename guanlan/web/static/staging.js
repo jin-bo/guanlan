@@ -327,6 +327,7 @@ function renderFetchArea(area, blocked) {
       // 403 后经 agentao 后备取得（决策P4.31-14）：说清楚是浏览器渲染还是第三方代取
       if (v.via === "playwright") msg.textContent += " " + t("staging.fetchViaBrowser");
       else if (v.via === "jina") msg.textContent += " " + t("staging.fetchViaJina");
+      else if (v.via === "deepseek") msg.textContent += " " + t("staging.fetchViaDeepseek");
       if (v.oneclick_error) msg.classList.replace("muted", "stage-fetch-error");
     } else if (v.state === "cancelled") {
       msg.textContent = v.error || v.state; // 用户自己停的，不算失败

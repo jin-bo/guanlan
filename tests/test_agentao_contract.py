@@ -1019,10 +1019,25 @@ def test_guanlan_parses_web_fetch_settings_like_agentao(monkeypatch, tmp_path):
     from guanlan import fetch
 
     monkeypatch.chdir(tmp_path)
-    for raw in ["", "none", "playwright", "JINA", " jina ", "crawl4ai", "bogus"]:
+    for raw in ["", "none", "playwright", "JINA", " jina ", "deepseek", " DeepSeek ", "crawl4ai", "bogus"]:
         monkeypatch.setenv("AGENTAO_WEB_FETCH_FALLBACK", raw)
         mode, _ = web._read_fallback_setting()
         assert fetch.fallback_mode(None) == mode, raw
     for raw in ["", "198.18.0.0/15", "10.0.0.0/8, 192.168.1.5", "10.0.0.0/8\tbad 172.16.0.0/12", "::1/128"]:
         monkeypatch.setenv("AGENTAO_WEB_FETCH_ALLOW_CIDRS", raw)
         assert tuple(fetch.allow_networks(None)) == tuple(dict.fromkeys(read_allow_cidrs_setting())), raw
+
+
+def test_deepseek_fetch_fallback_seam():
+    """网址导入的 deepseek 后备（决策P4.31-14，agentao 0.5.22）用到的私有接缝：函数签名、URL 上限、官方 base URL 判定。"""
+    import inspect
+
+    import agentao.tools.web as web
+
+    assert list(inspect.signature(web._fetch_via_deepseek).parameters) == ["url", "api_key"]
+    assert inspect.iscoroutinefunction(web._fetch_via_deepseek)
+    assert web._DEEPSEEK_FETCH_MAX_URL_CHARS == 8192
+    assert web._is_official_deepseek_base_url("https://api.deepseek.com")
+    assert web._is_official_deepseek_base_url("https://api.deepseek.com/v1")
+    for bad in (None, "", "http://api.deepseek.com", "https://gateway.example.com/deepseek", "https://u:p@api.deepseek.com"):
+        assert not web._is_official_deepseek_base_url(bad), bad

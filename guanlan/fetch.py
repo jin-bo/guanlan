@@ -40,7 +40,7 @@ from agentao.security.url_policy import _is_disallowed as _agentao_disallowed
 
 from . import __version__
 from .formats import EXT_KIND
-from .sourcerec import TMP_PREFIX, TMP_SUFFIX, redact_url
+from .sourcerec import THIRD_PARTY_FALLBACKS, TMP_PREFIX, TMP_SUFFIX, redact_url
 from .rawio import NAME_STEM_MAX_BYTES, cap_utf8
 
 __all__ = [
@@ -787,7 +787,7 @@ def _download(url, out, *, transport, env_root, resolver, progress, cancel, allo
 
 
 def fallback_mode(env_root: Path | None = None) -> str:
-    """用户给 agentao 配的 `AGENTAO_WEB_FETCH_FALLBACK`：`none`（默认）/ `playwright` / `jina`。
+    """用户给 agentao 配的 `AGENTAO_WEB_FETCH_FALLBACK`：`none`（默认）/ `playwright` / `jina` / `deepseek`（agentao 0.5.22 起）。
 
     解析规则与 agentao 的 `web_fetch` 一致（大小写不敏感、旧写法 `crawl4ai` → `playwright`、非法值按 `none`；
     `tests/test_agentao_contract.py` 对照着 agentao 自己的解析守着），但按 `agentao_setting` 的顺序找 `.env`。
@@ -795,7 +795,7 @@ def fallback_mode(env_root: Path | None = None) -> str:
     raw = agentao_setting(FALLBACK_ENV, env_root).strip().lower()
     if raw == "crawl4ai":
         return "playwright"
-    return raw if raw in ("playwright", "jina") else "none"
+    return raw if raw in THIRD_PARTY_FALLBACKS or raw == "playwright" else "none"
 
 
 def _run_async(coro, cancel: threading.Event | None = None):
@@ -822,6 +822,52 @@ def _run_async(coro, cancel: threading.Event | None = None):
         return pool.submit(asyncio.run, runner()).result()
 
 
+def _jina_markdown(target: str, env_root: Path | None, cancel: threading.Event | None) -> str:
+    from agentao.tools.web import _fetch_via_jina
+
+    # agentao 的 jina 只读进程环境里的 JINA_API_KEY；Web 宿主在第一次建 Agent 前还没把 .env 载入进程环境，
+    # 写在 .env 里的 key 就带不上。按同一查找顺序读到后不覆盖地补进去——与 agentao 自己 safe_load_dotenv 同姿态
+    if not os.environ.get("JINA_API_KEY"):
+        key = agentao_setting("JINA_API_KEY", env_root)
+        if key:
+            os.environ["JINA_API_KEY"] = key
+    return _run_async(_fetch_via_jina(target), cancel)
+
+
+def _deepseek_markdown(target: str, env_root: Path | None, cancel: threading.Event | None) -> str:
+    """经 DeepSeek Fetch API 代取（agentao 0.5.22 的 `_fetch_via_deepseek`），返回 Markdown。
+
+    key 与 base URL 按 `agentao_setting` 的顺序读（能读到 `<库>/.env`），启用规则直接用 agentao 的判断，
+    key 作参数传入、不写进进程环境。网址长度上限与 agentao 一致，超长不发（白白一次 400）。
+    """
+    import httpx
+    from agentao.tools.web import (
+        _DEEPSEEK_FETCH_MAX_URL_CHARS,
+        _fetch_via_deepseek,
+        _is_official_deepseek_base_url,
+    )
+
+    key = agentao_setting("DEEPSEEK_API_KEY", env_root)
+    if not key or not _is_official_deepseek_base_url(agentao_setting("DEEPSEEK_BASE_URL", env_root) or None):
+        raise FetchError(
+            "没有可用的 DeepSeek key：需要 DEEPSEEK_API_KEY，且 DEEPSEEK_BASE_URL 指向 https://api.deepseek.com"
+            "（与 agentao 的规则相同，经代理或网关的 key 不用）"
+        )
+    if len(target) > _DEEPSEEK_FETCH_MAX_URL_CHARS:
+        raise FetchError(f"网址有 {len(target)} 个字符，超过 DeepSeek Fetch API 的上限 {_DEEPSEEK_FETCH_MAX_URL_CHARS}")
+    try:
+        title, content = _run_async(_fetch_via_deepseek(target, key), cancel)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise FetchError("DeepSeek 没有取到可用内容（HTTP 404）") from None
+        raise
+    content = content or ""
+    # 没有一级标题时用 DeepSeek 给的标题补一个：raw 是 Markdown 文件，不照搬 agentao 给模型看的 `Title:` 前缀
+    if title and not content.lstrip().startswith("# "):
+        content = f"# {title}\n\n{content}"
+    return content
+
+
 def _fetch_with_fallback(
     url: str,
     refused: FetchRefused,
@@ -839,6 +885,8 @@ def _fetch_with_fallback(
       不放宽 TLS），得到渲染后的完整 HTML，按网页入库；
     - `jina`：网址交给第三方 `r.jina.ai` 代取，得到 Markdown，按 `.md` 入库（网址会发给第三方——这是用户在 agentao
       里打开它时已经接受的；但带签名 / 凭据参数的网址不发，直接报错）。
+    - `deepseek`：网址交给 DeepSeek 的 Fetch API 代取（按次计费），其余同 `jina`。key 的启用规则与 agentao 相同：
+      `DEEPSEEK_API_KEY` 只在 `DEEPSEEK_BASE_URL` 指向官方 `https://api.deepseek.com` 时才用（经代理 / 网关的 key 不用）。
 
     仍失败 → 抛 `FetchError`，同时说明两次的原因。出处记录多一项 `fetched_via`。
     """
@@ -857,21 +905,18 @@ def _fetch_with_fallback(
             # 本机渲染（playwright）不出本机，不受此限。
             if redact_url(target) != target:
                 raise FetchError(
-                    f"{refused}（网址带签名或凭据参数，没有交给第三方 r.jina.ai 代取；请在浏览器里另存为网页或打印 PDF 后上传）"
+                    f"{refused}（网址带签名或凭据参数，没有交给第三方 {THIRD_PARTY_FALLBACKS[mode]} 代取；"
+                    "请在浏览器里另存为网页或打印 PDF 后上传）"
                 )
-            from agentao.tools.web import _fetch_via_jina
-
-            # agentao 的 jina 只读进程环境里的 JINA_API_KEY；Web 宿主在第一次建 Agent 前还没把 .env 载入进程环境，
-            # 写在 .env 里的 key 就带不上。按同一查找顺序读到后不覆盖地补进去——与 agentao 自己 safe_load_dotenv 同姿态
-            if not os.environ.get("JINA_API_KEY"):
-                key = agentao_setting("JINA_API_KEY", env_root)
-                if key:
-                    os.environ["JINA_API_KEY"] = key
-
-            body = _run_async(_fetch_via_jina(target), cancel)
-            kind, data = "md", (body or "").encode("utf-8")
+            if mode == "deepseek":
+                body = _deepseek_markdown(target, env_root, cancel)
+                kind, data = "md", body.encode("utf-8")
+            else:
+                body = _jina_markdown(target, env_root, cancel)
+                kind, data = "md", (body or "").encode("utf-8")
     except FetchCancelled:
         raise
+
     except FetchError as exc:
         raise FetchError(f"{refused}（已按 AGENTAO_WEB_FETCH_FALLBACK={mode} 再取一次，仍失败：{exc}）") from None
     except Exception as exc:  # noqa: BLE001 — 没装 Chromium、jina 不可达等：如实报
