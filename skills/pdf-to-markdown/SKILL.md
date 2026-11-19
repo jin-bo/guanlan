@@ -116,7 +116,8 @@ The script reads `mineru --version` and picks the matching CLI:
   - **`--pages all` is always passed for PDFs.** Without it MinerU 4 parses only the
     first 10 pages. `--start/--end` (0-based) become 4.x's 1-based syntax (`3-r1`, where
     `r1` = last page).
-  - **Truncated Office output is asked for again.** MinerU 4.0.12 parses only page 1 of
+  - **Truncated Office output is asked for again** (4.0.x only; fixed upstream in 4.2,
+    where this check never fires). MinerU 4.0.12 parses only page 1 of
     an Office file it has not seen before, while its page markers already say
     `page 1 of N`. For non-PDF input the script compares the highest page marker with
     `N`; if pages are missing it logs `[mineru] output covers k of N pages; asking again`
@@ -133,7 +134,13 @@ The script reads `mineru --version` and picks the matching CLI:
     when flash yields nothing (e.g. a scanned PDF).
   - **Enable a local quality engine** (needed for OCR / layout / tables / formulas):
     `mineru config set parse_server.local.mode managed` (tier:
-    `mineru config set parse_server.local.managed_tier standard`).
+    `mineru config set parse_server.local.managed_tier standard`). Since 4.2 a managed
+    engine serves only tiers up to its own: `standard` serves flash/basic/standard, and
+    `--tier advanced` needs `managed_tier advanced` (it reuses the standard models).
+  - **Restart a pre-upgrade server.** After upgrading from 4.0.x, a still-running old
+    server is refused with `doclib_upgrade_required` (4.2 added token auth). The script
+    logs `mineru server stop && mineru server start` and fails the mineru tier; it does
+    not restart the server itself.
 - **MinerU ≤ 3.x** — legacy `mineru -p <input> -o <output_dir>` with `--method`,
   `--lang`, `--mineru-backend`. These flags are ignored (with a warning) on 4.x.
 

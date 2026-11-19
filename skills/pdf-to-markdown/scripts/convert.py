@@ -168,6 +168,9 @@ MINERU_TIERED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".
 
 # Error codes meaning "no local engine for a quality tier" — retry with flash.
 _MINERU_NO_QUALITY_ENGINE = {"quality_tier_unavailable", "no_engine", "engine_unavailable"}
+# MinerU 4.2 added token auth between the CLI and its doclib server. A server started by
+# 4.0.x before the upgrade is refused with one of these codes until it is restarted.
+_MINERU_STALE_SERVER = {"doclib_upgrade_required", "invalid_doclib_token"}
 
 
 def mineru_major_version() -> int | None:
@@ -377,6 +380,10 @@ def run_mineru_v4(input_path: Path, output_dir: Path, args) -> Path:
             raise BackendFailed(
                 f"mineru still {status} after {args.wait}s; re-run the same command to "
                 "collect the cached result, or raise --wait")
+        if err.get("code") in _MINERU_STALE_SERVER:
+            # Restarting a server that may be parsing for someone else is the user's call.
+            log("[mineru] the running mineru server predates this CLI; restart it: "
+                "mineru server stop && mineru server start")
         detail = f"{err.get('code')}: {err.get('message')}" if err else f"exit {rc}"
         raise BackendFailed(f"mineru parse failed ({detail})")
 
@@ -388,7 +395,8 @@ def run_mineru_v4(input_path: Path, output_dir: Path, args) -> Path:
         return out
 
     out = produced()
-    # MinerU 4.0.12: the first parse of a document it has not seen before covers only page 1
+    # MinerU 4.0.12 (fixed upstream in 4.2; kept for 4.0.x, never fires on 4.2+): the first
+    # parse of a document it has not seen before covers only page 1
     # for Office files (it learns the page count during that parse), although the page
     # markers already say "page 1 of N". A second call is served from the cache and covers
     # every page. PDFs get an explicit --pages, so only check the other formats.

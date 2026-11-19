@@ -229,6 +229,29 @@ def test_explicit_quality_tier_waits_but_never_falls_back(run):
     assert fake.parse_tiers() == ["standard"]
 
 
+@pytest.mark.parametrize("code", ["doclib_upgrade_required", "invalid_doclib_token"])
+def test_pre_upgrade_server_logs_restart_hint_and_never_restarts(run, conv, monkeypatch, capsys, code):
+    # MinerU 4.2 起 CLI 与 doclib 服务间要 token；升级前起的 4.0.x 服务仍在跑时被拒。
+    # 只提示、判失败（auto 会退到 marker），不替用户重启可能正在为别人解析的服务。
+    backend_calls: list[list[str]] = []
+    monkeypatch.setattr(conv, "run_backend", lambda cmd: backend_calls.append(cmd) or 0)
+    fake = FakeMineru([_err(code)], statuses=[READY])
+    with pytest.raises(conv.BackendFailed, match=code):
+        run(fake)
+    assert backend_calls == []  # 没有 server stop/start
+    assert fake.parse_tiers() == [None]  # 不重试、不降 flash
+    assert fake.status_calls() == 0
+    assert "mineru server stop && mineru server start" in capsys.readouterr().err
+
+
+def test_other_failures_get_no_restart_hint(run, conv, capsys):
+    # 反例：提示只给这两个错误码，别的失败（含显式档位不可用）不能也让用户去重启服务。
+    fake = FakeMineru([_err("quality_tier_unavailable")], statuses=[_status(mode="disabled")])
+    with pytest.raises(conv.BackendFailed):
+        run(fake, tier="standard")
+    assert "server stop" not in capsys.readouterr().err
+
+
 def test_remote_never_waits_for_local_engine(run):
     fake = FakeMineru([_err("server_not_running"), _ok("standard")], statuses=[READY])
     run(fake, remote=True)
