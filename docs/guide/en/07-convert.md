@@ -44,7 +44,7 @@ A `.docx` is structured XML and needs no layout analysis, so `--backend auto` **
 
 ## MinerU parse tiers
 
-`convert`, `import` and the Web "Import" parse all run the same skill script, so this section applies to all three. The tier and hardware data come from the MinerU 4.0.12 package description (`mineru-4.0.12.dist-info/METADATA`) and the official [Tiers and runtimes](https://opendatalab.github.io/MinerU/usage/tiers/) page; after a MinerU upgrade, the official docs win.
+`convert`, `import` and the Web "Import" parse all run the same skill script, so this section applies to all three. The tier and hardware data come from the MinerU 4.0.12 package description (`mineru-4.0.12.dist-info/METADATA`), the 4.2.3 source (the managed-tier paragraph) and the official [Tiers and runtimes](https://opendatalab.github.io/MinerU/usage/tiers/) page; after a MinerU upgrade, the official docs win.
 
 ### How GuānLán relates to MinerU
 
@@ -73,14 +73,14 @@ With no `--tier`, MinerU picks `standard`, then `basic`; it never picks `advance
 | `standard`/`advanced` | PyTorch + llama.cpp | ~2 GB | 16 GB | GPU/MPS required, 8 GB+ VRAM |
 | `standard`/`advanced` | PyTorch + vLLM/lmdeploy/mlx | ~3 GB | 16 GB | GPU/MPS required, 8 GB+ VRAM |
 
-MinerU's recommended managed tier by hardware: macOS on Apple Silicon → `standard` (the default install already has PyTorch); macOS on Intel → `basic`; NVIDIA with 8 GB+ VRAM → `standard` with `mineru[full]`; NVIDIA with 4 GB+ VRAM → `basic` with `mineru[torch]`; Linux/Windows with a modern iGPU → `standard`; no accelerator → `basic`. There are only two managed tiers, `basic` and `standard`; a `standard` managed engine serves the `basic`, `standard` and `advanced` request tiers.
+MinerU's recommended managed tier by hardware: macOS on Apple Silicon → `standard` (the default install already has PyTorch); macOS on Intel → `basic`; NVIDIA with 8 GB+ VRAM → `standard` with `mineru[full]`; NVIDIA with 4 GB+ VRAM → `basic` with `mineru[torch]`; Linux/Windows with a modern iGPU → `standard`; no accelerator → `basic`. Since MinerU 4.2 there are three managed tiers (`parse_server.local.managed_tier`): `basic`, `standard` and `advanced`, and a managed engine serves only request tiers up to its own: a `standard` engine serves `flash`/`basic`/`standard`; for `advanced`, set the managed tier to `advanced` (it reuses the `standard` models, so download with `--tier standard`). A `standard` setup asked for `--tier advanced` answers `quality_tier_unavailable` and fails (an explicit tier never falls back, see below). MinerU 4.0.x has only the `basic` and `standard` managed tiers, and a `standard` engine also serves `advanced`.
 
 ### Turning on the managed engine
 
 ```bash
 mineru-kit models download --tier standard      # download the models first (basic or standard)
 mineru-kit models verify --tier standard
-mineru config set parse_server.local.managed_tier standard   # set the tier first
+mineru config set parse_server.local.managed_tier standard   # set the tier first (advanced for advanced, 4.2+)
 mineru config set parse_server.local.mode managed            # then turn on managed mode
 mineru server status --json                                  # parse only once the engine is healthy
 ```
@@ -97,6 +97,7 @@ If you already run your own parse service, use `parse_server.local.mode self_hos
 - Timeout (180 s by default, skill script flag `--engine-wait`, `0` = don't wait) or a managed engine out of restart attempts: logs `[mineru] engine not ready (reason)`.
 - With no tier given, an unavailable engine falls back to `flash` and logs `[mineru] fallback: retrying with --tier flash`; an explicit `basic`/`standard`/`advanced` never falls back and fails instead.
 - If the server was already running but the engine is still loading, the script also waits once and retries.
+- After upgrading MinerU from 4.0.x to 4.2+, a background server started before the upgrade is refused by the new CLI (error code `doclib_upgrade_required`; since 4.2 the server requires token authentication). The script does not restart it for you: it logs `[mineru] the running mineru server predates this CLI; restart it: mineru server stop && mineru server start` and fails the MinerU tier, so `auto` falls through to marker/pypdf, an order of magnitude lower in quality. When you see that line, restart the server and convert again. If the new CLI cannot stop the old server, stop it with the pre-upgrade CLI or end the process that the old version reports. This happens once per machine.
 
 ### Checking the tier actually used
 
@@ -106,6 +107,6 @@ If you already run your own parse service, use `parse_server.local.mode self_hos
 
 ### Office files that come back with page 1 only
 
-The first time MinerU 4.0.12 parses an Office file it has not seen before, it returns page 1 only, although the page markers already say `page 1 of N`; a second parse of the same file is served from the cache and covers every page. For formats other than PDF the script compares the page markers: when pages are missing it logs `[mineru] output covers k of N pages; asking again` and parses once more; if the output is still incomplete, the MinerU tier fails rather than returning half a document. `.docx` now goes to pandoc by default, so this mainly protects `.pptx` and the other formats.
+The first time MinerU 4.0.12 parses an Office file it has not seen before, it returns page 1 only, although the page markers already say `page 1 of N`; a second parse of the same file is served from the cache and covers every page. MinerU 4.2 fixes this upstream (for non-PDF input it no longer filters the output by the page count estimated at scheduling time), but 4.0.x still has the problem, so the check below stays; on 4.2+ it never fires. For formats other than PDF the script compares the page markers: when pages are missing it logs `[mineru] output covers k of N pages; asking again` and parses once more; if the output is still incomplete, the MinerU tier fails rather than returning half a document. `.docx` now goes to pandoc by default, so this mainly protects `.pptx` and the other formats.
 
 See: repo [`docs/P5.2-多格式摄入.md`](../../P5.2-多格式摄入.md), [`docs/P5.2.1-图片落盘.md`](../../P5.2.1-图片落盘.md), [CLI commands → ingest](03-cli-commands.md#guanlan-ingest-target).
