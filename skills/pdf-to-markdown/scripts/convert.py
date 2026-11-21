@@ -77,6 +77,43 @@ class BackendFailed(Exception):
     """The backend ran but did not produce usable output — try the next tier."""
 
 
+# Garbled text layer (P4.30.1 §3). Some publishers embed fonts with a private encoding:
+# Latin letters and digits in the text layer read `犐犆犛` for "ICS", `犌犅／犜` for "GB/T",
+# or come out as bare glyph names such as `/G21`. Text-layer extraction copies that
+# verbatim, so every Latin word (codes, English terms, units) is unreadable.
+# The shifted glyphs land in U+7280-72FF, which also holds everyday characters (犯 状 独 狗);
+# those are all in GB2312, the shifted ones never are -- so only count the non-GB2312 ones.
+# Traditional Chinese also uses non-GB2312 characters from this block (狀 犢 犧 狹), one at a time;
+# shifted glyphs spell whole words (犐犆犛, 犌犅), so only count runs of two or more.
+_ODD_BLOCK = re.compile(r"[\u7280-\u72ff]{2,}")
+_GLYPH_NAME = re.compile(r"/G[0-9A-F]{2}\b")
+GARBLED_GLYPH_NAMES = 20
+GARBLED_SHIFTED_CHARS = 20
+
+
+def _rare(ch: str) -> bool:
+    try:
+        ch.encode("gb2312")
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
+def garbled_text_layer(markdown: str) -> str | None:
+    """Reason string if the Markdown looks like a garbled text layer, else None."""
+    glyphs = len(_GLYPH_NAME.findall(markdown))
+    if glyphs >= GARBLED_GLYPH_NAMES:
+        return f"{glyphs} raw glyph names (/Gxx) in the text layer"
+    shifted = 0
+    for run in _ODD_BLOCK.findall(markdown):
+        rare = [ch for ch in run if _rare(ch)]
+        if len(rare) >= 2:
+            shifted += len(rare)
+    if shifted >= GARBLED_SHIFTED_CHARS:
+        return f"{shifted} characters from a private font encoding (U+7280-72FF outside GB2312)"
+    return None
+
+
 def log(msg: str) -> None:
     print(msg, file=sys.stderr)
 
@@ -775,6 +812,15 @@ def _run_backends(order, input_path, output_dir, args, env_vars) -> None:
             log(f"[{name}] failed: {e}")
             errors.append(f"{name}: failed ({e})")
             continue
+        if input_path.suffix.lower() == ".pdf":
+            reason = garbled_text_layer(out.read_text(encoding="utf-8", errors="replace"))
+            if reason:
+                # Not a usable result: try the next tier instead of handing back gibberish.
+                # Only an OCR pass reads these files correctly (MinerU with OCR, marker).
+                log(f"[{name}] failed: garbled text layer ({reason}); the PDF needs OCR")
+                errors.append(f"{name}: failed (garbled text layer: {reason})")
+                out.unlink(missing_ok=True)  # never leave the gibberish where a caller could pick it up
+                continue
         log(f"[done] backend={name}")
         print(out)
         return
