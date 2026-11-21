@@ -10,6 +10,10 @@
 3. **跨页接句**（§3.4）：去噪之后再接，把被锚点切开的句子挪到长的一侧；锚点本身保留。
 4. **frontmatter**（§3.1）：title / origin / parsed_by / source_sha256 / pages / chars / normalized。
 
+国家 / 行业标准文件（P4.30.1，`stdnorm.detect_standard` 认出时）另做：标题取「标准号 标准名称」并写 `standard:`、
+按目录定层级之前的行级预处理（附录合并、术语条目、无标题条）、目录里附录与固定要素定为第 1 级、
+跨页接句多认几种标准的结构标记。认不出就完全照通用规则。
+
 阈值与窗口都是本模块的内置常量（决策P4.30-11：不暴露给用户）。
 """
 
@@ -22,6 +26,8 @@ import yaml
 
 from .pages import split_frontmatter
 from .rawio import dump_frontmatter
+from .stdnorm import STD_STRUCT_START_RE, detect_standard
+from .stdnorm import preprocess as std_preprocess
 from .tocnorm import TocReviewer, normalize_by_toc
 
 __all__ = [
@@ -164,6 +170,11 @@ class Op:
             "toc": "按目录定标题层级",
             "toc_skipped": "未按目录改层级",
             "toc_review": "目录审校",
+            "standard": "识别为标准文件",
+            "standard_title_fallback": "标准名称未取到，标题沿用通用规则",
+            "std_appendix": "合并附录标题",
+            "std_term": "术语编号与术语合成一行",
+            "std_clause": "无标题条降为正文",
         }.get(self.kind, self.kind)
         rule = f"［{self.rule}］" if self.rule else ""
         return f"{label} {where}{rule}：{self.text}"
@@ -542,11 +553,16 @@ def _standalone_short(lines: list[str], kinds: list[str], j: int) -> bool:
     return _nonws_len(s) <= _STANDALONE_MAX_CHARS and not any(ch in _CLAUSE_PUNCT for ch in s)
 
 
-def _join_vetoed(lines: list[str], kinds: list[str], j: int, prev: str, nxt: str) -> bool:
-    """页末 / 页首是独立文本（落款、日期、文号、标题行、条款起头、字段）→ 不接（#171）。"""
+def _join_vetoed(
+    lines: list[str], kinds: list[str], j: int, prev: str, nxt: str, *, standard: bool = False
+) -> bool:
+    """页末 / 页首是独立文本（落款、日期、文号、标题行、条款起头、字段）→ 不接（#171）。
+    `standard`：标准文件另认「5.2.1」「a)」「注：」等页首结构标记（P4.30.1 §2.6，只否决、不新增接合）。"""
     if _DATE_LINE_RE.match(prev) or _DATE_LINE_RE.match(nxt):
         return True
     if _STRUCT_START_RE.match(nxt) or _FIELD_START_RE.match(nxt):
+        return True
+    if standard and STD_STRUCT_START_RE.match(nxt):
         return True
     if kinds[j] != "text" or not _standalone_short(lines, kinds, j):
         return False
@@ -555,7 +571,7 @@ def _join_vetoed(lines: list[str], kinds: list[str], j: int, prev: str, nxt: str
     return bool(_HEADING_LIKE_RE.match(s) or _ORG_TAIL_RE.search(s) or DOC_TITLE_RE.match(s) or _DOCNO_LINE_RE.match(s))
 
 
-def _join_sentences(lines: list[str]) -> tuple[list[str], list[Op]]:
+def _join_sentences(lines: list[str], *, standard: bool = False) -> tuple[list[str], list[Op]]:
     ops: list[Op] = []
     kinds = _classify(lines)
     remove: set[int] = set()
@@ -577,7 +593,7 @@ def _join_sentences(lines: list[str]) -> tuple[list[str], list[Op]]:
         nxt = lines[k].lstrip()
         if not prev or not nxt or prev[-1] in _SENTENCE_END:
             continue
-        if _join_vetoed(lines, kinds, j, prev, nxt):
+        if _join_vetoed(lines, kinds, j, prev, nxt, standard=standard):
             continue
         m = PAGE_ANCHOR_RE.match(lines[a])
         page_no = int(m.group(1)) if m else None
@@ -700,6 +716,8 @@ def normalize(
             n_footnotes += 1
     if n_footnotes:
         ops.append(Op("footnote", None, f"{n_footnotes} 条", "页脚注 HTML"))
+    # 标准文件识别在去噪之前：封面上的标准号行常与每页页眉相同，落在第一页页首窗口里会先被当页眉删掉
+    std = detect_standard(lines)
     kinds = _classify(lines)
     pages, total = _paginate(lines, kinds)
 
@@ -727,8 +745,13 @@ def normalize(
                     ops.append(Op("line_number", None, f"{vals[0]}–{vals[-1]}：{new.strip()[:30]}…", "段内行号"))
     # 书名在按目录改层级之前取：封面标题会被降级，免得与目录第 1 级争层级
     h1 = _first_h1("\n".join(lines))
+    # 标准文件（P4.30.1）：认出才做行级预处理，让目录比对看到合并好的行（封面在去噪之前已认过）
+    if std is not None:
+        ops.append(Op("standard", None, std.code))
+        lines, std_ops = std_preprocess(lines)
+        ops.extend(Op(kind, None, text) for kind, text in std_ops)
     # 按目录规范化标题层级（#175）：在接句之前——目录条目所在行改成标题后，不会被接进上一页的残句
-    toc = normalize_by_toc(lines, reviewer=toc_reviewer, line_numbered=n_line_numbers > 0)
+    toc = normalize_by_toc(lines, reviewer=toc_reviewer, line_numbered=n_line_numbers > 0, standard=std is not None)
     lines = toc.lines
     ops.extend(Op("toc", page, text, f"目录第 {level} 级") for page, level, text in toc.promoted)
     if toc.review and toc.review != "ok":
@@ -736,11 +759,16 @@ def normalize(
     if toc.entries and not toc.applied:
         ops.append(Op("toc_skipped", None, f"目录 {toc.entries} 条，正文命中 {toc.matched} 条", "命中率不足，未按目录改层级"))
     if pages:
-        lines, join_ops = _join_sentences(lines)
+        lines, join_ops = _join_sentences(lines, standard=std is not None)
         ops.extend(join_ops)
     new_body = "\n".join(lines)
 
     title = h1 or str(old_meta.get("title") or "").strip() or title_hint
+    if std is not None:
+        if std.title:
+            title = std.title
+        else:
+            ops.append(Op("standard_title_fallback", None, title))
     chars = count_chars(new_body)
     summary = {
         "headers_removed": sum(1 for o in ops if o.kind == "header"),
@@ -760,6 +788,12 @@ def normalize(
         summary["toc_source"] = toc.source
     if toc.review:
         summary["toc_review"] = toc.review.split(":", 1)[0]
+    if std is not None:
+        summary["profile"] = "standard"
+        for kind, key in (("std_appendix", "appendices_merged"), ("std_term", "terms_merged"), ("std_clause", "clauses_demoted")):
+            n = sum(1 for o in ops if o.kind == kind)
+            if n:
+                summary[key] = n
     if provenance is not None:
         # 网址导入：原文自带的 frontmatter 来自对方网站，其中观澜自己会写的出处类键（parsed_by、pages、source_sha256…）
         # 一律不认，免得一份下载来的 Markdown 冒充出处（P4.31 代码评审）
@@ -779,6 +813,8 @@ def normalize(
         meta["pages"] = total
     meta["chars"] = chars
     meta["normalized"] = summary
+    if std is not None:
+        meta["standard"] = std.meta  # 决策P4.30.1-1：只含从封面原文抽到的键
     for key, value in old_meta.items():  # 转换器自带的其它键原样保留在后面（网址导入时出处类键已在上面滤掉）
         meta.setdefault(key, value)
 

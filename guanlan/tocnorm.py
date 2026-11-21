@@ -10,10 +10,15 @@
    - 目录区内的标题降为普通文本（不能被拆分当章）；目录及其之前的标题、不在目录里的标题排到目录最深层之下。
 
 命中率不足 → 原样返回（退回 splitdoc 的标题形状判断，再退回纯层级）。
+
+**标准模式**（P4.30.1 §2.2–§2.3，`normalize_by_toc(standard=True)`）：多认两种编号形式——附录（`附录A`）与
+附录条款（`A.1` / `A.1.1`）；附录与前言、引言、参考文献、索引固定为第 1 级，`A.1` 与目录里的 `1.1` 同级。
+不开标准模式时这两种形式不认，行为与原来完全一致。
 """
 
 from __future__ import annotations
 
+import contextvars
 import difflib
 import re
 import unicodedata
@@ -23,7 +28,7 @@ from dataclasses import dataclass, field
 
 from .stopscope import StopRequested
 
-__all__ = ["TocResult", "TocReviewer", "normalize_by_toc", "toc_title_lines"]
+__all__ = ["STD_FIXED_TOP", "TocResult", "TocReviewer", "normalize_by_toc", "toc_title_lines"]
 
 # 目录审校（#175）：(目录区原文, 规则草稿 [{title, page, level}]) → 修正后的条目列表。
 # 由调用方注入（一键入库经 Agentao 只读调用模型，见 tocreview.py）；本模块不碰 LLM。
@@ -73,6 +78,14 @@ _MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("num-multi", re.compile(r"^\d{1,3}(?:\.\d{1,3})+\.?(?=\s|[^\d.]|$)")),
     ("num", re.compile(r"^\d{1,3}(?:[.、](?!\d)|(?=\s+\S))")),
 )
+# 标准模式（P4.30.1）多认的编号形式：附录、附录条款。只在 `normalize_by_toc(standard=True)` 期间生效
+_STD_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("appendix", re.compile(r"^附录\s*[A-Z](?![A-Za-z])")),
+    ("app-multi", re.compile(r"^[A-Z]\.\d{1,3}(?:\.\d{1,3})*\.?(?=\s|[^\d.]|$)")),
+)
+_STANDARD: contextvars.ContextVar[bool] = contextvars.ContextVar("tocnorm_standard", default=False)
+# 标准的固定要素（去空白后整行比对）：层级固定为 1，不跟随上一条
+STD_FIXED_TOP = frozenset({"前言", "引言", "参考文献", "索引"})
 # 日期括注：「(1995年3月18日)」；括注残缺时（「(试行X1992年1月4日)」）从含年份的左括号起删到行尾
 _DATE_PAREN_RE = re.compile(r"\([^()]*\d{4}\s*年[^()]*\)|\([^()]*\d{4}\s*年.*$")
 # 施行状态括注：目录与正文常一边有一边无（或括注残缺），比对时不计
@@ -119,12 +132,15 @@ def _clean(line: str) -> str:
 def _marker(text: str) -> tuple[tuple[str, str] | None, str]:
     """(编号, 去编号并去空白后的正文)。比对前统一全角半角（NFKC）。"""
     t = _nfkc(text).strip()
-    for kind, pat in _MARKERS:
+    markers = _STD_MARKERS + _MARKERS if _STANDARD.get() else _MARKERS
+    for kind, pat in markers:
         m = pat.match(t)
         if m:
             value = re.sub(r"\s+", "", m.group(0)).rstrip(".、")
             if kind == "num-multi":
                 kind = f"num{value.count('.') + 1}"
+            elif kind == "app-multi":
+                kind = f"app{value.count('.') + 1}"
             return (kind, value), re.sub(r"\s+", "", t[m.end() :])
     return None, re.sub(r"\s+", "", t)
 
@@ -235,9 +251,52 @@ def _assign_levels(entries: list[_Entry]) -> None:
         e.key = _key(e.title)
         if e.marker and e.marker[0] not in order:
             order.append(e.marker[0])
+    if _STANDARD.get():  # 附录形式不参与排序：层级由 _standard_levels 定，免得挤占其它形式的序位
+        order = [k for k in order if not _is_appendix_kind(k)]
     prev = 1
     for e in entries:
-        e.level = min(6, order.index(e.marker[0]) + 1) if e.marker else prev
+        if e.marker and not _is_appendix_kind(e.marker[0]):
+            e.level = min(6, order.index(e.marker[0]) + 1)
+        else:
+            e.level = prev
+        prev = e.level
+    if _STANDARD.get():
+        _standard_levels(entries)
+
+
+def _is_appendix_kind(kind: str | None) -> bool:
+    return kind == "appendix" or bool(kind and re.fullmatch(r"app\d", kind))
+
+
+def _fixed_top(text: str) -> bool:
+    """标准的固定要素（前言 / 引言 / 参考文献 / 索引）：去编号、空白后整行比对。"""
+    _mk, rest = _marker(text)
+    return rest in STD_FIXED_TOP
+
+
+def _std_level(kind: str | None, text: str, num_levels: dict[str, int]) -> int | None:
+    """标准模式下的固定层级：附录与固定要素为 1；附录条款 `A.1`（app2）取目录里 `1.1`（num2）的层级，
+    目录里没有该级就取编号深度。其余返回 None（照通用规则）。"""
+    if kind == "appendix" or _fixed_top(text):
+        return 1
+    if kind and re.fullmatch(r"app\d", kind):
+        depth = int(kind[3:])
+        return num_levels.get(f"num{depth}", min(6, depth))
+    return None
+
+
+def _standard_levels(entries: list[_Entry], *, follow: bool = True) -> None:
+    """标准模式（P4.30.1 §2.2–§2.3）：附录、固定要素定为第 1 级；附录条款与同深度的数字条款同级。
+    `follow`：无编号条目跟随上一条的规则改为跟随改过之后的上一条（附录之后的无编号条目随附录为 1）。
+    审校给出的层级（follow=False）只改附录与固定要素，其余条目沿用审校的层级。"""
+    num_levels = {e.marker[0]: e.level for e in entries if e.marker and re.fullmatch(r"num[2-9]", e.marker[0])}
+    prev = 1
+    for e in entries:
+        lv = _std_level(e.marker[0] if e.marker else None, e.title, num_levels)
+        if lv is not None:
+            e.level = lv
+        elif follow and e.marker is None:
+            e.level = prev
         prev = e.level
 
 
@@ -502,7 +561,7 @@ def _apply_review(
 
 
 def normalize_by_toc(
-    lines: list[str], reviewer: TocReviewer | None = None, *, line_numbered: bool = False
+    lines: list[str], reviewer: TocReviewer | None = None, *, line_numbered: bool = False, standard: bool = False
 ) -> TocResult:
     """按目录改写标题层级；没有目录或命中率不足 → 原样返回（applied=False）。
 
@@ -510,7 +569,16 @@ def normalize_by_toc(
     之后的定位、把关、改写都是确定性的，审校改不了正文。
     `line_numbered`：文档有页边行号（normalize 已认出行号块）。此时命中目录条目的标题若比条目多出
     行首一个裸数字（「2 Practice 2.1 …」对目录「Practice 2.1 …」），那是并进标题的行号，去掉。
+    `standard`：标准文件（P4.30.1）。多认附录编号形式，附录与固定要素定为第 1 级（模块说明）。
     """
+    token = _STANDARD.set(standard)
+    try:
+        return _normalize_by_toc(lines, reviewer, line_numbered=line_numbered)
+    finally:
+        _STANDARD.reset(token)
+
+
+def _normalize_by_toc(lines: list[str], reviewer: TocReviewer | None, *, line_numbered: bool) -> TocResult:
     found = _find_toc(lines)
     if found is not None:
         _assign_levels(found[2])
@@ -520,6 +588,11 @@ def normalize_by_toc(
     if found is None:
         return TocResult(lines, promoted=[], review=review)
     start, end, entries = found
+    if _STANDARD.get() and source == "llm":  # 审校给出的层级：附录、固定要素同样定为第 1 级
+        for e in entries:
+            if e.marker is None:
+                e.marker, _ = _marker(e.title)
+        _standard_levels(entries, follow=False)
     fenced = _fenced(lines)
     cands = _candidates(lines, end, fenced)
     _locate(entries, cands)
@@ -556,8 +629,14 @@ def normalize_by_toc(
     }
     ranks = [k for k in _SUB_ORDER if k in present and k not in toc_kind] + [None]
 
+    std = _STANDARD.get()
+
     def sub_level(text: str) -> int:
         k = kind_of(text)
+        if std:
+            lv = _std_level(k, text, toc_kind)
+            if lv is not None:
+                return lv
         if k in toc_kind:
             return toc_kind[k]
         return min(6, deepest + 1 + ranks.index(k if k in ranks else None))
