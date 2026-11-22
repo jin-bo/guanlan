@@ -257,8 +257,13 @@ class Smoke:
         for sel in ("img", "script", "[onerror]", "foreignObject", "image"):
             assert fig.locator(sel).count() == 0, f"产物含活元素 {sel}"
         texts = [t or "" for t in fig.locator("text").all_text_contents()]
-        assert any("<img" in t for t in texts), f"payload 未以文本落进 <text>：{texts[:6]}"
-        return "不弹窗 + 无 img/script/onerror/foreignObject/image + payload 落成文本"
+        # 两段载荷都要**原样**落成文本：只查「有 <img」会放过「<script>…</script> 被剥成 alert(2)」——
+        # P4.20.1 升 flint 1.1 时正是类目轴 formatter 被 htmlToPlainText 剥掉了类别名里的尖括号
+        # flint 1.1 起长类别名会折行，一个类别名可能分在几个 <text> 里、断点不一定在空格——两边都去掉空白再比
+        joined = "".join("".join(texts).split())
+        for frag in ("<img src=x onerror=alert(1)>", "<script>alert(2)</script>"):
+            assert "".join(frag.split()) in joined, f"payload {frag!r} 未原样落进 <text>：{texts}"
+        return "不弹窗 + 无 img/script/onerror/foreignObject/image + 两段 payload 原样落成文本"
 
     def s4_tooltip_no_html(self):
         """4. tooltip 不走 HTML 通道（renderMode:'richText'）：hover 不产生含原始 HTML 的容器。"""

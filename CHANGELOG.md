@@ -31,6 +31,9 @@
   - **托管档位说明更正**（使用指南「MinerU 解析档位」、`pdf-to-markdown` 技能）：4.2 起托管档位有 `basic` / `standard` / `advanced` 三种，`standard` 引擎不再提供 `advanced`；要用 `--tier advanced` 得设 `managed_tier advanced`（复用 standard 的模型）。旧说明照做会得到 `quality_tier_unavailable`。
   - **升级后旧服务的提示**（`skills/pdf-to-markdown/scripts/convert.py`）：4.2 起命令行与后台服务间要 token 认证，升级前起的服务仍在跑时被拒（`doclib_upgrade_required` / `invalid_doclib_token`）。此前只打一行通用失败、`auto` 模式随即退到 marker/pypdf，质量差一个数量级却不显眼；现在日志明确提示 `mineru server stop && mineru server start`。脚本不替用户重启服务。
   - Office 文件只出第 1 页的问题已在 MinerU 4.2 上游修复；技能的缺页再取保留给 4.0.x，4.2+ 上不会触发。
+- **Web 图表的 flint 编译器从 0.4.1 升到 1.1.1**（复核记录见 `docs/P4.20.1-flint升级1.1.md`）：带来上游 1.0–1.1 的 ECharts 版面改进——长标题按整行折行、长类别名换行、图例与轴标题先量后排、右侧图例不再溢出、分布类图（箱线、密度、ECDF）的值轴贴合数据而不强制从 0 起。图型仍是 37 种，安全闸与资源闸不变，真浏览器冒烟 18/18。
+  - 升级中发现并修正：1.1 起类目轴也带格式化函数，原先「剥掉 formatter 输出里所有 `<…>`」会把含尖括号的类别名（如 `<img …>`、`x<y` 这类）剥坏甚至剥空；现在只剥 flint 自己拼的 `<br>` / `<b>` / `<span>`。同理不再解 HTML 实体（flint 不产出实体，`A &amp; B` 这类类别名原样显示）。
+  - `flint-chart-author` 技能：`field_display_names`（列名 → 显示名）在 1.1 起生效，改为推荐使用；`Line Chart` 新增 `strokeDash`（线型）通道；写明 `theme_spec` / `interaction_spec` / `updates` 只在 Vega-Lite 后端生效、观澜不读。已装技能的用户运行 `guanlan install-skill --force` 更新。
 
 ## [0.1.39] - 2026-11-16
 

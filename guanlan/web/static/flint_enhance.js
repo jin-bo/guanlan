@@ -34,9 +34,9 @@ const FLINT_FIT_RATIOS = [1, 0.75, 0.55, 0.4];
 
 // —— 安全闸常量（决策P4.20-4）——
 const FLINT_TOP_KEYS = ["data", "semantic_types", "chart_spec", "field_display_names", "options"];
-// 注：`field_display_names` 留在白名单里只为**向前兼容**——flint 0.4.1 的 dist 里**根本没有这个键**
-// （实测 grep 计数为 0，assembleECharts 只读 chart_spec/semantic_types/data.values/options），
-// 写了等于没写。作者侧文档已据此改口，不再教人用它（决策P4.20-21）。
+// 注：`field_display_names` 首版留在白名单里只为向前兼容（flint 0.4.1 不读它，决策P4.20-21）；
+// 1.1 起 flint 用它作轴标题与图例名，作者侧文档改为推荐（P4.20.1）。显示名只作为文本绘制，冒烟已验注入。
+// flint 1.x 新增的 `theme_spec` / `interaction_spec` / `updates` 只在 Vega-Lite 后端生效，**不进白名单**（P4.20.1）。
 // 危险**键**清单：值一律被 ECharts 当文本画进 <text>，是**键**才决定它是不是链接/图片/HTML。
 // **不含 `target`**（决策P4.20-16）：ECharts 的 `target` 只在与 `link` 配对时才有意义（`'blank'`/`'self'`），
 // 而 `link` 已被无条件拒——单独的 `target` 是惰性的。实测 `Sankey Diagram`/`Network Graph` 的
@@ -46,7 +46,7 @@ const FLINT_BAD_KEYS = new Set(["link", "toolbox", "dataView"]);
 
 // 色板槽位**承载语义**的图型（决策P4.20-22）：这些模板把颜色当含义用，逐槽换色会把含义改掉。
 // 名单由**对 vendored dist 做一次穷举**得出——搜「非色板数组里的裸 hex 语义常量」，`flint-chart@0.4.1`
-// 全包**只有一处**：`const COLOR = { startEnd: "#5470c6", increase: "#91cc75", decrease: "#ee6666" }`
+// 与 1.1.1 全包都**只有一处**：`const COLOR = { startEnd: "#5470c6", increase: "#91cc75", decrease: "#ee6666" }`
 // （waterfall 模板）。曾经的按值替换把 `#91cc75`(涨) 换成澜青、`#ee6666`(跌) 换成海沫**绿**——
 // 把「跌」画成绿的，比配色不统一坏得多。升级钉版时**必须重跑那次 grep**（见 vendor/README.md）。
 const FLINT_SEMANTIC_COLOR_CHARTS = new Set(["Waterfall Chart"]);
@@ -143,17 +143,18 @@ function applyGuanlanPalette(opt, chartType) {
 // 「模型: model-a<br/>评测得分: 72.4」这一行字面量。richText 这条安全铰链不能撤（决策P4.20-4），
 // 所以改的是**喂给它的东西**：把 `<br/>` 变成换行（richText 认 `\n`）、其余标签剥成文本。
 // 这一步纯属呈现修正，**不放宽任何安全性质**——产物仍然只作为文本绘制，全程没有 HTML 解析。
+// **只剥 flint 自己会拼的那几种标签**（P4.20.1）：flint 拼 HTML 时**不转义数据值**，而 1.1 起类目轴也装了
+// 函数 formatter（长名换行/截断）——若剥任意 `<…>`，类别名「<img src=x …>」会被剥成空串、数据被改写。
+// 对 dist 穷举（`grep -oE '<\/?[a-zA-Z][a-zA-Z0-9]*' echarts.js | sort | uniq -c`，与 vendor/README.md 复核项同一条）：
+// 0.4.1 与 1.1.1 都只有 br / b / span。首版的 p/div/li/tr 兜底 flint 从未输出，只会误伤数据，已去掉。
+// 升级 flint 时重跑这条穷举，出现新标签就补进 FLINT_MARKUP_TAG。
+const FLINT_MARKUP_TAG = /<\/?(?:b|span)(?:\s[^>]*)?>/gi;
+// **不解 HTML 实体**（P4.20.1）：dist 里没有任何实体（`&lt;`/`&amp;`/`&nbsp;` 计数为 0），flint 也不转义
+// 数据值，所以串里的实体只可能来自数据本身——解了就是把类别名「A &amp; B」改写成「A & B」，与剥尖括号同理。
 function htmlToPlainText(s) {
   return String(s)
     .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(?:p|div|li|tr)>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#0?39;/g, "'")
-    .replace(/&amp;/g, "&"); // 最后解 &amp;，免得把 `&amp;lt;` 二次解成 `<`
+    .replace(FLINT_MARKUP_TAG, "");
 }
 
 function plainTextFormatters(node) {

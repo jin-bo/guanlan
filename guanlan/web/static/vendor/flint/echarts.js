@@ -1,3 +1,2331 @@
+// src/core/spec-updates.ts
+function noteSpecUpdates(output, input) {
+  const count = input.updates?.length ?? 0;
+  if (!count || !output || typeof output !== "object") return output;
+  const warning = {
+    severity: "info",
+    code: "updates-not-compiled",
+    message: `The spec's ${count} update${count === 1 ? "" : "s"} (${input.updates.map((update) => `"${update.id}"`).join(", ")}) are applied by the interactive runtime (mountChart, <FlintChart>) once the chart is drawn; this output draws the chart without them.`
+  };
+  const notes = output;
+  notes._warnings = [...notes._warnings ?? [], warning];
+  return output;
+}
+
+// src/core/type-registry.ts
+var TYPE_REGISTRY = {
+  // --- Temporal: DateTime ---
+  DateTime: { t0: "Temporal", t1: "DateTime", visEncodings: ["temporal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Date: { t0: "Temporal", t1: "DateTime", visEncodings: ["temporal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Time: { t0: "Temporal", t1: "DateTime", visEncodings: ["temporal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Timestamp: { t0: "Temporal", t1: "DateTime", visEncodings: ["temporal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  // --- Temporal: DateGranule ---
+  Year: { t0: "Temporal", t1: "DateGranule", visEncodings: ["temporal", "ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "integer", zeroBaseline: "arbitrary", zeroPad: 0.03 },
+  Quarter: { t0: "Temporal", t1: "DateGranule", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Month: { t0: "Temporal", t1: "DateGranule", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Week: { t0: "Temporal", t1: "DateGranule", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Day: { t0: "Temporal", t1: "DateGranule", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Hour: { t0: "Temporal", t1: "DateGranule", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "integer", zeroBaseline: "arbitrary", zeroPad: 0 },
+  YearMonth: { t0: "Temporal", t1: "DateGranule", visEncodings: ["temporal", "ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  YearQuarter: { t0: "Temporal", t1: "DateGranule", visEncodings: ["temporal", "ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  YearWeek: { t0: "Temporal", t1: "DateGranule", visEncodings: ["temporal", "ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Decade: { t0: "Temporal", t1: "DateGranule", visEncodings: ["temporal", "ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "integer", zeroBaseline: "arbitrary", zeroPad: 0.03 },
+  // --- Temporal: Duration ---
+  Duration: { t0: "Temporal", t1: "Duration", visEncodings: ["quantitative"], aggRole: "additive", domainShape: "open", diverging: "none", formatClass: "unit-suffix", zeroBaseline: "meaningful", zeroPad: 0 },
+  // --- Measure: Amount ---
+  Amount: { t0: "Measure", t1: "Amount", visEncodings: ["quantitative"], aggRole: "additive", domainShape: "open", diverging: "none", formatClass: "currency", zeroBaseline: "meaningful", zeroPad: 0 },
+  Price: { t0: "Measure", t1: "Amount", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "open", diverging: "none", formatClass: "currency", zeroBaseline: "meaningful", zeroPad: 0 },
+  // --- Measure: Physical ---
+  Quantity: { t0: "Measure", t1: "Physical", visEncodings: ["quantitative"], aggRole: "additive", domainShape: "open", diverging: "none", formatClass: "unit-suffix", zeroBaseline: "meaningful", zeroPad: 0 },
+  Temperature: { t0: "Measure", t1: "Physical", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "open", diverging: "conditional", formatClass: "unit-suffix", zeroBaseline: "arbitrary", zeroPad: 0.05 },
+  // --- Measure: Proportion ---
+  Percentage: { t0: "Measure", t1: "Proportion", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "bounded", diverging: "none", formatClass: "percent", zeroBaseline: "contextual", zeroPad: 0 },
+  // --- Measure: SignedMeasure ---
+  Profit: { t0: "Measure", t1: "SignedMeasure", visEncodings: ["quantitative"], aggRole: "signed-additive", domainShape: "open", diverging: "conditional", formatClass: "decimal", zeroBaseline: "meaningful", zeroPad: 0 },
+  PercentageChange: { t0: "Measure", t1: "SignedMeasure", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "open", diverging: "conditional", formatClass: "percent", zeroBaseline: "contextual", zeroPad: 0.05 },
+  Sentiment: { t0: "Measure", t1: "SignedMeasure", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "open", diverging: "inherent", formatClass: "decimal", zeroBaseline: "meaningful", zeroPad: 0 },
+  Correlation: { t0: "Measure", t1: "SignedMeasure", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "bounded", diverging: "inherent", formatClass: "decimal", zeroBaseline: "meaningful", zeroPad: 0 },
+  // --- Measure: GenericMeasure ---
+  Count: { t0: "Measure", t1: "GenericMeasure", visEncodings: ["quantitative"], aggRole: "additive", domainShape: "open", diverging: "none", formatClass: "integer", zeroBaseline: "meaningful", zeroPad: 0 },
+  // A measure whose values should not be added up (or whose additivity is unknown); use Count, Amount, Quantity or Profit for totals.
+  Number: { t0: "Measure", t1: "GenericMeasure", visEncodings: ["quantitative"], aggRole: "measure", domainShape: "open", diverging: "none", formatClass: "decimal", zeroBaseline: "meaningful", zeroPad: 0 },
+  // --- Discrete ---
+  Rank: { t0: "Discrete", t1: "Rank", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "integer", zeroBaseline: "arbitrary", zeroPad: 0.08 },
+  Score: { t0: "Discrete", t1: "Score", visEncodings: ["quantitative", "ordinal"], aggRole: "intensive", domainShape: "bounded", diverging: "conditional", formatClass: "decimal", zeroBaseline: "contextual", zeroPad: 0.05 },
+  ID: { t0: "Identifier", t1: "ID", visEncodings: ["nominal"], aggRole: "identifier", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "arbitrary", zeroPad: 0 },
+  // --- Geographic ---
+  Latitude: { t0: "Geographic", t1: "GeoCoordinate", visEncodings: ["quantitative", "geographic"], aggRole: "dimension", domainShape: "fixed", diverging: "none", formatClass: "decimal", zeroBaseline: "arbitrary", zeroPad: 0.02 },
+  Longitude: { t0: "Geographic", t1: "GeoCoordinate", visEncodings: ["quantitative", "geographic"], aggRole: "dimension", domainShape: "fixed", diverging: "none", formatClass: "decimal", zeroBaseline: "arbitrary", zeroPad: 0.02 },
+  Country: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  State: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  City: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Region: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Address: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  ZipCode: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "identifier", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  // --- Categorical: Entity ---
+  Category: { t0: "Categorical", t1: "Entity", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Name: { t0: "Categorical", t1: "Entity", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  // --- Categorical: Coded ---
+  Status: { t0: "Categorical", t1: "Coded", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Boolean: { t0: "Categorical", t1: "Coded", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "fixed", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  Direction: { t0: "Categorical", t1: "Coded", visEncodings: ["ordinal", "nominal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  // --- Categorical: Binned ---
+  Range: { t0: "Categorical", t1: "Binned", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
+  // --- Fallbacks ---
+  Unknown: { t0: "Categorical", t1: "Entity", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 }
+};
+var UNKNOWN_ENTRY = {
+  t0: "Categorical",
+  t1: "Entity",
+  visEncodings: ["nominal"],
+  aggRole: "dimension",
+  domainShape: "open",
+  diverging: "none",
+  formatClass: "plain",
+  zeroBaseline: "none",
+  zeroPad: 0
+};
+function getRegistryEntry(semanticType) {
+  return TYPE_REGISTRY[semanticType] ?? UNKNOWN_ENTRY;
+}
+function isRegistered(semanticType) {
+  return semanticType in TYPE_REGISTRY;
+}
+function getRegisteredTypes() {
+  return Object.keys(TYPE_REGISTRY);
+}
+
+// src/core/temporal-parse.ts
+var MONTH_NUMBER = {
+  jan: 1,
+  feb: 2,
+  mar: 3,
+  apr: 4,
+  may: 5,
+  jun: 6,
+  jul: 7,
+  aug: 8,
+  sep: 9,
+  oct: 10,
+  nov: 11,
+  dec: 12
+};
+var MONTH = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?";
+var SEP = "[\\s\\-/._,]*";
+var YEAR = "(\\d{4})";
+var SHORT_YEAR = "'?(\\d{2})";
+var ORDINAL = "(?:st|nd|rd|th)?";
+var re = (source) => new RegExp(`^${source}$`, "i");
+var monthOf = (name) => MONTH_NUMBER[name.slice(0, 3).toLowerCase()];
+var fullYear = (twoDigits) => {
+  const n = Number(twoDigits);
+  return n <= 49 ? 2e3 + n : 1900 + n;
+};
+var pad = (n) => String(n).padStart(2, "0");
+function yearMonth(year, month) {
+  if (!Number.isInteger(year) || year < 1e3 || year > 2999) return null;
+  if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+  return `${year}-${pad(month)}`;
+}
+function date(year, month, day) {
+  const ym = yearMonth(year, month);
+  if (!ym || !Number.isInteger(day) || day < 1) return null;
+  if (new Date(Date.UTC(year, month - 1, day)).getUTCDate() !== day) return null;
+  return `${ym}-${pad(day)}`;
+}
+var YEAR_MONTH_PARSERS = [
+  // 202501
+  [re("(\\d{4})(\\d{2})"), (m) => yearMonth(+m[1], +m[2])],
+  // 2025-1, 2025/01, 2025.01, 2025 01
+  [re(`${YEAR}[\\-/. ](\\d{1,2})`), (m) => yearMonth(+m[1], +m[2])],
+  // 2025M01 (statistical-office style)
+  [re(`${YEAR}\\s*M(\\d{1,2})`), (m) => yearMonth(+m[1], +m[2])],
+  // 01/2025, 1-2025, 01.2025
+  [re(`(\\d{1,2})[\\-/. ]${YEAR}`), (m) => yearMonth(+m[2], +m[1])],
+  // 2025-Jul, 2025 July, 2025Jul
+  [re(`${YEAR}${SEP}${MONTH}`), (m) => yearMonth(+m[1], monthOf(m[2]))],
+  // Jul-2025, July 2025, Jul2025, July, 2025
+  [re(`${MONTH}${SEP}${YEAR}`), (m) => yearMonth(+m[2], monthOf(m[1]))],
+  // Jul-25, Jul '25
+  [re(`${MONTH}[\\s\\-/.]*${SHORT_YEAR}`), (m) => yearMonth(fullYear(m[2]), monthOf(m[1]))]
+];
+var DATE_PARSERS = [
+  // 20250115
+  [re("(\\d{4})(\\d{2})(\\d{2})"), (m) => date(+m[1], +m[2], +m[3])],
+  // 2025/01/15, 2025.1.15 (dashes already parse as ISO)
+  [re(`${YEAR}[/.](\\d{1,2})[/.](\\d{1,2})`), (m) => date(+m[1], +m[2], +m[3])],
+  // 2025-Jan-15, 2025 January 15
+  [re(`${YEAR}${SEP}${MONTH}${SEP}(\\d{1,2})${ORDINAL}`), (m) => date(+m[1], monthOf(m[2]), +m[3])],
+  // Jan 15, 2025; January 15th 2025; Jan-15-2025
+  [re(`${MONTH}${SEP}(\\d{1,2})${ORDINAL}${SEP}${YEAR}`), (m) => date(+m[3], monthOf(m[1]), +m[2])],
+  // 15 Jan 2025, 15-Jan-2025, 15th January, 2025
+  [re(`(\\d{1,2})${ORDINAL}${SEP}${MONTH}${SEP}${YEAR}`), (m) => date(+m[3], monthOf(m[2]), +m[1])]
+];
+var PARSERS_BY_TYPE = {
+  YearMonth: YEAR_MONTH_PARSERS,
+  Date: DATE_PARSERS,
+  DateTime: DATE_PARSERS
+};
+function hasTemporalParsers(semanticType) {
+  return semanticType in PARSERS_BY_TYPE;
+}
+var ISO_TIMESTAMP = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(\.\d+)?)?(Z|[+-]\d{2}(?::?\d{2})?)?$/i;
+function readIsoTimestamp(value, calendarGrain) {
+  if (typeof value !== "string") return null;
+  const match = value.trim().match(ISO_TIMESTAMP);
+  if (!match) return null;
+  const [, day, hours, minutes, seconds = "00", fraction = "", zone] = match;
+  const midnight = Number(hours) === 0 && Number(minutes) === 0 && Number(seconds) === 0 && !/[1-9]/.test(fraction);
+  if (calendarGrain && midnight) return day;
+  if (zone) return null;
+  return `${day}T${hours}:${minutes}:${seconds}${fraction}`;
+}
+function parseTemporalByType(value, semanticType) {
+  const parsers = PARSERS_BY_TYPE[semanticType];
+  if (!parsers) return null;
+  if (typeof value === "number") {
+    if (!Number.isInteger(value)) return null;
+    value = String(value);
+  }
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text) return null;
+  for (const [pattern, read] of parsers) {
+    const match = text.match(pattern);
+    if (match) {
+      const out = read(match);
+      if (out) return out;
+    }
+  }
+  return null;
+}
+
+// src/core/semantic-types.ts
+var measureTypes = new Set(
+  getRegisteredTypes().filter((t) => {
+    const e = getRegistryEntry(t);
+    return ["additive", "intensive", "signed-additive", "measure"].includes(e.aggRole) && e.t1 !== "Score";
+  })
+);
+var nonMeasureNumericTypes = /* @__PURE__ */ new Set([
+  "Rank",
+  "ID",
+  "Score",
+  "Year",
+  "Month",
+  "Day",
+  "Hour",
+  "Latitude",
+  "Longitude"
+]);
+var categoricalTypes = new Set(
+  getRegisteredTypes().filter((t) => {
+    const e = getRegistryEntry(t);
+    return e.visEncodings.includes("nominal") && e.aggRole !== "identifier" || e.t1 === "Binned";
+  })
+);
+var ordinalTypes = new Set(
+  getRegisteredTypes().filter((t) => {
+    const e = getRegistryEntry(t);
+    return e.visEncodings.includes("ordinal");
+  })
+);
+function getVisCategory(semanticType) {
+  if (!semanticType || !isRegistered(semanticType)) return null;
+  return getRegistryEntry(semanticType).visEncodings[0] ?? null;
+}
+var ISO_DATE = /^\d{4}-\d{2}(-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?)?$/;
+var US_SLASH_DATE = /^\d{1,2}\/\d{1,2}\/\d{4}$/;
+function isUnambiguousDateString(value) {
+  const text = value.trim();
+  if (ISO_DATE.test(text)) return Number.isFinite(Date.parse(text));
+  if (US_SLASH_DATE.test(text)) return Number.isFinite(Date.parse(text));
+  return parseTemporalByType(text, "Date") !== null;
+}
+function inferVisCategory(values) {
+  if (values.length === 0) return "nominal";
+  const isBoolean = (v) => v === true || v === false || Object.prototype.toString.call(v) === "[object Boolean]";
+  const isNumber = (v) => !isNaN(+v) && !(Object.prototype.toString.call(v) === "[object Date]");
+  const isDate = (v) => {
+    if (v instanceof Date) return !isNaN(v.getTime());
+    if (typeof v === "string") return isUnambiguousDateString(v);
+    return !isNaN(Date.parse(v));
+  };
+  const nonNull = values.filter((v) => v != null);
+  if (nonNull.length === 0) return "nominal";
+  if (nonNull.every(isBoolean)) return "nominal";
+  if (nonNull.every(isNumber)) return "quantitative";
+  if (nonNull.every(isDate)) return "temporal";
+  return "nominal";
+}
+function isMeasureType(semanticType) {
+  return measureTypes.has(semanticType);
+}
+function isTimeSeriesType(semanticType) {
+  const entry = getRegistryEntry(semanticType);
+  return entry.t0 === "Temporal" && entry.t1 !== "Duration";
+}
+function isCategoricalType(semanticType) {
+  return categoricalTypes.has(semanticType);
+}
+function isOrdinalType(semanticType) {
+  return ordinalTypes.has(semanticType);
+}
+function isGeoCoordinateType(semanticType) {
+  return getRegistryEntry(semanticType).t1 === "GeoCoordinate";
+}
+function isGeoLocationString(semanticType) {
+  return getRegistryEntry(semanticType).t1 === "GeoPlace";
+}
+function isNonMeasureNumeric(semanticType) {
+  return nonMeasureNumericTypes.has(semanticType);
+}
+function getZeroClass(semanticType) {
+  const baseline = getRegistryEntry(semanticType).zeroBaseline;
+  if (baseline === "none") return "unknown";
+  return baseline;
+}
+var ZERO_BASELINE_GAP_THRESHOLD = 0.5;
+function dataFarFromZero(values) {
+  if (!values || values.length === 0) return false;
+  const dataMin = Math.min(...values);
+  const dataMax = Math.max(...values);
+  if (dataMin <= 0 || dataMax <= 0) return false;
+  return dataMin / dataMax >= ZERO_BASELINE_GAP_THRESHOLD;
+}
+var DISTRIBUTION_CHARTS = /* @__PURE__ */ new Set(["Boxplot", "Violin Plot", "Density Plot", "Ridgeline Plot", "ECDF Plot"]);
+function zeroMarkType(chartType, templateMarkType) {
+  if (chartType && DISTRIBUTION_CHARTS.has(chartType)) return "boxplot";
+  return templateMarkType || "point";
+}
+function computeZeroDecision(semanticType, channel, markType, values) {
+  const isBarLike = ["bar", "area", "rect"].includes(markType);
+  const isScatterMark = markType === "circle" || markType === "point" || markType === "boxplot";
+  const isLineIndex = (markType === "line" || markType === "trail") && channel === "x";
+  const isPositional = ["x", "y"].includes(channel);
+  const entry = getRegistryEntry(semanticType);
+  const zeroClass = getZeroClass(semanticType);
+  if (markType === "boxplot" && isPositional && values && values.length > 0 && Math.min(...values) <= 0) {
+    return { zero: true, domainPadFraction: 0, zeroClass, forced: true, uncertain: false };
+  }
+  if (zeroClass === "meaningful") {
+    if (isBarLike) {
+      return { zero: true, domainPadFraction: 0, zeroClass, forced: true, uncertain: false };
+    }
+    if (isPositional && (isScatterMark || isLineIndex)) {
+      if (values && values.length > 0 && Math.min(...values) <= 0) {
+        return { zero: true, domainPadFraction: 0, zeroClass, forced: true, uncertain: false };
+      }
+      return {
+        zero: false,
+        domainPadFraction: entry.zeroPad || 0.05,
+        zeroClass,
+        forced: false,
+        uncertain: true
+      };
+    }
+    return {
+      zero: true,
+      domainPadFraction: 0,
+      zeroClass,
+      forced: false,
+      uncertain: dataFarFromZero(values)
+    };
+  }
+  if (zeroClass === "arbitrary") {
+    if (isBarLike && values && values.length > 0) {
+      const dataMin = Math.min(...values);
+      if (dataMin <= 0) {
+        return { zero: true, domainPadFraction: 0, zeroClass, forced: true, uncertain: false };
+      }
+    }
+    return {
+      zero: false,
+      domainPadFraction: entry.zeroPad || 0.05,
+      zeroClass,
+      forced: false,
+      uncertain: false
+    };
+  }
+  if (zeroClass === "contextual" && values && values.length > 0) {
+    const dataMin = Math.min(...values);
+    const dataMax = Math.max(...values);
+    if (dataMin <= 0) {
+      return { zero: true, domainPadFraction: 0, zeroClass, forced: true, uncertain: false };
+    }
+    const proximity = dataMax > 0 ? dataMin / dataMax : 0;
+    if (proximity < 0.3) {
+      return { zero: true, domainPadFraction: 0, zeroClass, forced: false, uncertain: false };
+    }
+    if (isBarLike) {
+      return { zero: true, domainPadFraction: 0, zeroClass, forced: true, uncertain: false };
+    }
+    return { zero: false, domainPadFraction: 0.05, zeroClass, forced: false, uncertain: false };
+  }
+  if (isBarLike && isPositional) {
+    return { zero: true, domainPadFraction: 0, zeroClass: "unknown", forced: true, uncertain: false };
+  }
+  return { zero: false, domainPadFraction: 0.05, zeroClass: "unknown", forced: true, uncertain: false };
+}
+function computePaddedDomain(values, padFraction) {
+  if (padFraction <= 0 || values.length < 2) return null;
+  const dataMin = Math.min(...values);
+  const dataMax = Math.max(...values);
+  const span = dataMax - dataMin;
+  if (span <= 0) return null;
+  const padding = span * padFraction;
+  return [dataMin - padding, dataMax + padding];
+}
+var DIVERGING_WARM_HIGH = "blueorange";
+var DIVERGING_WARM_LOW = "redblue";
+function getRecommendedColorScheme(semanticType, encodingType, uniqueValueCount = 10, fieldName = "", values = [], colorHint) {
+  const pickScheme = (schemes, name) => {
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) {
+      hash = (hash << 5) - hash + name.charCodeAt(i);
+      hash = hash & hash;
+    }
+    return schemes[Math.abs(hash) % schemes.length];
+  };
+  if (!semanticType) {
+    if (encodingType === "quantitative") {
+      return { scheme: "viridis", type: "sequential", reason: "default for quantitative" };
+    }
+    if (encodingType === "ordinal") {
+      return { scheme: "blues", type: "sequential", reason: "default for ordinal" };
+    }
+    return {
+      scheme: uniqueValueCount > 10 ? "tableau20" : "tableau10",
+      type: "categorical",
+      reason: "default for categorical"
+    };
+  }
+  if (semanticType === "Temperature") {
+    if (colorHint?.type === "diverging") {
+      return { scheme: DIVERGING_WARM_HIGH, type: "diverging", reason: "temperature diverging around freezing point, warm end high" };
+    }
+    return { scheme: "reds", type: "sequential", reason: "temperature single-direction uses sequential" };
+  }
+  if (semanticType === "Percentage") {
+    if (colorHint?.type === "diverging") {
+      return { scheme: DIVERGING_WARM_LOW, type: "diverging", reason: "percentage spans positive and negative, red is the losing side" };
+    }
+    return { scheme: "oranges", type: "sequential", reason: "percentage all same sign uses sequential" };
+  }
+  if (["Price", "Amount"].includes(semanticType)) {
+    if (colorHint?.type === "diverging") {
+      return { scheme: DIVERGING_WARM_LOW, type: "diverging", reason: "financial data spans positive and negative, red is the losing side" };
+    }
+    return { scheme: "goldgreen", type: "sequential", reason: "financial data uses gold-green" };
+  }
+  if (semanticType === "Score") {
+    if (colorHint?.type === "diverging") {
+      return { scheme: DIVERGING_WARM_LOW, type: "diverging", reason: "score diverging around midpoint, red is the poor side" };
+    }
+    return { scheme: "yelloworangebrown", type: "sequential", reason: "scores use warm sequential" };
+  }
+  if (semanticType === "Rank") {
+    return { scheme: "purples", type: "sequential", reason: "ranks use single-hue sequential" };
+  }
+  if (semanticType === "Range") {
+    return { scheme: "blues", type: "sequential", reason: "range groups use sequential" };
+  }
+  if (ordinalTypes.has(semanticType) && ["Year", "Quarter", "Month", "Week", "Day", "Hour", "Decade"].includes(semanticType)) {
+    return { scheme: "viridis", type: "sequential", reason: "temporal granules use perceptually uniform" };
+  }
+  if (getRegistryEntry(semanticType ?? "").t1 === "GeoPlace") {
+    if (uniqueValueCount <= 10) {
+      return { scheme: "tableau10", type: "categorical", reason: "places are named categories, at a contrast that survives thin marks" };
+    }
+    return { scheme: "tableau20", type: "categorical", reason: "many regions use large categorical" };
+  }
+  if (["Status", "Boolean"].includes(semanticType)) {
+    return { scheme: "set1", type: "categorical", reason: "status uses high-contrast categorical" };
+  }
+  if (semanticType === "Category") {
+    return {
+      scheme: uniqueValueCount > 10 ? "tableau20" : "tableau10",
+      type: "categorical",
+      reason: "categories use standard categorical"
+    };
+  }
+  if (semanticType === "Name") {
+    return {
+      scheme: uniqueValueCount > 8 ? "tableau20" : "tableau10",
+      type: "categorical",
+      reason: "names use readable categorical"
+    };
+  }
+  if (semanticType === "Duration") {
+    return { scheme: "oranges", type: "sequential", reason: "duration uses intensity-based sequential" };
+  }
+  if (measureTypes.has(semanticType)) {
+    if (colorHint?.type === "diverging") {
+      const signed = getRegistryEntry(semanticType).t1 === "SignedMeasure";
+      return signed ? { scheme: DIVERGING_WARM_LOW, type: "diverging", reason: "signed measure, red is the negative side" } : { scheme: DIVERGING_WARM_HIGH, type: "diverging", reason: "measure with no valence, warm end high" };
+    }
+    const sequentialSchemes = ["viridis", "blues", "greens", "reds", "yelloworangebrown", "goldgreen"];
+    return {
+      scheme: pickScheme(sequentialSchemes, fieldName),
+      type: "sequential",
+      reason: "measures use perceptually uniform sequential"
+    };
+  }
+  if (ordinalTypes.has(semanticType) || encodingType === "ordinal") {
+    const ordinalSchemes = ["blues", "greens", "purples", "oranges"];
+    return {
+      scheme: pickScheme(ordinalSchemes, fieldName),
+      type: "sequential",
+      reason: "ordinal data uses sequential scheme"
+    };
+  }
+  if (encodingType === "nominal" || encodingType === "temporal") {
+    return {
+      scheme: uniqueValueCount > 10 ? "tableau20" : "tableau10",
+      type: "categorical",
+      reason: "default categorical palette"
+    };
+  }
+  return { scheme: "viridis", type: "sequential", reason: "universal fallback" };
+}
+var MONTH_FULL = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+var MONTH_ABBR3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+var MONTH_NUM = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
+var DOW_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+var DOW_ABBR3 = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+var DOW_ABBR2 = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+var DOW_FULL_SUN = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+var DOW_ABBR3_SUN = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+var QUARTER_LABELS = ["Q1", "Q2", "Q3", "Q4"];
+var COMPASS_8 = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+var COMPASS_8_FULL = ["North", "Northeast", "East", "Southeast", "South", "Southwest", "West", "Northwest"];
+var COMPASS_4 = ["N", "E", "S", "W"];
+var COMPASS_4_FULL = ["North", "East", "South", "West"];
+var ORDINAL_SEQUENCES = {
+  Month: [
+    { labels: MONTH_FULL, caseInsensitive: true },
+    { labels: MONTH_ABBR3, caseInsensitive: true },
+    { labels: MONTH_NUM, caseInsensitive: false }
+  ],
+  Day: [
+    { labels: DOW_FULL, caseInsensitive: true },
+    { labels: DOW_ABBR3, caseInsensitive: true },
+    { labels: DOW_ABBR2, caseInsensitive: true },
+    { labels: DOW_FULL_SUN, caseInsensitive: true },
+    { labels: DOW_ABBR3_SUN, caseInsensitive: true }
+  ],
+  Quarter: [
+    { labels: QUARTER_LABELS, caseInsensitive: true }
+  ],
+  Direction: [
+    { labels: COMPASS_8, caseInsensitive: true },
+    { labels: COMPASS_8_FULL, caseInsensitive: true },
+    { labels: COMPASS_4, caseInsensitive: true },
+    { labels: COMPASS_4_FULL, caseInsensitive: true }
+  ]
+};
+function buildLookup(seq) {
+  const m = /* @__PURE__ */ new Map();
+  for (let i = 0; i < seq.labels.length; i++) {
+    const key = seq.caseInsensitive ? seq.labels[i].toLowerCase() : seq.labels[i];
+    m.set(key, i);
+  }
+  return m;
+}
+function matchSequence(values, sequences) {
+  const uniqueValues = [...new Set(values.map((v) => v != null ? String(v) : ""))].filter((v) => v !== "");
+  if (uniqueValues.length === 0) return void 0;
+  for (const seq of sequences) {
+    const lookup = buildLookup(seq);
+    const matched = [];
+    const unmatched = [];
+    for (const val of uniqueValues) {
+      const key = seq.caseInsensitive ? val.toLowerCase() : val;
+      const idx = lookup.get(key);
+      if (idx !== void 0) {
+        matched.push({ value: val, index: idx });
+      } else {
+        unmatched.push(val);
+      }
+    }
+    if (matched.length >= uniqueValues.length * 0.6 && matched.length >= 2) {
+      matched.sort((a, b) => a.index - b.index);
+      const result = matched.map((m) => m.value);
+      result.push(...unmatched);
+      return result;
+    }
+  }
+  return void 0;
+}
+function inferOrdinalSortOrder(semanticType, values) {
+  const sequences = ORDINAL_SEQUENCES[semanticType];
+  if (sequences) {
+    return matchSequence(values, sequences);
+  }
+  if (!semanticType || semanticType === "Category" || semanticType === "Unknown") {
+    for (const seqs of Object.values(ORDINAL_SEQUENCES)) {
+      const result = matchSequence(values, seqs);
+      if (result) return result;
+    }
+  }
+  return void 0;
+}
+
+// src/core/field-semantics.ts
+function toTypeString(input) {
+  if (!input) return "";
+  if (typeof input === "string") return input;
+  return input.semanticType || "";
+}
+function normalizeAnnotation(input) {
+  if (!input) return { semanticType: "Unknown" };
+  if (typeof input === "string") return { semanticType: input || "Unknown" };
+  return { ...input, semanticType: input.semanticType || "Unknown" };
+}
+var CURRENCY_MAP = {
+  USD: "$",
+  EUR: "\u20AC",
+  GBP: "\xA3",
+  JPY: "\xA5",
+  CNY: "\xA5",
+  KRW: "\u20A9",
+  INR: "\u20B9",
+  BRL: "R$",
+  CAD: "CA$",
+  AUD: "A$",
+  CHF: "CHF",
+  SEK: "kr",
+  NOK: "kr",
+  DKK: "kr"
+};
+var UNIT_SUFFIX_MAP = {
+  // Temperature
+  "\xB0C": "\xB0C",
+  "\xB0F": "\xB0F",
+  C: "\xB0C",
+  F: "\xB0F",
+  // Mass
+  kg: " kg",
+  lb: " lb",
+  // Distance
+  km: " km",
+  mi: " mi",
+  m: " m",
+  ft: " ft",
+  // Speed
+  "km/h": " km/h",
+  mph: " mph",
+  // Time
+  sec: " s",
+  min: " min",
+  hr: " hr",
+  seconds: " s",
+  minutes: " min",
+  hours: " hr",
+  // Percentage (handled by formatClass, but allow explicit suffix)
+  "%": "%"
+};
+function detectPercentageRepresentation(values) {
+  if (values.length === 0) return "0-100";
+  const abs = values.map(Math.abs);
+  const countBelow1 = abs.filter((v) => v <= 1).length;
+  if (countBelow1 / abs.length >= 0.8) return "0-1";
+  return "0-100";
+}
+function percentRepresentation(annotation, values) {
+  if (annotation?.percentScale === "fraction") return "0-1";
+  if (annotation?.percentScale === "percent") return "0-100";
+  const domain = annotation?.intrinsicDomain;
+  if (Array.isArray(domain) && domain.length === 2 && domain.every(Number.isFinite)) {
+    const reach = Math.max(Math.abs(domain[0]), Math.abs(domain[1]));
+    if (reach > 0 && reach <= 1) return "0-1";
+    if (reach >= 100) return "0-100";
+  }
+  return detectPercentageRepresentation(values);
+}
+function detectPrecision(values) {
+  let maxDecimals = 0;
+  for (const v of values) {
+    if (!Number.isFinite(v)) continue;
+    const s = v.toFixed(10);
+    const dot = s.indexOf(".");
+    if (dot === -1) continue;
+    let end = s.length - 1;
+    while (end > dot && s[end] === "0") end--;
+    const decimals = end > dot ? end - dot : 0;
+    if (decimals > maxDecimals) maxDecimals = decimals;
+  }
+  return Math.min(maxDecimals, 4);
+}
+function precisionFormat(values, useGrouping = true, signMode = "") {
+  const p = detectPrecision(values);
+  const group = useGrouping ? "," : "";
+  if (p === 0) return `${signMode}${group}d`;
+  return `${signMode}${group}.${p}f`;
+}
+function resolveFormat(semanticType, annotation, values) {
+  const entry = getRegistryEntry(semanticType);
+  const unit = annotation.unit;
+  const currencyPrefix = unit ? CURRENCY_MAP[unit.toUpperCase()] ?? CURRENCY_MAP[unit] : void 0;
+  const unitSuffix = unit ? UNIT_SUFFIX_MAP[unit] : void 0;
+  const nums = values.filter((v) => typeof v === "number" && !isNaN(v));
+  switch (entry.formatClass) {
+    case "currency": {
+      const pfx = currencyPrefix;
+      if (pfx) {
+        const p = Math.min(detectPrecision(nums), 2);
+        const axisPattern = semanticType === "Price" ? ",.2f" : p === 0 ? ",d" : `,.${p}~f`;
+        return {
+          format: { pattern: axisPattern, prefix: pfx },
+          tooltipFormat: { pattern: ",.2f", prefix: pfx }
+        };
+      }
+      return { tooltipFormat: { pattern: ",.2f" } };
+    }
+    case "percent": {
+      const rep = percentRepresentation(annotation, nums);
+      if (!annotation.intrinsicDomain && !annotation.percentScale && rep !== "0-1") {
+        return { tooltipFormat: { pattern: precisionFormat(nums) } };
+      }
+      if (rep === "0-1") {
+        const p = detectPrecision(nums);
+        const axisP = Math.max(0, p - 2);
+        const tipP = Math.min(axisP + 1, 4);
+        return {
+          format: { pattern: `.${axisP}~%` },
+          tooltipFormat: { pattern: `.${tipP}%` }
+        };
+      }
+      return {
+        tooltipFormat: { pattern: precisionFormat(nums, false), suffix: "%" }
+      };
+    }
+    case "unit-suffix":
+      return {
+        tooltipFormat: unitSuffix ? { pattern: precisionFormat(nums), suffix: unitSuffix } : { pattern: precisionFormat(nums) }
+      };
+    case "integer":
+      if (semanticType === "Year" || semanticType === "Decade") {
+        return {};
+      }
+      return { tooltipFormat: { pattern: ",d" } };
+    case "decimal":
+      return { tooltipFormat: { pattern: precisionFormat(nums) } };
+    case "plain":
+    default:
+      return {};
+  }
+}
+function resolveDefaultVisType(semanticType, values) {
+  if (!isRegistered(semanticType)) {
+    return inferVisCategory(values);
+  }
+  const entry = getRegistryEntry(semanticType);
+  const candidates = entry.visEncodings;
+  if (candidates.length === 1) {
+    if (candidates[0] === "quantitative") {
+      const nonNull = values.filter((v) => v != null);
+      const allNumeric = nonNull.length > 0 && nonNull.every((v) => typeof v === "number" || typeof v === "string" && !isNaN(+v) && v.trim() !== "");
+      if (!allNumeric) {
+        return inferVisCategory(values);
+      }
+    }
+    return candidates[0];
+  }
+  if (candidates.includes("quantitative") && candidates.includes("ordinal")) {
+    const distinct = new Set(values.filter((v) => v != null)).size;
+    return distinct <= 12 ? "ordinal" : "quantitative";
+  }
+  if (candidates.includes("temporal") && candidates.includes("ordinal")) {
+    const distinct = new Set(values.filter((v) => v != null)).size;
+    return distinct <= 6 ? "ordinal" : "temporal";
+  }
+  if (candidates.includes("geographic") && candidates.includes("quantitative")) {
+    return "quantitative";
+  }
+  return candidates[0];
+}
+function resolveAggregationDefault(semanticType) {
+  const entry = getRegistryEntry(semanticType);
+  switch (entry.aggRole) {
+    case "additive":
+      return "sum";
+    case "signed-additive":
+      return "sum";
+    case "intensive":
+      return "average";
+    case "measure":
+      return void 0;
+    case "dimension":
+      return void 0;
+    case "identifier":
+      return void 0;
+    default:
+      return void 0;
+  }
+}
+function resolveZeroClassFromAnnotation(semanticType, domain) {
+  if (domain && domain[0] > 0) return "arbitrary";
+  return getZeroClass(semanticType);
+}
+function resolveScaleType(semanticType, values) {
+  const entry = getRegistryEntry(semanticType);
+  const eligible = entry.aggRole === "additive" && entry.domainShape === "open" && entry.t1 !== "GenericMeasure";
+  if (!eligible) return void 0;
+  if (values.length < 10) return void 0;
+  const filtered = values.filter((v) => typeof v === "number" && !isNaN(v) && isFinite(v));
+  if (filtered.length < 10) return void 0;
+  const min = Math.min(...filtered);
+  const max = Math.max(...filtered);
+  if (max <= 0 || min === max) return void 0;
+  if (min < 0) return void 0;
+  const positiveMin = Math.min(...filtered.filter((v) => v > 0));
+  if (positiveMin > 0 && max / positiveMin >= 1e6) {
+    const hasZeros = filtered.some((v) => v === 0);
+    return hasZeros ? "symlog" : "log";
+  }
+  return void 0;
+}
+function mergeIntrinsicWithData(intrinsic, values, hard) {
+  if (hard) {
+    return { min: intrinsic[0], max: intrinsic[1], clamp: true };
+  }
+  const nums = values.filter((v) => typeof v === "number" && !isNaN(v));
+  if (nums.length === 0) {
+    return { min: intrinsic[0], max: intrinsic[1], clamp: false };
+  }
+  const dataMin = Math.min(...nums);
+  const dataMax = Math.max(...nums);
+  return {
+    min: Math.min(intrinsic[0], dataMin),
+    max: Math.max(intrinsic[1], dataMax),
+    clamp: false
+  };
+}
+function snapToBoundHeuristic(intrinsic, values) {
+  const nums = values.filter((v) => typeof v === "number" && !isNaN(v));
+  if (nums.length === 0) return void 0;
+  const [lo, hi] = intrinsic;
+  const range = hi - lo;
+  if (range <= 0) return void 0;
+  const dataMin = Math.min(...nums);
+  const dataMax = Math.max(...nums);
+  const zeroInside = lo < 0 && hi > 0;
+  const thresholdLo = 0.25 * (zeroInside ? 0 - lo : range);
+  const thresholdHi = 0.25 * (zeroInside ? hi : range);
+  let snapMin;
+  let snapMax;
+  if (dataMin >= lo && dataMin <= lo + thresholdLo) {
+    snapMin = lo;
+  }
+  if (dataMax <= hi && dataMax >= hi - thresholdHi) {
+    snapMax = hi;
+  }
+  if (snapMin === void 0 && snapMax === void 0) return void 0;
+  return { min: snapMin, max: snapMax, clamp: false };
+}
+function resolveDomainConstraint(semanticType, annotation, values) {
+  const entry = getRegistryEntry(semanticType);
+  if (annotation.intrinsicDomain) {
+    if (entry.t1 === "Proportion" || entry.t1 === "SignedMeasure") {
+      return snapToBoundHeuristic(annotation.intrinsicDomain, values);
+    }
+    return mergeIntrinsicWithData(annotation.intrinsicDomain, values, false);
+  }
+  if (semanticType === "Latitude") return mergeIntrinsicWithData([-90, 90], values, true);
+  if (semanticType === "Longitude") return mergeIntrinsicWithData([-180, 180], values, true);
+  if (semanticType === "Correlation") return mergeIntrinsicWithData([-1, 1], values, true);
+  if (semanticType === "Percentage") {
+    const nums = values.filter((v) => typeof v === "number" && !isNaN(v));
+    if (nums.length > 0) {
+      const rep = percentRepresentation(annotation, nums);
+      const M = rep === "0-1" ? 1 : 100;
+      return snapToBoundHeuristic([0, M], values);
+    }
+  }
+  return void 0;
+}
+function resolveTickConstraint(semanticType, domain) {
+  const entry = getRegistryEntry(semanticType);
+  if (entry.formatClass === "integer") {
+    const tc = { integersOnly: true, minStep: 1 };
+    if (domain) {
+      const span = domain[1] - domain[0];
+      if (span <= 20 && span > 0) {
+        tc.exactTicks = [];
+        for (let i = domain[0]; i <= domain[1]; i++) {
+          tc.exactTicks.push(i);
+        }
+      }
+    }
+    return tc;
+  }
+  if (semanticType === "Score" && domain) {
+    const span = domain[1] - domain[0];
+    if (span >= 2) {
+      const tc = { integersOnly: true, minStep: 1 };
+      if (span <= 20) {
+        tc.exactTicks = [];
+        for (let i = domain[0]; i <= domain[1]; i++) {
+          tc.exactTicks.push(i);
+        }
+      }
+      return tc;
+    }
+  }
+  return void 0;
+}
+function resolveCanonicalOrder(semanticType, annotation, values) {
+  if (annotation.sortOrder && annotation.sortOrder.length > 0) {
+    return annotation.sortOrder;
+  }
+  return inferOrdinalSortOrder(semanticType, values);
+}
+function resolveCyclic(semanticType) {
+  const entry = getRegistryEntry(semanticType);
+  return entry.domainShape === "cyclic";
+}
+function resolveReversed(semanticType, channel) {
+  if (semanticType === "Rank") {
+    return channel !== "x";
+  }
+  return false;
+}
+function resolveNice(semanticType, domainConstraint) {
+  if (domainConstraint?.clamp) return false;
+  if (domainConstraint && domainConstraint.min !== void 0 && domainConstraint.max !== void 0) {
+    return false;
+  }
+  const entry = getRegistryEntry(semanticType);
+  if (entry.domainShape === "fixed") return false;
+  return true;
+}
+function resolveDivergingInfo(semanticType, annotation, values) {
+  const entry = getRegistryEntry(semanticType);
+  if (annotation.divergingMidpoint !== void 0) {
+    return { midpoint: annotation.divergingMidpoint, inherent: true, source: "annotation" };
+  }
+  if (semanticType === "Temperature" && annotation.unit) {
+    const unitMidpoints = {
+      "\xB0C": 0,
+      "\xB0F": 32,
+      "K": 273.15,
+      C: 0,
+      F: 32
+    };
+    const mid = unitMidpoints[annotation.unit];
+    if (mid !== void 0) {
+      return { midpoint: mid, inherent: false, source: "unit" };
+    }
+  }
+  if (entry.diverging === "inherent") {
+    return { midpoint: 0, inherent: true, source: "type-intrinsic" };
+  }
+  if (entry.diverging === "conditional") {
+    return { midpoint: 0, inherent: false, source: "type-intrinsic" };
+  }
+  if (annotation.intrinsicDomain) {
+    return {
+      midpoint: (annotation.intrinsicDomain[0] + annotation.intrinsicDomain[1]) / 2,
+      inherent: false,
+      source: "domain"
+    };
+  }
+  if (values.length > 0) {
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    if (min < 0 && max > 0) {
+      return { midpoint: 0, inherent: false, source: "data" };
+    }
+  }
+  return void 0;
+}
+function resolveColorSchemeHint(semanticType, annotation, values) {
+  const entry = getRegistryEntry(semanticType);
+  const nums = values.filter((v) => typeof v === "number" && !isNaN(v));
+  const divInfo = resolveDivergingInfo(semanticType, annotation, nums);
+  if (divInfo) {
+    const min = nums.length > 0 ? Math.min(...nums) : 0;
+    const max = nums.length > 0 ? Math.max(...nums) : 0;
+    const spansBothSides = min < divInfo.midpoint && max > divInfo.midpoint;
+    if (divInfo.inherent || spansBothSides) {
+      return {
+        type: "diverging",
+        divergingMidpoint: divInfo.midpoint,
+        inherentlyDiverging: divInfo.inherent
+      };
+    }
+  }
+  if (entry.visEncodings.includes("quantitative")) {
+    return { type: "sequential" };
+  }
+  return { type: "categorical" };
+}
+function resolveBinningSuggested(semanticType, domain) {
+  const entry = getRegistryEntry(semanticType);
+  if (!entry.visEncodings.includes("quantitative")) return false;
+  if (entry.aggRole === "identifier" || entry.aggRole === "dimension") return false;
+  if (semanticType === "Year" || semanticType === "Decade") return false;
+  if (domain && domain[1] - domain[0] <= 20) return false;
+  if (semanticType === "Score" && !domain) return false;
+  return true;
+}
+function resolveStackable(semanticType) {
+  const entry = getRegistryEntry(semanticType);
+  switch (entry.aggRole) {
+    case "additive":
+      return "sum";
+    case "signed-additive":
+      return "sum";
+    case "intensive":
+      if (semanticType === "Percentage") return "normalize";
+      return false;
+    case "measure":
+      return false;
+    case "dimension":
+      return false;
+    case "identifier":
+      return false;
+    default:
+      return false;
+  }
+}
+function resolveSortDirection(semanticType) {
+  if (semanticType === "Rank") return "descending";
+  return "ascending";
+}
+function resolveFieldSemantics(input, fieldName, values) {
+  const annotation = normalizeAnnotation(input);
+  const semanticType = annotation.semanticType;
+  const numericValues = values.filter((v) => typeof v === "number" && !isNaN(v) && isFinite(v));
+  const defaultVisType = resolveDefaultVisType(semanticType, values);
+  const { format: format2, tooltipFormat } = resolveFormat(semanticType, annotation, values);
+  let aggregationDefault = resolveAggregationDefault(semanticType);
+  let zeroClass = resolveZeroClassFromAnnotation(semanticType, annotation.intrinsicDomain);
+  const scaleType = resolveScaleType(semanticType, numericValues);
+  const domainConstraint = resolveDomainConstraint(semanticType, annotation, values);
+  const canonicalOrder = resolveCanonicalOrder(semanticType, annotation, values);
+  const cyclic = resolveCyclic(semanticType);
+  let binningSuggested = resolveBinningSuggested(semanticType, annotation.intrinsicDomain);
+  const sortDirection = resolveSortDirection(semanticType);
+  if (!isRegistered(semanticType) && defaultVisType === "quantitative") {
+    if (!aggregationDefault) aggregationDefault = "sum";
+    if (zeroClass === "unknown") zeroClass = "meaningful";
+    binningSuggested = true;
+  }
+  return {
+    semanticAnnotation: annotation,
+    defaultVisType,
+    format: format2,
+    tooltipFormat,
+    aggregationDefault,
+    zeroClass,
+    scaleType: scaleType ?? void 0,
+    domainConstraint,
+    canonicalOrder,
+    cyclic,
+    sortDirection,
+    binningSuggested
+  };
+}
+
+// src/core/theme/presence.ts
+var HEX3 = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i;
+var HEX6 = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i;
+var HEX8 = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i;
+function parseColor(input) {
+  if (!input) return null;
+  const s = String(input).trim();
+  let m = HEX8.exec(s);
+  if (m) {
+    return {
+      r: parseInt(m[1], 16),
+      g: parseInt(m[2], 16),
+      b: parseInt(m[3], 16),
+      a: parseInt(m[4], 16) / 255
+    };
+  }
+  m = HEX6.exec(s);
+  if (m) {
+    return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16), a: 1 };
+  }
+  m = HEX3.exec(s);
+  if (m) {
+    return {
+      r: parseInt(m[1] + m[1], 16),
+      g: parseInt(m[2] + m[2], 16),
+      b: parseInt(m[3] + m[3], 16),
+      a: 1
+    };
+  }
+  return null;
+}
+function toHex(c) {
+  const h = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+  return `#${h(c.r)}${h(c.g)}${h(c.b)}`;
+}
+function mix(a, b, t) {
+  const k = Math.max(0, Math.min(1, t));
+  return {
+    r: a.r + (b.r - a.r) * k,
+    g: a.g + (b.g - a.g) * k,
+    b: a.b + (b.b - a.b) * k,
+    a: 1
+  };
+}
+function mixHex(a, b, t, fallback = "#000000") {
+  const ca = parseColor(a);
+  const cb = parseColor(b);
+  if (!ca || !cb) return fallback;
+  return toHex(mix(ca, cb, t));
+}
+
+// src/core/color-controls.ts
+var COLOR_CONTROL_CHANNELS = ["color", "group"];
+function colorEncoding(encodings) {
+  for (const channel of COLOR_CONTROL_CHANNELS) {
+    const enc = encodings?.[channel];
+    if (enc && typeof enc === "object" && !Array.isArray(enc) && enc.field) return enc;
+  }
+  return void 0;
+}
+function withEncodingColorAnnotations(semanticTypes, encodings) {
+  const enc = colorEncoding(encodings);
+  if (!enc?.field || enc.colors === void 0 && enc.mid === void 0) return semanticTypes;
+  const base = normalizeAnnotation(semanticTypes[enc.field]);
+  const folded = {
+    ...base,
+    semanticType: base.semanticType === "Unknown" ? "" : base.semanticType,
+    ...typeof enc.mid === "number" ? { divergingMidpoint: enc.mid } : {},
+    ...enc.colors ? { colors: { ...base.colors ?? {}, ...enc.colors } } : {}
+  };
+  return { ...semanticTypes, [enc.field]: folded };
+}
+function authoredColorScale(encodings) {
+  const enc = colorEncoding(encodings);
+  if (!enc?.field) return void 0;
+  const named = typeof enc.scheme === "string" && enc.scheme !== "default" ? enc.scheme : void 0;
+  const stops = Array.isArray(enc.scheme) && enc.scheme.length >= 2 ? enc.scheme.map(String) : void 0;
+  const bins = typeof enc.bins === "number" && Number.isInteger(enc.bins) && (enc.bins === 0 || enc.bins >= 2) ? enc.bins : void 0;
+  const domain = Array.isArray(enc.domain) && enc.domain.length === 2 && enc.domain.every((v) => typeof v === "number") ? [enc.domain[0], enc.domain[1]] : void 0;
+  if (!named && !stops && enc.reverse === void 0 && !domain && bins === void 0) return void 0;
+  return {
+    field: enc.field,
+    ...named ? { scheme: named } : {},
+    ...stops ? { stops: bins ? resampleStops(stops, bins) : stops } : {},
+    ...enc.reverse !== void 0 ? { reverse: Boolean(enc.reverse) } : {},
+    ...domain ? { domain } : {},
+    ...bins !== void 0 ? { bins } : {}
+  };
+}
+function resampleStops(stops, count) {
+  if (count < 2 || stops.length < 2) return stops.slice(0, Math.max(1, count));
+  if (stops.length === count) return stops;
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const t = i / (count - 1) * (stops.length - 1);
+    const k = Math.min(stops.length - 2, Math.floor(t));
+    out.push(mixHex(stops[k], stops[k + 1], t - k, stops[k]));
+  }
+  return out;
+}
+function schemeName(scheme) {
+  return typeof scheme === "string" ? scheme : void 0;
+}
+var ROUND_STEPS = [1, 2, 2.5, 5];
+function roundBinEdges(min, max, count) {
+  if (!(count >= 2) || !Number.isFinite(min) || !Number.isFinite(max) || !(max > min)) return void 0;
+  const raw = (max - min) / count;
+  let best;
+  for (let exp = Math.floor(Math.log10(raw)) - 1; exp <= Math.floor(Math.log10(raw)) + 1; exp++) {
+    for (const unit of ROUND_STEPS) {
+      const step = unit * 10 ** exp;
+      const first = Math.round(((min + max) / 2 - step * (count - 2) / 2) / step) * step;
+      const edges = Array.from({ length: count - 1 }, (_, i) => Number((first + i * step).toPrecision(12)));
+      if (edges[0] <= min || edges[edges.length - 1] >= max) continue;
+      const cost = Math.abs(edges[0] - min - step) / step + Math.abs(max - edges[edges.length - 1] - step) / step;
+      if (!best || cost < best.cost) best = { edges, cost };
+    }
+  }
+  return best?.edges;
+}
+var SIMPLEST_STEPS = [1, 5, 2, 2.5];
+var MAX_CLASSES_PER_SIDE = 4;
+function roundColorClasses(values, target, pivot, options = {}) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const value of values) {
+    if (!Number.isFinite(value)) continue;
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+  if (!(target >= 2) || !(max > min)) return void 0;
+  const crosses = pivot !== void 0 && Number.isFinite(pivot) && min < pivot && max > pivot;
+  const anchor = crosses ? pivot : 0;
+  const band = crosses ? options.neutral : void 0;
+  const span = max - min;
+  const most = Math.max(3, target + 2);
+  const round = (value) => Number(value.toPrecision(12));
+  let best;
+  for (let exp = Math.floor(Math.log10(span / (most + 1))) - 1; exp <= Math.ceil(Math.log10(span)); exp++) {
+    for (const unit of ROUND_STEPS) {
+      const step = unit * 10 ** exp;
+      if (band === "auto" && unit === 2.5) continue;
+      const half = band === void 0 ? 0 : band === "auto" ? step / 2 : band;
+      if (!(half >= 0)) continue;
+      const reach = (extent) => Math.max(0, Math.ceil((extent - half) / step - 1e-9));
+      const up = crosses ? reach(max - anchor) : 0;
+      const down = crosses ? reach(anchor - min) : 0;
+      const lo = crosses ? round(anchor - half - down * step) : round(Math.floor(min / step + 1e-9) * step);
+      const hi = crosses ? round(anchor + half + up * step) : round(Math.ceil(max / step - 1e-9) * step);
+      const breaks = crosses ? [
+        ...Array.from({ length: down }, (_, i) => round(anchor - half - (down - 1 - i) * step)),
+        ...Array.from({ length: up }, (_, i) => round(anchor + half + i * step))
+      ].filter((edge, i, all) => i === 0 || edge !== all[i - 1]) : Array.from({ length: Math.round((hi - lo) / step) - 1 }, (_, i) => round(lo + (i + 1) * step));
+      const count = breaks.length + 1;
+      if (count < 3 || count > most) continue;
+      if (options.exact && count !== target) continue;
+      const simplicity = 1 - SIMPLEST_STEPS.indexOf(unit) / (SIMPLEST_STEPS.length - 1);
+      const coverage = 1 - 0.5 * ((max - hi) ** 2 + (min - lo) ** 2) / (0.1 * span) ** 2;
+      const density = 2 - Math.max(count / target, target / count);
+      const score = 0.25 * simplicity + 0.2 * coverage + 0.5 * density;
+      const capped = Math.max(down, up) > MAX_CLASSES_PER_SIDE;
+      if (best && (capped && !best.capped || capped === best.capped && score <= best.score)) continue;
+      best = {
+        score,
+        capped,
+        classes: {
+          breaks,
+          lo,
+          hi,
+          ...crosses ? { below: down, above: up, ...half > 0 ? { neutral: true } : {} } : {}
+        }
+      };
+    }
+  }
+  if (best || !options.exact) return best?.classes;
+  const edges = roundBinEdges(min - anchor, max - anchor, target)?.map((edge) => round(edge + anchor));
+  if (!edges) return void 0;
+  const at = crosses ? edges.findIndex((edge) => Math.abs(edge - anchor) < 1e-9 * span) : -1;
+  return { breaks: edges, ...at >= 0 ? { below: at + 1, above: target - at - 1 } : {} };
+}
+function rampAt(stops, t) {
+  if (stops.length < 2) return stops[0];
+  const x = Math.min(1, Math.max(0, t)) * (stops.length - 1);
+  const k = Math.min(stops.length - 2, Math.floor(x));
+  return mixHex(stops[k], stops[k + 1], x - k, stops[k]);
+}
+function classColors(stops, classes) {
+  const { below, above } = classes;
+  if (below === void 0 || above === void 0) return resampleStops(stops, classes.breaks.length + 1);
+  const side = Math.max(1, below, above);
+  return [
+    ...Array.from({ length: below }, (_, i) => rampAt(stops, 0.5 - 0.5 * (below - i) / side)),
+    ...classes.neutral ? [rampAt(stops, 0.5)] : [],
+    ...Array.from({ length: above }, (_, i) => rampAt(stops, 0.5 + 0.5 * (i + 1) / side))
+  ];
+}
+
+// ../../node_modules/d3-format/src/formatDecimal.js
+function formatDecimal_default(x) {
+  return Math.abs(x = Math.round(x)) >= 1e21 ? x.toLocaleString("en").replace(/,/g, "") : x.toString(10);
+}
+function formatDecimalParts(x, p) {
+  if (!isFinite(x) || x === 0) return null;
+  var i = (x = p ? x.toExponential(p - 1) : x.toExponential()).indexOf("e"), coefficient = x.slice(0, i);
+  return [
+    coefficient.length > 1 ? coefficient[0] + coefficient.slice(2) : coefficient,
+    +x.slice(i + 1)
+  ];
+}
+
+// ../../node_modules/d3-format/src/exponent.js
+function exponent_default(x) {
+  return x = formatDecimalParts(Math.abs(x)), x ? x[1] : NaN;
+}
+
+// ../../node_modules/d3-format/src/formatGroup.js
+function formatGroup_default(grouping, thousands) {
+  return function(value, width) {
+    var i = value.length, t = [], j = 0, g = grouping[0], length = 0;
+    while (i > 0 && g > 0) {
+      if (length + g + 1 > width) g = Math.max(1, width - length);
+      t.push(value.substring(i -= g, i + g));
+      if ((length += g + 1) > width) break;
+      g = grouping[j = (j + 1) % grouping.length];
+    }
+    return t.reverse().join(thousands);
+  };
+}
+
+// ../../node_modules/d3-format/src/formatNumerals.js
+function formatNumerals_default(numerals) {
+  return function(value) {
+    return value.replace(/[0-9]/g, function(i) {
+      return numerals[+i];
+    });
+  };
+}
+
+// ../../node_modules/d3-format/src/formatSpecifier.js
+var re2 = /^(?:(.)?([<>=^]))?([+\-( ])?([$#])?(0)?(\d+)?(,)?(\.\d+)?(~)?([a-z%])?$/i;
+function formatSpecifier(specifier) {
+  if (!(match = re2.exec(specifier))) throw new Error("invalid format: " + specifier);
+  var match;
+  return new FormatSpecifier({
+    fill: match[1],
+    align: match[2],
+    sign: match[3],
+    symbol: match[4],
+    zero: match[5],
+    width: match[6],
+    comma: match[7],
+    precision: match[8] && match[8].slice(1),
+    trim: match[9],
+    type: match[10]
+  });
+}
+formatSpecifier.prototype = FormatSpecifier.prototype;
+function FormatSpecifier(specifier) {
+  this.fill = specifier.fill === void 0 ? " " : specifier.fill + "";
+  this.align = specifier.align === void 0 ? ">" : specifier.align + "";
+  this.sign = specifier.sign === void 0 ? "-" : specifier.sign + "";
+  this.symbol = specifier.symbol === void 0 ? "" : specifier.symbol + "";
+  this.zero = !!specifier.zero;
+  this.width = specifier.width === void 0 ? void 0 : +specifier.width;
+  this.comma = !!specifier.comma;
+  this.precision = specifier.precision === void 0 ? void 0 : +specifier.precision;
+  this.trim = !!specifier.trim;
+  this.type = specifier.type === void 0 ? "" : specifier.type + "";
+}
+FormatSpecifier.prototype.toString = function() {
+  return this.fill + this.align + this.sign + this.symbol + (this.zero ? "0" : "") + (this.width === void 0 ? "" : Math.max(1, this.width | 0)) + (this.comma ? "," : "") + (this.precision === void 0 ? "" : "." + Math.max(0, this.precision | 0)) + (this.trim ? "~" : "") + this.type;
+};
+
+// ../../node_modules/d3-format/src/formatTrim.js
+function formatTrim_default(s) {
+  out: for (var n = s.length, i = 1, i0 = -1, i1; i < n; ++i) {
+    switch (s[i]) {
+      case ".":
+        i0 = i1 = i;
+        break;
+      case "0":
+        if (i0 === 0) i0 = i;
+        i1 = i;
+        break;
+      default:
+        if (!+s[i]) break out;
+        if (i0 > 0) i0 = 0;
+        break;
+    }
+  }
+  return i0 > 0 ? s.slice(0, i0) + s.slice(i1 + 1) : s;
+}
+
+// ../../node_modules/d3-format/src/formatPrefixAuto.js
+var prefixExponent;
+function formatPrefixAuto_default(x, p) {
+  var d = formatDecimalParts(x, p);
+  if (!d) return prefixExponent = void 0, x.toPrecision(p);
+  var coefficient = d[0], exponent = d[1], i = exponent - (prefixExponent = Math.max(-8, Math.min(8, Math.floor(exponent / 3))) * 3) + 1, n = coefficient.length;
+  return i === n ? coefficient : i > n ? coefficient + new Array(i - n + 1).join("0") : i > 0 ? coefficient.slice(0, i) + "." + coefficient.slice(i) : "0." + new Array(1 - i).join("0") + formatDecimalParts(x, Math.max(0, p + i - 1))[0];
+}
+
+// ../../node_modules/d3-format/src/formatRounded.js
+function formatRounded_default(x, p) {
+  var d = formatDecimalParts(x, p);
+  if (!d) return x + "";
+  var coefficient = d[0], exponent = d[1];
+  return exponent < 0 ? "0." + new Array(-exponent).join("0") + coefficient : coefficient.length > exponent + 1 ? coefficient.slice(0, exponent + 1) + "." + coefficient.slice(exponent + 1) : coefficient + new Array(exponent - coefficient.length + 2).join("0");
+}
+
+// ../../node_modules/d3-format/src/formatTypes.js
+var formatTypes_default = {
+  "%": (x, p) => (x * 100).toFixed(p),
+  "b": (x) => Math.round(x).toString(2),
+  "c": (x) => x + "",
+  "d": formatDecimal_default,
+  "e": (x, p) => x.toExponential(p),
+  "f": (x, p) => x.toFixed(p),
+  "g": (x, p) => x.toPrecision(p),
+  "o": (x) => Math.round(x).toString(8),
+  "p": (x, p) => formatRounded_default(x * 100, p),
+  "r": formatRounded_default,
+  "s": formatPrefixAuto_default,
+  "X": (x) => Math.round(x).toString(16).toUpperCase(),
+  "x": (x) => Math.round(x).toString(16)
+};
+
+// ../../node_modules/d3-format/src/identity.js
+function identity_default(x) {
+  return x;
+}
+
+// ../../node_modules/d3-format/src/locale.js
+var map = Array.prototype.map;
+var prefixes = ["y", "z", "a", "f", "p", "n", "\xB5", "m", "", "k", "M", "G", "T", "P", "E", "Z", "Y"];
+function locale_default(locale2) {
+  var group = locale2.grouping === void 0 || locale2.thousands === void 0 ? identity_default : formatGroup_default(map.call(locale2.grouping, Number), locale2.thousands + ""), currencyPrefix = locale2.currency === void 0 ? "" : locale2.currency[0] + "", currencySuffix = locale2.currency === void 0 ? "" : locale2.currency[1] + "", decimal = locale2.decimal === void 0 ? "." : locale2.decimal + "", numerals = locale2.numerals === void 0 ? identity_default : formatNumerals_default(map.call(locale2.numerals, String)), percent = locale2.percent === void 0 ? "%" : locale2.percent + "", minus = locale2.minus === void 0 ? "\u2212" : locale2.minus + "", nan = locale2.nan === void 0 ? "NaN" : locale2.nan + "";
+  function newFormat(specifier, options) {
+    specifier = formatSpecifier(specifier);
+    var fill = specifier.fill, align = specifier.align, sign = specifier.sign, symbol = specifier.symbol, zero = specifier.zero, width = specifier.width, comma = specifier.comma, precision = specifier.precision, trim = specifier.trim, type = specifier.type;
+    if (type === "n") comma = true, type = "g";
+    else if (!formatTypes_default[type]) precision === void 0 && (precision = 12), trim = true, type = "g";
+    if (zero || fill === "0" && align === "=") zero = true, fill = "0", align = "=";
+    var prefix = (options && options.prefix !== void 0 ? options.prefix : "") + (symbol === "$" ? currencyPrefix : symbol === "#" && /[boxX]/.test(type) ? "0" + type.toLowerCase() : ""), suffix = (symbol === "$" ? currencySuffix : /[%p]/.test(type) ? percent : "") + (options && options.suffix !== void 0 ? options.suffix : "");
+    var formatType = formatTypes_default[type], maybeSuffix = /[defgprs%]/.test(type);
+    precision = precision === void 0 ? 6 : /[gprs]/.test(type) ? Math.max(1, Math.min(21, precision)) : Math.max(0, Math.min(20, precision));
+    function format2(value) {
+      var valuePrefix = prefix, valueSuffix = suffix, i, n, c;
+      if (type === "c") {
+        valueSuffix = formatType(value) + valueSuffix;
+        value = "";
+      } else {
+        value = +value;
+        var valueNegative = value < 0 || 1 / value < 0;
+        value = isNaN(value) ? nan : formatType(Math.abs(value), precision);
+        if (trim) value = formatTrim_default(value);
+        if (valueNegative && +value === 0 && sign !== "+") valueNegative = false;
+        valuePrefix = (valueNegative ? sign === "(" ? sign : minus : sign === "-" || sign === "(" ? "" : sign) + valuePrefix;
+        valueSuffix = (type === "s" && !isNaN(value) && prefixExponent !== void 0 ? prefixes[8 + prefixExponent / 3] : "") + valueSuffix + (valueNegative && sign === "(" ? ")" : "");
+        if (maybeSuffix) {
+          i = -1, n = value.length;
+          while (++i < n) {
+            if (c = value.charCodeAt(i), 48 > c || c > 57) {
+              valueSuffix = (c === 46 ? decimal + value.slice(i + 1) : value.slice(i)) + valueSuffix;
+              value = value.slice(0, i);
+              break;
+            }
+          }
+        }
+      }
+      if (comma && !zero) value = group(value, Infinity);
+      var length = valuePrefix.length + value.length + valueSuffix.length, padding = length < width ? new Array(width - length + 1).join(fill) : "";
+      if (comma && zero) value = group(padding + value, padding.length ? width - valueSuffix.length : Infinity), padding = "";
+      switch (align) {
+        case "<":
+          value = valuePrefix + value + valueSuffix + padding;
+          break;
+        case "=":
+          value = valuePrefix + padding + value + valueSuffix;
+          break;
+        case "^":
+          value = padding.slice(0, length = padding.length >> 1) + valuePrefix + value + valueSuffix + padding.slice(length);
+          break;
+        default:
+          value = padding + valuePrefix + value + valueSuffix;
+          break;
+      }
+      return numerals(value);
+    }
+    format2.toString = function() {
+      return specifier + "";
+    };
+    return format2;
+  }
+  function formatPrefix2(specifier, value) {
+    var e = Math.max(-8, Math.min(8, Math.floor(exponent_default(value) / 3))) * 3, k = Math.pow(10, -e), f = newFormat((specifier = formatSpecifier(specifier), specifier.type = "f", specifier), { suffix: prefixes[8 + e / 3] });
+    return function(value2) {
+      return f(k * value2);
+    };
+  }
+  return {
+    format: newFormat,
+    formatPrefix: formatPrefix2
+  };
+}
+
+// ../../node_modules/d3-format/src/defaultLocale.js
+var locale;
+var format;
+defaultLocale({
+  thousands: ",",
+  grouping: [3],
+  currency: ["$", ""]
+});
+function defaultLocale(definition) {
+  locale = locale_default(definition);
+  format = locale.format;
+  locale.formatPrefix;
+  return locale;
+}
+var clean = (value) => Number(Math.abs(value).toPrecision(12));
+function decimalsOf(value) {
+  if (!Number.isFinite(value)) return 0;
+  const match = /^\d+(?:\.(\d+))?(?:e([+-]\d+))?$/.exec(String(clean(value)));
+  if (!match) return 0;
+  return Math.max(0, (match[1]?.length ?? 0) - Number(match[2] ?? 0));
+}
+function exactPattern(values, pattern) {
+  const finite = values.filter(Number.isFinite);
+  const decimals = (scale = 1) => Math.max(0, ...finite.map((value) => decimalsOf(value * scale)));
+  return `,.${decimals()}~f`;
+}
+function exactFormat(values, fmt2) {
+  return { ...fmt2, pattern: exactPattern(values) };
+}
+function printFormatted(value, fmt2) {
+  const prefix = fmt2?.prefix ?? "";
+  const suffix = fmt2?.suffix ?? "";
+  if (fmt2?.abbreviate) {
+    const abs = Math.abs(value);
+    const [divisor, unit] = abs >= 1e12 ? [1e12, "T"] : abs >= 1e9 ? [1e9, "B"] : abs >= 1e6 ? [1e6, "M"] : abs >= 1e3 ? [1e3, "K"] : [1, ""];
+    return `${prefix}${unit ? format("~g")(value / divisor) + unit : format(",")(value)}${suffix}`;
+  }
+  let shown;
+  try {
+    shown = fmt2?.pattern ? format(fmt2.pattern)(value) : String(value);
+  } catch {
+    shown = String(value);
+  }
+  return `${prefix}${shown}${suffix}`;
+}
+
+// src/core/decisions.ts
+var BANDED_CHART_TYPES = /* @__PURE__ */ new Set([
+  "Bar Chart",
+  "Stacked Bar Chart",
+  "Grouped Bar Chart",
+  "Lollipop Chart",
+  "Bar Table",
+  "Waterfall Chart",
+  "Pyramid Chart",
+  "Heatmap",
+  "Boxplot",
+  "Violin Plot",
+  "Strip Plot",
+  "Ranged Dot Plot"
+]);
+var SNAPSHOT_MAX_DATES = 8;
+var SNAPSHOT_MAX_COVERAGE = 0.5;
+var SNAPSHOT_MAX_BANDS = 50;
+var DAY_MS = 864e5;
+function snapshotTime(value) {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.getTime() : void 0;
+  if (typeof value === "number") {
+    if (Number.isInteger(value) && value >= 1e3 && value <= 2999) return Date.UTC(value, 0, 1);
+    return Number.isFinite(value) ? value : void 0;
+  }
+  if (typeof value !== "string") return void 0;
+  const text = value.trim();
+  if (/^\d{4}$/.test(text)) return Date.UTC(Number(text), 0, 1);
+  const time = Date.parse(text);
+  return Number.isFinite(time) ? time : void 0;
+}
+var gcd = (a, b) => b === 0 ? a : gcd(b, a % b);
+function isDateField(semanticType, values) {
+  if (semanticType && isRegistered(semanticType)) {
+    const entry = getRegistryEntry(semanticType);
+    return entry.t0 === "Temporal" && entry.t1 !== "Duration" && entry.domainShape !== "cyclic";
+  }
+  return inferVisCategory([...values]) === "temporal";
+}
+function chronologicalOrder(values) {
+  const seen = /* @__PURE__ */ new Map();
+  for (const value of values) {
+    if (value == null || value === "") continue;
+    const key = value instanceof Date ? value.toISOString() : String(value);
+    if (seen.has(key)) continue;
+    const time = snapshotTime(value);
+    if (time === void 0) return void 0;
+    seen.set(key, time);
+  }
+  if (seen.size < 2) return void 0;
+  return [...seen.entries()].sort((a, b) => a[1] - b[1]).map(([key]) => key);
+}
+var MONTH_DAYS = 365.2425 / 12;
+var MONTH_SLACK_DAYS = 4;
+var CADENCE_SLACK = 0.25;
+function dateCadence(times) {
+  if (times.length < 2) return void 0;
+  const count = times.length;
+  const span = times[count - 1] - times[0];
+  const gaps = times.slice(1).map((time, i) => time - times[i]);
+  const month = times.map((time) => {
+    const d = new Date(time);
+    return d.getUTCFullYear() * 12 + d.getUTCMonth();
+  });
+  const monthGaps = month.slice(1).map((value, i) => value - month[i]);
+  if (monthGaps.every((g, i) => g > 0 && Math.abs(gaps[i] / DAY_MS - g * MONTH_DAYS) <= MONTH_SLACK_DAYS)) {
+    const step = monthGaps.reduce((g, value) => gcd(g, value), 0);
+    return { months: step, exact: true, count, periods: (month[count - 1] - month[0]) / step + 1 };
+  }
+  const least = Math.min(...gaps);
+  const common = gaps.reduce((g, value) => gcd(g, value), 0);
+  if (!(least > 0) || !(common > 0)) return void 0;
+  if (common === least) return { ms: least, exact: true, count, periods: Math.round(span / least) + 1 };
+  const usual = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
+  const keeps = gaps.every((g) => Math.abs(g - Math.max(1, Math.round(g / usual)) * usual) <= CADENCE_SLACK * usual);
+  if (keeps) return { ms: usual, exact: false, count, periods: Math.round(span / usual) + 1 };
+  const midnight = times.every((time) => time % DAY_MS === 0);
+  return midnight ? { ms: common, exact: true, count, periods: span / common + 1 } : void 0;
+}
+function calendarCoverage(times) {
+  const cadence = dateCadence(times);
+  if (!cadence) return void 0;
+  return {
+    count: cadence.count,
+    periods: cadence.periods,
+    monthly: cadence.months !== void 0,
+    step: cadence.months ?? Math.round(cadence.ms / DAY_MS)
+  };
+}
+var distinctTimes = (values) => [...new Set(values.map(snapshotTime).filter((time) => time !== void 0))].sort((a, b) => a - b);
+function readsAsSnapshots(values) {
+  const times = distinctTimes(values);
+  if (times.length < 2) return false;
+  if (times.length <= SNAPSHOT_MAX_DATES) return true;
+  if (times.length > SNAPSHOT_MAX_BANDS) return false;
+  const coverage = calendarCoverage(times);
+  return !!coverage && coverage.count / coverage.periods < SNAPSHOT_MAX_COVERAGE;
+}
+function visCategoryToVLType(vc) {
+  switch (vc) {
+    case "quantitative":
+      return "quantitative";
+    case "ordinal":
+      return "ordinal";
+    case "temporal":
+      return "temporal";
+    case "geographic":
+      return "quantitative";
+    case "nominal":
+    default:
+      return "nominal";
+  }
+}
+function validateTemporalParsing(data, fieldName, fromRegistry) {
+  const sampleValues = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const row of data) {
+    const value = row[fieldName];
+    if (value == null) continue;
+    const key = value instanceof Date ? `date:${value.getTime()}` : `${typeof value}:${String(value)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    sampleValues.push(value);
+    if (sampleValues.length >= 15) break;
+  }
+  if (sampleValues.length === 0) return false;
+  if (sampleValues.length <= 1) return false;
+  const looksTemporalValue = (val) => {
+    if (val instanceof Date) return true;
+    if (typeof val === "number") {
+      if (val >= 1500 && val <= 2200 && val % 1 === 0) return true;
+      if (val > 864e5 && val < 42e11) return true;
+      return false;
+    }
+    if (typeof val === "string") {
+      const trimmed = val.trim();
+      if (!trimmed) return false;
+      if (/^\d{4}$/.test(trimmed)) return true;
+      return !Number.isNaN(Date.parse(trimmed));
+    }
+    return false;
+  };
+  const passingCount = sampleValues.filter(looksTemporalValue).length;
+  const minFraction = fromRegistry ? 0.3 : 0.5;
+  return passingCount / sampleValues.length >= minFraction;
+}
+function resolveTemporalEncoding(visCategory, channel, data, fieldName, fromRegistry, context = {}, fieldValues = data.map((r) => r[fieldName])) {
+  if (["size", "column", "row"].includes(channel)) {
+    return { vlType: "ordinal", visCategory, channelOverride: true, cardinalityGuard: false };
+  }
+  if (channel === "color" || channel === "group") {
+    const uniqueCount = new Set(data.map((r) => r[fieldName])).size;
+    if (uniqueCount <= 12) {
+      return { vlType: "ordinal", visCategory, channelOverride: true, cardinalityGuard: false };
+    }
+  }
+  if (!validateTemporalParsing(data, fieldName, fromRegistry)) {
+    return { vlType: "ordinal", visCategory, channelOverride: false, cardinalityGuard: false };
+  }
+  if ((channel === "x" || channel === "y") && context.chartType && BANDED_CHART_TYPES.has(context.chartType) && readsAsSnapshots(fieldValues)) {
+    return { vlType: "ordinal", visCategory, channelOverride: true, cardinalityGuard: true, snapshots: true };
+  }
+  return { vlType: "temporal", visCategory, channelOverride: false, cardinalityGuard: false };
+}
+function applyOrdinalGuards(visCategory, channel, data, fieldName, fieldValues, fromRegistry) {
+  const numericVals = fieldValues.filter((v) => v != null && !isNaN(+v)).map(Number);
+  if (numericVals.length > 0) {
+    const uniqueCount = new Set(numericVals).size;
+    const hasFractions = numericVals.some((v) => v % 1 !== 0);
+    if (!fromRegistry && hasFractions && uniqueCount > 20) {
+      return { vlType: "quantitative", visCategory, channelOverride: false, cardinalityGuard: true };
+    }
+    if (!hasFractions && uniqueCount > 12 && ["color", "group"].includes(channel)) {
+      return { vlType: "quantitative", visCategory, channelOverride: true, cardinalityGuard: true };
+    }
+    if (!hasFractions && uniqueCount > 12 && ["x", "y"].includes(channel)) {
+      return { vlType: "quantitative", visCategory, channelOverride: true, cardinalityGuard: true };
+    }
+  }
+  return { vlType: "ordinal", visCategory, channelOverride: false, cardinalityGuard: false };
+}
+function disambiguateMultiEncoding(candidates, channel, data, fieldName, fieldValues, context = {}) {
+  const has = (vc) => candidates.includes(vc);
+  if (has("temporal") && has("ordinal")) {
+    return resolveTemporalEncoding("temporal", channel, data, fieldName, true, context, fieldValues);
+  }
+  if (has("quantitative") && has("ordinal")) {
+    if (["color", "group"].includes(channel)) {
+      const uniqueCount = new Set(data.map((r) => r[fieldName])).size;
+      if (uniqueCount <= 12) {
+        return { vlType: "ordinal", visCategory: "ordinal", channelOverride: false, cardinalityGuard: false };
+      }
+      return { vlType: "quantitative", visCategory: "quantitative", channelOverride: false, cardinalityGuard: true };
+    }
+    if (["column", "row"].includes(channel)) {
+      return { vlType: "ordinal", visCategory: "ordinal", channelOverride: false, cardinalityGuard: false };
+    }
+    return { vlType: "quantitative", visCategory: "quantitative", channelOverride: false, cardinalityGuard: false };
+  }
+  if (has("quantitative") && has("geographic")) {
+    return { vlType: "quantitative", visCategory: "quantitative", channelOverride: false, cardinalityGuard: false };
+  }
+  if (has("ordinal") && has("nominal")) {
+    if (["color", "group"].includes(channel)) {
+      return { vlType: "nominal", visCategory: "nominal", channelOverride: false, cardinalityGuard: false };
+    }
+    return { vlType: "ordinal", visCategory: "ordinal", channelOverride: false, cardinalityGuard: false };
+  }
+  const fallback = candidates[0];
+  return { vlType: visCategoryToVLType(fallback), visCategory: fallback, channelOverride: false, cardinalityGuard: false };
+}
+function resolveEncodingType(semanticType, fieldValues, channel, data, fieldName, context = {}) {
+  if (semanticType && isRegistered(semanticType)) {
+    const entry = getRegistryEntry(semanticType);
+    const candidates = entry.visEncodings;
+    if (candidates.length > 1) {
+      return disambiguateMultiEncoding(candidates, channel, data, fieldName, fieldValues, context);
+    }
+    const baseType = candidates[0];
+    if (baseType === "quantitative") {
+      const nonNull = fieldValues.filter((v) => v != null);
+      const allNumeric = nonNull.length > 0 && nonNull.every((v) => typeof v === "number" || typeof v === "string" && !isNaN(+v) && v.trim() !== "");
+      if (!allNumeric) {
+        const inferred = inferVisCategory(fieldValues);
+        return {
+          vlType: visCategoryToVLType(inferred),
+          visCategory: inferred,
+          channelOverride: false,
+          cardinalityGuard: false
+        };
+      }
+    }
+    if (baseType === "temporal") {
+      return resolveTemporalEncoding(baseType, channel, data, fieldName, true, context, fieldValues);
+    }
+    if (baseType === "ordinal") {
+      return applyOrdinalGuards(baseType, channel, data, fieldName, fieldValues, true);
+    }
+    return {
+      vlType: visCategoryToVLType(baseType),
+      visCategory: baseType,
+      channelOverride: false,
+      cardinalityGuard: false
+    };
+  }
+  const visCategory = inferVisCategory(fieldValues);
+  const channelOverride = false;
+  const cardinalityGuard = false;
+  switch (visCategory) {
+    case "temporal":
+      return resolveTemporalEncoding(visCategory, channel, data, fieldName, false, context, fieldValues);
+    case "ordinal":
+      return applyOrdinalGuards(visCategory, channel, data, fieldName, fieldValues, false);
+    case "quantitative":
+      return { vlType: "quantitative", visCategory, channelOverride, cardinalityGuard };
+    case "geographic":
+      return { vlType: "quantitative", visCategory, channelOverride, cardinalityGuard };
+    case "nominal":
+    default:
+      return { vlType: "nominal", visCategory, channelOverride, cardinalityGuard };
+  }
+}
+var DEFAULT_GAS_PRESSURE_PARAMS = {
+  markCrossSection: 30,
+  elasticity: 0.3,
+  maxStretch: 1.5
+};
+function computeGasPressure(xValues, yValues, xDomain, yDomain, canvasWidth, canvasHeight, params = DEFAULT_GAS_PRESSURE_PARAMS) {
+  const N = xValues.length;
+  if (N <= 1 || canvasWidth <= 0 || canvasHeight <= 0) {
+    return { stretchX: 1, stretchY: 1, rawStretchX: 1, rawStretchY: 1 };
+  }
+  const sigma1dDefault = Math.sqrt(params.markCrossSection);
+  const computeAxisStretch = (values, domain, baseDim, sigma1d) => {
+    if (baseDim <= 0 || values.length <= 1) return [1, 1];
+    const range = domain[1] - domain[0];
+    if (range <= 0) return [1, 1];
+    const pxPerUnit = baseDim / range;
+    const seen = /* @__PURE__ */ new Set();
+    for (const v of values) {
+      seen.add(Math.round((v - domain[0]) * pxPerUnit));
+    }
+    const uniquePositions = seen.size;
+    const pressure = uniquePositions * sigma1d / baseDim;
+    if (pressure <= 1) return [1, 1];
+    const raw = Math.pow(pressure, params.elasticity);
+    return [Math.min(params.maxStretch, raw), raw];
+  };
+  const sigma1dX = params.markCrossSectionX != null ? Math.sqrt(params.markCrossSectionX) : sigma1dDefault;
+  const sigma1dY = params.markCrossSectionY != null ? Math.sqrt(params.markCrossSectionY) : sigma1dDefault;
+  const computeStretchForAxis = (values, domain, baseDim, sigma1d, sigmaRaw, itemCountOverride) => {
+    if (itemCountOverride != null && sigmaRaw > 0) {
+      const pressure = itemCountOverride * sigmaRaw / baseDim;
+      if (pressure <= 1) return [1, 1];
+      const raw = Math.pow(pressure, params.elasticity);
+      return [Math.min(params.maxStretch, raw), raw];
+    }
+    return sigma1d > 0 ? computeAxisStretch(values, domain, baseDim, sigma1d) : [1, 1];
+  };
+  const sigmaRawX = params.markCrossSectionX ?? params.markCrossSection;
+  const sigmaRawY = params.markCrossSectionY ?? params.markCrossSection;
+  const [stretchX, rawStretchX] = computeStretchForAxis(xValues, xDomain, canvasWidth, sigma1dX, sigmaRawX, params.xItemCountOverride);
+  const [stretchY, rawStretchY] = computeStretchForAxis(yValues, yDomain, canvasHeight, sigma1dY, sigmaRawY, params.yItemCountOverride);
+  return { stretchX, stretchY, rawStretchX, rawStretchY };
+}
+function computeElasticBudget(itemCount, baseDimension, params) {
+  if (itemCount <= 0) {
+    return { budget: baseDimension, stretchFactor: 1 };
+  }
+  const pressure = itemCount * params.defaultStepSize / baseDimension;
+  if (pressure <= 1) {
+    return { budget: baseDimension, stretchFactor: 1 };
+  }
+  const stretchFactor = Math.min(params.maxStretch, Math.pow(pressure, params.elasticity));
+  return {
+    budget: baseDimension * stretchFactor,
+    stretchFactor
+  };
+}
+function computeAxisStep(nominalCount, continuousCount, baseDimension, params) {
+  const itemCount = nominalCount > 0 ? nominalCount : continuousCount;
+  if (itemCount > 0) {
+    const fit = Math.max(0, Math.min(1, params.bandStepFit ?? 0));
+    const baseSpanStep = baseDimension / itemCount;
+    const capacityStep = baseDimension * (params.bandStepFitCapacity ?? 1) / itemCount;
+    const fitted = fit > 0 && baseSpanStep > params.defaultStepSize && (params.bandStepFitCapacity ?? 1) > 1;
+    const preferredStep = baseSpanStep > params.defaultStepSize ? params.defaultStepSize * (1 - fit) + capacityStep * fit : params.defaultStepSize;
+    if (preferredStep <= baseSpanStep) {
+      return { step: Math.floor(preferredStep), budget: baseDimension, itemCount, fitted };
+    }
+    const { budget } = computeElasticBudget(itemCount, baseDimension, {
+      ...params,
+      defaultStepSize: preferredStep
+    });
+    return {
+      step: Math.floor(Math.min(preferredStep, budget / itemCount)),
+      budget,
+      itemCount,
+      fitted
+    };
+  }
+  return { step: params.defaultStepSize, budget: baseDimension, itemCount: 0, fitted: false };
+}
+function fitTwoLineLabels(labels, fontSize, maxWidth, ellipsis = false, widthOf = (text) => text.length * fontSize * 0.62) {
+  const lines = [];
+  let width = 0;
+  for (const label of labels) {
+    if (widthOf(label) <= maxWidth) {
+      lines.push([label]);
+      width = Math.max(width, widthOf(label));
+      continue;
+    }
+    let best;
+    let bestWidth = Infinity;
+    for (const match of label.matchAll(/\s+/g)) {
+      const candidate = [label.slice(0, match.index), label.slice(match.index + match[0].length)];
+      if (candidate.some((line) => !line)) continue;
+      const candidateWidth = Math.max(...candidate.map(widthOf));
+      const avoidsWidow = /\s/.test(candidate[1].trim());
+      const bestAvoidsWidow = best && /\s/.test(best[1].trim());
+      if (candidateWidth <= maxWidth ? bestWidth > maxWidth || avoidsWidow || !bestAvoidsWidow : bestWidth > maxWidth && candidateWidth < bestWidth) {
+        best = candidate;
+        bestWidth = candidateWidth;
+      }
+    }
+    if (!best || bestWidth > maxWidth) {
+      if (!ellipsis) return null;
+      let split;
+      for (const match of label.matchAll(/\s+/g)) {
+        if (widthOf(label.slice(0, match.index)) <= maxWidth) split = match;
+      }
+      if (split) {
+        lines.push([label.slice(0, split.index), label.slice(split.index + split[0].length)]);
+      } else {
+        lines.push(best ?? [label]);
+      }
+      width = Math.max(width, maxWidth);
+      continue;
+    }
+    lines.push(best);
+    width = Math.max(width, bestWidth);
+  }
+  return lines.some((label) => label.length > 1) ? { lines, width } : null;
+}
+function computeBandLabelLayout(input) {
+  const { labels, axis, fontSize, step, baseSpan, maxSpan, gutterLimit, baselineLimit, elasticity, measure: measure2 } = input;
+  if (!labels.length || baseSpan <= 0 || maxSpan <= 0) return null;
+  const widthOf = measure2 ?? ((text) => text.length * fontSize * 0.62);
+  const lineHeight2 = Math.ceil(fontSize * 1.2);
+  const widths = labels.map(widthOf);
+  const demands = labels.map((label, index) => {
+    let width2 = widths[index];
+    for (const match of label.matchAll(/\s+/g)) {
+      if (!match.index || match.index + match[0].length === label.length) continue;
+      width2 = Math.min(width2, Math.max(widthOf(label.slice(0, match.index)), widthOf(label.slice(match.index + match[0].length))));
+    }
+    return width2;
+  });
+  const count = labels.length;
+  const baseStep = baseSpan / count;
+  const preferredWidth = Math.min(Math.max(...demands), gutterLimit);
+  const wrappedLabelBandFraction = 0.75;
+  const minimumYStepForLines = (rows2) => rows2 > 1 ? Math.ceil((fontSize + (rows2 - 1) * lineHeight2) / wrappedLabelBandFraction) : fontSize + 4;
+  const preferredDemands = axis === "x" ? demands.map((width2) => width2 + 6) : widths.map((width2) => width2 > preferredWidth ? minimumYStepForLines(2) : lineHeight2 + 6);
+  const excess = preferredDemands.reduce((sum, demand) => sum + Math.min(baseStep, Math.max(0, demand - baseStep)), 0) / count;
+  const preferredStep = Math.max(step, Math.min(Math.max(...preferredDemands), baseStep) + excess);
+  const solved = computeAxisStep(count, 0, baseSpan, {
+    defaultStepSize: Math.ceil(preferredStep),
+    minStep: Math.min(step, baseStep),
+    elasticity,
+    maxStretch: Math.max(1, maxSpan / baseSpan)
+  });
+  const minimumYStep = minimumYStepForLines(widths.some((width2) => width2 > preferredWidth) ? 2 : 1);
+  const needed = input.stretchToFit && axis === "x" ? Math.ceil(Math.max(...preferredDemands)) : 0;
+  const proposedStep = Math.min(maxSpan / count, Math.max(step, solved.step, needed, axis === "y" ? minimumYStep : 0));
+  const width = axis === "x" ? proposedStep - 6 : preferredWidth;
+  const widestWord = Math.max(0, ...labels.flatMap((label) => label.split(/\s+/)).map(widthOf));
+  if ((measure2 ? width < widestWord : width < fontSize * 4) && widths.some((labelWidth) => labelWidth > width)) return null;
+  const fit = fitTwoLineLabels(labels, fontSize, width, true, widthOf);
+  const lines = fit?.lines ?? labels.map((label) => [label]);
+  const rows = Math.max(...lines.map((parts) => parts.length));
+  if (axis === "y" && minimumYStepForLines(rows) > proposedStep) return null;
+  const retainedWidth = (text, limit) => widthOf(text) <= limit ? widthOf(text) : Math.max(0, limit - fontSize);
+  const loss = (parts, limit) => parts.reduce((sum, row, index) => {
+    const retained = row.reduce((total, line) => total + retainedWidth(line, limit), 0) + (row.length - 1) * widthOf(" ");
+    return sum + Math.max(0, 1 - retained / Math.max(1, widths[index]));
+  }, 0) / count;
+  const imbalance = (parts, limit) => {
+    const extents = parts.map((row) => Math.min(limit, Math.max(...row.map(widthOf))));
+    return (Math.max(...extents) - extents.reduce((sum, value) => sum + value, 0) / count) / Math.max(1, gutterLimit);
+  };
+  const baseline = labels.map((label) => [label]);
+  const expansion = Math.max(0, (Math.min(proposedStep * count, baseSpan) - Math.min(step * count, baseSpan)) / baseSpan);
+  const stretch = Math.max(0, proposedStep * count / baseSpan - 1);
+  const baselineStretch = Math.max(0, step * count / baseSpan - 1);
+  const wrappedShare = lines.filter((row) => row.length > 1).length / count;
+  const horizontalCost = loss(lines, width) + 0.18 * expansion + Math.max(0, stretch * stretch - baselineStretch * baselineStretch) + 0.04 * wrappedShare + (axis === "y" ? 0.15 * imbalance(lines, width) : 0);
+  const baselineCost = loss(baseline, baselineLimit) + (axis === "x" ? 0.3 : 0.15 * imbalance(baseline, baselineLimit));
+  if (input.compareBaseline !== false && horizontalCost > baselineCost) return null;
+  if (axis === "x" && !fit && widths.some((labelWidth) => labelWidth > width)) return null;
+  if (axis === "y" && !fit) return null;
+  return { step: proposedStep, width, lines, lineHeight: lineHeight2, cost: horizontalCost };
+}
+function computeLabelSizing(effectiveStep, hasDiscreteItems, opts) {
+  const baseFont = opts?.baseFont ?? 10;
+  const minFont = opts?.minFont ?? 6;
+  const defaultLimit = 100;
+  if (!hasDiscreteItems) {
+    return { fontSize: baseFont, labelLimit: defaultLimit };
+  }
+  const fontStep = Math.floor(effectiveStep);
+  let fontSize = Math.max(minFont, Math.min(baseFont, fontStep - 1));
+  let labelLimit = Math.max(30, Math.min(100, effectiveStep * 8));
+  let labelAngle;
+  let labelAlign;
+  let labelBaseline;
+  if (effectiveStep < 10) {
+    labelAngle = -90;
+    fontSize = Math.max(minFont, Math.min(baseFont - 2, fontStep));
+    labelLimit = 40;
+    labelAlign = "right";
+    labelBaseline = "middle";
+  } else if (effectiveStep < 16) {
+    labelAngle = -90;
+    fontSize = Math.max(minFont, Math.min(baseFont - 1, fontStep));
+    labelLimit = 60;
+    labelAlign = "right";
+    labelBaseline = "middle";
+  }
+  return { fontSize, labelLimit, labelAngle, labelAlign, labelBaseline };
+}
+function computeFontSizing(minPlotDimension, opts) {
+  const baseLabel = opts?.baseLabelFontSize ?? 10;
+  const baseTitle = opts?.baseTitleFontSize ?? 11;
+  const minDim = minPlotDimension || 320;
+  const ratio = minDim >= 220 ? 1 : Math.max(0.7, minDim / 220);
+  const atMostNative = (base) => Math.round(Math.max(base - 2, Math.min(base, base * ratio)));
+  const tickBase = atMostNative(baseLabel);
+  const titleFontSize = atMostNative(baseTitle);
+  const legendFontSize = Math.max(baseTitle - 2, titleFontSize - 1);
+  return { tickBase, titleFontSize, legendFontSize };
+}
+function computeCircumferencePressure(effectiveItemCount, canvasSize, params = {}) {
+  const {
+    minArcPx = 45,
+    minRadius = 60,
+    maxRadius = 400,
+    elasticity = 0.5,
+    maxStretch = 2,
+    margin = 20
+  } = params;
+  const maxStretchX = Math.max(1, params.maxStretchX ?? maxStretch);
+  const maxStretchY = Math.max(1, params.maxStretchY ?? maxStretch);
+  const baseW = canvasSize.width;
+  const baseH = canvasSize.height;
+  const baseRadius = Math.max(
+    minRadius,
+    Math.min(baseW, baseH) / 2 - margin
+  );
+  const maxCanvasW = baseW * maxStretchX;
+  const maxCanvasH = baseH * maxStretchY;
+  const maxDiameter = Math.min(maxCanvasW, maxCanvasH);
+  const effectiveMaxRadius = Math.min(
+    maxRadius,
+    (maxDiameter - 2 * margin) / 2
+  );
+  const effectiveMaxStretch = Math.max(1, effectiveMaxRadius / baseRadius);
+  const baseCircumference = 2 * Math.PI * baseRadius;
+  const pressure = effectiveItemCount * minArcPx / baseCircumference;
+  let radius;
+  if (pressure <= 1) {
+    radius = baseRadius;
+  } else {
+    const stretch = Math.min(effectiveMaxStretch, Math.pow(pressure, elasticity));
+    radius = Math.round(baseRadius * stretch);
+  }
+  radius = Math.min(maxRadius, Math.max(minRadius, radius));
+  const diameter = 2 * radius + 2 * margin;
+  const canvasW = Math.max(baseW, diameter);
+  const canvasH = Math.max(baseH, diameter);
+  return { radius, canvasW, canvasH };
+}
+function computeEffectiveBarCount(values) {
+  if (values.length === 0) return 0;
+  const positiveValues = values.filter((v) => v > 0);
+  if (positiveValues.length === 0) return values.length;
+  const total = positiveValues.reduce((s, v) => s + v, 0);
+  const minVal = Math.min(...positiveValues);
+  const effective = total / minVal;
+  return Math.min(100, effective);
+}
+
+// src/echarts/templates/utils.ts
+function getCategoryOrder(ctx, channel) {
+  const resolved = ctx.resolvedEncodings?.[channel];
+  if (Array.isArray(resolved?.sortValues) && resolved.sortValues.length > 0) {
+    return resolved.sortValues.map(String);
+  }
+  const ordinal = resolved?.ordinalSortOrder ?? ctx.channelSemantics?.[channel]?.ordinalSortOrder;
+  const enc = ctx.encodings?.[channel];
+  const sortByChannel = enc?.sortBy;
+  if (typeof sortByChannel === "string" && (sortByChannel === "x" || sortByChannel === "y" || sortByChannel === "color" || sortByChannel === "size" || sortByChannel === "group")) {
+    const catField = ctx.channelSemantics?.[channel]?.field ?? enc?.field;
+    const sortByField = ctx.channelSemantics?.[sortByChannel]?.field ?? ctx.encodings?.[sortByChannel]?.field;
+    if (catField && sortByField && ctx.table) {
+      return resolveCategoryOrder(ctx.table, catField, {
+        ordinalSortOrder: ordinal,
+        sortBy: sortByField,
+        sortOrder: enc?.sortOrder
+      });
+    }
+  }
+  return ordinal;
+}
+function resolveCategoryOrder(data, catField, opts) {
+  const base = extractCategories(data, catField, opts?.ordinalSortOrder);
+  if (!opts?.sortBy) return base;
+  const agg = /* @__PURE__ */ new Map();
+  for (const row of data) {
+    const cat = String(row[catField] ?? "");
+    const v = Number(row[opts.sortBy]);
+    if (Number.isFinite(v)) agg.set(cat, (agg.get(cat) ?? 0) + v);
+  }
+  const dir = opts.sortOrder === "ascending" ? 1 : -1;
+  return [...base].sort((a, b) => dir * ((agg.get(a) ?? 0) - (agg.get(b) ?? 0)));
+}
+var isDiscrete = (type) => type === "nominal" || type === "ordinal";
+function extractCategories(data, field, ordinalSortOrder) {
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  for (const row of data) {
+    const val = row[field];
+    if (val != null) {
+      const key = String(val);
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(key);
+      }
+    }
+  }
+  if (ordinalSortOrder && ordinalSortOrder.length > 0) {
+    const orderMap = new Map(ordinalSortOrder.map((v, i) => [v, i]));
+    result.sort((a, b) => {
+      const ia = orderMap.get(a);
+      const ib = orderMap.get(b);
+      if (ia !== void 0 && ib !== void 0) return ia - ib;
+      if (ia !== void 0) return -1;
+      if (ib !== void 0) return 1;
+      return 0;
+    });
+  }
+  return result;
+}
+function groupBy(data, field) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const row of data) {
+    const key = String(row[field] ?? "");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  return groups;
+}
+var DEFAULT_COLORS = [
+  "#5470c6",
+  "#91cc75",
+  "#fac858",
+  "#ee6666",
+  "#73c0de",
+  "#3ba272",
+  "#fc8452",
+  "#9a60b4",
+  "#ea7ccc",
+  "#48b8d0"
+];
+function detectAxes(channelSemantics) {
+  const xCS = channelSemantics.x;
+  const yCS = channelSemantics.y;
+  if (xCS && isDiscrete(xCS.type)) {
+    return { categoryAxis: "x", valueAxis: "y" };
+  }
+  if (yCS && isDiscrete(yCS.type)) {
+    return { categoryAxis: "y", valueAxis: "x" };
+  }
+  if (xCS?.type === "quantitative" && yCS?.type === "temporal") {
+    return { categoryAxis: "y", valueAxis: "x" };
+  }
+  if (xCS?.type === "temporal" && yCS?.type === "quantitative") {
+    return { categoryAxis: "x", valueAxis: "y" };
+  }
+  return { categoryAxis: "x", valueAxis: "y" };
+}
+
+// src/echarts/colormap.ts
+var ECHARTS_COLOR_MAPS = [
+  {
+    id: "cat10",
+    type: "categorical",
+    supportsDiscrete: true,
+    supportsContinuous: false,
+    background: "any",
+    maxCategories: 10,
+    colorblindSafe: false,
+    colors: [
+      "#5470c6",
+      "#91cc75",
+      "#fac858",
+      "#ee6666",
+      "#73c0de",
+      "#3ba272",
+      "#fc8452",
+      "#9a60b4",
+      "#ea7ccc",
+      "#d48265"
+    ]
+  },
+  {
+    id: "cat20",
+    type: "categorical",
+    supportsDiscrete: true,
+    supportsContinuous: false,
+    background: "any",
+    maxCategories: 20,
+    colorblindSafe: false,
+    colors: [
+      "#5470c6",
+      "#91cc75",
+      "#fac858",
+      "#ee6666",
+      "#73c0de",
+      "#3ba272",
+      "#fc8452",
+      "#9a60b4",
+      "#ea7ccc",
+      "#d48265",
+      "#749f83",
+      "#ca8622",
+      "#bda29a",
+      "#6e7074",
+      "#546570",
+      "#c4ccd3",
+      "#4b565b",
+      "#2f4554",
+      "#61a0a8",
+      "#c23531"
+    ]
+  },
+  {
+    id: "viridis",
+    type: "sequential",
+    supportsDiscrete: true,
+    supportsContinuous: true,
+    background: "any",
+    colorblindSafe: true,
+    colors: [
+      "#440154",
+      "#46327e",
+      "#365c8d",
+      "#277f8e",
+      "#1fa187",
+      "#4ac16d",
+      "#a0da39",
+      "#fde725"
+    ]
+  },
+  {
+    id: "RdBu",
+    type: "diverging",
+    supportsDiscrete: true,
+    supportsContinuous: true,
+    background: "any",
+    colorblindSafe: false,
+    diverging: true,
+    preferredMidpoint: 0,
+    colors: [
+      "#b2182b",
+      "#d6604d",
+      "#f4a582",
+      "#fddbc7",
+      "#f7f7f7",
+      "#d1e5f0",
+      "#92c5de",
+      "#4393c3",
+      "#2166ac"
+    ]
+  }
+];
+function getMapById(id) {
+  if (!id) return void 0;
+  const key = String(id).toLowerCase();
+  return ECHARTS_COLOR_MAPS.find((m) => m.id.toLowerCase() === key);
+}
+function getPaletteForScheme(id) {
+  const entry = getMapById(id);
+  return entry?.colors;
+}
+function pickEChartsPalette(decision) {
+  if (!decision) {
+    return DEFAULT_COLORS;
+  }
+  const { schemeType, schemeId, categoryCount } = decision;
+  if (schemeId) {
+    const fromId = getPaletteForScheme(schemeId);
+    if (fromId && fromId.length > 0) {
+      return fromId;
+    }
+  }
+  const mapsOfType = ECHARTS_COLOR_MAPS.filter((m) => m.type === schemeType);
+  if (schemeType === "categorical") {
+    const k = categoryCount ?? 0;
+    if (mapsOfType.length) {
+      const candidates = mapsOfType.filter((m) => m.supportsDiscrete);
+      if (candidates.length) {
+        const byCapacity = candidates.filter((m) => m.maxCategories == null || m.maxCategories >= k).sort((a, b) => (a.maxCategories ?? Infinity) - (b.maxCategories ?? Infinity));
+        const picked = byCapacity[0] ?? candidates[0];
+        if (picked.colors.length) {
+          return picked.colors;
+        }
+      }
+    }
+  } else if (schemeType === "sequential") {
+    const seq = mapsOfType.find((m) => m.supportsContinuous) ?? getMapById("viridis");
+    if (seq && seq.colors.length) {
+      return seq.colors;
+    }
+  } else if (schemeType === "diverging") {
+    const divergingFirst = mapsOfType.find((m) => m.diverging) ?? getMapById("RdBu");
+    if (divergingFirst && divergingFirst.colors.length) {
+      return divergingFirst.colors;
+    }
+  }
+  return DEFAULT_COLORS;
+}
+
+// src/echarts/color-controls.ts
+function applyAuthoredColorScaleEC(option, ctl, rows = [], pivot, neutral) {
+  const maps = Array.isArray(option?.visualMap) ? option.visualMap : option?.visualMap ? [option.visualMap] : [];
+  const values = rows.map((row) => row?.[ctl.field]).filter((value) => typeof value === "number" && Number.isFinite(value));
+  for (const vm of maps) {
+    const current = vm.inRange?.color;
+    if (!Array.isArray(current)) continue;
+    let colors = ctl.stops ?? (ctl.scheme ? getPaletteForScheme(ctl.scheme) : void 0) ?? current;
+    if (ctl.bins !== void 0 && ctl.bins > 0) {
+      vm.type = "piecewise";
+      delete vm.calculable;
+      const classes = ctl.domain ? void 0 : roundColorClasses(values, ctl.bins, pivot, { exact: true, neutral });
+      if (classes) {
+        const ramp = ctl.reverse ? [...colors].reverse() : colors;
+        const inks = classColors(ramp, classes);
+        delete vm.splitNumber;
+        if (classes.lo !== void 0 && classes.hi !== void 0) {
+          vm.pieces = classPieces(classes.breaks, classes.lo, classes.hi, inks);
+          vm.min = classes.lo;
+          vm.max = classes.hi;
+        } else vm.pieces = binPieces(classes.breaks, inks);
+        vm.inRange = { ...vm.inRange, color: inks };
+        continue;
+      }
+      colors = resampleStops(colors, ctl.bins);
+      const lo = Number(ctl.domain?.[0] ?? vm.min);
+      const hi = Number(ctl.domain?.[1] ?? vm.max);
+      const edges = roundBinEdges(lo, hi, ctl.bins);
+      if (edges) {
+        delete vm.splitNumber;
+        vm.pieces = binPieces(edges, ctl.reverse ? [...colors].reverse() : colors);
+        vm.inRange = { ...vm.inRange, color: ctl.reverse ? [...colors].reverse() : colors };
+        if (ctl.domain) {
+          vm.min = ctl.domain[0];
+          vm.max = ctl.domain[1];
+        }
+        continue;
+      }
+      vm.splitNumber = ctl.bins;
+    } else if (ctl.bins === 0 && vm.type === "piecewise") {
+      vm.type = "continuous";
+      delete vm.splitNumber;
+    }
+    if (ctl.reverse) colors = [...colors].reverse();
+    vm.inRange = { ...vm.inRange, color: colors };
+    if (ctl.domain) {
+      vm.min = ctl.domain[0];
+      vm.max = ctl.domain[1];
+    }
+  }
+}
+var fmt = (value) => value.toLocaleString("en-US").replace("-", "\u2212");
+function binPieces(edges, colors) {
+  const pieces = [{ lt: edges[0], label: `< ${fmt(edges[0])}`, color: colors[0] }];
+  for (let i = 1; i < edges.length; i++) {
+    pieces.push({ gte: edges[i - 1], lt: edges[i], label: `${fmt(edges[i - 1])} \u2013 ${fmt(edges[i])}`, color: colors[i] });
+  }
+  pieces.push({ gte: edges[edges.length - 1], label: `\u2265 ${fmt(edges[edges.length - 1])}`, color: colors[edges.length] });
+  return pieces;
+}
+function classPieces(breaks, lo, hi, colors) {
+  const edges = [lo, ...breaks, hi];
+  const exact = exactFormat(edges);
+  const print = (value) => printFormatted(value, exact).replace("-", "\u2212");
+  return colors.map((color, i) => ({
+    gte: edges[i],
+    ...i === colors.length - 1 ? { lte: edges[i + 1] } : { lt: edges[i + 1] },
+    label: `${print(edges[i])} \u2013 ${print(edges[i + 1])}`,
+    color
+  }));
+}
+
 // src/core/encoding-overrides.ts
 function applyEncodingOverrides(template, encodings, chartProperties) {
   const actions = template.encodingActions;
@@ -13,6 +2341,44 @@ function applyEncodingOverrides(template, encodings, chartProperties) {
 }
 
 // src/core/aggregate.ts
+var ONE_MARK_PER_KEY = {
+  Heatmap: ["color"]
+};
+function resolveImplicitAggregation(chartType, encodings, data, semanticTypes) {
+  const measures = ONE_MARK_PER_KEY[chartType];
+  if (!measures || !data || data.length < 2) return { encodings, warnings: [] };
+  const open = measures.filter((ch) => encodings[ch]?.field && !encodings[ch].aggregate);
+  if (open.length === 0) return { encodings, warnings: [] };
+  const keyFields = [...new Set(Object.entries(encodings).filter(([ch, enc]) => !measures.includes(ch) && enc?.field && !enc.aggregate).map(([, enc]) => enc.field))];
+  const seen = /* @__PURE__ */ new Set();
+  let rowsPerKey = 1;
+  const counts = /* @__PURE__ */ new Map();
+  for (const row of data) {
+    const key = JSON.stringify(keyFields.map((f) => row[f] ?? null));
+    const n = (counts.get(key) ?? 0) + 1;
+    counts.set(key, n);
+    if (n > rowsPerKey) rowsPerKey = n;
+    seen.add(key);
+  }
+  if (rowsPerKey < 2) return { encodings, warnings: [] };
+  const next = { ...encodings };
+  const warnings = [];
+  for (const ch of open) {
+    const field = encodings[ch].field;
+    const values = data.map((r) => r[field]).filter((v) => v != null);
+    if (!values.length || !values.every((v) => typeof v === "number" || Number.isFinite(Number(v)))) continue;
+    const op = resolveAggregationDefault(toTypeString(semanticTypes[field])) === "sum" ? "sum" : "average";
+    next[ch] = { ...encodings[ch], aggregate: op };
+    warnings.push({
+      severity: "warning",
+      code: "implicit-aggregate",
+      channel: ch,
+      field,
+      message: `Up to ${rowsPerKey} rows share one ${keyFields.join(" \xD7 ")} cell; ${field} is aggregated with ${op} (${seen.size} cells from ${data.length} rows). Set "aggregate" on ${ch} to choose another operation.`
+    });
+  }
+  return { encodings: next, warnings };
+}
 function applyAggregation(encodings, data) {
   if (!data || data.length === 0) return data;
   const specs = [];
@@ -148,6 +2514,7 @@ var CHART_TRANSITIONS = {
   ],
   // ── Two-measure relationship — M₁ × M₂ (§4.3) ──────────────────────────
   "Scatter Plot": [
+    { to: "Marginal Plot", label: "Margins" },
     {
       to: "Strip Plot",
       label: "Jitter",
@@ -176,7 +2543,14 @@ var CHART_TRANSITIONS = {
     { to: "Density Plot", label: "Density" },
     { to: "ECDF Plot", label: "ECDF" }
   ],
+  "Ridgeline Plot": [
+    { to: "Density Plot", label: "Density" }
+  ],
+  "Marginal Plot": [
+    { to: "Scatter Plot", label: "Scatter" }
+  ],
   "Density Plot": [
+    { to: "Ridgeline Plot", label: "Ridgeline" },
     { to: "Histogram", label: "Histogram" },
     { to: "ECDF Plot", label: "ECDF" }
   ],
@@ -200,7 +2574,7 @@ function getChartTransitions(chart) {
 
 // src/core/pivot.ts
 var DISCRETE_TYPES = /* @__PURE__ */ new Set(["nominal", "ordinal"]);
-function isDiscrete(enc) {
+function isDiscrete2(enc) {
   return !!enc?.field && !!enc.type && DISCRETE_TYPES.has(enc.type);
 }
 function isMeasure(enc) {
@@ -279,7 +2653,7 @@ function transposeState(base, template, pair) {
 function channelProfile(enc, template) {
   if (!enc?.field) return null;
   if (isMeasure(enc)) return "measure";
-  if (isDiscrete(enc) || isTemporal(enc) && temporalActsDiscrete(template)) return "category";
+  if (isDiscrete2(enc) || isTemporal(enc) && temporalActsDiscrete(template)) return "category";
   return "time";
 }
 function permuteSwapState(base, template, pair) {
@@ -327,7 +2701,7 @@ function routeLabel(from, to) {
 }
 function findTransitionSeries(base, candidates, channels) {
   for (const channel of candidates) {
-    if (channels.includes(channel) && isDiscrete(base[channel])) {
+    if (channels.includes(channel) && isDiscrete2(base[channel])) {
       return { channel, enc: base[channel] };
     }
   }
@@ -336,7 +2710,7 @@ function findTransitionSeries(base, candidates, channels) {
 function seriesRoutingStates(base, template, data, shiftChannels, facetBudget, preferredFacet) {
   const channels = template.channels ?? [];
   const out = [];
-  const identitySource = isDiscrete(base.color) ? "color" : !base.color?.field && isDiscrete(base.group) ? "group" : void 0;
+  const identitySource = isDiscrete2(base.color) ? "color" : !base.color?.field && isDiscrete2(base.group) ? "group" : void 0;
   if (identitySource && shiftChannels.includes(identitySource) && channels.includes(identitySource)) {
     const identityEncoding = base[identitySource];
     const card = distinctCount(data, identityEncoding.field);
@@ -361,7 +2735,7 @@ function seriesRoutingStates(base, template, data, shiftChannels, facetBudget, p
     }
   }
   const facetSource = ["column", "row"].find(
-    (channel) => shiftChannels.includes(channel) && channels.includes(channel) && isDiscrete(base[channel])
+    (channel) => shiftChannels.includes(channel) && channels.includes(channel) && isDiscrete2(base[channel])
   );
   if (facetSource) {
     const facetEncoding = base[facetSource];
@@ -407,10 +2781,10 @@ function transitionGatesPass(base, data, t) {
     if (!domain || !(domain.type === "temporal" || domain.type === "ordinal")) return false;
   }
   if (t.requireNonNegative) {
-    const measure = measureAxisEnc(base);
-    if (measure?.field) {
+    const measure2 = measureAxisEnc(base);
+    if (measure2?.field) {
       for (const row of data) {
-        const v = row?.[measure.field];
+        const v = row?.[measure2.field];
         if (typeof v === "number" && v < 0) return false;
       }
     }
@@ -421,12 +2795,12 @@ function transitionGatesPass(base, data, t) {
   }
   if (t.requireNoSeries) {
     for (const ch of GROUPING_CHANNELS) {
-      if (isDiscrete(base[ch])) return false;
+      if (isDiscrete2(base[ch])) return false;
     }
   }
   if (t.requireSeries) {
     const seriesChannels = ["color", "group", "detail", "column", "row"];
-    if (!seriesChannels.some((ch) => isDiscrete(base[ch]))) return false;
+    if (!seriesChannels.some((ch) => isDiscrete2(base[ch]))) return false;
   }
   if (t.requireBiaxialMeasure) {
     if (!isMeasure(base.x) || !isMeasure(base.y)) return false;
@@ -445,7 +2819,7 @@ function transitionState(base, data, template, t) {
     if (!fromCh) return null;
     const srcEnc = base[fromCh];
     if (!srcEnc?.field) return null;
-    if (t.requireDiscreteSource && !isDiscrete(srcEnc)) return null;
+    if (t.requireDiscreteSource && !isDiscrete2(srcEnc)) return null;
     if (t.maxSourceCardinality != null && distinctCount(data, srcEnc.field) > t.maxSourceCardinality) return null;
     const mode = route.mode ?? "move";
     const dstEnc = base[route.to];
@@ -715,1715 +3089,160 @@ function applyTransform(template, base, data, chartProperties, resolveTemplate) 
   };
 }
 
-// src/core/type-registry.ts
-var TYPE_REGISTRY = {
-  // --- Temporal: DateTime ---
-  DateTime: { t0: "Temporal", t1: "DateTime", visEncodings: ["temporal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Date: { t0: "Temporal", t1: "DateTime", visEncodings: ["temporal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Time: { t0: "Temporal", t1: "DateTime", visEncodings: ["temporal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Timestamp: { t0: "Temporal", t1: "DateTime", visEncodings: ["temporal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  // --- Temporal: DateGranule ---
-  Year: { t0: "Temporal", t1: "DateGranule", visEncodings: ["temporal", "ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "integer", zeroBaseline: "arbitrary", zeroPad: 0.03 },
-  Quarter: { t0: "Temporal", t1: "DateGranule", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Month: { t0: "Temporal", t1: "DateGranule", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Week: { t0: "Temporal", t1: "DateGranule", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Day: { t0: "Temporal", t1: "DateGranule", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Hour: { t0: "Temporal", t1: "DateGranule", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "integer", zeroBaseline: "arbitrary", zeroPad: 0 },
-  YearMonth: { t0: "Temporal", t1: "DateGranule", visEncodings: ["temporal", "ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  YearQuarter: { t0: "Temporal", t1: "DateGranule", visEncodings: ["temporal", "ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  YearWeek: { t0: "Temporal", t1: "DateGranule", visEncodings: ["temporal", "ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Decade: { t0: "Temporal", t1: "DateGranule", visEncodings: ["temporal", "ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "integer", zeroBaseline: "arbitrary", zeroPad: 0.03 },
-  // --- Temporal: Duration ---
-  Duration: { t0: "Temporal", t1: "Duration", visEncodings: ["quantitative"], aggRole: "additive", domainShape: "open", diverging: "none", formatClass: "unit-suffix", zeroBaseline: "meaningful", zeroPad: 0 },
-  // --- Measure: Amount ---
-  Amount: { t0: "Measure", t1: "Amount", visEncodings: ["quantitative"], aggRole: "additive", domainShape: "open", diverging: "none", formatClass: "currency", zeroBaseline: "meaningful", zeroPad: 0 },
-  Price: { t0: "Measure", t1: "Amount", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "open", diverging: "none", formatClass: "currency", zeroBaseline: "meaningful", zeroPad: 0 },
-  // --- Measure: Physical ---
-  Quantity: { t0: "Measure", t1: "Physical", visEncodings: ["quantitative"], aggRole: "additive", domainShape: "open", diverging: "none", formatClass: "unit-suffix", zeroBaseline: "meaningful", zeroPad: 0 },
-  Temperature: { t0: "Measure", t1: "Physical", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "open", diverging: "conditional", formatClass: "unit-suffix", zeroBaseline: "arbitrary", zeroPad: 0.05 },
-  // --- Measure: Proportion ---
-  Percentage: { t0: "Measure", t1: "Proportion", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "bounded", diverging: "none", formatClass: "percent", zeroBaseline: "contextual", zeroPad: 0 },
-  // --- Measure: SignedMeasure ---
-  Profit: { t0: "Measure", t1: "SignedMeasure", visEncodings: ["quantitative"], aggRole: "signed-additive", domainShape: "open", diverging: "conditional", formatClass: "decimal", zeroBaseline: "meaningful", zeroPad: 0 },
-  PercentageChange: { t0: "Measure", t1: "SignedMeasure", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "open", diverging: "conditional", formatClass: "percent", zeroBaseline: "contextual", zeroPad: 0.05 },
-  Sentiment: { t0: "Measure", t1: "SignedMeasure", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "open", diverging: "inherent", formatClass: "decimal", zeroBaseline: "meaningful", zeroPad: 0 },
-  Correlation: { t0: "Measure", t1: "SignedMeasure", visEncodings: ["quantitative"], aggRole: "intensive", domainShape: "bounded", diverging: "inherent", formatClass: "decimal", zeroBaseline: "meaningful", zeroPad: 0 },
-  // --- Measure: GenericMeasure ---
-  Count: { t0: "Measure", t1: "GenericMeasure", visEncodings: ["quantitative"], aggRole: "additive", domainShape: "open", diverging: "none", formatClass: "integer", zeroBaseline: "meaningful", zeroPad: 0 },
-  Number: { t0: "Measure", t1: "GenericMeasure", visEncodings: ["quantitative"], aggRole: "additive", domainShape: "open", diverging: "none", formatClass: "decimal", zeroBaseline: "meaningful", zeroPad: 0 },
-  // --- Discrete ---
-  Rank: { t0: "Discrete", t1: "Rank", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "integer", zeroBaseline: "arbitrary", zeroPad: 0.08 },
-  Score: { t0: "Discrete", t1: "Score", visEncodings: ["quantitative", "ordinal"], aggRole: "intensive", domainShape: "bounded", diverging: "conditional", formatClass: "decimal", zeroBaseline: "contextual", zeroPad: 0.05 },
-  ID: { t0: "Identifier", t1: "ID", visEncodings: ["nominal"], aggRole: "identifier", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "arbitrary", zeroPad: 0 },
-  // --- Geographic ---
-  Latitude: { t0: "Geographic", t1: "GeoCoordinate", visEncodings: ["quantitative", "geographic"], aggRole: "dimension", domainShape: "fixed", diverging: "none", formatClass: "decimal", zeroBaseline: "arbitrary", zeroPad: 0.02 },
-  Longitude: { t0: "Geographic", t1: "GeoCoordinate", visEncodings: ["quantitative", "geographic"], aggRole: "dimension", domainShape: "fixed", diverging: "none", formatClass: "decimal", zeroBaseline: "arbitrary", zeroPad: 0.02 },
-  Country: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  State: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  City: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Region: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Address: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  ZipCode: { t0: "Geographic", t1: "GeoPlace", visEncodings: ["nominal"], aggRole: "identifier", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  // --- Categorical: Entity ---
-  Category: { t0: "Categorical", t1: "Entity", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Name: { t0: "Categorical", t1: "Entity", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  // --- Categorical: Coded ---
-  Status: { t0: "Categorical", t1: "Coded", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Boolean: { t0: "Categorical", t1: "Coded", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "fixed", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  Direction: { t0: "Categorical", t1: "Coded", visEncodings: ["ordinal", "nominal"], aggRole: "dimension", domainShape: "cyclic", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  // --- Categorical: Binned ---
-  Range: { t0: "Categorical", t1: "Binned", visEncodings: ["ordinal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 },
-  // --- Fallbacks ---
-  Unknown: { t0: "Categorical", t1: "Entity", visEncodings: ["nominal"], aggRole: "dimension", domainShape: "open", diverging: "none", formatClass: "plain", zeroBaseline: "none", zeroPad: 0 }
-};
-var UNKNOWN_ENTRY = {
-  t0: "Categorical",
-  t1: "Entity",
-  visEncodings: ["nominal"],
-  aggRole: "dimension",
-  domainShape: "open",
-  diverging: "none",
-  formatClass: "plain",
-  zeroBaseline: "none",
-  zeroPad: 0
-};
-function getRegistryEntry(semanticType) {
-  return TYPE_REGISTRY[semanticType] ?? UNKNOWN_ENTRY;
-}
-function isRegistered(semanticType) {
-  return semanticType in TYPE_REGISTRY;
-}
-function getRegisteredTypes() {
-  return Object.keys(TYPE_REGISTRY);
-}
+// src/echarts/graphic-ids.ts
+var EC_LEGEND_TITLE_ID = "flint-legend-title";
+var EC_SIZE_KEY_ID = "flint-size-key";
+var rampId = (channel) => `flint-ramp:${channel}`;
+var rampTitleId = (channel) => `flint-ramp-title:${channel}`;
 
-// src/core/semantic-types.ts
-var measureTypes = new Set(
-  getRegisteredTypes().filter((t) => {
-    const e = getRegistryEntry(t);
-    return ["additive", "intensive", "signed-additive"].includes(e.aggRole) && e.t1 !== "Score";
-  })
-);
-var nonMeasureNumericTypes = /* @__PURE__ */ new Set([
-  "Rank",
-  "ID",
-  "Score",
-  "Year",
-  "Month",
-  "Day",
-  "Hour",
-  "Latitude",
-  "Longitude"
-]);
-var categoricalTypes = new Set(
-  getRegisteredTypes().filter((t) => {
-    const e = getRegistryEntry(t);
-    return e.visEncodings.includes("nominal") && e.aggRole !== "identifier" || e.t1 === "Binned";
-  })
-);
-var ordinalTypes = new Set(
-  getRegisteredTypes().filter((t) => {
-    const e = getRegistryEntry(t);
-    return e.visEncodings.includes("ordinal");
-  })
-);
-function getVisCategory(semanticType) {
-  if (!semanticType || !isRegistered(semanticType)) return null;
-  return getRegistryEntry(semanticType).visEncodings[0] ?? null;
-}
-function inferVisCategory(values) {
-  if (values.length === 0) return "nominal";
-  const isBoolean = (v) => v === true || v === false || Object.prototype.toString.call(v) === "[object Boolean]";
-  const isNumber = (v) => !isNaN(+v) && !(Object.prototype.toString.call(v) === "[object Date]");
-  const looksLikeDate = (s) => /^\d|^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(s.trim());
-  const isDate = (v) => {
-    if (v instanceof Date) return !isNaN(v.getTime());
-    if (typeof v === "string") return looksLikeDate(v) && !isNaN(Date.parse(v));
-    return !isNaN(Date.parse(v));
-  };
-  const nonNull = values.filter((v) => v != null);
-  if (nonNull.length === 0) return "nominal";
-  if (nonNull.every(isBoolean)) return "nominal";
-  if (nonNull.every(isNumber)) return "quantitative";
-  if (nonNull.every(isDate)) return "temporal";
-  return "nominal";
-}
-function isMeasureType(semanticType) {
-  return measureTypes.has(semanticType);
-}
-function isTimeSeriesType(semanticType) {
-  const entry = getRegistryEntry(semanticType);
-  return entry.t0 === "Temporal" && entry.t1 !== "Duration";
-}
-function isCategoricalType(semanticType) {
-  return categoricalTypes.has(semanticType);
-}
-function isOrdinalType(semanticType) {
-  return ordinalTypes.has(semanticType);
-}
-function isGeoCoordinateType(semanticType) {
-  return getRegistryEntry(semanticType).t1 === "GeoCoordinate";
-}
-function isGeoLocationString(semanticType) {
-  return getRegistryEntry(semanticType).t1 === "GeoPlace";
-}
-function isNonMeasureNumeric(semanticType) {
-  return nonMeasureNumericTypes.has(semanticType);
-}
-function getZeroClass(semanticType) {
-  const baseline = getRegistryEntry(semanticType).zeroBaseline;
-  if (baseline === "none") return "unknown";
-  return baseline;
-}
-var ZERO_BASELINE_GAP_THRESHOLD = 0.5;
-function dataFarFromZero(values) {
-  if (!values || values.length === 0) return false;
-  const dataMin = Math.min(...values);
-  const dataMax = Math.max(...values);
-  if (dataMin <= 0 || dataMax <= 0) return false;
-  return dataMin / dataMax >= ZERO_BASELINE_GAP_THRESHOLD;
-}
-function computeZeroDecision(semanticType, channel, markType, values) {
-  const isBarLike = ["bar", "area", "rect"].includes(markType);
-  const isScatterMark = markType === "circle" || markType === "point";
-  const isPositional = ["x", "y"].includes(channel);
-  const entry = getRegistryEntry(semanticType);
-  const zeroClass = getZeroClass(semanticType);
-  if (zeroClass === "meaningful") {
-    if (isBarLike) {
-      return { zero: true, domainPadFraction: 0, zeroClass, forced: true, uncertain: false };
-    }
-    if (isPositional && isScatterMark) {
-      if (values && values.length > 0 && Math.min(...values) <= 0) {
-        return { zero: true, domainPadFraction: 0, zeroClass, forced: true, uncertain: false };
-      }
-      return {
-        zero: false,
-        domainPadFraction: entry.zeroPad || 0.05,
-        zeroClass,
-        forced: false,
-        uncertain: true
-      };
-    }
-    return {
-      zero: true,
-      domainPadFraction: 0,
-      zeroClass,
-      forced: false,
-      uncertain: dataFarFromZero(values)
-    };
+// src/core/text-widths.generated.ts
+var TEXT_WIDTHS = {
+  "Helvetica Neue": {
+    normal: [0.278, 0.259, 0.426, 0.556, 0.556, 1, 0.63, 0.278, 0.259, 0.259, 0.352, 0.6, 0.278, 0.389, 0.278, 0.333, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.278, 0.278, 0.6, 0.6, 0.6, 0.556, 0.8, 0.648, 0.685, 0.722, 0.704, 0.611, 0.574, 0.759, 0.722, 0.259, 0.519, 0.667, 0.556, 0.871, 0.722, 0.76, 0.648, 0.76, 0.685, 0.648, 0.574, 0.722, 0.611, 0.926, 0.611, 0.648, 0.611, 0.259, 0.333, 0.259, 0.6, 0.5, 0.222, 0.537, 0.593, 0.537, 0.593, 0.537, 0.296, 0.574, 0.556, 0.222, 0.222, 0.519, 0.222, 0.853, 0.556, 0.574, 0.593, 0.593, 0.333, 0.5, 0.315, 0.556, 0.5, 0.758, 0.518, 0.5, 0.48, 0.333, 0.222, 0.333, 0.6],
+    bold: [0.278, 0.278, 0.463, 0.556, 0.556, 1, 0.685, 0.278, 0.296, 0.296, 0.407, 0.6, 0.278, 0.407, 0.278, 0.371, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.278, 0.278, 0.6, 0.6, 0.6, 0.556, 0.8, 0.685, 0.704, 0.741, 0.741, 0.648, 0.593, 0.759, 0.741, 0.295, 0.556, 0.722, 0.593, 0.907, 0.741, 0.778, 0.667, 0.778, 0.722, 0.649, 0.611, 0.741, 0.63, 0.944, 0.667, 0.667, 0.648, 0.333, 0.371, 0.333, 0.6, 0.5, 0.259, 0.574, 0.611, 0.574, 0.611, 0.574, 0.333, 0.611, 0.593, 0.258, 0.278, 0.574, 0.258, 0.906, 0.593, 0.611, 0.611, 0.611, 0.389, 0.537, 0.352, 0.593, 0.52, 0.814, 0.537, 0.519, 0.519, 0.333, 0.223, 0.333, 0.6]
+  },
+  "Helvetica": {
+    normal: [0.278, 0.278, 0.355, 0.556, 0.556, 0.889, 0.667, 0.191, 0.333, 0.333, 0.389, 0.584, 0.278, 0.333, 0.278, 0.278, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.278, 0.278, 0.584, 0.584, 0.584, 0.556, 1.015, 0.667, 0.667, 0.722, 0.722, 0.667, 0.611, 0.778, 0.722, 0.278, 0.5, 0.667, 0.556, 0.833, 0.722, 0.778, 0.667, 0.778, 0.722, 0.667, 0.611, 0.722, 0.667, 0.944, 0.667, 0.667, 0.611, 0.278, 0.278, 0.278, 0.469, 0.556, 0.333, 0.556, 0.556, 0.5, 0.556, 0.556, 0.278, 0.556, 0.556, 0.222, 0.222, 0.5, 0.222, 0.833, 0.556, 0.556, 0.556, 0.556, 0.333, 0.5, 0.278, 0.556, 0.5, 0.722, 0.5, 0.5, 0.5, 0.334, 0.26, 0.334, 0.584],
+    bold: [0.278, 0.333, 0.474, 0.556, 0.556, 0.889, 0.722, 0.238, 0.333, 0.333, 0.389, 0.584, 0.278, 0.333, 0.278, 0.278, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.333, 0.333, 0.584, 0.584, 0.584, 0.611, 0.975, 0.722, 0.722, 0.722, 0.722, 0.667, 0.611, 0.778, 0.722, 0.278, 0.556, 0.722, 0.611, 0.833, 0.722, 0.778, 0.667, 0.778, 0.722, 0.667, 0.611, 0.722, 0.667, 0.944, 0.667, 0.667, 0.611, 0.333, 0.278, 0.333, 0.584, 0.556, 0.333, 0.556, 0.611, 0.556, 0.611, 0.556, 0.333, 0.611, 0.611, 0.278, 0.278, 0.556, 0.278, 0.889, 0.611, 0.611, 0.611, 0.611, 0.389, 0.556, 0.333, 0.611, 0.556, 0.778, 0.556, 0.556, 0.5, 0.389, 0.28, 0.389, 0.584]
+  },
+  "Arial": {
+    normal: [0.278, 0.278, 0.355, 0.556, 0.556, 0.889, 0.667, 0.191, 0.333, 0.333, 0.389, 0.584, 0.278, 0.333, 0.278, 0.278, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.278, 0.278, 0.584, 0.584, 0.584, 0.556, 1.015, 0.667, 0.667, 0.722, 0.722, 0.667, 0.611, 0.778, 0.722, 0.278, 0.5, 0.667, 0.556, 0.833, 0.722, 0.778, 0.667, 0.778, 0.722, 0.667, 0.611, 0.722, 0.667, 0.944, 0.667, 0.667, 0.611, 0.278, 0.278, 0.278, 0.469, 0.556, 0.333, 0.556, 0.556, 0.5, 0.556, 0.556, 0.278, 0.556, 0.556, 0.222, 0.222, 0.5, 0.222, 0.833, 0.556, 0.556, 0.556, 0.556, 0.333, 0.5, 0.278, 0.556, 0.5, 0.722, 0.5, 0.5, 0.5, 0.334, 0.26, 0.334, 0.584],
+    bold: [0.278, 0.333, 0.474, 0.556, 0.556, 0.889, 0.722, 0.238, 0.333, 0.333, 0.389, 0.584, 0.278, 0.333, 0.278, 0.278, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.333, 0.333, 0.584, 0.584, 0.584, 0.611, 0.975, 0.722, 0.722, 0.722, 0.722, 0.667, 0.611, 0.778, 0.722, 0.278, 0.556, 0.722, 0.611, 0.833, 0.722, 0.778, 0.667, 0.778, 0.722, 0.667, 0.611, 0.722, 0.667, 0.944, 0.667, 0.667, 0.611, 0.333, 0.278, 0.333, 0.584, 0.556, 0.333, 0.556, 0.611, 0.556, 0.611, 0.556, 0.333, 0.611, 0.611, 0.278, 0.278, 0.556, 0.278, 0.889, 0.611, 0.611, 0.611, 0.611, 0.389, 0.556, 0.333, 0.611, 0.556, 0.778, 0.556, 0.556, 0.5, 0.389, 0.28, 0.389, 0.584]
+  },
+  "Verdana": {
+    normal: [0.352, 0.394, 0.459, 0.818, 0.636, 1.076, 0.727, 0.269, 0.454, 0.454, 0.636, 0.818, 0.364, 0.454, 0.364, 0.454, 0.636, 0.636, 0.636, 0.636, 0.636, 0.636, 0.636, 0.636, 0.636, 0.636, 0.454, 0.454, 0.818, 0.818, 0.818, 0.545, 1, 0.684, 0.686, 0.698, 0.771, 0.632, 0.575, 0.775, 0.751, 0.421, 0.455, 0.693, 0.557, 0.843, 0.748, 0.787, 0.603, 0.787, 0.695, 0.684, 0.616, 0.732, 0.684, 0.989, 0.685, 0.615, 0.685, 0.454, 0.454, 0.454, 0.818, 0.636, 0.636, 0.601, 0.623, 0.521, 0.623, 0.596, 0.352, 0.623, 0.633, 0.274, 0.344, 0.592, 0.274, 0.973, 0.633, 0.607, 0.623, 0.623, 0.427, 0.521, 0.394, 0.633, 0.592, 0.818, 0.592, 0.592, 0.525, 0.635, 0.454, 0.635, 0.818],
+    bold: [0.342, 0.402, 0.587, 0.867, 0.711, 1.272, 0.862, 0.332, 0.543, 0.543, 0.711, 0.867, 0.361, 0.48, 0.361, 0.689, 0.711, 0.711, 0.711, 0.711, 0.711, 0.711, 0.711, 0.711, 0.711, 0.711, 0.402, 0.402, 0.867, 0.867, 0.867, 0.617, 0.964, 0.776, 0.762, 0.724, 0.83, 0.683, 0.65, 0.811, 0.837, 0.546, 0.555, 0.771, 0.637, 0.948, 0.847, 0.85, 0.733, 0.85, 0.782, 0.71, 0.682, 0.812, 0.764, 1.128, 0.764, 0.737, 0.692, 0.543, 0.689, 0.543, 0.867, 0.711, 0.711, 0.668, 0.699, 0.588, 0.699, 0.664, 0.422, 0.699, 0.712, 0.342, 0.403, 0.671, 0.342, 1.058, 0.712, 0.687, 0.699, 0.699, 0.497, 0.593, 0.456, 0.712, 0.65, 0.979, 0.669, 0.651, 0.597, 0.711, 0.543, 0.711, 0.867]
+  },
+  "Arial Black": {
+    normal: [0.333, 0.333, 0.5, 0.66, 0.667, 1, 0.889, 0.278, 0.389, 0.389, 0.556, 0.66, 0.333, 0.333, 0.333, 0.278, 0.667, 0.667, 0.667, 0.667, 0.667, 0.667, 0.667, 0.667, 0.667, 0.667, 0.333, 0.333, 0.66, 0.66, 0.66, 0.611, 0.74, 0.778, 0.778, 0.778, 0.778, 0.722, 0.667, 0.833, 0.833, 0.389, 0.667, 0.833, 0.667, 0.944, 0.833, 0.833, 0.722, 0.833, 0.778, 0.722, 0.722, 0.833, 0.778, 1, 0.778, 0.778, 0.722, 0.389, 0.278, 0.389, 0.66, 0.5, 0.333, 0.667, 0.667, 0.667, 0.667, 0.667, 0.389, 0.667, 0.667, 0.333, 0.333, 0.667, 0.333, 1, 0.667, 0.667, 0.667, 0.667, 0.444, 0.611, 0.444, 0.667, 0.611, 0.944, 0.667, 0.611, 0.556, 0.389, 0.278, 0.389, 0.66],
+    bold: [0.333, 0.333, 0.5, 0.66, 0.667, 1, 0.889, 0.278, 0.389, 0.389, 0.556, 0.66, 0.333, 0.333, 0.333, 0.278, 0.667, 0.667, 0.667, 0.667, 0.667, 0.667, 0.667, 0.667, 0.667, 0.667, 0.333, 0.333, 0.66, 0.66, 0.66, 0.611, 0.74, 0.778, 0.778, 0.778, 0.778, 0.722, 0.667, 0.833, 0.833, 0.389, 0.667, 0.833, 0.667, 0.944, 0.833, 0.833, 0.722, 0.833, 0.778, 0.722, 0.722, 0.833, 0.778, 1, 0.778, 0.778, 0.722, 0.389, 0.278, 0.389, 0.66, 0.5, 0.333, 0.667, 0.667, 0.667, 0.667, 0.667, 0.389, 0.667, 0.667, 0.333, 0.333, 0.667, 0.333, 1, 0.667, 0.667, 0.667, 0.667, 0.444, 0.611, 0.444, 0.667, 0.611, 0.944, 0.667, 0.611, 0.556, 0.389, 0.278, 0.389, 0.66]
+  },
+  "Georgia": {
+    normal: [0.241, 0.331, 0.412, 0.643, 0.61, 0.817, 0.71, 0.215, 0.375, 0.375, 0.472, 0.643, 0.27, 0.374, 0.27, 0.469, 0.614, 0.43, 0.559, 0.552, 0.565, 0.528, 0.566, 0.502, 0.596, 0.566, 0.313, 0.313, 0.643, 0.643, 0.643, 0.479, 0.929, 0.671, 0.654, 0.642, 0.749, 0.653, 0.599, 0.725, 0.815, 0.39, 0.518, 0.694, 0.604, 0.927, 0.767, 0.744, 0.61, 0.744, 0.702, 0.561, 0.619, 0.756, 0.667, 0.976, 0.71, 0.615, 0.602, 0.375, 0.469, 0.375, 0.643, 0.643, 0.5, 0.504, 0.56, 0.454, 0.574, 0.483, 0.325, 0.509, 0.582, 0.293, 0.292, 0.536, 0.286, 0.881, 0.591, 0.539, 0.571, 0.56, 0.41, 0.432, 0.345, 0.575, 0.497, 0.737, 0.505, 0.492, 0.444, 0.43, 0.375, 0.43, 0.643],
+    bold: [0.254, 0.376, 0.51, 0.703, 0.641, 0.879, 0.799, 0.269, 0.447, 0.447, 0.482, 0.703, 0.328, 0.379, 0.328, 0.472, 0.701, 0.49, 0.626, 0.625, 0.649, 0.599, 0.648, 0.554, 0.676, 0.648, 0.367, 0.367, 0.703, 0.703, 0.703, 0.548, 0.967, 0.758, 0.757, 0.715, 0.834, 0.721, 0.671, 0.807, 0.913, 0.446, 0.595, 0.817, 0.686, 1.023, 0.839, 0.82, 0.701, 0.82, 0.797, 0.649, 0.684, 0.833, 0.762, 1.126, 0.809, 0.732, 0.689, 0.447, 0.472, 0.447, 0.703, 0.703, 0.5, 0.596, 0.646, 0.531, 0.663, 0.572, 0.393, 0.577, 0.68, 0.354, 0.346, 0.632, 0.344, 1.016, 0.69, 0.636, 0.658, 0.648, 0.52, 0.513, 0.397, 0.677, 0.567, 0.863, 0.588, 0.562, 0.525, 0.5, 0.388, 0.5, 0.703]
+  },
+  "Comic Sans MS": {
+    normal: [0.299, 0.238, 0.424, 0.843, 0.693, 0.82, 0.654, 0.388, 0.366, 0.366, 0.53, 0.48, 0.277, 0.417, 0.249, 0.512, 0.61, 0.45, 0.61, 0.61, 0.61, 0.61, 0.61, 0.61, 0.61, 0.61, 0.299, 0.299, 0.381, 0.51, 0.381, 0.524, 0.931, 0.731, 0.63, 0.603, 0.722, 0.625, 0.607, 0.68, 0.768, 0.546, 0.665, 0.611, 0.551, 0.883, 0.797, 0.798, 0.521, 0.876, 0.628, 0.693, 0.68, 0.737, 0.65, 1.04, 0.724, 0.635, 0.693, 0.376, 0.55, 0.376, 0.581, 0.627, 0.556, 0.512, 0.593, 0.514, 0.587, 0.548, 0.508, 0.531, 0.578, 0.28, 0.403, 0.54, 0.274, 0.777, 0.523, 0.526, 0.535, 0.52, 0.48, 0.487, 0.471, 0.52, 0.486, 0.684, 0.59, 0.521, 0.538, 0.366, 0.421, 0.366, 0.598],
+    bold: [0.434, 0.238, 0.438, 0.843, 0.693, 0.82, 0.654, 0.434, 0.366, 0.366, 0.53, 0.61, 0.434, 0.61, 0.434, 0.512, 0.61, 0.61, 0.61, 0.61, 0.61, 0.61, 0.61, 0.61, 0.61, 0.61, 0.434, 0.434, 0.61, 0.61, 0.61, 0.566, 0.931, 0.731, 0.63, 0.619, 0.722, 0.625, 0.607, 0.68, 0.768, 0.546, 0.665, 0.611, 0.551, 0.883, 0.813, 0.798, 0.533, 0.876, 0.64, 0.693, 0.696, 0.737, 0.675, 1.04, 0.724, 0.635, 0.693, 0.376, 0.55, 0.376, 0.61, 0.627, 0.556, 0.556, 0.593, 0.514, 0.587, 0.559, 0.508, 0.531, 0.578, 0.28, 0.403, 0.54, 0.274, 0.777, 0.523, 0.526, 0.535, 0.52, 0.48, 0.487, 0.471, 0.52, 0.486, 0.684, 0.59, 0.553, 0.538, 0.366, 0.421, 0.366, 0.61]
+  },
+  "Chalkboard SE": {
+    normal: [0.382, 0.255, 0.453, 0.798, 0.579, 0.811, 0.708, 0.193, 0.315, 0.315, 0.498, 0.539, 0.255, 0.476, 0.295, 0.545, 0.569, 0.569, 0.569, 0.569, 0.569, 0.569, 0.569, 0.569, 0.569, 0.569, 0.285, 0.362, 0.425, 0.487, 0.442, 0.45, 0.817, 0.645, 0.57, 0.587, 0.636, 0.547, 0.501, 0.664, 0.622, 0.443, 0.55, 0.585, 0.518, 0.828, 0.656, 0.726, 0.579, 0.76, 0.624, 0.588, 0.569, 0.657, 0.646, 0.988, 0.655, 0.587, 0.656, 0.31, 0.519, 0.298, 0.483, 0.635, 0.295, 0.536, 0.559, 0.493, 0.514, 0.526, 0.432, 0.527, 0.544, 0.25, 0.388, 0.528, 0.301, 0.737, 0.51, 0.487, 0.528, 0.516, 0.438, 0.431, 0.457, 0.528, 0.465, 0.72, 0.557, 0.536, 0.535, 0.344, 0.252, 0.351, 0.639],
+    bold: [0.414, 0.299, 0.497, 0.842, 0.623, 0.855, 0.752, 0.238, 0.359, 0.359, 0.543, 0.583, 0.299, 0.52, 0.339, 0.589, 0.613, 0.613, 0.613, 0.613, 0.613, 0.613, 0.613, 0.613, 0.613, 0.613, 0.329, 0.407, 0.47, 0.531, 0.486, 0.494, 0.861, 0.667, 0.592, 0.609, 0.659, 0.569, 0.523, 0.686, 0.644, 0.465, 0.572, 0.607, 0.54, 0.85, 0.678, 0.748, 0.601, 0.782, 0.646, 0.61, 0.591, 0.68, 0.669, 1.01, 0.677, 0.609, 0.678, 0.355, 0.564, 0.343, 0.527, 0.68, 0.339, 0.558, 0.581, 0.515, 0.6, 0.548, 0.454, 0.549, 0.566, 0.272, 0.41, 0.55, 0.323, 0.759, 0.533, 0.509, 0.55, 0.538, 0.46, 0.453, 0.48, 0.55, 0.487, 0.743, 0.579, 0.558, 0.557, 0.388, 0.296, 0.396, 0.683]
+  },
+  "Marker Felt": {
+    normal: [0.25, 0.2, 0.31, 0.568, 0.53, 0.7, 0.56, 0.16, 0.26, 0.26, 0.465, 0.44, 0.19, 0.37, 0.19, 0.52, 0.57, 0.57, 0.57, 0.57, 0.57, 0.57, 0.57, 0.57, 0.57, 0.57, 0.23, 0.19, 0.38, 0.39, 0.38, 0.41, 0.906, 0.62, 0.49, 0.45, 0.49, 0.43, 0.42, 0.49, 0.5, 0.24, 0.43, 0.56, 0.42, 0.93, 0.6, 0.54, 0.45, 0.58, 0.57, 0.49, 0.48, 0.54, 0.54, 0.95, 0.61, 0.59, 0.6, 0.39, 0.522, 0.39, 0.3, 0.49, 0.21, 0.46, 0.43, 0.38, 0.43, 0.38, 0.36, 0.42, 0.47, 0.2, 0.21, 0.48, 0.2, 0.72, 0.49, 0.41, 0.43, 0.43, 0.38, 0.37, 0.36, 0.41, 0.44, 0.72, 0.41, 0.47, 0.48, 0.39, 0.204, 0.39, 0.33],
+    bold: [0.25, 0.22, 0.45, 0.75, 0.434, 0.63, 0.63, 0.22, 0.33, 0.33, 0.59, 0.54, 0.3, 0.49, 0.19, 0.61, 0.65, 0.65, 0.65, 0.65, 0.65, 0.65, 0.65, 0.65, 0.65, 0.65, 0.21, 0.21, 0.439, 0.51, 0.456, 0.48, 0.862, 0.66, 0.55, 0.54, 0.54, 0.48, 0.48, 0.58, 0.6, 0.24, 0.51, 0.57, 0.48, 0.94, 0.62, 0.63, 0.52, 0.61, 0.6, 0.51, 0.57, 0.57, 0.59, 0.88, 0.67, 0.65, 0.64, 0.46, 0.56, 0.46, 0.42, 0.76, 0.28, 0.51, 0.5, 0.45, 0.53, 0.45, 0.38, 0.46, 0.5, 0.24, 0.26, 0.51, 0.23, 0.79, 0.5, 0.48, 0.53, 0.5, 0.4, 0.41, 0.4, 0.5, 0.5, 0.7, 0.56, 0.56, 0.51, 0.38, 0.21, 0.38, 0.46]
+  },
+  "-apple-system": {
+    normal: [0.25, 0.333, 0.408, 0.5, 0.5, 0.833, 0.778, 0.18, 0.333, 0.333, 0.5, 0.564, 0.25, 0.333, 0.25, 0.278, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.278, 0.278, 0.564, 0.564, 0.564, 0.444, 0.921, 0.722, 0.667, 0.667, 0.722, 0.611, 0.556, 0.722, 0.722, 0.333, 0.389, 0.722, 0.611, 0.889, 0.722, 0.722, 0.556, 0.722, 0.667, 0.556, 0.611, 0.722, 0.722, 0.944, 0.722, 0.722, 0.611, 0.333, 0.278, 0.333, 0.469, 0.5, 0.333, 0.444, 0.5, 0.444, 0.5, 0.444, 0.333, 0.5, 0.5, 0.278, 0.278, 0.5, 0.278, 0.778, 0.5, 0.5, 0.5, 0.5, 0.333, 0.389, 0.278, 0.5, 0.5, 0.722, 0.5, 0.5, 0.444, 0.48, 0.2, 0.48, 0.541],
+    bold: [0.25, 0.333, 0.555, 0.5, 0.5, 1, 0.833, 0.278, 0.333, 0.333, 0.5, 0.57, 0.25, 0.333, 0.25, 0.278, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.333, 0.333, 0.57, 0.57, 0.57, 0.5, 0.93, 0.722, 0.667, 0.722, 0.722, 0.667, 0.611, 0.778, 0.778, 0.389, 0.5, 0.778, 0.667, 0.944, 0.722, 0.778, 0.611, 0.778, 0.722, 0.556, 0.667, 0.722, 0.722, 1, 0.722, 0.722, 0.667, 0.333, 0.278, 0.333, 0.581, 0.5, 0.333, 0.5, 0.556, 0.444, 0.556, 0.444, 0.333, 0.5, 0.556, 0.278, 0.333, 0.556, 0.278, 0.833, 0.556, 0.5, 0.556, 0.556, 0.444, 0.389, 0.333, 0.556, 0.5, 0.722, 0.5, 0.5, 0.444, 0.394, 0.22, 0.394, 0.52]
+  },
+  "BlinkMacSystemFont": {
+    normal: [0.205, 0.267, 0.403, 0.604, 0.604, 0.808, 0.669, 0.254, 0.322, 0.322, 0.4, 0.604, 0.215, 0.429, 0.215, 0.279, 0.606, 0.443, 0.566, 0.592, 0.604, 0.585, 0.617, 0.547, 0.6, 0.617, 0.215, 0.215, 0.604, 0.604, 0.604, 0.489, 0.875, 0.635, 0.604, 0.686, 0.679, 0.552, 0.528, 0.707, 0.699, 0.225, 0.495, 0.601, 0.524, 0.831, 0.699, 0.731, 0.578, 0.731, 0.599, 0.593, 0.581, 0.696, 0.631, 0.924, 0.635, 0.612, 0.617, 0.322, 0.279, 0.322, 0.604, 0.527, 0.5, 0.502, 0.554, 0.501, 0.554, 0.512, 0.304, 0.549, 0.539, 0.206, 0.205, 0.485, 0.204, 0.803, 0.527, 0.531, 0.549, 0.549, 0.308, 0.465, 0.301, 0.527, 0.483, 0.715, 0.468, 0.486, 0.468, 0.322, 0.216, 0.322, 0.604],
+    bold: [0.198, 0.316, 0.456, 0.639, 0.647, 0.89, 0.702, 0.27, 0.382, 0.382, 0.449, 0.647, 0.241, 0.441, 0.241, 0.303, 0.656, 0.48, 0.603, 0.63, 0.647, 0.625, 0.652, 0.572, 0.649, 0.652, 0.241, 0.241, 0.647, 0.647, 0.647, 0.534, 0.888, 0.692, 0.64, 0.712, 0.7, 0.573, 0.548, 0.727, 0.729, 0.265, 0.558, 0.653, 0.543, 0.861, 0.714, 0.752, 0.618, 0.752, 0.64, 0.631, 0.602, 0.708, 0.678, 0.965, 0.686, 0.665, 0.631, 0.382, 0.303, 0.382, 0.647, 0.576, 0.5, 0.547, 0.597, 0.545, 0.596, 0.555, 0.356, 0.593, 0.584, 0.241, 0.24, 0.538, 0.242, 0.863, 0.576, 0.573, 0.593, 0.593, 0.364, 0.515, 0.355, 0.576, 0.528, 0.79, 0.528, 0.539, 0.505, 0.382, 0.242, 0.382, 0.647]
+  },
+  "system-ui": {
+    normal: [0.205, 0.267, 0.403, 0.604, 0.604, 0.808, 0.669, 0.254, 0.322, 0.322, 0.4, 0.604, 0.215, 0.429, 0.215, 0.279, 0.606, 0.443, 0.566, 0.592, 0.604, 0.585, 0.617, 0.547, 0.6, 0.617, 0.215, 0.215, 0.604, 0.604, 0.604, 0.489, 0.875, 0.635, 0.604, 0.686, 0.679, 0.552, 0.528, 0.707, 0.699, 0.225, 0.495, 0.601, 0.524, 0.831, 0.699, 0.731, 0.578, 0.731, 0.599, 0.593, 0.581, 0.696, 0.631, 0.924, 0.635, 0.612, 0.617, 0.322, 0.279, 0.322, 0.604, 0.527, 0.5, 0.502, 0.554, 0.501, 0.554, 0.512, 0.304, 0.549, 0.539, 0.206, 0.205, 0.485, 0.204, 0.803, 0.527, 0.531, 0.549, 0.549, 0.308, 0.465, 0.301, 0.527, 0.483, 0.715, 0.468, 0.486, 0.468, 0.322, 0.216, 0.322, 0.604],
+    bold: [0.198, 0.316, 0.456, 0.639, 0.647, 0.89, 0.702, 0.27, 0.382, 0.382, 0.449, 0.647, 0.241, 0.441, 0.241, 0.303, 0.656, 0.48, 0.603, 0.63, 0.647, 0.625, 0.652, 0.572, 0.649, 0.652, 0.241, 0.241, 0.647, 0.647, 0.647, 0.534, 0.888, 0.692, 0.64, 0.712, 0.7, 0.573, 0.548, 0.727, 0.729, 0.265, 0.558, 0.653, 0.543, 0.861, 0.714, 0.752, 0.618, 0.752, 0.64, 0.631, 0.602, 0.708, 0.678, 0.965, 0.686, 0.665, 0.631, 0.382, 0.303, 0.382, 0.647, 0.576, 0.5, 0.547, 0.597, 0.545, 0.596, 0.555, 0.356, 0.593, 0.584, 0.241, 0.24, 0.538, 0.242, 0.863, 0.576, 0.573, 0.593, 0.593, 0.364, 0.515, 0.355, 0.576, 0.528, 0.79, 0.528, 0.539, 0.505, 0.382, 0.242, 0.382, 0.647]
+  },
+  "sans-serif": {
+    normal: [0.278, 0.278, 0.355, 0.556, 0.556, 0.889, 0.667, 0.191, 0.333, 0.333, 0.389, 0.584, 0.278, 0.333, 0.278, 0.278, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.278, 0.278, 0.584, 0.584, 0.584, 0.556, 1.015, 0.667, 0.667, 0.722, 0.722, 0.667, 0.611, 0.778, 0.722, 0.278, 0.5, 0.667, 0.556, 0.833, 0.722, 0.778, 0.667, 0.778, 0.722, 0.667, 0.611, 0.722, 0.667, 0.944, 0.667, 0.667, 0.611, 0.278, 0.278, 0.278, 0.469, 0.556, 0.333, 0.556, 0.556, 0.5, 0.556, 0.556, 0.278, 0.556, 0.556, 0.222, 0.222, 0.5, 0.222, 0.833, 0.556, 0.556, 0.556, 0.556, 0.333, 0.5, 0.278, 0.556, 0.5, 0.722, 0.5, 0.5, 0.5, 0.334, 0.26, 0.334, 0.584],
+    bold: [0.278, 0.333, 0.474, 0.556, 0.556, 0.889, 0.722, 0.238, 0.333, 0.333, 0.389, 0.584, 0.278, 0.333, 0.278, 0.278, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.556, 0.333, 0.333, 0.584, 0.584, 0.584, 0.611, 0.975, 0.722, 0.722, 0.722, 0.722, 0.667, 0.611, 0.778, 0.722, 0.278, 0.556, 0.722, 0.611, 0.833, 0.722, 0.778, 0.667, 0.778, 0.722, 0.667, 0.611, 0.722, 0.667, 0.944, 0.667, 0.667, 0.611, 0.333, 0.278, 0.333, 0.584, 0.556, 0.333, 0.556, 0.611, 0.556, 0.611, 0.556, 0.333, 0.611, 0.611, 0.278, 0.278, 0.556, 0.278, 0.889, 0.611, 0.611, 0.611, 0.611, 0.389, 0.556, 0.333, 0.611, 0.556, 0.778, 0.556, 0.556, 0.5, 0.389, 0.28, 0.389, 0.584]
+  },
+  "serif": {
+    normal: [0.25, 0.333, 0.408, 0.5, 0.5, 0.833, 0.778, 0.18, 0.333, 0.333, 0.5, 0.564, 0.25, 0.333, 0.25, 0.278, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.278, 0.278, 0.564, 0.564, 0.564, 0.444, 0.921, 0.722, 0.667, 0.667, 0.722, 0.611, 0.556, 0.722, 0.722, 0.333, 0.389, 0.722, 0.611, 0.889, 0.722, 0.722, 0.556, 0.722, 0.667, 0.556, 0.611, 0.722, 0.722, 0.944, 0.722, 0.722, 0.611, 0.333, 0.278, 0.333, 0.469, 0.5, 0.333, 0.444, 0.5, 0.444, 0.5, 0.444, 0.333, 0.5, 0.5, 0.278, 0.278, 0.5, 0.278, 0.778, 0.5, 0.5, 0.5, 0.5, 0.333, 0.389, 0.278, 0.5, 0.5, 0.722, 0.5, 0.5, 0.444, 0.48, 0.2, 0.48, 0.541],
+    bold: [0.25, 0.333, 0.555, 0.5, 0.5, 1, 0.833, 0.278, 0.333, 0.333, 0.5, 0.57, 0.25, 0.333, 0.25, 0.278, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.333, 0.333, 0.57, 0.57, 0.57, 0.5, 0.93, 0.722, 0.667, 0.722, 0.722, 0.667, 0.611, 0.778, 0.778, 0.389, 0.5, 0.778, 0.667, 0.944, 0.722, 0.778, 0.611, 0.778, 0.722, 0.556, 0.667, 0.722, 0.722, 1, 0.722, 0.722, 0.667, 0.333, 0.278, 0.333, 0.581, 0.5, 0.333, 0.5, 0.556, 0.444, 0.556, 0.444, 0.333, 0.5, 0.556, 0.278, 0.333, 0.556, 0.278, 0.833, 0.556, 0.5, 0.556, 0.556, 0.444, 0.389, 0.333, 0.556, 0.5, 0.722, 0.5, 0.5, 0.444, 0.394, 0.22, 0.394, 0.52]
+  },
+  "cursive": {
+    normal: [0.278, 0.256, 0.38, 0.556, 0.388, 0.734, 0.885, 0.207, 0.34, 0.34, 0.446, 0.556, 0.207, 0.362, 0.207, 0.434, 0.516, 0.431, 0.559, 0.461, 0.618, 0.483, 0.567, 0.509, 0.517, 0.567, 0.207, 0.207, 0.556, 0.556, 0.556, 0.364, 0.692, 0.717, 0.721, 0.623, 0.843, 0.731, 0.701, 0.662, 0.847, 0.457, 0.455, 0.801, 0.64, 0.991, 0.882, 0.686, 0.669, 0.692, 0.787, 0.525, 0.762, 0.854, 0.69, 0.898, 0.701, 0.645, 0.589, 0.316, 0.349, 0.316, 0.556, 0.556, 0.446, 0.513, 0.485, 0.383, 0.513, 0.372, 0.312, 0.466, 0.532, 0.296, 0.266, 0.462, 0.267, 0.789, 0.564, 0.429, 0.498, 0.485, 0.417, 0.355, 0.354, 0.561, 0.451, 0.627, 0.501, 0.542, 0.412, 0.348, 0.204, 0.348, 0.556],
+    bold: [0.278, 0.256, 0.38, 0.556, 0.388, 0.734, 0.885, 0.207, 0.34, 0.34, 0.446, 0.556, 0.207, 0.362, 0.207, 0.434, 0.516, 0.431, 0.559, 0.461, 0.618, 0.483, 0.567, 0.509, 0.517, 0.567, 0.207, 0.207, 0.556, 0.556, 0.556, 0.364, 0.692, 0.717, 0.721, 0.623, 0.843, 0.731, 0.701, 0.662, 0.847, 0.457, 0.455, 0.801, 0.64, 0.991, 0.882, 0.686, 0.669, 0.692, 0.787, 0.525, 0.762, 0.854, 0.69, 0.898, 0.701, 0.645, 0.589, 0.316, 0.349, 0.316, 0.556, 0.556, 0.446, 0.513, 0.485, 0.383, 0.513, 0.372, 0.312, 0.466, 0.532, 0.296, 0.266, 0.462, 0.267, 0.789, 0.564, 0.429, 0.498, 0.485, 0.417, 0.355, 0.354, 0.561, 0.451, 0.627, 0.501, 0.542, 0.412, 0.348, 0.204, 0.348, 0.556]
   }
-  if (zeroClass === "arbitrary") {
-    if (isBarLike && values && values.length > 0) {
-      const dataMin = Math.min(...values);
-      if (dataMin <= 0) {
-        return { zero: true, domainPadFraction: 0, zeroClass, forced: true, uncertain: false };
-      }
-    }
-    return {
-      zero: false,
-      domainPadFraction: entry.zeroPad || 0.05,
-      zeroClass,
-      forced: false,
-      uncertain: false
-    };
-  }
-  if (zeroClass === "contextual" && values && values.length > 0) {
-    const dataMin = Math.min(...values);
-    const dataMax = Math.max(...values);
-    if (dataMin <= 0) {
-      return { zero: true, domainPadFraction: 0, zeroClass, forced: true, uncertain: false };
-    }
-    const proximity = dataMax > 0 ? dataMin / dataMax : 0;
-    if (proximity < 0.3) {
-      return { zero: true, domainPadFraction: 0, zeroClass, forced: false, uncertain: false };
-    }
-    if (isBarLike) {
-      return { zero: true, domainPadFraction: 0, zeroClass, forced: true, uncertain: false };
-    }
-    return { zero: false, domainPadFraction: 0.05, zeroClass, forced: false, uncertain: false };
-  }
-  if (isBarLike && isPositional) {
-    return { zero: true, domainPadFraction: 0, zeroClass: "unknown", forced: true, uncertain: false };
-  }
-  return { zero: false, domainPadFraction: 0.05, zeroClass: "unknown", forced: true, uncertain: false };
-}
-function computePaddedDomain(values, padFraction) {
-  if (padFraction <= 0 || values.length < 2) return null;
-  const dataMin = Math.min(...values);
-  const dataMax = Math.max(...values);
-  const span = dataMax - dataMin;
-  if (span <= 0) return null;
-  const padding = span * padFraction;
-  return [dataMin - padding, dataMax + padding];
-}
-function getRecommendedColorScheme(semanticType, encodingType, uniqueValueCount = 10, fieldName = "", values = [], colorHint) {
-  const pickScheme = (schemes, name) => {
-    let hash = 0;
-    for (let i = 0; i < name.length; i++) {
-      hash = (hash << 5) - hash + name.charCodeAt(i);
-      hash = hash & hash;
-    }
-    return schemes[Math.abs(hash) % schemes.length];
-  };
-  if (!semanticType) {
-    if (encodingType === "quantitative") {
-      return { scheme: "viridis", type: "sequential", reason: "default for quantitative" };
-    }
-    if (encodingType === "ordinal") {
-      return { scheme: "blues", type: "sequential", reason: "default for ordinal" };
-    }
-    return {
-      scheme: uniqueValueCount > 10 ? "tableau20" : "tableau10",
-      type: "categorical",
-      reason: "default for categorical"
-    };
-  }
-  if (semanticType === "Temperature") {
-    if (colorHint?.type === "diverging") {
-      return { scheme: "redblue", type: "diverging", reason: "temperature diverging around freezing point" };
-    }
-    return { scheme: "reds", type: "sequential", reason: "temperature single-direction uses sequential" };
-  }
-  if (semanticType === "Percentage") {
-    if (colorHint?.type === "diverging") {
-      return { scheme: "redblue", type: "diverging", reason: "percentage spans positive and negative" };
-    }
-    return { scheme: "oranges", type: "sequential", reason: "percentage all same sign uses sequential" };
-  }
-  if (["Price", "Amount"].includes(semanticType)) {
-    if (colorHint?.type === "diverging") {
-      return { scheme: "redblue", type: "diverging", reason: "financial data spans positive and negative" };
-    }
-    return { scheme: "goldgreen", type: "sequential", reason: "financial data uses gold-green" };
-  }
-  if (semanticType === "Score") {
-    if (colorHint?.type === "diverging") {
-      return { scheme: "redblue", type: "diverging", reason: "score/rating diverging around midpoint" };
-    }
-    return { scheme: "yelloworangebrown", type: "sequential", reason: "scores use warm sequential" };
-  }
-  if (semanticType === "Rank") {
-    return { scheme: "purples", type: "sequential", reason: "ranks use single-hue sequential" };
-  }
-  if (semanticType === "Range") {
-    return { scheme: "blues", type: "sequential", reason: "range groups use sequential" };
-  }
-  if (ordinalTypes.has(semanticType) && ["Year", "Quarter", "Month", "Week", "Day", "Hour", "Decade"].includes(semanticType)) {
-    return { scheme: "viridis", type: "sequential", reason: "temporal granules use perceptually uniform" };
-  }
-  if (getRegistryEntry(semanticType ?? "").t1 === "GeoPlace") {
-    if (uniqueValueCount <= 10) {
-      return { scheme: "set2", type: "categorical", reason: "geographic regions use distinct pastels" };
-    }
-    return { scheme: "tableau20", type: "categorical", reason: "many regions use large categorical" };
-  }
-  if (["Status", "Boolean"].includes(semanticType)) {
-    return { scheme: "set1", type: "categorical", reason: "status uses high-contrast categorical" };
-  }
-  if (semanticType === "Category") {
-    return {
-      scheme: uniqueValueCount > 10 ? "tableau20" : "tableau10",
-      type: "categorical",
-      reason: "categories use standard categorical"
-    };
-  }
-  if (semanticType === "Name") {
-    return {
-      scheme: uniqueValueCount > 8 ? "tableau20" : "set2",
-      type: "categorical",
-      reason: "names use readable categorical"
-    };
-  }
-  if (semanticType === "Duration") {
-    return { scheme: "oranges", type: "sequential", reason: "duration uses intensity-based sequential" };
-  }
-  if (measureTypes.has(semanticType)) {
-    if (colorHint?.type === "diverging") {
-      return { scheme: "redblue", type: "diverging", reason: "measure with diverging nature" };
-    }
-    const sequentialSchemes = ["viridis", "blues", "greens", "reds", "yelloworangebrown", "goldgreen"];
-    return {
-      scheme: pickScheme(sequentialSchemes, fieldName),
-      type: "sequential",
-      reason: "measures use perceptually uniform sequential"
-    };
-  }
-  if (ordinalTypes.has(semanticType) || encodingType === "ordinal") {
-    const ordinalSchemes = ["blues", "greens", "purples", "oranges"];
-    return {
-      scheme: pickScheme(ordinalSchemes, fieldName),
-      type: "sequential",
-      reason: "ordinal data uses sequential scheme"
-    };
-  }
-  if (encodingType === "nominal" || encodingType === "temporal") {
-    return {
-      scheme: uniqueValueCount > 10 ? "tableau20" : "tableau10",
-      type: "categorical",
-      reason: "default categorical palette"
-    };
-  }
-  return { scheme: "viridis", type: "sequential", reason: "universal fallback" };
-}
-var MONTH_FULL = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-var MONTH_ABBR3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-var MONTH_NUM = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
-var DOW_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-var DOW_ABBR3 = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-var DOW_ABBR2 = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
-var DOW_FULL_SUN = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-var DOW_ABBR3_SUN = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-var QUARTER_LABELS = ["Q1", "Q2", "Q3", "Q4"];
-var COMPASS_8 = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
-var COMPASS_8_FULL = ["North", "Northeast", "East", "Southeast", "South", "Southwest", "West", "Northwest"];
-var COMPASS_4 = ["N", "E", "S", "W"];
-var COMPASS_4_FULL = ["North", "East", "South", "West"];
-var ORDINAL_SEQUENCES = {
-  Month: [
-    { labels: MONTH_FULL, caseInsensitive: true },
-    { labels: MONTH_ABBR3, caseInsensitive: true },
-    { labels: MONTH_NUM, caseInsensitive: false }
-  ],
-  Day: [
-    { labels: DOW_FULL, caseInsensitive: true },
-    { labels: DOW_ABBR3, caseInsensitive: true },
-    { labels: DOW_ABBR2, caseInsensitive: true },
-    { labels: DOW_FULL_SUN, caseInsensitive: true },
-    { labels: DOW_ABBR3_SUN, caseInsensitive: true }
-  ],
-  Quarter: [
-    { labels: QUARTER_LABELS, caseInsensitive: true }
-  ],
-  Direction: [
-    { labels: COMPASS_8, caseInsensitive: true },
-    { labels: COMPASS_8_FULL, caseInsensitive: true },
-    { labels: COMPASS_4, caseInsensitive: true },
-    { labels: COMPASS_4_FULL, caseInsensitive: true }
-  ]
 };
-function buildLookup(seq) {
-  const m = /* @__PURE__ */ new Map();
-  for (let i = 0; i < seq.labels.length; i++) {
-    const key = seq.caseInsensitive ? seq.labels[i].toLowerCase() : seq.labels[i];
-    m.set(key, i);
-  }
-  return m;
-}
-function matchSequence(values, sequences) {
-  const uniqueValues = [...new Set(values.map((v) => v != null ? String(v) : ""))].filter((v) => v !== "");
-  if (uniqueValues.length === 0) return void 0;
-  for (const seq of sequences) {
-    const lookup = buildLookup(seq);
-    const matched = [];
-    const unmatched = [];
-    for (const val of uniqueValues) {
-      const key = seq.caseInsensitive ? val.toLowerCase() : val;
-      const idx = lookup.get(key);
-      if (idx !== void 0) {
-        matched.push({ value: val, index: idx });
-      } else {
-        unmatched.push(val);
-      }
-    }
-    if (matched.length >= uniqueValues.length * 0.6 && matched.length >= 2) {
-      matched.sort((a, b) => a.index - b.index);
-      const result = matched.map((m) => m.value);
-      result.push(...unmatched);
-      return result;
-    }
-  }
-  return void 0;
-}
-function inferOrdinalSortOrder(semanticType, values) {
-  const sequences = ORDINAL_SEQUENCES[semanticType];
-  if (sequences) {
-    return matchSequence(values, sequences);
-  }
-  if (!semanticType || semanticType === "Category" || semanticType === "Unknown") {
-    for (const seqs of Object.values(ORDINAL_SEQUENCES)) {
-      const result = matchSequence(values, seqs);
-      if (result) return result;
-    }
-  }
-  return void 0;
-}
 
-// src/core/field-semantics.ts
-function toTypeString(input) {
-  if (!input) return "";
-  if (typeof input === "string") return input;
-  return input.semanticType || "";
-}
-function normalizeAnnotation(input) {
-  if (!input) return { semanticType: "Unknown" };
-  if (typeof input === "string") return { semanticType: input || "Unknown" };
-  return { ...input, semanticType: input.semanticType || "Unknown" };
-}
-var CURRENCY_MAP = {
-  USD: "$",
-  EUR: "\u20AC",
-  GBP: "\xA3",
-  JPY: "\xA5",
-  CNY: "\xA5",
-  KRW: "\u20A9",
-  INR: "\u20B9",
-  BRL: "R$",
-  CAD: "CA$",
-  AUD: "A$",
-  CHF: "CHF",
-  SEK: "kr",
-  NOK: "kr",
-  DKK: "kr"
-};
-var UNIT_SUFFIX_MAP = {
-  // Temperature
-  "\xB0C": "\xB0C",
-  "\xB0F": "\xB0F",
-  C: "\xB0C",
-  F: "\xB0F",
-  // Mass
-  kg: " kg",
-  lb: " lb",
-  // Distance
-  km: " km",
-  mi: " mi",
-  m: " m",
-  ft: " ft",
-  // Speed
-  "km/h": " km/h",
-  mph: " mph",
-  // Time
-  sec: " s",
-  min: " min",
-  hr: " hr",
-  seconds: " s",
-  minutes: " min",
-  hours: " hr",
-  // Percentage (handled by formatClass, but allow explicit suffix)
-  "%": "%"
-};
-function detectPercentageRepresentation(values) {
-  if (values.length === 0) return "0-100";
-  const abs = values.map(Math.abs);
-  const countBelow1 = abs.filter((v) => v <= 1).length;
-  if (countBelow1 / abs.length >= 0.8) return "0-1";
-  return "0-100";
-}
-function detectPrecision(values) {
-  let maxDecimals = 0;
-  for (const v of values) {
-    if (!Number.isFinite(v)) continue;
-    const s = v.toFixed(10);
-    const dot = s.indexOf(".");
-    if (dot === -1) continue;
-    let end = s.length - 1;
-    while (end > dot && s[end] === "0") end--;
-    const decimals = end > dot ? end - dot : 0;
-    if (decimals > maxDecimals) maxDecimals = decimals;
-  }
-  return Math.min(maxDecimals, 4);
-}
-function precisionFormat(values, useGrouping = true, signMode = "") {
-  const p = detectPrecision(values);
-  const group = useGrouping ? "," : "";
-  if (p === 0) return `${signMode}${group}d`;
-  return `${signMode}${group}.${p}f`;
-}
-function resolveFormat(semanticType, annotation, values) {
-  const entry = getRegistryEntry(semanticType);
-  const unit = annotation.unit;
-  const currencyPrefix = unit ? CURRENCY_MAP[unit.toUpperCase()] ?? CURRENCY_MAP[unit] : void 0;
-  const unitSuffix = unit ? UNIT_SUFFIX_MAP[unit] : void 0;
-  const nums = values.filter((v) => typeof v === "number" && !isNaN(v));
-  switch (entry.formatClass) {
-    case "currency": {
-      const pfx = currencyPrefix;
-      if (pfx) {
-        const axisPattern = semanticType === "Price" ? ",.2f" : precisionFormat(nums);
-        return {
-          format: { pattern: axisPattern, prefix: pfx },
-          tooltipFormat: { pattern: ",.2f", prefix: pfx }
-        };
-      }
-      return { tooltipFormat: { pattern: ",.2f" } };
+// src/core/text-width.ts
+var isCJK = (code) => code >= 12288 && code <= 12351 || code >= 13312 && code <= 40959 || code >= 63744 && code <= 64255 || code >= 65280 && code <= 65519;
+var families = /* @__PURE__ */ new Map();
+function knownFamily(font) {
+  const stack = font ?? "sans-serif";
+  if (families.has(stack)) return families.get(stack);
+  let known;
+  for (const entry of stack.split(",")) {
+    const family = entry.trim().replace(/^['"]|['"]$/g, "");
+    if (TEXT_WIDTHS[family]) {
+      known = family;
+      break;
     }
-    case "percent": {
-      if (!annotation.intrinsicDomain) {
-        return { tooltipFormat: { pattern: precisionFormat(nums) } };
+  }
+  families.set(stack, known);
+  return known;
+}
+var measured = /* @__PURE__ */ new Map();
+var MEASURED_LIMIT = 2e4;
+function textWidth(text, fontSize, font, weight = "normal") {
+  return emMeasurer(font, weight)(text) * fontSize;
+}
+function emMeasurer(font, weight) {
+  const family = knownFamily(font);
+  const bold = weight === "bold" || Number(weight) >= 600;
+  const key = `${family ?? ""}|${bold}`;
+  let byText = measured.get(key);
+  if (!byText) measured.set(key, byText = /* @__PURE__ */ new Map());
+  const cache = byText;
+  const widths = family ? TEXT_WIDTHS[family][bold ? "bold" : "normal"] : void 0;
+  return (text) => {
+    let em = cache.get(text);
+    if (em === void 0) {
+      em = 0;
+      for (const char of text) {
+        const code = char.charCodeAt(0);
+        em += isCJK(code) ? 1 : widths && code >= 32 && code < 127 ? widths[code - 32] : 0.62;
       }
-      const rep = detectPercentageRepresentation(nums);
-      if (rep === "0-1") {
-        const p = detectPrecision(nums);
-        const axisP = Math.max(0, p - 2);
-        const tipP = Math.min(axisP + 1, 4);
-        return {
-          format: { pattern: `.${axisP}~%` },
-          tooltipFormat: { pattern: `.${tipP}%` }
-        };
-      }
-      return {
-        tooltipFormat: { pattern: precisionFormat(nums, false), suffix: "%" }
-      };
+      if (cache.size >= MEASURED_LIMIT) cache.clear();
+      cache.set(text, em);
     }
-    case "unit-suffix":
-      return {
-        tooltipFormat: unitSuffix ? { pattern: precisionFormat(nums), suffix: unitSuffix } : { pattern: precisionFormat(nums) }
-      };
-    case "integer":
-      if (semanticType === "Year" || semanticType === "Decade") {
-        return {};
-      }
-      return { tooltipFormat: { pattern: ",d" } };
-    case "decimal":
-      return { tooltipFormat: { pattern: precisionFormat(nums) } };
-    case "plain":
-    default:
-      return {};
-  }
-}
-function resolveDefaultVisType(semanticType, values) {
-  if (!isRegistered(semanticType)) {
-    return inferVisCategory(values);
-  }
-  const entry = getRegistryEntry(semanticType);
-  const candidates = entry.visEncodings;
-  if (candidates.length === 1) {
-    if (candidates[0] === "quantitative") {
-      const nonNull = values.filter((v) => v != null);
-      const allNumeric = nonNull.length > 0 && nonNull.every((v) => typeof v === "number" || typeof v === "string" && !isNaN(+v) && v.trim() !== "");
-      if (!allNumeric) {
-        return inferVisCategory(values);
-      }
-    }
-    return candidates[0];
-  }
-  if (candidates.includes("quantitative") && candidates.includes("ordinal")) {
-    const distinct = new Set(values.filter((v) => v != null)).size;
-    return distinct <= 12 ? "ordinal" : "quantitative";
-  }
-  if (candidates.includes("temporal") && candidates.includes("ordinal")) {
-    const distinct = new Set(values.filter((v) => v != null)).size;
-    return distinct <= 6 ? "ordinal" : "temporal";
-  }
-  if (candidates.includes("geographic") && candidates.includes("quantitative")) {
-    return "quantitative";
-  }
-  return candidates[0];
-}
-function resolveAggregationDefault(semanticType) {
-  const entry = getRegistryEntry(semanticType);
-  switch (entry.aggRole) {
-    case "additive":
-      return "sum";
-    case "signed-additive":
-      return "sum";
-    case "intensive":
-      return "average";
-    case "dimension":
-      return void 0;
-    case "identifier":
-      return void 0;
-    default:
-      return void 0;
-  }
-}
-function resolveZeroClassFromAnnotation(semanticType, domain) {
-  if (domain && domain[0] > 0) return "arbitrary";
-  return getZeroClass(semanticType);
-}
-function resolveScaleType(semanticType, values) {
-  const entry = getRegistryEntry(semanticType);
-  const eligible = entry.aggRole === "additive" && entry.domainShape === "open" && entry.t1 !== "GenericMeasure";
-  if (!eligible) return void 0;
-  if (values.length < 10) return void 0;
-  const filtered = values.filter((v) => typeof v === "number" && !isNaN(v) && isFinite(v));
-  if (filtered.length < 10) return void 0;
-  const min = Math.min(...filtered);
-  const max = Math.max(...filtered);
-  if (max <= 0 || min === max) return void 0;
-  if (min < 0) return void 0;
-  const positiveMin = Math.min(...filtered.filter((v) => v > 0));
-  if (positiveMin > 0 && max / positiveMin >= 1e6) {
-    const hasZeros = filtered.some((v) => v === 0);
-    return hasZeros ? "symlog" : "log";
-  }
-  return void 0;
-}
-function mergeIntrinsicWithData(intrinsic, values, hard) {
-  if (hard) {
-    return { min: intrinsic[0], max: intrinsic[1], clamp: true };
-  }
-  const nums = values.filter((v) => typeof v === "number" && !isNaN(v));
-  if (nums.length === 0) {
-    return { min: intrinsic[0], max: intrinsic[1], clamp: false };
-  }
-  const dataMin = Math.min(...nums);
-  const dataMax = Math.max(...nums);
-  return {
-    min: Math.min(intrinsic[0], dataMin),
-    max: Math.max(intrinsic[1], dataMax),
-    clamp: false
+    return em;
   };
 }
-function snapToBoundHeuristic(intrinsic, values) {
-  const nums = values.filter((v) => typeof v === "number" && !isNaN(v));
-  if (nums.length === 0) return void 0;
-  const [lo, hi] = intrinsic;
-  const range = hi - lo;
-  if (range <= 0) return void 0;
-  const dataMin = Math.min(...nums);
-  const dataMax = Math.max(...nums);
-  const zeroInside = lo < 0 && hi > 0;
-  const thresholdLo = 0.25 * (zeroInside ? 0 - lo : range);
-  const thresholdHi = 0.25 * (zeroInside ? hi : range);
-  let snapMin;
-  let snapMax;
-  if (dataMin >= lo && dataMin <= lo + thresholdLo) {
-    snapMin = lo;
-  }
-  if (dataMax <= hi && dataMax >= hi - thresholdHi) {
-    snapMax = hi;
-  }
-  if (snapMin === void 0 && snapMax === void 0) return void 0;
-  return { min: snapMin, max: snapMax, clamp: false };
-}
-function resolveDomainConstraint(semanticType, annotation, values) {
-  const entry = getRegistryEntry(semanticType);
-  if (annotation.intrinsicDomain) {
-    if (entry.t1 === "Proportion" || entry.t1 === "SignedMeasure") {
-      return snapToBoundHeuristic(annotation.intrinsicDomain, values);
-    }
-    return mergeIntrinsicWithData(annotation.intrinsicDomain, values, false);
-  }
-  if (semanticType === "Latitude") return mergeIntrinsicWithData([-90, 90], values, true);
-  if (semanticType === "Longitude") return mergeIntrinsicWithData([-180, 180], values, true);
-  if (semanticType === "Correlation") return mergeIntrinsicWithData([-1, 1], values, true);
-  if (semanticType === "Percentage") {
-    const nums = values.filter((v) => typeof v === "number" && !isNaN(v));
-    if (nums.length > 0) {
-      const rep = detectPercentageRepresentation(nums);
-      const M = rep === "0-1" ? 1 : 100;
-      return snapToBoundHeuristic([0, M], values);
-    }
-  }
-  return void 0;
-}
-function resolveTickConstraint(semanticType, domain) {
-  const entry = getRegistryEntry(semanticType);
-  if (entry.formatClass === "integer") {
-    const tc = { integersOnly: true, minStep: 1 };
-    if (domain) {
-      const span = domain[1] - domain[0];
-      if (span <= 20 && span > 0) {
-        tc.exactTicks = [];
-        for (let i = domain[0]; i <= domain[1]; i++) {
-          tc.exactTicks.push(i);
-        }
-      }
-    }
-    return tc;
-  }
-  if (semanticType === "Score" && domain) {
-    const span = domain[1] - domain[0];
-    if (span >= 2) {
-      const tc = { integersOnly: true, minStep: 1 };
-      if (span <= 20) {
-        tc.exactTicks = [];
-        for (let i = domain[0]; i <= domain[1]; i++) {
-          tc.exactTicks.push(i);
-        }
-      }
-      return tc;
-    }
-  }
-  return void 0;
-}
-function resolveCanonicalOrder(semanticType, annotation, values) {
-  if (annotation.sortOrder && annotation.sortOrder.length > 0) {
-    return annotation.sortOrder;
-  }
-  return inferOrdinalSortOrder(semanticType, values);
-}
-function resolveCyclic(semanticType) {
-  const entry = getRegistryEntry(semanticType);
-  return entry.domainShape === "cyclic";
-}
-function resolveReversed(semanticType, channel) {
-  if (semanticType === "Rank") {
-    return channel !== "x";
-  }
-  return false;
-}
-function resolveNice(semanticType, domainConstraint) {
-  if (domainConstraint?.clamp) return false;
-  if (domainConstraint && domainConstraint.min !== void 0 && domainConstraint.max !== void 0) {
-    return false;
-  }
-  const entry = getRegistryEntry(semanticType);
-  if (entry.domainShape === "fixed") return false;
-  return true;
-}
-function resolveDivergingInfo(semanticType, annotation, values) {
-  const entry = getRegistryEntry(semanticType);
-  if (semanticType === "Temperature" && annotation.unit) {
-    const unitMidpoints = {
-      "\xB0C": 0,
-      "\xB0F": 32,
-      "K": 273.15,
-      C: 0,
-      F: 32
-    };
-    const mid = unitMidpoints[annotation.unit];
-    if (mid !== void 0) {
-      return { midpoint: mid, inherent: false, source: "unit" };
-    }
-  }
-  if (entry.diverging === "inherent") {
-    return { midpoint: 0, inherent: true, source: "type-intrinsic" };
-  }
-  if (entry.diverging === "conditional") {
-    return { midpoint: 0, inherent: false, source: "type-intrinsic" };
-  }
-  if (annotation.intrinsicDomain) {
-    return {
-      midpoint: (annotation.intrinsicDomain[0] + annotation.intrinsicDomain[1]) / 2,
-      inherent: false,
-      source: "domain"
-    };
-  }
-  if (values.length > 0) {
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    if (min < 0 && max > 0) {
-      return { midpoint: 0, inherent: false, source: "data" };
-    }
-  }
-  return void 0;
-}
-function resolveColorSchemeHint(semanticType, annotation, values) {
-  const entry = getRegistryEntry(semanticType);
-  const nums = values.filter((v) => typeof v === "number" && !isNaN(v));
-  const divInfo = resolveDivergingInfo(semanticType, annotation, nums);
-  if (divInfo) {
-    const min = nums.length > 0 ? Math.min(...nums) : 0;
-    const max = nums.length > 0 ? Math.max(...nums) : 0;
-    const spansBothSides = min < divInfo.midpoint && max > divInfo.midpoint;
-    if (divInfo.inherent || spansBothSides) {
-      return {
-        type: "diverging",
-        divergingMidpoint: divInfo.midpoint,
-        inherentlyDiverging: divInfo.inherent
-      };
-    }
-  }
-  if (entry.visEncodings.includes("quantitative")) {
-    return { type: "sequential" };
-  }
-  return { type: "categorical" };
-}
-function resolveBinningSuggested(semanticType, domain) {
-  const entry = getRegistryEntry(semanticType);
-  if (!entry.visEncodings.includes("quantitative")) return false;
-  if (entry.aggRole === "identifier" || entry.aggRole === "dimension") return false;
-  if (semanticType === "Year" || semanticType === "Decade") return false;
-  if (domain && domain[1] - domain[0] <= 20) return false;
-  if (semanticType === "Score" && !domain) return false;
-  return true;
-}
-function resolveStackable(semanticType) {
-  const entry = getRegistryEntry(semanticType);
-  switch (entry.aggRole) {
-    case "additive":
-      return "sum";
-    case "signed-additive":
-      return "sum";
-    case "intensive":
-      if (semanticType === "Percentage") return "normalize";
-      return false;
-    case "dimension":
-      return false;
-    case "identifier":
-      return false;
-    default:
-      return false;
-  }
-}
-function resolveSortDirection(semanticType) {
-  if (semanticType === "Rank") return "descending";
-  return "ascending";
-}
-function resolveFieldSemantics(input, fieldName, values) {
-  const annotation = normalizeAnnotation(input);
-  const semanticType = annotation.semanticType;
-  const numericValues = values.filter((v) => typeof v === "number" && !isNaN(v) && isFinite(v));
-  const defaultVisType = resolveDefaultVisType(semanticType, values);
-  const { format, tooltipFormat } = resolveFormat(semanticType, annotation, values);
-  let aggregationDefault = resolveAggregationDefault(semanticType);
-  let zeroClass = resolveZeroClassFromAnnotation(semanticType, annotation.intrinsicDomain);
-  const scaleType = resolveScaleType(semanticType, numericValues);
-  const domainConstraint = resolveDomainConstraint(semanticType, annotation, values);
-  const canonicalOrder = resolveCanonicalOrder(semanticType, annotation, values);
-  const cyclic = resolveCyclic(semanticType);
-  let binningSuggested = resolveBinningSuggested(semanticType, annotation.intrinsicDomain);
-  const sortDirection = resolveSortDirection(semanticType);
-  if (!isRegistered(semanticType) && defaultVisType === "quantitative") {
-    if (!aggregationDefault) aggregationDefault = "sum";
-    if (zeroClass === "unknown") zeroClass = "meaningful";
-    binningSuggested = true;
-  }
-  return {
-    semanticAnnotation: annotation,
-    defaultVisType,
-    format,
-    tooltipFormat,
-    aggregationDefault,
-    zeroClass,
-    scaleType: scaleType ?? void 0,
-    domainConstraint,
-    canonicalOrder,
-    cyclic,
-    sortDirection,
-    binningSuggested
-  };
-}
+var tableTextMeasurer = (fontSize, font, weight) => {
+  const em = emMeasurer(font, weight);
+  return (text) => em(text) * fontSize;
+};
 
-// src/core/decisions.ts
-function visCategoryToVLType(vc) {
-  switch (vc) {
-    case "quantitative":
-      return "quantitative";
-    case "ordinal":
-      return "ordinal";
-    case "temporal":
-      return "temporal";
-    case "geographic":
-      return "quantitative";
-    case "nominal":
-    default:
-      return "nominal";
+// src/core/calendar-labels.ts
+var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function calendarLabels(values) {
+  if (values.length < 2) return void 0;
+  const times = [];
+  for (const value of values) {
+    const time = snapshotTime(value);
+    if (time === void 0) return void 0;
+    times.push(time);
   }
-}
-function validateTemporalParsing(data, fieldName, fromRegistry) {
-  const sampleValues = data.map((r) => r[fieldName]).slice(0, 15).filter((v) => v != null);
-  if (sampleValues.length === 0) return false;
-  const uniqueValues = new Set(sampleValues.map(String));
-  if (uniqueValues.size <= 1) return false;
-  const looksTemporalValue = (val) => {
-    if (val instanceof Date) return true;
-    if (typeof val === "number") {
-      if (val >= 1500 && val <= 2200 && val % 1 === 0) return true;
-      if (val > 864e5 && val < 42e11) return true;
-      return false;
-    }
-    if (typeof val === "string") {
-      const trimmed = val.trim();
-      if (!trimmed) return false;
-      if (/^\d{4}$/.test(trimmed)) return true;
-      return !Number.isNaN(Date.parse(trimmed));
-    }
-    return false;
-  };
-  const passingCount = sampleValues.filter(looksTemporalValue).length;
-  const minFraction = fromRegistry ? 0.3 : 0.5;
-  return passingCount / sampleValues.length >= minFraction;
-}
-function resolveTemporalEncoding(visCategory, channel, data, fieldName, fromRegistry) {
-  if (["size", "column", "row"].includes(channel)) {
-    return { vlType: "ordinal", visCategory, channelOverride: true, cardinalityGuard: false };
-  }
-  if (channel === "color") {
-    const uniqueCount = new Set(data.map((r) => r[fieldName])).size;
-    if (uniqueCount <= 12) {
-      return { vlType: "ordinal", visCategory, channelOverride: true, cardinalityGuard: false };
-    }
-  }
-  if (!validateTemporalParsing(data, fieldName, fromRegistry)) {
-    return { vlType: "ordinal", visCategory, channelOverride: false, cardinalityGuard: false };
-  }
-  return { vlType: "temporal", visCategory, channelOverride: false, cardinalityGuard: false };
-}
-function applyOrdinalGuards(visCategory, channel, data, fieldName, fieldValues, fromRegistry) {
-  const numericVals = fieldValues.filter((v) => v != null && !isNaN(+v)).map(Number);
-  if (numericVals.length > 0) {
-    const uniqueCount = new Set(numericVals).size;
-    const hasFractions = numericVals.some((v) => v % 1 !== 0);
-    if (!fromRegistry && hasFractions && uniqueCount > 20) {
-      return { vlType: "quantitative", visCategory, channelOverride: false, cardinalityGuard: true };
-    }
-    if (!hasFractions && uniqueCount > 12 && ["color", "group"].includes(channel)) {
-      return { vlType: "quantitative", visCategory, channelOverride: true, cardinalityGuard: true };
-    }
-    if (!hasFractions && uniqueCount > 12 && ["x", "y"].includes(channel)) {
-      return { vlType: "quantitative", visCategory, channelOverride: true, cardinalityGuard: true };
-    }
-  }
-  return { vlType: "ordinal", visCategory, channelOverride: false, cardinalityGuard: false };
-}
-function disambiguateMultiEncoding(candidates, channel, data, fieldName, fieldValues) {
-  const has = (vc) => candidates.includes(vc);
-  if (has("temporal") && has("ordinal")) {
-    return resolveTemporalEncoding("temporal", channel, data, fieldName, true);
-  }
-  if (has("quantitative") && has("ordinal")) {
-    if (["color", "group"].includes(channel)) {
-      const uniqueCount = new Set(data.map((r) => r[fieldName])).size;
-      if (uniqueCount <= 12) {
-        return { vlType: "ordinal", visCategory: "ordinal", channelOverride: false, cardinalityGuard: false };
-      }
-      return { vlType: "quantitative", visCategory: "quantitative", channelOverride: false, cardinalityGuard: true };
-    }
-    if (["column", "row"].includes(channel)) {
-      return { vlType: "ordinal", visCategory: "ordinal", channelOverride: false, cardinalityGuard: false };
-    }
-    return { vlType: "quantitative", visCategory: "quantitative", channelOverride: false, cardinalityGuard: false };
-  }
-  if (has("quantitative") && has("geographic")) {
-    return { vlType: "quantitative", visCategory: "quantitative", channelOverride: false, cardinalityGuard: false };
-  }
-  if (has("ordinal") && has("nominal")) {
-    if (["color", "group"].includes(channel)) {
-      return { vlType: "nominal", visCategory: "nominal", channelOverride: false, cardinalityGuard: false };
-    }
-    return { vlType: "ordinal", visCategory: "ordinal", channelOverride: false, cardinalityGuard: false };
-  }
-  const fallback = candidates[0];
-  return { vlType: visCategoryToVLType(fallback), visCategory: fallback, channelOverride: false, cardinalityGuard: false };
-}
-function resolveEncodingType(semanticType, fieldValues, channel, data, fieldName) {
-  if (semanticType && isRegistered(semanticType)) {
-    const entry = getRegistryEntry(semanticType);
-    const candidates = entry.visEncodings;
-    if (candidates.length > 1) {
-      return disambiguateMultiEncoding(candidates, channel, data, fieldName);
-    }
-    const baseType = candidates[0];
-    if (baseType === "quantitative") {
-      const nonNull = fieldValues.filter((v) => v != null);
-      const allNumeric = nonNull.length > 0 && nonNull.every((v) => typeof v === "number" || typeof v === "string" && !isNaN(+v) && v.trim() !== "");
-      if (!allNumeric) {
-        const inferred = inferVisCategory(fieldValues);
-        return {
-          vlType: visCategoryToVLType(inferred),
-          visCategory: inferred,
-          channelOverride: false,
-          cardinalityGuard: false
-        };
-      }
-    }
-    if (baseType === "temporal") {
-      return resolveTemporalEncoding(baseType, channel, data, fieldName, true);
-    }
-    if (baseType === "ordinal") {
-      return applyOrdinalGuards(baseType, channel, data, fieldName, fieldValues, true);
-    }
-    return {
-      vlType: visCategoryToVLType(baseType),
-      visCategory: baseType,
-      channelOverride: false,
-      cardinalityGuard: false
-    };
-  }
-  const visCategory = inferVisCategory(fieldValues);
-  const channelOverride = false;
-  const cardinalityGuard = false;
-  switch (visCategory) {
-    case "temporal":
-      return resolveTemporalEncoding(visCategory, channel, data, fieldName, false);
-    case "ordinal":
-      return applyOrdinalGuards(visCategory, channel, data, fieldName, fieldValues, false);
-    case "quantitative":
-      return { vlType: "quantitative", visCategory, channelOverride, cardinalityGuard };
-    case "geographic":
-      return { vlType: "quantitative", visCategory, channelOverride, cardinalityGuard };
-    case "nominal":
-    default:
-      return { vlType: "nominal", visCategory, channelOverride, cardinalityGuard };
-  }
-}
-var DEFAULT_GAS_PRESSURE_PARAMS = {
-  markCrossSection: 30,
-  elasticity: 0.3,
-  maxStretch: 1.5
-};
-function computeGasPressure(xValues, yValues, xDomain, yDomain, canvasWidth, canvasHeight, params = DEFAULT_GAS_PRESSURE_PARAMS) {
-  const N = xValues.length;
-  if (N <= 1 || canvasWidth <= 0 || canvasHeight <= 0) {
-    return { stretchX: 1, stretchY: 1, rawStretchX: 1, rawStretchY: 1 };
-  }
-  const sigma1dDefault = Math.sqrt(params.markCrossSection);
-  const computeAxisStretch = (values, domain, baseDim, sigma1d) => {
-    if (baseDim <= 0 || values.length <= 1) return [1, 1];
-    const range = domain[1] - domain[0];
-    if (range <= 0) return [1, 1];
-    const pxPerUnit = baseDim / range;
-    const seen = /* @__PURE__ */ new Set();
-    for (const v of values) {
-      seen.add(Math.round((v - domain[0]) * pxPerUnit));
-    }
-    const uniquePositions = seen.size;
-    const pressure = uniquePositions * sigma1d / baseDim;
-    if (pressure <= 1) return [1, 1];
-    const raw = Math.pow(pressure, params.elasticity);
-    return [Math.min(params.maxStretch, raw), raw];
-  };
-  const sigma1dX = params.markCrossSectionX != null ? Math.sqrt(params.markCrossSectionX) : sigma1dDefault;
-  const sigma1dY = params.markCrossSectionY != null ? Math.sqrt(params.markCrossSectionY) : sigma1dDefault;
-  const computeStretchForAxis = (values, domain, baseDim, sigma1d, sigmaRaw, itemCountOverride) => {
-    if (itemCountOverride != null && sigmaRaw > 0) {
-      const pressure = itemCountOverride * sigmaRaw / baseDim;
-      if (pressure <= 1) return [1, 1];
-      const raw = Math.pow(pressure, params.elasticity);
-      return [Math.min(params.maxStretch, raw), raw];
-    }
-    return sigma1d > 0 ? computeAxisStretch(values, domain, baseDim, sigma1d) : [1, 1];
-  };
-  const sigmaRawX = params.markCrossSectionX ?? params.markCrossSection;
-  const sigmaRawY = params.markCrossSectionY ?? params.markCrossSection;
-  const [stretchX, rawStretchX] = computeStretchForAxis(xValues, xDomain, canvasWidth, sigma1dX, sigmaRawX, params.xItemCountOverride);
-  const [stretchY, rawStretchY] = computeStretchForAxis(yValues, yDomain, canvasHeight, sigma1dY, sigmaRawY, params.yItemCountOverride);
-  return { stretchX, stretchY, rawStretchX, rawStretchY };
-}
-function computeElasticBudget(itemCount, baseDimension, params) {
-  if (itemCount <= 0) {
-    return { budget: baseDimension, stretchFactor: 1 };
-  }
-  const pressure = itemCount * params.defaultStepSize / baseDimension;
-  if (pressure <= 1) {
-    return { budget: baseDimension, stretchFactor: 1 };
-  }
-  const stretchFactor = Math.min(params.maxStretch, Math.pow(pressure, params.elasticity));
-  return {
-    budget: baseDimension * stretchFactor,
-    stretchFactor
-  };
-}
-function computeAxisStep(nominalCount, continuousCount, baseDimension, params) {
-  if (nominalCount > 0) {
-    const { budget } = computeElasticBudget(nominalCount, baseDimension, params);
-    return { step: Math.floor(budget / nominalCount), budget, itemCount: nominalCount };
-  }
-  if (continuousCount > 0) {
-    const { budget } = computeElasticBudget(continuousCount, baseDimension, params);
-    return { step: Math.floor(budget / continuousCount), budget, itemCount: continuousCount };
-  }
-  return { step: params.defaultStepSize, budget: baseDimension, itemCount: 0 };
-}
-function computeLabelSizing(effectiveStep, hasDiscreteItems, opts) {
-  const baseFont = opts?.baseFont ?? 10;
-  const minFont = opts?.minFont;
-  const defaultLimit = 100;
-  if (!hasDiscreteItems) {
-    return { fontSize: baseFont, labelLimit: defaultLimit };
-  }
-  let fontSize = Math.max(minFont, Math.min(baseFont, effectiveStep - 1));
-  let labelLimit = Math.max(30, Math.min(100, effectiveStep * 8));
-  let labelAngle;
-  let labelAlign;
-  let labelBaseline;
-  if (effectiveStep < 10) {
-    labelAngle = -90;
-    fontSize = Math.max(minFont, Math.min(baseFont - 2, effectiveStep));
-    labelLimit = 40;
-    labelAlign = "right";
-    labelBaseline = "middle";
-  } else if (effectiveStep < 16) {
-    labelAngle = -45;
-    fontSize = Math.max(minFont, Math.min(baseFont - 1, effectiveStep));
-    labelLimit = 60;
-    labelAlign = "right";
-    labelBaseline = "top";
-  }
-  return { fontSize, labelLimit, labelAngle, labelAlign, labelBaseline };
-}
-function computeFontSizing(minPlotDimension, opts) {
-  const baseLabel = opts?.baseLabelFontSize ?? 10;
-  const baseTitle = opts?.baseTitleFontSize ?? 11;
-  const minDim = minPlotDimension || 320;
-  const ratio = minDim >= 220 ? 1 : Math.max(0.7, minDim / 220);
-  const atMostNative = (base) => Math.round(Math.max(base - 2, Math.min(base, base * ratio)));
-  const tickBase = atMostNative(baseLabel);
-  const titleFontSize = atMostNative(baseTitle);
-  const legendFontSize = Math.max(baseTitle - 2, titleFontSize - 1);
-  return { tickBase, titleFontSize, legendFontSize };
-}
-function computeCircumferencePressure(effectiveItemCount, canvasSize, params = {}) {
-  const {
-    minArcPx = 45,
-    minRadius = 60,
-    maxRadius = 400,
-    elasticity = 0.5,
-    maxStretch = 2,
-    margin = 20
-  } = params;
-  const maxStretchX = Math.max(1, params.maxStretchX ?? maxStretch);
-  const maxStretchY = Math.max(1, params.maxStretchY ?? maxStretch);
-  const baseW = canvasSize.width;
-  const baseH = canvasSize.height;
-  const baseRadius = Math.max(
-    minRadius,
-    Math.min(baseW, baseH) / 2 - margin
-  );
-  const maxCanvasW = baseW * maxStretchX;
-  const maxCanvasH = baseH * maxStretchY;
-  const maxDiameter = Math.min(maxCanvasW, maxCanvasH);
-  const effectiveMaxRadius = Math.min(
-    maxRadius,
-    (maxDiameter - 2 * margin) / 2
-  );
-  const effectiveMaxStretch = Math.max(1, effectiveMaxRadius / baseRadius);
-  const baseCircumference = 2 * Math.PI * baseRadius;
-  const pressure = effectiveItemCount * minArcPx / baseCircumference;
-  let radius;
-  if (pressure <= 1) {
-    radius = baseRadius;
-  } else {
-    const stretch = Math.min(effectiveMaxStretch, Math.pow(pressure, elasticity));
-    radius = Math.round(baseRadius * stretch);
-  }
-  radius = Math.min(maxRadius, Math.max(minRadius, radius));
-  const diameter = 2 * radius + 2 * margin;
-  const canvasW = Math.max(baseW, diameter);
-  const canvasH = Math.max(baseH, diameter);
-  return { radius, canvasW, canvasH };
-}
-function computeEffectiveBarCount(values) {
-  if (values.length === 0) return 0;
-  const positiveValues = values.filter((v) => v > 0);
-  if (positiveValues.length === 0) return values.length;
-  const total = positiveValues.reduce((s, v) => s + v, 0);
-  const minVal = Math.min(...positiveValues);
-  const effective = total / minVal;
-  return Math.min(100, effective);
-}
-
-// src/core/resolve-semantics.ts
-var MAX_TIMESTAMP_SEC = 4102444800;
-var MAX_TIMESTAMP_MS = 41024448e5;
-function isLikelyTimestamp(val) {
-  if (val >= 1e9 && val <= MAX_TIMESTAMP_SEC) return true;
-  if (val > MAX_TIMESTAMP_SEC && val <= MAX_TIMESTAMP_MS) return true;
-  return false;
-}
-function timestampToMs(val) {
-  return val <= MAX_TIMESTAMP_SEC ? val * 1e3 : val;
-}
-function looksLikeDateString(s) {
-  const t = s.trim();
-  return /^\d|^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(t);
-}
-function analyzeTemporalField(fieldValues) {
-  const dates = [];
-  let nonNull = 0;
-  for (const v of fieldValues.slice(0, 100)) {
-    if (v == null) continue;
-    nonNull++;
-    const d = v instanceof Date ? v : new Date(v);
-    if (!isNaN(d.getTime())) dates.push(d);
-  }
-  if (dates.length < 2 || dates.length < nonNull * 0.5) return null;
-  const monthSet = new Set(dates.map((d) => d.getUTCMonth()));
-  const daySet = new Set(dates.map((d) => d.getUTCDate()));
-  const hourSet = new Set(dates.map((d) => d.getUTCHours()));
-  const minuteSet = new Set(dates.map((d) => d.getUTCMinutes()));
-  const secondSet = new Set(dates.map((d) => d.getUTCSeconds()));
-  const yearSet = new Set(dates.map((d) => d.getUTCFullYear()));
-  const isSmallSpread = (s, maxSpread = 1) => {
-    if (s.size <= 1) return true;
-    const arr = [...s];
-    return Math.max(...arr) - Math.min(...arr) <= maxSpread;
-  };
-  const same = {
-    month: monthSet.size === 1,
-    day: daySet.size === 1,
-    hour: isSmallSpread(hourSet, 1),
-    minute: minuteSet.size === 1,
-    second: secondSet.size === 1
-  };
-  const sameYear = yearSet.size === 1;
-  const sameMonth = sameYear && same.month;
-  const sameDay = sameMonth && same.day;
-  return { dates, same, sameYear, sameMonth, sameDay };
-}
-function computeDataVotes(same) {
-  const votes = [0, 0, 0, 0, 0, 0];
-  if (same.second) votes[5] += 1;
-  if (same.minute && same.second) votes[5] += 1;
-  if (same.hour && same.minute && same.second) votes[5] += 1;
-  if (same.day && same.hour && same.minute && same.second) votes[5] += 2;
-  if (same.month && same.day && same.hour && same.minute && same.second) votes[5] += 3;
-  if (same.second) votes[4] += 1;
-  if (same.minute && same.second) votes[4] += 1;
-  if (same.hour && same.minute && same.second) votes[4] += 1;
-  if (same.day && same.hour && same.minute && same.second) votes[4] += 2;
-  if (!same.month && same.day && same.hour && same.minute && same.second) votes[4] += 3;
-  if (same.second) votes[3] += 1;
-  if (same.minute && same.second) votes[3] += 1;
-  if (same.hour && same.minute && same.second) votes[3] += 1;
-  if (!same.day && same.hour && same.minute && same.second) votes[3] += 3;
-  if (same.second) votes[2] += 1;
-  if (same.minute && same.second) votes[2] += 1;
-  if (!same.hour && same.minute && same.second) votes[2] += 3;
-  if (same.second) votes[1] += 1;
-  if (!same.minute && same.second) votes[1] += 3;
-  if (!same.second) votes[0] += 4;
-  return votes;
-}
-var SEMANTIC_LEVEL = {
-  Year: 5,
-  Decade: 5,
-  YearMonth: 4,
-  Month: 4,
-  YearQuarter: 4,
-  Quarter: 4,
-  Date: 3,
-  Day: 3,
-  Hour: 2,
-  DateTime: 1,
-  Timestamp: 0
-};
-function pickBestLevel(votes) {
-  let bestLevel = 0;
-  let bestScore = votes[0];
-  for (let i = 1; i <= 5; i++) {
-    if (votes[i] >= bestScore) {
-      bestScore = votes[i];
-      bestLevel = i;
-    }
-  }
-  return { level: bestLevel, score: bestScore };
-}
-function levelToFormat(level, analysis) {
-  switch (level) {
-    case 5:
-      return "%Y";
-    case 4:
-      return analysis.sameYear ? "%b" : "%b %Y";
-    case 3:
-      return analysis.sameYear ? "%b %d" : "%b %d, %Y";
-    case 2:
-      return analysis.sameDay ? "%H:00" : "%b %d %H:00";
-    case 1:
-      return analysis.sameDay ? "%H:%M" : "%b %d %H:%M";
-    case 0:
-      return analysis.sameDay ? "%H:%M:%S" : "%b %d %H:%M:%S";
-    default:
-      return null;
-  }
-}
-function resolveTemporalFormat(fieldValues, semanticType) {
-  const analysis = analyzeTemporalField(fieldValues);
-  if (!analysis) return null;
-  const votes = computeDataVotes(analysis.same);
-  const semLevel = SEMANTIC_LEVEL[semanticType];
-  if (semLevel !== void 0) votes[semLevel] += 3;
-  const { level } = pickBestLevel(votes);
-  return levelToFormat(level, analysis);
-}
-function expandToFullYear(val) {
-  const trimmed = val.trim();
-  if (/^\d{2}$/.test(trimmed)) {
-    const n = parseInt(trimmed, 10);
-    return String(n <= 49 ? 2e3 + n : 1900 + n);
-  }
-  return val;
-}
-function convertTemporalData(data, semanticTypes) {
-  if (data.length === 0) return data;
-  const keys = Object.keys(data[0]);
-  const temporalKeys = keys.filter((k) => {
-    const st = toTypeString(semanticTypes[k]);
-    const vc = inferVisCategory(data.map((r) => r[k]));
-    const stCategory = st ? getVisCategory(st) : null;
-    return vc === "temporal" || stCategory === "temporal" || st === "Decade";
-  });
-  if (temporalKeys.length === 0) return data;
-  const values = structuredClone(data);
-  return values.map((r) => {
-    for (const temporalKey of temporalKeys) {
-      const val = r[temporalKey];
-      const st = toTypeString(semanticTypes[temporalKey]);
-      if (typeof val === "number") {
-        if (st === "Year" || st === "Decade") {
-          r[temporalKey] = `${Math.floor(val)}`;
-        } else if (isLikelyTimestamp(val)) {
-          r[temporalKey] = new Date(timestampToMs(val)).toISOString();
-        } else {
-          r[temporalKey] = String(val);
-        }
-      } else if (val instanceof Date) {
-        r[temporalKey] = val.toISOString();
-      } else {
-        if ((st === "Year" || st === "Decade") && typeof val === "string") {
-          r[temporalKey] = expandToFullYear(val);
-        } else {
-          r[temporalKey] = String(val);
-        }
-      }
-    }
-    return r;
+  const dates = times.map((time) => new Date(time));
+  const midnight = dates.every((d) => d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0);
+  if (!midnight) return void 0;
+  const monthly = dates.every((d) => d.getUTCDate() === 1);
+  if (monthly && dates.every((d) => d.getUTCMonth() === 0)) return void 0;
+  const chronological = times.every((time, i) => i === 0 || time > times[i - 1]);
+  return dates.map((d, i) => {
+    const year = d.getUTCFullYear();
+    const opensYear = !chronological || i === 0 || dates[i - 1].getUTCFullYear() !== year;
+    const month = MONTHS[d.getUTCMonth()];
+    const name = monthly ? month : `${month} ${d.getUTCDate()}`;
+    return opensYear ? [name, String(year)] : [name];
   });
 }
-function resolveChannelSemantics(encodings, data, semanticTypes, convertedData) {
-  const result = {};
-  const temporalData = convertedData ?? data;
-  for (const [channel, encoding] of Object.entries(encodings)) {
-    const fieldName = encoding.field;
-    if (!fieldName && encoding.aggregate !== "count") continue;
-    if (!fieldName && encoding.aggregate === "count") {
-      result[channel] = {
-        field: "_count",
-        semanticAnnotation: { semanticType: "Count" },
-        type: "quantitative",
-        aggregationDefault: "sum"
-      };
-      continue;
-    }
-    if (!fieldName) continue;
-    const rawAnnotation = semanticTypes[fieldName];
-    const semanticType = typeof rawAnnotation === "string" ? rawAnnotation || "" : rawAnnotation?.semanticType ?? "";
-    const fieldValues = data.map((r) => r[fieldName]);
-    const typeDecision = resolveEncodingType(
-      semanticType,
-      fieldValues,
-      channel,
-      data,
-      fieldName
-    );
-    let resolvedType = typeDecision.vlType;
-    if (encoding.type) {
-      resolvedType = encoding.type;
-    } else if (channel === "column" || channel === "row") {
-      if (resolvedType !== "nominal" && resolvedType !== "ordinal") {
-        resolvedType = "nominal";
-      }
-    }
-    if (resolvedType === "quantitative") {
-      const sampleValues = data.slice(0, 15).filter((r) => r[fieldName] != void 0).map((r) => r[fieldName]);
-      const isoDateRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/;
-      if (sampleValues.length > 0 && sampleValues.every((val) => isoDateRegex.test(`${val}`.trim()))) {
-        resolvedType = "temporal";
-      }
-    }
-    const fc = resolveFieldSemantics(rawAnnotation, fieldName, fieldValues);
-    const annotation = fc.semanticAnnotation;
-    const tickConstraint = resolveTickConstraint(annotation.semanticType, annotation.intrinsicDomain);
-    const reversed = resolveReversed(annotation.semanticType, channel);
-    const nice = resolveNice(annotation.semanticType, fc.domainConstraint);
-    const stackable = resolveStackable(annotation.semanticType);
-    const cs = {
-      field: fieldName,
-      semanticAnnotation: annotation,
-      type: resolvedType,
-      // From FieldSemantics (data identity)
-      format: fc.format,
-      tooltipFormat: fc.tooltipFormat,
-      aggregationDefault: fc.aggregationDefault,
-      scaleType: fc.scaleType,
-      domainConstraint: fc.domainConstraint,
-      cyclic: fc.cyclic || void 0,
-      sortDirection: fc.sortDirection,
-      binningSuggested: fc.binningSuggested || void 0,
-      // Channel-specific visualization decisions
-      nice,
-      tickConstraint,
-      reversed: reversed || void 0,
-      stackable
-    };
-    if (encoding.aggregate) {
-      if (encoding.aggregate === "count") {
-        cs.field = "_count";
-        cs.type = "quantitative";
-      } else {
-        cs.field = `${fieldName}_${encoding.aggregate}`;
-        cs.type = "quantitative";
-      }
-    }
-    if ((channel === "color" || channel === "group") && fieldName) {
-      if (encoding.scheme && encoding.scheme !== "default") {
-        cs.colorScheme = {
-          scheme: encoding.scheme,
-          type: "categorical",
-          reason: "explicit user scheme"
-        };
-      } else {
-        const encodingVLType = cs.type;
-        const colorHint = resolveColorSchemeHint(semanticType, annotation, fieldValues);
-        const uniqueValues = [...new Set(fieldValues)];
-        cs.colorScheme = getRecommendedColorScheme(
-          semanticType,
-          encodingVLType,
-          uniqueValues.length,
-          fieldName,
-          fieldValues,
-          { type: colorHint.type }
-        );
-        if (cs.colorScheme.type === "diverging" && encodingVLType === "quantitative") {
-          const nums = fieldValues.filter((v) => typeof v === "number" && !isNaN(v));
-          const divInfo = resolveDivergingInfo(semanticType, annotation, nums);
-          if (divInfo) {
-            cs.colorScheme.domainMid = divInfo.midpoint;
-          }
-        }
-      }
-    }
-    if (cs.type === "temporal" || semanticType && getVisCategory(semanticType) === "temporal") {
-      const convertedFieldValues = temporalData.map((r) => r[fieldName]);
-      const fmt = resolveTemporalFormat(convertedFieldValues, semanticType);
-      if (fmt) cs.temporalFormat = fmt;
-    }
-    if (cs.type === "ordinal" || cs.type === "nominal") {
-      if (!encoding.sortOrder && !encoding.sortBy) {
-        const ordinalSort = inferOrdinalSortOrder(semanticType, fieldValues);
-        if (ordinalSort) {
-          cs.ordinalSortOrder = ordinalSort;
-        }
-      }
-    }
-    result[channel] = cs;
-  }
-  return result;
+function widestLines(names, widthOf) {
+  return Math.max(0, ...names.flatMap((lines) => lines.map(widthOf)));
 }
-
-// src/echarts/templates/utils.ts
-function getCategoryOrder(ctx, channel) {
-  const resolved = ctx.resolvedEncodings?.[channel];
-  if (Array.isArray(resolved?.sortValues) && resolved.sortValues.length > 0) {
-    return resolved.sortValues.map(String);
-  }
-  const ordinal = resolved?.ordinalSortOrder ?? ctx.channelSemantics?.[channel]?.ordinalSortOrder;
-  const enc = ctx.encodings?.[channel];
-  const sortByChannel = enc?.sortBy;
-  if (typeof sortByChannel === "string" && (sortByChannel === "x" || sortByChannel === "y" || sortByChannel === "color" || sortByChannel === "size" || sortByChannel === "group")) {
-    const catField = ctx.channelSemantics?.[channel]?.field ?? enc?.field;
-    const sortByField = ctx.channelSemantics?.[sortByChannel]?.field ?? ctx.encodings?.[sortByChannel]?.field;
-    if (catField && sortByField && ctx.table) {
-      return resolveCategoryOrder(ctx.table, catField, {
-        ordinalSortOrder: ordinal,
-        sortBy: sortByField,
-        sortOrder: enc?.sortOrder
-      });
-    }
-  }
-  return ordinal;
-}
-function resolveCategoryOrder(data, catField, opts) {
-  const base = extractCategories(data, catField, opts?.ordinalSortOrder);
-  if (!opts?.sortBy) return base;
-  const agg = /* @__PURE__ */ new Map();
-  for (const row of data) {
-    const cat = String(row[catField] ?? "");
-    const v = Number(row[opts.sortBy]);
-    if (Number.isFinite(v)) agg.set(cat, (agg.get(cat) ?? 0) + v);
-  }
-  const dir = opts.sortOrder === "ascending" ? 1 : -1;
-  return [...base].sort((a, b) => dir * ((agg.get(a) ?? 0) - (agg.get(b) ?? 0)));
-}
-var isDiscrete2 = (type) => type === "nominal" || type === "ordinal";
-function extractCategories(data, field, ordinalSortOrder) {
-  const seen = /* @__PURE__ */ new Set();
-  const result = [];
-  for (const row of data) {
-    const val = row[field];
-    if (val != null) {
-      const key = String(val);
-      if (!seen.has(key)) {
-        seen.add(key);
-        result.push(key);
-      }
-    }
-  }
-  if (ordinalSortOrder && ordinalSortOrder.length > 0) {
-    const orderMap = new Map(ordinalSortOrder.map((v, i) => [v, i]));
-    result.sort((a, b) => {
-      const ia = orderMap.get(a);
-      const ib = orderMap.get(b);
-      if (ia !== void 0 && ib !== void 0) return ia - ib;
-      if (ia !== void 0) return -1;
-      if (ib !== void 0) return 1;
-      return 0;
-    });
-  }
-  return result;
-}
-function groupBy(data, field) {
-  const groups = /* @__PURE__ */ new Map();
-  for (const row of data) {
-    const key = String(row[field] ?? "");
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(row);
-  }
-  return groups;
-}
-var DEFAULT_COLORS = [
-  "#5470c6",
-  "#91cc75",
-  "#fac858",
-  "#ee6666",
-  "#73c0de",
-  "#3ba272",
-  "#fc8452",
-  "#9a60b4",
-  "#ea7ccc",
-  "#48b8d0"
-];
-function detectAxes(channelSemantics) {
-  const xCS = channelSemantics.x;
-  const yCS = channelSemantics.y;
-  if (xCS && isDiscrete2(xCS.type)) {
-    return { categoryAxis: "x", valueAxis: "y" };
-  }
-  if (yCS && isDiscrete2(yCS.type)) {
-    return { categoryAxis: "y", valueAxis: "x" };
-  }
-  if (xCS?.type === "quantitative" && yCS?.type === "temporal") {
-    return { categoryAxis: "y", valueAxis: "x" };
-  }
-  if (xCS?.type === "temporal" && yCS?.type === "quantitative") {
-    return { categoryAxis: "x", valueAxis: "y" };
-  }
-  return { categoryAxis: "x", valueAxis: "y" };
-}
-
-// src/echarts/colormap.ts
-var ECHARTS_COLOR_MAPS = [
-  {
-    id: "cat10",
-    type: "categorical",
-    supportsDiscrete: true,
-    supportsContinuous: false,
-    background: "any",
-    maxCategories: 10,
-    colorblindSafe: false,
-    colors: [
-      "#5470c6",
-      "#91cc75",
-      "#fac858",
-      "#ee6666",
-      "#73c0de",
-      "#3ba272",
-      "#fc8452",
-      "#9a60b4",
-      "#ea7ccc",
-      "#d48265"
-    ]
-  },
-  {
-    id: "cat20",
-    type: "categorical",
-    supportsDiscrete: true,
-    supportsContinuous: false,
-    background: "any",
-    maxCategories: 20,
-    colorblindSafe: false,
-    colors: [
-      "#5470c6",
-      "#91cc75",
-      "#fac858",
-      "#ee6666",
-      "#73c0de",
-      "#3ba272",
-      "#fc8452",
-      "#9a60b4",
-      "#ea7ccc",
-      "#d48265",
-      "#749f83",
-      "#ca8622",
-      "#bda29a",
-      "#6e7074",
-      "#546570",
-      "#c4ccd3",
-      "#4b565b",
-      "#2f4554",
-      "#61a0a8",
-      "#c23531"
-    ]
-  },
-  {
-    id: "viridis",
-    type: "sequential",
-    supportsDiscrete: true,
-    supportsContinuous: true,
-    background: "any",
-    colorblindSafe: true,
-    colors: [
-      "#440154",
-      "#46327e",
-      "#365c8d",
-      "#277f8e",
-      "#1fa187",
-      "#4ac16d",
-      "#a0da39",
-      "#fde725"
-    ]
-  },
-  {
-    id: "RdBu",
-    type: "diverging",
-    supportsDiscrete: true,
-    supportsContinuous: true,
-    background: "any",
-    colorblindSafe: false,
-    diverging: true,
-    preferredMidpoint: 0,
-    colors: [
-      "#b2182b",
-      "#d6604d",
-      "#f4a582",
-      "#fddbc7",
-      "#f7f7f7",
-      "#d1e5f0",
-      "#92c5de",
-      "#4393c3",
-      "#2166ac"
-    ]
-  }
-];
-function getMapById(id) {
-  if (!id) return void 0;
-  const key = String(id).toLowerCase();
-  return ECHARTS_COLOR_MAPS.find((m) => m.id.toLowerCase() === key);
-}
-function getPaletteForScheme(id) {
-  const entry = getMapById(id);
-  return entry?.colors;
-}
-function pickEChartsPalette(decision) {
-  if (!decision) {
-    return DEFAULT_COLORS;
-  }
-  const { schemeType, schemeId, categoryCount } = decision;
-  if (schemeId) {
-    const fromId = getPaletteForScheme(schemeId);
-    if (fromId && fromId.length > 0) {
-      return fromId;
-    }
-  }
-  const mapsOfType = ECHARTS_COLOR_MAPS.filter((m) => m.type === schemeType);
-  if (schemeType === "categorical") {
-    const k = categoryCount ?? 0;
-    if (mapsOfType.length) {
-      const candidates = mapsOfType.filter((m) => m.supportsDiscrete);
-      if (candidates.length) {
-        const byCapacity = candidates.filter((m) => m.maxCategories == null || m.maxCategories >= k).sort((a, b) => (a.maxCategories ?? Infinity) - (b.maxCategories ?? Infinity));
-        const picked = byCapacity[0] ?? candidates[0];
-        if (picked.colors.length) {
-          return picked.colors;
-        }
-      }
-    }
-  } else if (schemeType === "sequential") {
-    const seq = mapsOfType.find((m) => m.supportsContinuous) ?? getMapById("viridis");
-    if (seq && seq.colors.length) {
-      return seq.colors;
-    }
-  } else if (schemeType === "diverging") {
-    const divergingFirst = mapsOfType.find((m) => m.diverging) ?? getMapById("RdBu");
-    if (divergingFirst && divergingFirst.colors.length) {
-      return divergingFirst.colors;
-    }
-  }
-  return DEFAULT_COLORS;
+function crowdedCalendarLabels(values, band, fontSize) {
+  if (!(band > 0) || !(fontSize > 0)) return void 0;
+  const calendar = calendarLabels(values);
+  if (!calendar) return void 0;
+  const widthOf = (text) => textWidth(text, fontSize);
+  const gap = Math.max(6, fontSize / 2);
+  if (Math.max(0, ...values.map(widthOf)) + gap <= band) return void 0;
+  return widestLines(calendar, widthOf) + gap <= band ? calendar : void 0;
 }
 
 // src/echarts/templates/rose.ts
@@ -2763,6 +3582,8 @@ function pyramidNiceTickStep(niceMax2) {
   }
   return niceMax2 / 4;
 }
+var COMPANION_SUFFIX = / \((?:outliers|points)\)$/;
+var isCompanionSeries = (s) => s?._companion === true;
 function estimateGroupedBoxplotMinPlotWidth(option, layout) {
   if (option?.xAxis?.type !== "category" || !Array.isArray(option?.series)) return 0;
   const boxplotSeriesCount = option.series.filter((s) => s?.type === "boxplot").length;
@@ -2790,7 +3611,7 @@ function placePyramidChannelHeaders(option) {
   const gw = Math.max(0, cw - gl - gr);
   const centerX = gl + gw / 2;
   const dx = gw / 4;
-  const topY = Math.max(4, gt - 10);
+  const topY = Math.max(4, gt - 24);
   const L = estimatePyramidYCategoryInsetPx(option, gw);
   const innerW = Math.max(gw - L, 1);
   const zX = gl + L + innerW / 2;
@@ -2855,9 +3676,9 @@ function ecApplyLayoutToSpec(option, context, warnings) {
     const maxVal = Math.max(...numericVals);
     const dataRange = maxVal - minVal;
     if (dataRange === 0) continue;
-    const pad = dataRange / (bandedCount - 1) / 2;
-    axisObj.min = minVal - pad;
-    axisObj.max = maxVal + pad;
+    const pad2 = dataRange / (bandedCount - 1) / 2;
+    axisObj.min = minVal - pad2;
+    axisObj.max = maxVal + pad2;
   }
   if (option.xAxis) {
     if (option.xAxis.name) {
@@ -2914,6 +3735,7 @@ function ecApplyLayoutToSpec(option, context, warnings) {
         };
         if (legendTitle != null) {
           const titleGraphic = {
+            id: EC_LEGEND_TITLE_ID,
             type: "text",
             bottom: 22,
             left: "center",
@@ -2936,33 +3758,12 @@ function ecApplyLayoutToSpec(option, context, warnings) {
         const legendItemGap = 5;
         const estimatedTextWidth = Math.min(120, maxLabelLen * 7 + 30);
         option._legendWidth = legendSymbolWidth + legendItemGap + estimatedTextWidth;
-        const LEGEND_GAP2 = 12;
-        const CANVAS_BUFFER2 = 16;
-        const rightMarginPx = option._legendWidth + LEGEND_GAP2 + CANVAS_BUFFER2;
-        const hasYTitle2 = !!option.yAxis?.name;
-        const gridLeft = (hasYTitle2 ? 70 : 50) + CANVAS_BUFFER2;
-        let plotW = layout?.subplotWidth ?? canvasSize?.width ?? 400;
-        const xIsDiscreteForLegend = layout.xNominalCount > 0 || layout.xContinuousAsDiscrete > 0;
-        if (xIsDiscreteForLegend) {
-          let xItemCount = layout.xNominalCount || layout.xContinuousAsDiscrete || 0;
-          if (layout.xStepUnit === "group" && option.series && Array.isArray(option.series) && layout.xNominalCount > 0) {
-            const barSeriesCount = option.series.filter((s) => s.type === "bar").length || option.series.length;
-            if (barSeriesCount > 0) {
-              xItemCount = Math.max(1, Math.round(layout.xNominalCount / barSeriesCount));
-            }
-          }
-          plotW = xItemCount > 0 ? layout.xStep * xItemCount : plotW;
-        }
-        const boxplotMinWForLegend = estimateGroupedBoxplotMinPlotWidth(option, layout);
-        if (boxplotMinWForLegend > 0) {
-          plotW = Math.max(plotW, boxplotMinWForLegend);
-        }
-        const effectiveChartWidth = plotW + gridLeft + rightMarginPx;
-        const legendLeftPx = Math.max(0, effectiveChartWidth - rightMarginPx);
+        const CANVAS_BUFFER3 = 16;
+        const { left: _ignoredLeft, ...legendRest } = option.legend;
         option.legend = {
-          ...option.legend,
+          ...legendRest,
           top: legendTitle != null ? 20 : 0,
-          left: legendLeftPx,
+          right: CANVAS_BUFFER3,
           orient: option.legend.orient || "vertical",
           align: "left",
           // icon on left, text on right
@@ -2975,8 +3776,9 @@ function ecApplyLayoutToSpec(option, context, warnings) {
         };
         if (legendTitle != null) {
           const titleGraphic = {
+            id: EC_LEGEND_TITLE_ID,
             type: "text",
-            left: legendLeftPx,
+            right: CANVAS_BUFFER3,
             top: 4,
             z: 100,
             style: {
@@ -2984,7 +3786,8 @@ function ecApplyLayoutToSpec(option, context, warnings) {
               fontSize: layout.legendFontSize,
               fontWeight: "bold",
               fill: "#333",
-              textAlign: "left"
+              textAlign: "left",
+              width: option._legendWidth
             }
           };
           const existing = option.graphic;
@@ -3000,7 +3803,7 @@ function ecApplyLayoutToSpec(option, context, warnings) {
   }
   const hasXTitle = !!option.xAxis?.name;
   const hasYTitle = !!option.yAxis?.name;
-  const CANVAS_BUFFER = 16;
+  const CANVAS_BUFFER2 = 16;
   const LEGEND_GAP = 12;
   const VISUALMAP_GAP = 18;
   const VISUALMAP_RIGHT_OFFSET = 10;
@@ -3010,10 +3813,10 @@ function ecApplyLayoutToSpec(option, context, warnings) {
   const rightMargin = isDualLegend ? hasVisualMap ? VISUALMAP_RIGHT_OFFSET + visualMapWidth + VISUALMAP_GAP : 10 : (hasLegend ? legendWidth : hasVisualMap ? visualMapWidth + VISUALMAP_GAP : 10) + LEGEND_GAP;
   const bottomLegendExtra = isDualLegend ? 30 : 0;
   const gridMargin = {
-    left: (hasYTitle ? 70 : 50) + CANVAS_BUFFER,
-    right: rightMargin + CANVAS_BUFFER,
-    top: 20 + CANVAS_BUFFER,
-    bottom: (hasXTitle ? 45 : 30) + CANVAS_BUFFER + bottomLegendExtra
+    left: (hasYTitle ? 70 : 50) + CANVAS_BUFFER2,
+    right: rightMargin + CANVAS_BUFFER2,
+    top: 20 + CANVAS_BUFFER2,
+    bottom: (hasXTitle ? 45 : 30) + CANVAS_BUFFER2 + bottomLegendExtra
   };
   if (hasAxes) {
     if (!option.grid) option.grid = {};
@@ -3111,12 +3914,30 @@ function ecApplyLayoutToSpec(option, context, warnings) {
     }
     if (layout.xLabel.labelLimit && layout.xLabel.labelLimit < 100) {
       const maxLen = layout.xLabel.labelLimit;
-      option.xAxis.axisLabel.formatter = (value) => {
+      const formatter = (value) => {
         if (typeof value === "string" && value.length > maxLen) {
           return value.substring(0, maxLen) + "\u2026";
         }
         return value;
       };
+      formatter._flintCalendar = true;
+      option.xAxis.axisLabel.formatter = formatter;
+    }
+  }
+  {
+    const xAxis = option.xAxis;
+    const xcs = channelSemantics.x;
+    if (xAxis && !Array.isArray(xAxis) && xAxis.type === "category" && Array.isArray(xAxis.data) && xcs?.field && (xcs.type === "nominal" || xcs.type === "ordinal")) {
+      const values = xAxis.data.map((d) => String(d?.value ?? d));
+      const semanticType = toTypeString(context.semanticTypes[xcs.field]);
+      const named = isDateField(semanticType, values) ? crowdedCalendarLabels(values, layout.xStep, xAxis.axisLabel?.fontSize ?? layout.xLabel?.fontSize ?? 11) : void 0;
+      if (named) {
+        const byValue = new Map(values.map((value, index) => [value, named[index].join("\n")]));
+        const existing = xAxis.axisLabel?.formatter;
+        const formatter = (value) => byValue.get(String(value)) ?? (typeof existing === "function" ? existing(value) : value);
+        formatter._flintCalendar = true;
+        xAxis.axisLabel = { ...xAxis.axisLabel, formatter, rotate: 0 };
+      }
     }
   }
   if (option.xAxis && option.grid && option.xAxis.axisLabel) {
@@ -3205,34 +4026,6 @@ function ecApplyLayoutToSpec(option, context, warnings) {
     }
   }
   for (const axis of ["x", "y"]) {
-    const axisObj = option[`${axis}Axis`];
-    if (!axisObj || axisObj.type !== "category") continue;
-    const cs = channelSemantics[axis];
-    if (!cs?.field || cs.type !== "nominal" && cs.type !== "ordinal") continue;
-    const semanticType = toTypeString(context.semanticTypes[cs.field]);
-    if (getVisCategory(semanticType) !== "temporal") continue;
-    const fieldVals = context.table.map((r) => r[cs.field]).filter((v) => v != null);
-    const datelikeCnt = fieldVals.filter(
-      (v) => typeof v !== "string" || looksLikeDateString(String(v))
-    ).length;
-    if (datelikeCnt < fieldVals.length * 0.5) continue;
-    const analysis = analyzeTemporalField(fieldVals);
-    if (!analysis) continue;
-    const votes = computeDataVotes(analysis.same);
-    const semLevel = SEMANTIC_LEVEL[semanticType];
-    if (semLevel !== void 0) votes[semLevel] += 3;
-    const { level, score } = pickBestLevel(votes);
-    if (score < 5) continue;
-    const fmt = levelToFormat(level, analysis);
-    if (!fmt) continue;
-    if (!axisObj.axisLabel) axisObj.axisLabel = {};
-    const existingFormatter = axisObj.axisLabel.formatter;
-    axisObj.axisLabel.formatter = (value) => {
-      const formatted = formatCategoryTemporal(value, fmt);
-      return typeof existingFormatter === "function" ? existingFormatter(formatted) : formatted;
-    };
-  }
-  for (const axis of ["x", "y"]) {
     const cs = channelSemantics[axis];
     if (cs?.temporalFormat && option[`${axis}Axis`]) {
       const axisObj = option[`${axis}Axis`];
@@ -3243,8 +4036,8 @@ function ecApplyLayoutToSpec(option, context, warnings) {
       if (axisObj.type === "value" && cs.type === "temporal") {
         if (axisObj.name === "Count") continue;
         if (!axisObj.axisLabel) axisObj.axisLabel = {};
-        const fmt = cs.temporalFormat;
-        axisObj.axisLabel.formatter = (val) => formatTimestamp(val, fmt);
+        const fmt2 = cs.temporalFormat;
+        axisObj.axisLabel.formatter = (val) => formatTimestamp(val, fmt2);
       }
     }
   }
@@ -3376,7 +4169,7 @@ function ecApplyLayoutToSpec(option, context, warnings) {
       option.series.forEach((s, idx) => {
         if (!s) return;
         const rawName = typeof s.name === "string" ? s.name : s.name != null ? String(s.name) : "";
-        const baseName = rawName.endsWith(" (outliers)") ? rawName.slice(0, -" (outliers)".length) : rawName;
+        const baseName = rawName.replace(COMPANION_SUFFIX, "");
         const mappedColor = baseName && categoryToColor.has(baseName) ? categoryToColor.get(baseName) : palette_[idx % n];
         s.itemStyle = s.itemStyle || {};
         s.itemStyle.color = mappedColor;
@@ -3387,7 +4180,7 @@ function ecApplyLayoutToSpec(option, context, warnings) {
     } else if (context.chartType === "Pyramid Chart" && Array.isArray(option.series)) {
       const pal = effectivePalette && effectivePalette.length > 0 ? effectivePalette : DEFAULT_COLORS;
       const cLeft = pal[0];
-      const cRight = pal.length > 3 ? pal[3] : pal[Math.min(1, pal.length - 1)];
+      const cRight = pal.length > 3 ? pal[3] : pal[Math.max(0, pal.length - 1)];
       let barIdx = 0;
       for (const s of option.series) {
         if (!s || s.type !== "bar") continue;
@@ -3477,13 +4270,22 @@ function ecApplyLayoutToSpec(option, context, warnings) {
       } else {
         const hasLegend2 = !!option.legend && Array.isArray(option.legend.data);
         const rankLegendColorMap = isRankLikeColor && hasLegend2 ? buildRankColorLookupFromLegend(option.legend.data, palette_) : /* @__PURE__ */ new Map();
-        const colorableCount = option.series.filter((s) => s && s.itemStyle?.color == null).length;
+        const colorableCount = option.series.filter(
+          (s) => s && s.itemStyle?.color == null && !isCompanionSeries(s)
+        ).length;
         const spacedIndices = useEvenSpacing && colorableCount > 0 ? pickEvenlySpacedColorIndices(n, colorableCount) : null;
         let colorIdx = 0;
         option.series.forEach((s, idx) => {
           if (!s) return;
           s.itemStyle = s.itemStyle || {};
           if (s.itemStyle.color != null) return;
+          if (isCompanionSeries(s)) {
+            const owner = option.series[idx - 1];
+            if (owner?.itemStyle?.color != null) {
+              s.itemStyle.color = owner.itemStyle.color;
+              return;
+            }
+          }
           if (isRankLikeColor && rankLegendColorMap.size > 0) {
             const rawName = typeof s.name === "string" ? s.name : s.name != null ? String(s.name) : "";
             const mapped = rawName ? rankLegendColorMap.get(rawName) : void 0;
@@ -3537,15 +4339,10 @@ function convertTemporalFormat(d3Format) {
 }
 var MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 var MONTH_FULL2 = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-function formatCategoryTemporal(value, d3Format) {
-  const d = new Date(value);
-  if (isNaN(d.getTime())) return value;
-  return formatTimestamp(d.getTime(), d3Format);
-}
 function formatTimestamp(val, d3Format) {
   const d = new Date(val);
-  const pad = (n) => n < 10 ? "0" + n : String(n);
-  return d3Format.replace(/%Y/g, String(d.getFullYear())).replace(/%y/g, String(d.getFullYear()).slice(-2)).replace(/%B/g, MONTH_FULL2[d.getMonth()]).replace(/%b/g, MONTH_ABBR[d.getMonth()]).replace(/%m/g, pad(d.getMonth() + 1)).replace(/%d/g, pad(d.getDate())).replace(/%H/g, pad(d.getHours())).replace(/%M/g, pad(d.getMinutes())).replace(/%S/g, pad(d.getSeconds()));
+  const pad2 = (n) => n < 10 ? "0" + n : String(n);
+  return d3Format.replace(/%Y/g, String(d.getFullYear())).replace(/%y/g, String(d.getFullYear()).slice(-2)).replace(/%B/g, MONTH_FULL2[d.getMonth()]).replace(/%b/g, MONTH_ABBR[d.getMonth()]).replace(/%m/g, pad2(d.getMonth() + 1)).replace(/%d/g, pad2(d.getDate())).replace(/%H/g, pad2(d.getHours())).replace(/%M/g, pad2(d.getMinutes())).replace(/%S/g, pad2(d.getSeconds()));
 }
 function fmtNumForTooltip(v) {
   if (v == null) return "";
@@ -3561,6 +4358,7 @@ function buildEncodingTooltipFormatter(option) {
     const categoryFormat = enc.categoryFormat;
     const temporalFormat = enc.temporalFormat ?? "%b %d, %Y";
     const filterScatterOnly = !!enc.filterScatterOnly;
+    const seriesSuffix = enc.seriesSuffix;
     return (params) => {
       const rawList = Array.isArray(params) ? params : [params];
       const list = filterScatterOnly ? rawList.filter((item) => item && item.seriesType === "scatter") : rawList;
@@ -3576,9 +4374,16 @@ function buildEncodingTooltipFormatter(option) {
       }
       const parts2 = [`${categoryLabel}: ${cat}`];
       for (const item of list) {
-        const name = item.seriesName ?? valueLabel;
+        const lane = item?.data && typeof item.data === "object" && !Array.isArray(item.data) ? item.data.laneGroup : void 0;
+        if (lane === void 0 && String(item?.seriesName ?? "").startsWith("__")) continue;
+        let name = lane ?? item.seriesName ?? valueLabel;
         let val = item.value != null ? item.value : Array.isArray(item.data) ? item.data[item.dataIndex] : item.data;
+        if (seriesSuffix && Array.isArray(val)) {
+          const suffix = seriesSuffix.categoryNames[Number(val[seriesSuffix.index])];
+          if (suffix) name = `${name} \xB7 ${suffix}`;
+        }
         if (Array.isArray(val) && val.length >= 2) val = val[1];
+        if (val && typeof val === "object" && "value" in val) val = val.value;
         parts2.push(`${name}: ${fmtNumForTooltip(val)}`);
       }
       return parts2.join("<br/>");
@@ -3593,7 +4398,7 @@ function buildEncodingTooltipFormatter(option) {
     for (const p of parts) {
       let val;
       if (p.from === "series") {
-        val = params.seriesName ?? params.name;
+        val = params.data?.laneGroup ?? params.seriesName ?? params.name;
       } else if (p.from === "name") {
         val = params.name;
       } else if (p.from === "value") {
@@ -3644,9 +4449,9 @@ function ecApplyTooltips(option) {
     if (hasThemeRiver && !option.tooltip.formatter) {
       option.tooltip.formatter = (params) => {
         if (!params || !params.data) return "";
-        const [date, value, name] = params.data;
+        const [date2, value, name] = params.data;
         const color = params.color || "#333";
-        const dateStr = date instanceof Date ? date.toLocaleDateString() : String(date);
+        const dateStr = date2 instanceof Date ? date2.toLocaleDateString() : String(date2);
         return `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color};margin-right:6px;"></span><b>${name}</b><br/>${dateStr}: ${value}`;
       };
     }
@@ -3659,6 +4464,32 @@ function computeSymbolSize(width, height, pointCount) {
   const areaPerPoint = canvasArea / Math.max(1, pointCount);
   const idealDiameter = Math.sqrt(areaPerPoint * 0.05);
   return Math.max(3, Math.min(12, Math.round(idealDiameter)));
+}
+var SIZE_KEY_RIGHT = 28;
+function sizeKeyFill(ctx, hasColorEncoding) {
+  if (hasColorEncoding) return "#cccccc";
+  const fallback = (getPaletteForScheme("cat10") ?? DEFAULT_COLORS)[0];
+  return ctx.resolvedEncodings?.color?.colorPalette?.[0] ?? fallback;
+}
+function sizeKeyGraphic(entries, title, fill) {
+  const gap = 8;
+  const rowGap = 6;
+  const fontSize = 10;
+  const titleHeight = 20;
+  const maxR = Math.max(...entries.map((e) => e.diameter / 2));
+  const labelWidth = Math.max(...entries.map((e) => e.label.length * fontSize * 0.6), 20);
+  const titleWidth = title.length * 11 * 0.62;
+  const width = Math.ceil(Math.max(2 * maxR + gap + labelWidth, titleWidth));
+  const children = [{ type: "text", left: 0, top: 0, style: { text: title, fontSize: 11, fontWeight: "bold", fill: "#333", textAlign: "left" } }];
+  let rowTop = titleHeight;
+  for (const entry of entries) {
+    const r = entry.diameter / 2;
+    const rowH = Math.max(entry.diameter, 16) + rowGap;
+    children.push({ type: "circle", left: maxR - r, top: rowTop + (rowH - entry.diameter) / 2, shape: { cx: r, cy: r, r }, style: { fill } });
+    children.push({ type: "text", left: 2 * maxR + gap, top: rowTop + (rowH - fontSize) / 2, style: { text: entry.label, fontSize, fill: "#333", textAlign: "left" } });
+    rowTop += rowH;
+  }
+  return { graphic: { id: EC_SIZE_KEY_ID, type: "group", right: SIZE_KEY_RIGHT, top: titleHeight, width, z: 100, children }, width };
 }
 var ecScatterPlotDef = {
   chart: "Scatter Plot",
@@ -3735,6 +4566,9 @@ var ecScatterPlotDef = {
     const yType = channelSemantics.y?.type;
     const xIsCategorical = xType === "nominal" || xType === "ordinal";
     const yIsCategorical = yType === "nominal" || yType === "ordinal";
+    const xIsTemporal = xType === "temporal";
+    const yIsTemporal = yType === "temporal";
+    const toTime = (v) => typeof v === "number" ? v : new Date(String(v)).getTime();
     const xCategories = xIsCategorical ? extractCategories(table, xField, getCategoryOrder(ctx, "x")) : [];
     const yCategories = yIsCategorical ? extractCategories(table, yField, getCategoryOrder(ctx, "y")) : [];
     const xCategoryToIndex = new Map(xCategories.map((c, i) => [String(c), i]));
@@ -3750,7 +4584,7 @@ var ecScatterPlotDef = {
         axisLabel: { interval: 0, rotate: 90 },
         axisTick: { show: true, alignWithLabel: true },
         axisLine: { show: true }
-      } : { type: "value", name: xField, nameLocation: "middle", nameGap: 30 },
+      } : { type: xIsTemporal ? "time" : "value", name: xField, nameLocation: "middle", nameGap: 30 },
       yAxis: yIsCategorical ? {
         type: "category",
         data: yCategories,
@@ -3760,7 +4594,7 @@ var ecScatterPlotDef = {
         axisLabel: { interval: 0, rotate: 0 },
         axisTick: { show: true, alignWithLabel: true },
         axisLine: { show: true }
-      } : { type: "value", name: yField, nameLocation: "middle", nameGap: 40 },
+      } : { type: yIsTemporal ? "time" : "value", name: yField, nameLocation: "middle", nameGap: 40 },
       series: []
     };
     if (usePiecewiseSizeVisualMap) {
@@ -3782,78 +4616,20 @@ var ecScatterPlotDef = {
           title: sizeField
         }
       ];
-      option._visualMapWidth = 88;
-      const ordLegendRight = 28;
-      const ordGap = 8;
-      const ordRowGap = 6;
-      const ordFontSize = 10;
-      const ordTitleHeight = 20;
-      const ordLabelWidth = 44;
-      const canvasH = ctx.canvasSize?.height ?? 300;
-      const maxCircleR = Math.max(...sizeOrderForLegend.map((name) => scaleSize(name) / 2));
-      const legendWidth = ordLabelWidth + ordGap + 2 * maxCircleR;
       const hasColorEncoding = !!channelSemantics.color?.field;
-      const fallbackPalette = getPaletteForScheme("cat10") ?? DEFAULT_COLORS;
-      const fallbackColor = fallbackPalette[0];
-      const scatterColor = hasColorEncoding ? "#cccccc" : ctx.resolvedEncodings?.color?.colorPalette?.[0] ?? fallbackColor;
-      const rowHeights = sizeOrderForLegend.map((name) => Math.max(scaleSize(name), 16) + ordRowGap);
-      const totalLegendHeight = ordTitleHeight + rowHeights.reduce((a, b) => a + b, 0);
-      const ordLegendTop = Math.max(10, (canvasH - totalLegendHeight) / 2);
-      const legendChildren = [
-        {
-          type: "text",
-          left: 0,
-          top: 0,
-          style: {
-            text: sizeField,
-            fontSize: 11,
-            fontWeight: "bold",
-            fill: "#333",
-            textAlign: "left"
-          }
-        }
-      ];
-      let rowTop = ordTitleHeight;
-      for (let i = 0; i < sizeOrderForLegend.length; i++) {
-        const name = sizeOrderForLegend[i];
-        const r = scaleSize(name) / 2;
-        const rowH = rowHeights[i];
-        const circleTop = rowTop + (rowH - scaleSize(name)) / 2;
-        const textTop = rowTop + (rowH - ordFontSize) / 2;
-        legendChildren.push({
-          type: "circle",
-          left: maxCircleR - r,
-          top: circleTop - r,
-          shape: { cx: r, cy: r, r },
-          style: { fill: scatterColor }
-        });
-        legendChildren.push({
-          type: "text",
-          left: 2 * maxCircleR + ordGap,
-          top: textTop,
-          style: {
-            text: name,
-            fontSize: ordFontSize,
-            fill: "#333",
-            textAlign: "left"
-          }
-        });
-        rowTop += rowH;
-      }
-      const ordLegendGraphic = {
-        type: "group",
-        right: ordLegendRight,
-        top: ordLegendTop,
-        width: legendWidth,
-        z: 100,
-        children: legendChildren
-      };
-      const existingGraphic = option.graphic;
-      option.graphic = Array.isArray(existingGraphic) ? [...existingGraphic, ordLegendGraphic] : existingGraphic ? [existingGraphic, ordLegendGraphic] : [ordLegendGraphic];
+      const key = sizeKeyGraphic(
+        sizeOrderForLegend.map((name) => ({ label: name, diameter: scaleSize(name) })),
+        sizeField,
+        sizeKeyFill(ctx, hasColorEncoding)
+      );
+      option._visualMapWidth = key.width + SIZE_KEY_RIGHT - 10;
+      option.graphic = [...Array.isArray(option.graphic) ? option.graphic : option.graphic ? [option.graphic] : [], key.graphic];
     } else if (useContinuousSizeVisualMap) {
       const SIZE_SPREAD_MIN = 20;
       const sizeMaxForMap = Math.max(rangeMaxClamped, rangeMin + SIZE_SPREAD_MIN);
-      const fmtSize = (v) => Number.isInteger(v) ? String(v) : v.toFixed(1);
+      const fmtSize = (v) => v.toLocaleString("en-US", {
+        maximumFractionDigits: v === 0 ? 1 : Math.min(20, Math.max(1, 1 - Math.floor(Math.log10(Math.abs(v)))))
+      });
       const sizeVisualMap = {
         type: "continuous",
         show: true,
@@ -3870,7 +4646,8 @@ var ecScatterPlotDef = {
         text: [fmtSize(sizeDomainMax), fmtSize(sizeDomainMin)],
         textStyle: { fontSize: 10 },
         seriesIndex: 0,
-        name: sizeField
+        name: sizeField,
+        id: rampId("size")
       };
       const hasColorEncoding = !!colorField;
       if (hasColorEncoding) {
@@ -3899,6 +4676,7 @@ var ecScatterPlotDef = {
       option.graphic = [
         ...existingGraphic,
         {
+          id: rampTitleId("size"),
           type: "text",
           right: 50,
           top: 10,
@@ -3920,8 +4698,8 @@ var ecScatterPlotDef = {
       option.yAxis.scale = channelSemantics.y?.zero ? !channelSemantics.y.zero.zero : true;
     }
     const opacity = chartProperties?.opacity ?? 1;
-    const xVal = (row) => xIsCategorical ? xCategoryToIndex.get(String(row[xField] ?? "")) ?? 0 : row[xField];
-    const yVal = (row) => yIsCategorical ? yCategoryToIndex.get(String(row[yField] ?? "")) ?? 0 : row[yField];
+    const xVal = (row) => xIsCategorical ? xCategoryToIndex.get(String(row[xField] ?? "")) ?? 0 : xIsTemporal ? toTime(row[xField]) : row[xField];
+    const yVal = (row) => yIsCategorical ? yCategoryToIndex.get(String(row[yField] ?? "")) ?? 0 : yIsTemporal ? toTime(row[yField]) : row[yField];
     const pointData = (row) => sizeField != null ? [xVal(row), yVal(row), row[sizeField]] : [xVal(row), yVal(row)];
     const colorPalette = ctx.resolvedEncodings?.color?.colorPalette ?? ctx.resolvedEncodings?.group?.colorPalette ?? DEFAULT_COLORS;
     const legendOpts = ctx.resolvedEncodings?.color ?? ctx.resolvedEncodings?.group;
@@ -3941,7 +4719,7 @@ var ecScatterPlotDef = {
       const colorVals = table.map((r) => toColorVal(r[colorField])).filter((v) => !isNaN(v));
       const colorMin = colorVals.length ? Math.min(...colorVals) : isTemporalColor ? Date.now() : 0;
       const colorMax = colorVals.length ? Math.max(...colorVals) : isTemporalColor ? Date.now() : 1;
-      const scheme = ctx.encodings?.color?.scheme ?? "";
+      const scheme = schemeName(ctx.encodings?.color?.scheme) ?? "";
       const defaultGrayRange = ["#f5f5f5", "#e0e0e0", "#9e9e9e", "#616161", "#424242"];
       const greensRange = ["#f7fcf5", "#c7e9c0", "#41ab5d", "#006d2c", "#00441b"];
       const decisionSchemeId = colorDecisions?.color?.schemeId ?? colorDecisions?.group?.schemeId;
@@ -3978,7 +4756,8 @@ var ecScatterPlotDef = {
         textStyle: { fontSize: VM_FONT_SIZE },
         show: true,
         seriesIndex: 0,
-        name: colorField
+        name: colorField,
+        id: rampId("color")
       };
       if (option.visualMap) {
         option.visualMap.push(colorVisualMap);
@@ -3988,6 +4767,7 @@ var ecScatterPlotDef = {
       option._visualMapWidth = hasSizeVisualMap ? VM_BAR_WIDTH + VM_GAP + VM_BAR_WIDTH : VM_BAR_WIDTH;
       const vmGraphics = [
         {
+          id: rampTitleId("color"),
           type: "text",
           right: colorBarRight,
           top: VM_TITLE_TOP,
@@ -4624,9 +5404,9 @@ var isMeasureEnc = (e) => !!e?.field && (!!e.aggregate || e.type === "quantitati
 var isDiscreteCategoryEnc = (e) => !!e?.field && !e.aggregate && e.type !== "quantitative" && e.type !== "temporal";
 function resolveSortChannels(encodings, candidates) {
   const category = candidates.find((c) => isDiscreteCategoryEnc(encodings[c]));
-  const measure = candidates.find((c) => isMeasureEnc(encodings[c]));
-  if (!category || !measure || category === measure) return null;
-  return { category, measure };
+  const measure2 = candidates.find((c) => isMeasureEnc(encodings[c]));
+  if (!category || !measure2 || category === measure2) return null;
+  return { category, measure: measure2 };
 }
 function makeSortAction(options) {
   const candidates = ["x", "y"];
@@ -4646,9 +5426,9 @@ function makeSortAction(options) {
     get: (encodings) => {
       const resolved = resolveSortChannels(encodings, candidates);
       if (!resolved) return void 0;
-      const { category, measure } = resolved;
+      const { category, measure: measure2 } = resolved;
       const enc = encodings[category];
-      if (enc.sortBy === measure) {
+      if (enc.sortBy === measure2) {
         return enc.sortOrder === "descending" ? "value-desc" : "value-asc";
       }
       return void 0;
@@ -4656,15 +5436,15 @@ function makeSortAction(options) {
     set: (encodings, value) => {
       const resolved = resolveSortChannels(encodings, candidates);
       if (!resolved) return encodings;
-      const { category, measure } = resolved;
+      const { category, measure: measure2 } = resolved;
       const base = encodings[category];
       let next;
       switch (value) {
         case "value-asc":
-          next = { ...base, sortBy: measure, sortOrder: "ascending" };
+          next = { ...base, sortBy: measure2, sortOrder: "ascending" };
           break;
         case "value-desc":
-          next = { ...base, sortBy: measure, sortOrder: "descending" };
+          next = { ...base, sortBy: measure2, sortOrder: "descending" };
           break;
         default:
           next = { ...base, sortBy: void 0, sortOrder: void 0 };
@@ -4702,30 +5482,30 @@ function buildLocalLaneSeries(table, categories, catField, groupField, valField,
       const g = perBand.get(cat)?.[lane];
       if (g === void 0) return "-";
       const v = valAt.get(`${cat}\0${g}`);
-      return v === void 0 ? "-" : { value: v, itemStyle: { color: groupColor(g) } };
+      return v === void 0 ? "-" : { value: v, laneGroup: g, itemStyle: { color: groupColor(g) } };
     })
   }));
   const legendData = globalGroups.map((g) => ({ name: g, itemStyle: { color: groupColor(g) } }));
   return { series, legendData };
 }
 function buildCategoryValues(rows, categoryField, valueField, categories) {
-  const map = /* @__PURE__ */ new Map();
+  const map2 = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const cat = String(row[categoryField] ?? "");
     const val = row[valueField];
     if (val != null && !isNaN(val)) {
-      map.set(cat, (map.get(cat) ?? 0) + Number(val));
+      map2.set(cat, (map2.get(cat) ?? 0) + Number(val));
     }
   }
-  return categories.map((cat) => map.get(cat) ?? null);
+  return categories.map((cat) => map2.get(cat) ?? null);
 }
 function buildCategoryCounts(rows, categoryField, categories) {
-  const map = /* @__PURE__ */ new Map();
+  const map2 = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const cat = String(row[categoryField] ?? "");
-    map.set(cat, (map.get(cat) ?? 0) + 1);
+    map2.set(cat, (map2.get(cat) ?? 0) + 1);
   }
-  return categories.map((cat) => map.get(cat) ?? 0);
+  return categories.map((cat) => map2.get(cat) ?? 0);
 }
 function buildCategoryGroupCounts(rows, categoryField, groupField, categories, groups) {
   return groups.map(
@@ -5430,6 +6210,21 @@ var ecGroupedBarChartDef = {
 
 // src/echarts/templates/line.ts
 var isDiscrete5 = (type) => type === "nominal" || type === "ordinal";
+var LINE_DASHES = ["solid", [8, 4], [2, 3], [8, 3, 2, 3]];
+var DASH_KEY_COLOR = "#777777";
+var dashKeyName = (label) => `${label}\u200B`;
+function dashPattern(index) {
+  const dash = LINE_DASHES[index % LINE_DASHES.length];
+  return typeof dash === "string" ? dash : [...dash];
+}
+var dashLabelOf = (value) => value == null ? "null" : String(value);
+function resolveDashLabels(ctx, dashField) {
+  const source = ctx.fullTable ?? ctx.table;
+  const order = getCategoryOrder({ ...ctx, table: source }, "strokeDash");
+  const labels = extractCategories(source, dashField, order);
+  if (source.some((row) => row[dashField] == null) && !labels.includes("null")) labels.push("null");
+  return labels;
+}
 function areCategoriesNumeric(cats) {
   if (cats.length === 0) return true;
   return cats.every((c) => {
@@ -5442,7 +6237,7 @@ function areCategoriesNumeric(cats) {
 var ecLineChartDef = {
   chart: "Line Chart",
   template: { mark: "line", encoding: {} },
-  channels: ["x", "y", "color", "opacity", "column", "row"],
+  channels: ["x", "y", "color", "strokeDash", "opacity", "column", "row"],
   markCognitiveChannel: "position",
   declareLayoutMode: () => ({
     paramOverrides: { continuousMarkCrossSection: { x: 100, y: 20, seriesCountAxis: "auto" } }
@@ -5453,6 +6248,7 @@ var ecLineChartDef = {
     const yCS = channelSemantics.y;
     const colorField = channelSemantics.color?.field;
     const colorType = channelSemantics.color?.type;
+    const dashField = channelSemantics.strokeDash?.field;
     if (!xCS?.field || !yCS?.field) return;
     const xField = xCS.field;
     const yField = yCS.field;
@@ -5460,6 +6256,9 @@ var ecLineChartDef = {
     const xIsTemporal = xCS.type === "temporal";
     const yIsDiscrete = isDiscrete5(yCS.type);
     const isContinuousColor = !!colorField && (colorType === "quantitative" || colorType === "temporal");
+    const discreteColorField = colorField && isDiscrete5(colorType) ? colorField : void 0;
+    const dashLabels = dashField ? resolveDashLabels(ctx, dashField) : [];
+    const dashIndexOf = (row) => dashField ? Math.max(0, dashLabels.indexOf(dashLabelOf(row[dashField]))) : 0;
     const categories = xIsDiscrete ? extractCategories(table, xField, getCategoryOrder(ctx, "x")) : void 0;
     const yCategories = yIsDiscrete ? extractCategories(table, yField, getCategoryOrder(ctx, "y")) : void 0;
     const option = {
@@ -5529,8 +6328,20 @@ var ecLineChartDef = {
         if (!isNaN(na) && !isNaN(nb)) return na - nb;
         return String(ax).localeCompare(String(bx));
       });
-      const pointData = sorted.map((r) => [r[xField], r[yField], r[colorField]]);
-      const lineData = sorted.map((r) => [r[xField], r[yField]]);
+      const pointData = sorted.map((r) => dashField ? [r[xField], r[yField], r[colorField], dashIndexOf(r)] : [r[xField], r[yField], r[colorField]]);
+      const lineGroups = [];
+      if (dashField) {
+        const byDash = /* @__PURE__ */ new Map();
+        for (const r of sorted) {
+          const dashIndex = dashIndexOf(r);
+          const rows = byDash.get(dashIndex);
+          if (rows) rows.push(r);
+          else byDash.set(dashIndex, [r]);
+        }
+        lineGroups.push(...[...byDash].sort((a, b) => a[0] - b[0]));
+      } else {
+        lineGroups.push([0, sorted]);
+      }
       const nums = sorted.map((r) => Number(r[colorField])).filter((v) => !isNaN(v) && isFinite(v));
       const cMin = nums.length ? Math.min(...nums) : 0;
       const cMax = nums.length ? Math.max(...nums) : 1;
@@ -5549,8 +6360,8 @@ var ecLineChartDef = {
         inRange: {
           color: paletteFromDecision && paletteFromDecision.length > 0 ? paletteFromDecision : ["#f7fcf5", "#74c476", "#00441b"]
         },
-        seriesIndex: 1,
-        // apply to point series
+        seriesIndex: lineGroups.length,
+        // apply to point series, which follows the lines
         name: colorField,
         textStyle: { fontSize: 10 },
         calculable: true
@@ -5572,16 +6383,19 @@ var ecLineChartDef = {
           }
         }
       ];
-      option.series.push({
-        type: "line",
-        data: lineData,
-        itemStyle: { color: "#cccccc" },
-        lineStyle: { color: "#cccccc" },
-        showSymbol: false,
-        symbol: "none",
-        ...smooth ? { smooth: true } : {},
-        ...step ? { step } : {}
-      });
+      for (const [dashIndex, rows] of lineGroups) {
+        option.series.push({
+          type: "line",
+          ...dashField ? { name: dashLabels[dashIndex] } : {},
+          data: rows.map((r) => [r[xField], r[yField]]),
+          itemStyle: { color: "#cccccc" },
+          lineStyle: { color: "#cccccc", ...dashField ? { type: dashPattern(dashIndex) } : {} },
+          showSymbol: false,
+          symbol: "none",
+          ...smooth ? { smooth: true } : {},
+          ...step ? { step } : {}
+        });
+      }
       option.series.push({
         type: "scatter",
         data: pointData,
@@ -5589,23 +6403,97 @@ var ecLineChartDef = {
         symbolSize: 7,
         itemStyle: { opacity: 1 }
       });
-    } else if (colorField && isDiscrete5(colorType)) {
-      const groups = groupBy(table, colorField);
-      option.legend = { data: [...groups.keys()] };
-      for (const [name, rows] of groups) {
-        const seriesData = yIsDiscrete && yCategories ? buildCategoryAlignedXYData(rows, xField, yField, yCategories) : xIsDiscrete ? buildCategoryAlignedData(rows, xField, yField, categories) : rows.map((r) => [r[xField], r[yField]]);
-        const series = {
-          name,
-          type: "line",
-          data: seriesData,
-          // Default line chart: don't draw point markers (unless showPoints is set).
-          showSymbol: !!showPoints,
-          symbol: showPoints ? "circle" : "none",
-          ...showPoints ? { symbolSize: 6 } : {}
+      if (dashField) {
+        option.legend = { data: dashLabels.map((name) => ({ name, itemStyle: { opacity: 0 } })) };
+        option._legendTitle = dashField;
+        option._encodingTooltip.parts.push({
+          from: "data",
+          index: 3,
+          label: dashField,
+          format: "category",
+          categoryNames: dashLabels
+        });
+      }
+    } else if (discreteColorField || dashField) {
+      const factored = !!discreteColorField && !!dashField && discreteColorField !== dashField;
+      const nameOf = (row) => discreteColorField ? String(row[discreteColorField] ?? "") : dashLabelOf(row[dashField]);
+      const groups = /* @__PURE__ */ new Map();
+      for (const row of table) {
+        const name = nameOf(row);
+        const dashIndex = dashIndexOf(row);
+        let byDash = groups.get(name);
+        if (!byDash) {
+          byDash = /* @__PURE__ */ new Map();
+          groups.set(name, byDash);
+        }
+        const rows = byDash.get(dashIndex);
+        if (rows) rows.push(row);
+        else byDash.set(dashIndex, [row]);
+      }
+      const names = [...groups.keys()];
+      if (!discreteColorField) names.sort((a, b) => dashLabels.indexOf(a) - dashLabels.indexOf(b));
+      const buildSeriesData = (rows, dashIndex) => {
+        if (yIsDiscrete && yCategories) {
+          const points = buildCategoryAlignedXYData(rows, xField, yField, yCategories);
+          return factored ? points.map((p) => [...p, dashIndex]) : points;
+        }
+        if (xIsDiscrete) {
+          const values = buildCategoryAlignedData(rows, xField, yField, categories);
+          return factored ? values.map((v, i) => [categories[i], v, dashIndex]) : values;
+        }
+        return rows.map((r) => factored ? [r[xField], r[yField], dashIndex] : [r[xField], r[yField]]);
+      };
+      for (const name of names) {
+        const byDash = [...groups.get(name)].sort((a, b) => a[0] - b[0]);
+        byDash.forEach(([dashIndex, rows], k) => {
+          const series = {
+            name,
+            type: "line",
+            data: buildSeriesData(rows, dashIndex),
+            // Default line chart: don't draw point markers (unless showPoints is set).
+            showSymbol: !!showPoints,
+            symbol: showPoints ? "circle" : "none",
+            ...showPoints ? { symbolSize: 6 } : {}
+          };
+          if (dashField) series.lineStyle = { type: dashPattern(dashIndex) };
+          if (k > 0 || !discreteColorField && option.series.length > 0) series._companion = true;
+          if (smooth) series.smooth = true;
+          if (step) series.step = step;
+          option.series.push(series);
+        });
+      }
+      if (factored) {
+        option.legend = {
+          data: [
+            ...names.map((name) => ({ name, lineStyle: { type: "solid" } })),
+            ...dashLabels.map((label, i) => ({
+              name: dashKeyName(label),
+              lineStyle: { type: dashPattern(i), color: DASH_KEY_COLOR },
+              itemStyle: { color: DASH_KEY_COLOR, opacity: 0 }
+            }))
+          ]
         };
-        if (smooth) series.smooth = true;
-        if (step) series.step = step;
-        option.series.push(series);
+        dashLabels.forEach((label, i) => {
+          option.series.push({
+            name: dashKeyName(label),
+            type: "line",
+            data: [],
+            silent: true,
+            showSymbol: false,
+            symbol: "none",
+            lineStyle: { type: dashPattern(i), color: DASH_KEY_COLOR },
+            itemStyle: { color: DASH_KEY_COLOR }
+          });
+        });
+        option._encodingTooltip = {
+          ...option._encodingTooltip,
+          seriesSuffix: { index: 2, categoryNames: dashLabels }
+        };
+      } else if (dashField && !discreteColorField) {
+        option.legend = { data: dashLabels.map((name) => ({ name, itemStyle: { opacity: 0 } })) };
+        option._legendTitle = dashField;
+      } else {
+        option.legend = { data: names };
       }
     } else {
       const seriesData = yIsDiscrete && yCategories ? buildCategoryAlignedXYData(table, xField, yField, yCategories) : xIsDiscrete ? categories.map((cat) => {
@@ -5653,25 +6541,25 @@ var ecLineChartDef = {
   })
 };
 function buildCategoryAlignedData(rows, xField, yField, categories, yTransform) {
-  const map = /* @__PURE__ */ new Map();
+  const map2 = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const v = row[yField];
-    if (v != null && !isNaN(Number(v))) map.set(String(row[xField]), Number(v));
+    if (v != null && !isNaN(Number(v))) map2.set(String(row[xField]), Number(v));
   }
   return categories.map((cat) => {
-    const v = map.get(cat);
+    const v = map2.get(cat);
     return v != null ? yTransform ? yTransform(v) : v : null;
   });
 }
 function buildCategoryAlignedXYData(rows, xField, yField, yCategories) {
-  const map = /* @__PURE__ */ new Map();
+  const map2 = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const key = String(row[yField] ?? "");
-    if (!map.has(key)) {
-      map.set(key, row[xField]);
+    if (!map2.has(key)) {
+      map2.set(key, row[xField]);
     }
   }
-  return yCategories.filter((cat) => map.has(cat)).map((cat) => [map.get(cat), cat]);
+  return yCategories.filter((cat) => map2.has(cat)).map((cat) => [map2.get(cat), cat]);
 }
 var RANK_SEMANTIC_TYPES = /* @__PURE__ */ new Set(["Rank", "Score", "Level"]);
 var ecBumpChartDef = {
@@ -5812,13 +6700,13 @@ function orderPeriods(categories) {
   return categories;
 }
 function alignToPeriods(rows, xField, yField, categories) {
-  const map = /* @__PURE__ */ new Map();
+  const map2 = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const v = row[yField];
-    if (v != null && !isNaN(Number(v))) map.set(String(row[xField]), Number(v));
+    if (v != null && !isNaN(Number(v))) map2.set(String(row[xField]), Number(v));
   }
   return categories.map((cat) => {
-    const v = map.get(cat);
+    const v = map2.get(cat);
     return v != null ? v : null;
   });
 }
@@ -6165,25 +7053,25 @@ var ecAreaChartDef = {
   ]
 };
 function buildCategoryAlignedData2(rows, xField, yField, categories) {
-  const map = /* @__PURE__ */ new Map();
+  const map2 = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const v = row[yField];
     if (v != null && !isNaN(Number(v))) {
       const k = String(row[xField]);
-      map.set(k, (map.get(k) ?? 0) + Number(v));
+      map2.set(k, (map2.get(k) ?? 0) + Number(v));
     }
   }
-  return categories.map((cat) => map.get(cat) ?? null);
+  return categories.map((cat) => map2.get(cat) ?? null);
 }
 function buildCategoryAlignedXYData2(rows, xField, yField, yCategories) {
-  const map = /* @__PURE__ */ new Map();
+  const map2 = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const key = String(row[yField] ?? "");
-    if (!map.has(key)) {
-      map.set(key, row[xField]);
+    if (!map2.has(key)) {
+      map2.set(key, row[xField]);
     }
   }
-  return yCategories.filter((cat) => map.has(cat)).map((cat) => [map.get(cat), cat]);
+  return yCategories.filter((cat) => map2.has(cat)).map((cat) => [map2.get(cat), cat]);
 }
 function getSortedUniqueDates(table, xField) {
   const set = /* @__PURE__ */ new Set();
@@ -6204,22 +7092,22 @@ function getSortedUniqueXValues(table, xField) {
   return [...set].sort((a, b) => a - b);
 }
 function buildValueAlignedYData(rows, xField, yField, sortedX) {
-  const map = /* @__PURE__ */ new Map();
+  const map2 = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const x = Number(row[xField]);
     const y = Number(row[yField]);
     if (!Number.isFinite(x)) continue;
-    map.set(x, Number.isFinite(y) ? y : 0);
+    map2.set(x, Number.isFinite(y) ? y : 0);
   }
-  return sortedX.map((x) => map.get(x) ?? 0);
+  return sortedX.map((x) => map2.get(x) ?? 0);
 }
 function buildTimeAlignedData(rows, xField, yField, sortedDates) {
-  const map = /* @__PURE__ */ new Map();
+  const map2 = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const n = Number(row[yField]);
-    map.set(String(row[xField]), Number.isFinite(n) ? n : 0);
+    map2.set(String(row[xField]), Number.isFinite(n) ? n : 0);
   }
-  return sortedDates.map((d) => [d, map.get(d) ?? 0]);
+  return sortedDates.map((d) => [d, map2.get(d) ?? 0]);
 }
 
 // src/echarts/templates/range-area.ts
@@ -6250,15 +7138,15 @@ function fmtTemporalLabel(s) {
   return new Date(t).toLocaleDateString(void 0, { month: "short", day: "numeric", year: "numeric" });
 }
 function alignBounds(rows, xField, lowField, highField, labels) {
-  const map = /* @__PURE__ */ new Map();
+  const map2 = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const lo = Number(row[lowField]);
     const hi = Number(row[highField]);
     if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
-    map.set(String(row[xField]), { low: Math.min(lo, hi), high: Math.max(lo, hi) });
+    map2.set(String(row[xField]), { low: Math.min(lo, hi), high: Math.max(lo, hi) });
   }
   return labels.map((l) => {
-    const v = map.get(l);
+    const v = map2.get(l);
     return v ? { low: v.low, high: v.high } : { low: null, high: null };
   });
 }
@@ -6603,7 +7491,7 @@ var ecHeatmapDef = {
   declareLayoutMode: () => ({
     axisFlags: { x: { banded: true }, y: { banded: true } }
     // No paramOverrides needed — uses the backend default band size
-    // (defaultBandSize=20, minStep=6), matching VL heatmap sizing.
+    // (defaultBandSize=20, minStep=8), matching VL heatmap sizing.
   }),
   instantiate: (spec, ctx) => {
     const { channelSemantics, table, colorDecisions, encodings } = ctx;
@@ -6641,12 +7529,12 @@ var ecHeatmapDef = {
     }
     if (minVal === Infinity) minVal = 0;
     if (maxVal === -Infinity) maxVal = 1;
-    const encScheme = encodings?.color?.scheme;
+    const encScheme = schemeName(encodings?.color?.scheme);
     const userScheme = encScheme && encScheme !== "default" ? encScheme : void 0;
     const decision = colorDecisions?.color ?? colorDecisions?.group;
     const semanticIsDiverging = decision?.schemeType === "diverging";
-    const schemeName = userScheme || (semanticIsDiverging ? "redblue" : DEFAULT_HEATMAP_SCHEME);
-    const isDivergingScale = semanticIsDiverging || isDivergingHeatmapScheme(schemeName);
+    const schemeName2 = userScheme || (semanticIsDiverging ? "redblue" : DEFAULT_HEATMAP_SCHEME);
+    const isDivergingScale = semanticIsDiverging || isDivergingHeatmapScheme(schemeName2);
     if (isDivergingScale && minVal < 0 && maxVal > 0) {
       const sym = Math.max(Math.abs(minVal), Math.abs(maxVal));
       minVal = -sym;
@@ -6668,10 +7556,10 @@ var ecHeatmapDef = {
       if (paletteFromDecision && paletteFromDecision.length > 0) {
         schemeColors = paletteFromDecision;
       } else {
-        schemeColors = SCHEME_COLORS[schemeName] || SCHEME_COLORS[DEFAULT_HEATMAP_SCHEME];
+        schemeColors = SCHEME_COLORS[schemeName2] || SCHEME_COLORS[DEFAULT_HEATMAP_SCHEME];
       }
     } else {
-      schemeColors = SCHEME_COLORS[schemeName] || SCHEME_COLORS[DEFAULT_HEATMAP_SCHEME];
+      schemeColors = SCHEME_COLORS[schemeName2] || SCHEME_COLORS[DEFAULT_HEATMAP_SCHEME];
     }
     const option = {
       tooltip: { position: "top" },
@@ -6787,7 +7675,7 @@ var ecHeatmapDef = {
           { value: "redblue", label: "Red-Blue (diverging)" }
         ]
       },
-      get: (enc) => enc.color?.scheme,
+      get: (enc) => schemeName(enc.color?.scheme),
       set: (enc, value) => ({ ...enc, color: { ...enc.color, scheme: value } })
     }
   ],
@@ -6972,13 +7860,35 @@ function findOutliers(values) {
   const hi = q3 + 1.5 * iqr;
   return values.filter((v) => v < lo || v > hi);
 }
-function boxplotLaneOffset(bandWidth, laneCount, laneIndex) {
+function boxplotLaneGeometry(bandWidth, laneCount, laneIndex) {
   const availableWidth = bandWidth * 0.8 - 2;
   const boxGap = availableWidth / laneCount * 0.3;
   const boxWidth = (availableWidth - boxGap * (laneCount - 1)) / laneCount;
-  return boxWidth / 2 - availableWidth / 2 + laneIndex * (boxGap + boxWidth);
+  return {
+    offset: boxWidth / 2 - availableWidth / 2 + laneIndex * (boxGap + boxWidth),
+    boxWidth
+  };
 }
-function makeOutlierSeries(name, data, laneIndex, laneCount, horizontal) {
+var POINT_JITTER_FRACTION = 0.35;
+function jitterAt(index) {
+  return index * 0.6180339887498949 % 1 * 2 - 1;
+}
+function laneBoxTooltip(p) {
+  const [min, q1, median, q3, max] = Array.isArray(p?.data?.value) ? p.data.value : [];
+  return [
+    `${p?.name ?? ""}`,
+    `${p?.marker ?? ""}${p?.data?.laneGroup ?? ""}`,
+    `max: ${max}`,
+    `Q3: ${q3}`,
+    `median: ${median}`,
+    `Q1: ${q1}`,
+    `min: ${min}`
+  ].join("<br/>");
+}
+function lanePointTooltip(p) {
+  return `${p?.marker ?? ""}${p?.data?.laneGroup ?? ""}: ${Array.isArray(p?.data?.value) ? p.data.value[1] : ""}`;
+}
+function makePointSeries(name, data, laneIndex, laneCount, horizontal, fullSample = false) {
   return {
     name,
     type: "custom",
@@ -6986,21 +7896,31 @@ function makeOutlierSeries(name, data, laneIndex, laneCount, horizontal) {
     data,
     encode: { tooltip: [0, 1] },
     z: 3,
+    // Marks this as an overlay belonging to the boxplot series before it, so
+    // palette assignment gives it that box's colour instead of a new slot.
+    _companion: true,
     renderItem: (_params, api) => {
       const category = Number(api.value(0));
       const value = Number(api.value(1));
+      const jitter2 = Number(api.value(2)) || 0;
       const point = horizontal ? api.coord([value, category]) : api.coord([category, value]);
       const size = api.size(horizontal ? [0, 1] : [1, 0]);
       const bandWidth = Math.abs(horizontal ? size[1] : size[0]);
-      const offset = boxplotLaneOffset(bandWidth, laneCount, laneIndex);
+      const lane = boxplotLaneGeometry(bandWidth, laneCount, laneIndex);
+      const offset = lane.offset + jitter2 * lane.boxWidth * POINT_JITTER_FRACTION;
+      const color = api.visual("color");
       return {
         type: "circle",
         shape: {
           cx: point[0] + (horizontal ? 0 : offset),
           cy: point[1] + (horizontal ? offset : 0),
-          r: 2
+          r: fullSample ? Math.max(1.6, Math.min(3.2, lane.boxWidth * 0.08)) : 2
         },
-        style: { fill: api.visual("color") }
+        // With the whole sample drawn the box goes hollow and the points
+        // become the mark that spends saturated ink, so they carry the
+        // group colour. Slight transparency lets dense regions read as
+        // density; the hairline halo keeps overlaps countable.
+        style: fullSample ? { fill: color, opacity: 0.7, stroke: "#ffffff", lineWidth: 0.5 } : { fill: color }
       };
     }
   };
@@ -7060,7 +7980,8 @@ var ecBoxplotDef = {
     const colorIsDiscrete = colorField && isDiscrete8(colorType);
     if (!xCS?.field || !yCS?.field) return;
     const whiskerMethod = ctx.chartProperties?.whiskerMethod === "minmax" ? "minmax" : "iqr";
-    const showOutliers = whiskerMethod === "iqr" && ctx.chartProperties?.showOutliers !== false;
+    const showPoints = ctx.chartProperties?.showPoints === true;
+    const showOutliers = !showPoints && whiskerMethod === "iqr" && ctx.chartProperties?.showOutliers !== false;
     const xIsDiscrete = isDiscrete8(xCS.type);
     const yIsDiscrete = isDiscrete8(yCS.type);
     let catAxis = "x";
@@ -7120,7 +8041,7 @@ var ecBoxplotDef = {
       const catGroups = groupBy(table, catField);
       for (let lane = 0; lane < maxPerBand; lane++) {
         const boxData = [];
-        const outlierData = [];
+        const pointData = [];
         for (let i = 0; i < categories.length; i++) {
           const cat = categories[i];
           const g = perBand.get(cat)?.[lane];
@@ -7135,20 +8056,31 @@ var ecBoxplotDef = {
             continue;
           }
           const c = colorFor(g);
-          boxData.push({ value: fiveNumberSummary(values, whiskerMethod), itemStyle: { color: c, borderColor: c } });
-          if (showOutliers) {
-            for (const o of findOutliers(values)) outlierData.push({ value: [i, o], itemStyle: { color: c } });
+          boxData.push({
+            value: fiveNumberSummary(values, whiskerMethod),
+            // The group this lane draws at this band, so the tooltip names it, not the lane.
+            laneGroup: g,
+            // Hollow box when the sample is drawn (see makePointSeries).
+            itemStyle: { color: showPoints ? "transparent" : c, borderColor: c }
+          });
+          if (showPoints) {
+            values.forEach((v, k) => pointData.push({ value: [i, v, jitterAt(k)], laneGroup: g }));
+          } else if (showOutliers) {
+            for (const o of findOutliers(values)) pointData.push({ value: [i, o], laneGroup: g, itemStyle: { color: c } });
           }
         }
-        option.series.push({ name: `__lane${lane}`, type: "boxplot", data: boxData });
-        if (outlierData.length > 0) {
-          option.series.push(makeOutlierSeries(
-            `__lane${lane} (outliers)`,
-            outlierData,
-            lane,
-            maxPerBand,
-            isHorizontal
-          ));
+        option.series.push({
+          name: `__lane${lane}`,
+          type: "boxplot",
+          data: boxData,
+          ...showPoints ? { itemStyle: { borderWidth: 1.5 } } : {},
+          tooltip: { formatter: laneBoxTooltip }
+        });
+        if (pointData.length > 0) {
+          option.series.push({
+            ...makePointSeries(`__lane${lane} (points)`, pointData, lane, maxPerBand, isHorizontal, showPoints),
+            tooltip: { formatter: lanePointTooltip }
+          });
         }
       }
       option.series.push(makeGroupSeparatorSeries(categories.length, isHorizontal));
@@ -7160,33 +8092,39 @@ var ecBoxplotDef = {
       for (let cIdx = 0; cIdx < colorCategories.length; cIdx++) {
         const colorName = colorCategories[cIdx];
         const boxData = [];
-        const outlierData = [];
+        const pointData = [];
         for (let i = 0; i < categories.length; i++) {
           const cat = categories[i];
           const rows = (catGroups.get(cat) || []).filter(
             (r) => String(r[colorField] ?? "") === colorName
           );
           const values = rows.map((r) => Number(r[valField])).filter((v) => isFinite(v));
-          boxData.push(values.length ? fiveNumberSummary(values, whiskerMethod) : "-");
-          if (showOutliers) {
+          boxData.push(
+            !values.length ? "-" : showPoints ? { value: fiveNumberSummary(values, whiskerMethod), itemStyle: { color: "transparent" } } : fiveNumberSummary(values, whiskerMethod)
+          );
+          if (showPoints) {
+            values.forEach((v, k) => pointData.push([i, v, jitterAt(k)]));
+          } else if (showOutliers) {
             for (const o of findOutliers(values)) {
-              outlierData.push([i, o]);
+              pointData.push([i, o]);
             }
           }
         }
         option.series.push({
           name: colorName,
           type: "boxplot",
-          data: boxData
+          data: boxData,
+          ...showPoints ? { itemStyle: { borderWidth: 1.5 } } : {}
           // itemStyle 由 ecApplyLayoutToSpec 按 colorDecisions 填充
         });
-        if (outlierData.length > 0) {
-          option.series.push(makeOutlierSeries(
-            colorName + " (outliers)",
-            outlierData,
+        if (pointData.length > 0) {
+          option.series.push(makePointSeries(
+            colorName + " (points)",
+            pointData,
             cIdx,
             colorCategories.length,
-            isHorizontal
+            isHorizontal,
+            showPoints
           ));
         }
       }
@@ -7195,25 +8133,29 @@ var ecBoxplotDef = {
     } else {
       const catGroups = groupBy(table, catField);
       const boxData = [];
-      const outlierData = [];
+      const pointData = [];
       for (let i = 0; i < categories.length; i++) {
         const cat = categories[i];
         const rows = catGroups.get(cat) || [];
         const values = rows.map((r) => Number(r[valField])).filter((v) => isFinite(v));
-        boxData.push(fiveNumberSummary(values, whiskerMethod));
-        if (showOutliers) {
+        const summary = fiveNumberSummary(values, whiskerMethod);
+        boxData.push(showPoints ? { value: summary, itemStyle: { color: "transparent" } } : summary);
+        if (showPoints) {
+          values.forEach((v, k) => pointData.push([i, v, jitterAt(k)]));
+        } else if (showOutliers) {
           for (const o of findOutliers(values)) {
-            outlierData.push([i, o]);
+            pointData.push([i, o]);
           }
         }
       }
       option.series.push({
         type: "boxplot",
-        data: boxData
+        data: boxData,
+        ...showPoints ? { itemStyle: { borderWidth: 1.5 } } : {}
         // 单系列颜色由 ecApplyLayoutToSpec 使用 cat10[0] 等统一默认
       });
-      if (outlierData.length > 0) {
-        option.series.push(makeOutlierSeries("Outliers", outlierData, 0, 1, isHorizontal));
+      if (pointData.length > 0) {
+        option.series.push(makePointSeries("Points", pointData, 0, 1, isHorizontal, showPoints));
       }
     }
     Object.assign(spec, option);
@@ -7232,11 +8174,27 @@ var ecBoxplotDef = {
       defaultValue: "iqr"
     },
     {
+      key: "showPoints",
+      label: "Points",
+      type: "binary",
+      defaultValue: false,
+      // Jitter needs a band to scatter within, so this is only meaningful
+      // once one position axis is discrete.
+      check: (ctx) => ({
+        applicable: isDiscrete8(ctx.channelSemantics?.x?.type) || isDiscrete8(ctx.channelSemantics?.y?.type)
+      })
+    },
+    {
       key: "showOutliers",
       label: "Outliers",
       type: "binary",
       defaultValue: true,
-      check: (ctx) => ({ applicable: ctx.chartProperties?.whiskerMethod !== "minmax" })
+      // Outliers exist only with Tukey whiskers; min–max whiskers absorb
+      // every point. And once every observation is drawn, the outlier
+      // marks are just duplicates.
+      check: (ctx) => ({
+        applicable: ctx.chartProperties?.whiskerMethod !== "minmax" && ctx.chartProperties?.showPoints !== true
+      })
     },
     {
       key: "dodge",
@@ -7699,17 +8657,16 @@ var ecStreamgraphDef = {
       option.singleAxis.left = option.singleAxis.left || 50;
       option.singleAxis.right = Math.max(option.singleAxis.right || 0, rightMargin);
       if (hasLegend && option.legend) {
-        const legendLeft = option._width - rightMargin + BUFFER;
-        option.legend.left = legendLeft;
-        delete option.legend.right;
+        delete option.legend.left;
+        option.legend.right = BUFFER;
         option.legend.top = 20;
         option.legend.orient = option.legend.orient || "vertical";
         option.legend.align = "left";
         if (Array.isArray(option.graphic)) {
           for (const g of option.graphic) {
             if (g.type === "text" && (g.top === 4 || g.top === 20) && g.style && g.style.fontWeight === "bold") {
-              g.left = legendLeft;
-              delete g.right;
+              delete g.left;
+              g.right = BUFFER;
             }
           }
         }
@@ -9046,7 +10003,7 @@ var ecWaterfallChartDef = {
       cumulative.push(acc);
     }
     const COLOR = { startEnd: "#5470c6", increase: "#91cc75", decrease: "#ee6666" };
-    const fmt = (n) => {
+    const fmt2 = (n) => {
       const a = Math.abs(n);
       if (a >= 1e3) {
         const v = n / 1e3;
@@ -9070,8 +10027,8 @@ var ecWaterfallChartDef = {
       const color = t === "start" || t === "end" ? COLOR.startEnd : top >= prev ? COLOR.increase : COLOR.decrease;
       barData.push({ value: [i, lo, hi, v], itemStyle: { color } });
       tops.push(top);
-      outerText.push(fmt(top));
-      innerText.push((t === "delta" && v > 0 ? "+" : "") + fmt(v));
+      outerText.push(fmt2(top));
+      innerText.push((t === "delta" && v > 0 ? "+" : "") + fmt2(v));
       tipVals.push(top);
       prevVals.push(prev);
     }
@@ -9710,11 +10667,11 @@ var ecCalendarHeatmapDef = {
     const gridH = 7 * cell;
     const canvasW = calLeft + weeks * cell + calRight;
     const canvasH = calTop + gridH + vmHeight;
-    const encScheme = encodings?.color?.scheme;
+    const encScheme = schemeName(encodings?.color?.scheme);
     const userScheme = encScheme && encScheme !== "default" ? encScheme : void 0;
-    const schemeName = userScheme || "viridis";
+    const schemeName2 = userScheme || "viridis";
     const decision = colorDecisions?.color ?? colorDecisions?.group;
-    let schemeColors = SCHEME_COLORS2[schemeName] || SCHEME_COLORS2.viridis;
+    let schemeColors = SCHEME_COLORS2[schemeName2] || SCHEME_COLORS2.viridis;
     if (decision?.schemeId) {
       const fromDecision = getPaletteForScheme(decision.schemeId);
       if (fromDecision && fromDecision.length > 0) schemeColors = fromDecision;
@@ -9723,8 +10680,8 @@ var ecCalendarHeatmapDef = {
       tooltip: {
         trigger: "item",
         formatter: (params) => {
-          const [date, val] = params.value;
-          return `${date}<br/>${valueField ?? "Count"}: ${val}`;
+          const [date2, val] = params.value;
+          return `${date2}<br/>${valueField ?? "Count"}: ${val}`;
         }
       },
       visualMap: {
@@ -9784,7 +10741,7 @@ var ecCalendarHeatmapDef = {
           { value: "purples", label: "Purples" }
         ]
       },
-      get: (enc) => enc.color?.scheme,
+      get: (enc) => schemeName(enc.color?.scheme),
       set: (enc, value) => ({ ...enc, color: { ...enc.color, scheme: value } })
     }
   ]
@@ -10006,8 +10963,8 @@ function isNumericField(table, field) {
 function niceBounds(min, max) {
   if (!isFinite(min) || !isFinite(max)) return null;
   if (min === max) {
-    const pad = Math.abs(min) > 1e-9 ? Math.abs(min) * 0.1 : 1;
-    return [min - pad, max + pad];
+    const pad2 = Math.abs(min) > 1e-9 ? Math.abs(min) * 0.1 : 1;
+    return [min - pad2, max + pad2];
   }
   const rawStep = (max - min) / 5;
   const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
@@ -10199,7 +11156,7 @@ var ecGraphDef = {
     };
     const layout = chartProperties?.layout === "force" ? "force" : "circular";
     const side = Math.max(420, Math.min(860, Math.round(Math.sqrt(nodeArr.length) * 155) + 40));
-    const pad = 64;
+    const pad2 = 64;
     const option = {
       tooltip: {
         trigger: "item",
@@ -10233,10 +11190,10 @@ var ecGraphDef = {
         },
         circular: { rotateLabel: true },
         force: { repulsion: 180, edgeLength: [50, 130], gravity: 0.08 },
-        left: pad,
-        right: pad,
-        top: pad,
-        bottom: pad
+        left: pad2,
+        right: pad2,
+        top: pad2,
+        bottom: pad2
       }],
       color: palette ?? DEFAULT_COLORS,
       _width: side,
@@ -10560,7 +11517,7 @@ var ecBulletChartDef = {
     );
     const byCat = /* @__PURE__ */ new Map();
     for (const r of table) byCat.set(String(r[labelField] ?? ""), r);
-    const valueOf = (cat) => Number(byCat.get(cat)?.[valueField]);
+    const valueOf2 = (cat) => Number(byCat.get(cat)?.[valueField]);
     const goalOf = (cat) => goalField != null ? Number(byCat.get(cat)?.[goalField]) : NaN;
     const band1 = [];
     const band2 = [];
@@ -10573,7 +11530,7 @@ var ecBulletChartDef = {
       band3.push(q);
     }
     const valueData = categories.map((cat) => {
-      const v = valueOf(cat);
+      const v = valueOf2(cat);
       const g = goalOf(cat);
       const met = Number.isFinite(g) ? v >= g : true;
       return {
@@ -10601,7 +11558,7 @@ var ecBulletChartDef = {
         formatter: (p) => {
           if (typeof p.seriesName === "string" && p.seriesName.startsWith("_")) return "";
           const cat = categories[p.dataIndex] ?? "";
-          const v = valueOf(cat);
+          const v = valueOf2(cat);
           const g = goalOf(cat);
           const goalLine = Number.isFinite(g) ? `<br/>${goalField}: ${g}` : "";
           return `${cat}<br/>${valueField}: ${v}${goalLine}`;
@@ -10677,6 +11634,455 @@ function ecGetTemplateChannels(chartType) {
   return ecGetTemplateDef(chartType)?.channels || [];
 }
 
+// src/core/resolve-semantics.ts
+var isCategoryValue = (value) => typeof value === "string" || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value);
+function inspectEncodingSort(encoding, channel, encodings, dataFields, options = {}) {
+  const issues = [];
+  const describe = (property, value) => `encodings.${channel}.${property} ${typeof value === "string" ? `"${value}"` : JSON.stringify(value)}`;
+  let sortOrder;
+  if (encoding.sortOrder === "ascending" || encoding.sortOrder === "descending") {
+    sortOrder = encoding.sortOrder;
+  } else if (encoding.sortOrder !== void 0) {
+    issues.push({
+      property: "sortOrder",
+      value: encoding.sortOrder,
+      error: `encodings.${channel}.sortOrder must be "ascending" or "descending".`,
+      warning: `${describe("sortOrder", encoding.sortOrder)} must be "ascending" or "descending"; ignoring it.`
+    });
+  }
+  const sortBy = encoding.sortBy;
+  if (sortBy === void 0) return { sortOrder, issues };
+  const reject = (error, reason) => {
+    issues.push({
+      property: "sortBy",
+      value: sortBy,
+      error,
+      warning: `${describe("sortBy", sortBy)} ${reason}; using default order.`
+    });
+    return { issues };
+  };
+  const invalid = `encodings.${channel}.sortBy must name an existing data field, a mapped channel (x, y, color), or a JSON category-order array; received ${JSON.stringify(sortBy)}.`;
+  if (typeof sortBy !== "string" || !sortBy.trim()) {
+    return reject(invalid, "is not a data field, mapped channel, or JSON category array");
+  }
+  if (sortBy === "x" || sortBy === "y" || sortBy === "color") {
+    const binding = encodings[sortBy];
+    const targets = Array.isArray(binding) ? binding : [binding];
+    if (!targets.some((target) => typeof target === "string" ? target.length > 0 : target && typeof target === "object" && (typeof target.field === "string" || target.aggregate === "count"))) {
+      return reject(
+        `encodings.${channel}.sortBy: channel "${sortBy}" must be mapped to a field or count aggregation.`,
+        "names a channel that is not mapped"
+      );
+    }
+    return { sort: { kind: "channel", channel: sortBy }, sortBy, sortOrder, issues };
+  }
+  if (dataFields.has(sortBy)) {
+    if (options.fieldSort === false) {
+      return reject(
+        `chart_spec.encodings.${channel}.sortBy: raw field-name sorting is not supported by this backend; bind the sort field to a supported measure channel and sort by that channel.`,
+        "sorts by a raw data field, which this backend does not support"
+      );
+    }
+    return { sort: { kind: "field", field: sortBy }, sortBy, sortOrder, issues };
+  }
+  let values;
+  try {
+    values = JSON.parse(sortBy);
+  } catch {
+    return reject(invalid, "is not a data field");
+  }
+  if (!Array.isArray(values)) return reject(invalid, "is not a data field or JSON category array");
+  const valid = values.filter(isCategoryValue);
+  if (valid.length === 0 && values.length > 0) return reject(invalid, "contains no valid category values");
+  if (valid.length < values.length) {
+    const dropped = values.length - valid.length;
+    issues.push({
+      property: "sortBy",
+      value: sortBy,
+      error: invalid,
+      warning: `${describe("sortBy", sortBy)} contains ${dropped} invalid category value${dropped === 1 ? "" : "s"}; ignoring ${dropped === 1 ? "it" : "them"}.`
+    });
+    return { sort: { kind: "values", values: valid }, sortBy: JSON.stringify(valid), sortOrder, issues };
+  }
+  return { sort: { kind: "values", values: valid }, sortBy, sortOrder, issues };
+}
+function repairEncodingSorts(encodings, data, options = {}) {
+  const warnings = [];
+  if (!encodings || typeof encodings !== "object") return { encodings, warnings };
+  const dataFields = /* @__PURE__ */ new Set();
+  let fieldsCollected = false;
+  const repair = (channel, entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    const encoding = entry;
+    const sortByValue = encoding.sortBy;
+    if (!fieldsCollected && typeof sortByValue === "string" && sortByValue.trim() && sortByValue !== "x" && sortByValue !== "y" && sortByValue !== "color") {
+      for (const row of data) {
+        if (row && typeof row === "object") {
+          const fields = Object.keys(row);
+          for (let index = 0; index < fields.length; index++) dataFields.add(fields[index]);
+        }
+      }
+      fieldsCollected = true;
+    }
+    const { sortBy, sortOrder, issues } = inspectEncodingSort(encoding, channel, encodings, dataFields, options);
+    if (issues.length === 0) return entry;
+    for (const issue of issues) {
+      warnings.push({ severity: "warning", code: "invalid_sort", message: issue.warning, channel });
+    }
+    const next = { ...encoding };
+    delete next.sortBy;
+    delete next.sortOrder;
+    if (sortBy !== void 0) next.sortBy = sortBy;
+    if (sortOrder !== void 0) next.sortOrder = sortOrder;
+    return next;
+  };
+  const repaired = Object.fromEntries(Object.entries(encodings).map(([channel, value]) => [
+    channel,
+    Array.isArray(value) ? value.map((entry) => repair(channel, entry)) : repair(channel, value)
+  ]));
+  return { encodings: repaired, warnings };
+}
+var MAX_TIMESTAMP_SEC = 4102444800;
+var MAX_TIMESTAMP_MS = 41024448e5;
+function isLikelyTimestamp(val) {
+  if (val >= 1e9 && val <= MAX_TIMESTAMP_SEC) return true;
+  if (val > MAX_TIMESTAMP_SEC && val <= MAX_TIMESTAMP_MS) return true;
+  return false;
+}
+function timestampToMs(val) {
+  return val <= MAX_TIMESTAMP_SEC ? val * 1e3 : val;
+}
+function inferImplicitSemanticType(fieldName, values) {
+  const tokens = fieldName.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  if (!tokens.includes("year")) return "";
+  const observed = values.filter((value) => value != null && value !== "");
+  if (new Set(observed.map(String)).size <= 1) return "";
+  const allYears = observed.every((value) => {
+    const numeric = typeof value === "number" ? value : Number(value);
+    return Number.isInteger(numeric) && numeric >= 1500 && numeric <= 2200;
+  });
+  return allYears ? "Year" : "";
+}
+var ISO_PREFIX = /^\d{4}-\d{2}/;
+function analyzeTemporalField(fieldValues) {
+  const dates = [];
+  let nonNull = 0;
+  for (const v of fieldValues.slice(0, 100)) {
+    if (v == null) continue;
+    nonNull++;
+    const d = v instanceof Date ? v : new Date(v);
+    if (!isNaN(d.getTime())) dates.push(d);
+  }
+  if (dates.length < 2 || dates.length < nonNull * 0.5) return null;
+  const monthSet = new Set(dates.map((d) => d.getUTCMonth()));
+  const daySet = new Set(dates.map((d) => d.getUTCDate()));
+  const hourSet = new Set(dates.map((d) => d.getUTCHours()));
+  const minuteSet = new Set(dates.map((d) => d.getUTCMinutes()));
+  const secondSet = new Set(dates.map((d) => d.getUTCSeconds()));
+  const yearSet = new Set(dates.map((d) => d.getUTCFullYear()));
+  const isSmallSpread = (s, maxSpread = 1) => {
+    if (s.size <= 1) return true;
+    const arr = [...s];
+    return Math.max(...arr) - Math.min(...arr) <= maxSpread;
+  };
+  const same = {
+    month: monthSet.size === 1,
+    day: daySet.size === 1,
+    hour: isSmallSpread(hourSet, 1),
+    minute: minuteSet.size === 1,
+    second: secondSet.size === 1
+  };
+  const sameYear = yearSet.size === 1;
+  const sameMonth = sameYear && same.month;
+  const sameDay = sameMonth && same.day;
+  return { dates, same, sameYear, sameMonth, sameDay };
+}
+function computeDataVotes(same) {
+  const votes = [0, 0, 0, 0, 0, 0];
+  if (same.second) votes[5] += 1;
+  if (same.minute && same.second) votes[5] += 1;
+  if (same.hour && same.minute && same.second) votes[5] += 1;
+  if (same.day && same.hour && same.minute && same.second) votes[5] += 2;
+  if (same.month && same.day && same.hour && same.minute && same.second) votes[5] += 3;
+  if (same.second) votes[4] += 1;
+  if (same.minute && same.second) votes[4] += 1;
+  if (same.hour && same.minute && same.second) votes[4] += 1;
+  if (same.day && same.hour && same.minute && same.second) votes[4] += 2;
+  if (!same.month && same.day && same.hour && same.minute && same.second) votes[4] += 3;
+  if (same.second) votes[3] += 1;
+  if (same.minute && same.second) votes[3] += 1;
+  if (same.hour && same.minute && same.second) votes[3] += 1;
+  if (!same.day && same.hour && same.minute && same.second) votes[3] += 3;
+  if (same.second) votes[2] += 1;
+  if (same.minute && same.second) votes[2] += 1;
+  if (!same.hour && same.minute && same.second) votes[2] += 3;
+  if (same.second) votes[1] += 1;
+  if (!same.minute && same.second) votes[1] += 3;
+  if (!same.second) votes[0] += 4;
+  return votes;
+}
+var SEMANTIC_LEVEL = {
+  Year: 5,
+  Decade: 5,
+  YearMonth: 4,
+  Month: 4,
+  YearQuarter: 4,
+  Quarter: 4,
+  Date: 3,
+  Day: 3,
+  Hour: 2,
+  DateTime: 1,
+  Timestamp: 0
+};
+function pickBestLevel(votes) {
+  let bestLevel = 0;
+  let bestScore = votes[0];
+  for (let i = 1; i <= 5; i++) {
+    if (votes[i] >= bestScore) {
+      bestScore = votes[i];
+      bestLevel = i;
+    }
+  }
+  return { level: bestLevel, score: bestScore };
+}
+function levelToFormat(level, analysis) {
+  switch (level) {
+    case 5:
+      return "%Y";
+    case 4:
+      return analysis.sameYear ? "%b" : "%b %Y";
+    case 3:
+      return analysis.sameYear ? "%b %d" : "%b %d, %Y";
+    case 2:
+      return analysis.sameDay ? "%H:00" : "%b %d %H:00";
+    case 1:
+      return analysis.sameDay ? "%H:%M" : "%b %d %H:%M";
+    case 0:
+      return analysis.sameDay ? "%H:%M:%S" : "%b %d %H:%M:%S";
+    default:
+      return null;
+  }
+}
+function resolveTemporalFormat(fieldValues, semanticType) {
+  const analysis = analyzeTemporalField(fieldValues);
+  if (!analysis) return null;
+  const votes = computeDataVotes(analysis.same);
+  const semLevel = SEMANTIC_LEVEL[semanticType];
+  if (semLevel !== void 0) votes[semLevel] += 3;
+  const { level } = pickBestLevel(votes);
+  return levelToFormat(level, analysis);
+}
+function expandToFullYear(val) {
+  const trimmed = val.trim();
+  if (/^\d{2}$/.test(trimmed)) {
+    const n = parseInt(trimmed, 10);
+    return String(n <= 49 ? 2e3 + n : 1900 + n);
+  }
+  return val;
+}
+function convertTemporalData(data, semanticTypes) {
+  if (data.length === 0) return data;
+  const keys = Object.keys(data[0]);
+  const fieldValues = Object.fromEntries(keys.map((key) => [key, data.map((row) => row[key])]));
+  const effectiveSemanticTypes = Object.fromEntries(keys.map((key) => [
+    key,
+    toTypeString(semanticTypes[key]) || inferImplicitSemanticType(key, fieldValues[key])
+  ]));
+  const temporalKeys = keys.filter((k) => {
+    const st = effectiveSemanticTypes[k];
+    const vc = inferVisCategory(fieldValues[k]);
+    const stCategory = st ? getVisCategory(st) : null;
+    return vc === "temporal" || stCategory === "temporal" || st === "Decade";
+  });
+  if (temporalKeys.length === 0) return data;
+  const values = structuredClone(data);
+  return values.map((r) => {
+    for (const temporalKey of temporalKeys) {
+      const val = r[temporalKey];
+      const st = effectiveSemanticTypes[temporalKey];
+      const calendar = (SEMANTIC_LEVEL[st] ?? -1) >= SEMANTIC_LEVEL.Date;
+      const parsed = readIsoTimestamp(val, calendar) ?? parseTemporalByType(val, st) ?? (!st && typeof val === "string" && !ISO_PREFIX.test(val.trim()) ? parseTemporalByType(val, "Date") : null);
+      if (parsed !== null) {
+        r[temporalKey] = parsed;
+      } else if (typeof val === "number") {
+        if (st === "Year" || st === "Decade") {
+          r[temporalKey] = `${Math.floor(val)}`;
+        } else if (isLikelyTimestamp(val)) {
+          r[temporalKey] = new Date(timestampToMs(val)).toISOString();
+        } else {
+          r[temporalKey] = String(val);
+        }
+      } else if (val instanceof Date) {
+        const localMidnight = !val.getHours() && !val.getMinutes() && !val.getSeconds() && !val.getMilliseconds();
+        r[temporalKey] = calendar && localMidnight && Number.isFinite(val.getTime()) ? `${val.getFullYear()}-${String(val.getMonth() + 1).padStart(2, "0")}-${String(val.getDate()).padStart(2, "0")}` : val.toISOString();
+      } else {
+        if ((st === "Year" || st === "Decade") && typeof val === "string") {
+          r[temporalKey] = expandToFullYear(val);
+        } else {
+          r[temporalKey] = String(val);
+        }
+      }
+    }
+    return r;
+  });
+}
+function resolveFieldChannelType(channel, encoding, fieldName, data, semanticTypes, context = {}) {
+  const rawAnnotation = semanticTypes[fieldName];
+  const suppliedSemanticType = typeof rawAnnotation === "string" ? rawAnnotation || "" : rawAnnotation?.semanticType ?? "";
+  const fieldValues = data.map((r) => r[fieldName]);
+  const semanticType = suppliedSemanticType || inferImplicitSemanticType(fieldName, fieldValues);
+  let decisionData = data;
+  let decisionValues = fieldValues;
+  if (hasTemporalParsers(semanticType)) {
+    const parsed = fieldValues.map((v) => parseTemporalByType(v, semanticType) ?? v);
+    if (parsed.some((v, i) => v !== fieldValues[i])) {
+      decisionValues = parsed;
+      decisionData = data.map((r, i) => ({ ...r, [fieldName]: parsed[i] }));
+    }
+  }
+  const typeDecision = resolveEncodingType(
+    semanticType,
+    decisionValues,
+    channel,
+    decisionData,
+    fieldName,
+    context
+  );
+  let type = typeDecision.vlType;
+  if (encoding.type) {
+    type = encoding.type;
+  } else if (channel === "column" || channel === "row") {
+    if (type !== "nominal" && type !== "ordinal") {
+      type = "nominal";
+    }
+  }
+  if (type === "quantitative") {
+    const sampleValues = data.slice(0, 15).filter((r) => r[fieldName] != void 0).map((r) => r[fieldName]);
+    const isoDateRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/;
+    if (sampleValues.length > 0 && sampleValues.every((val) => isoDateRegex.test(`${val}`.trim()))) {
+      type = "temporal";
+    }
+  }
+  const snapshots = typeDecision.snapshots === true && (type === "ordinal" || type === "nominal");
+  return { semanticType, fieldValues, type, snapshots };
+}
+function resolveChannelSemantics(encodings, data, semanticTypes, convertedData, context = {}) {
+  const result = {};
+  const temporalData = convertedData ?? data;
+  for (const [channel, encoding] of Object.entries(encodings)) {
+    const fieldName = encoding.field;
+    if (!fieldName && encoding.aggregate !== "count") continue;
+    if (!fieldName && encoding.aggregate === "count") {
+      result[channel] = {
+        field: "_count",
+        semanticAnnotation: { semanticType: "Count" },
+        type: "quantitative",
+        aggregationDefault: "sum"
+      };
+      continue;
+    }
+    if (!fieldName) continue;
+    const rawAnnotation = semanticTypes[fieldName];
+    const { semanticType, fieldValues, type: resolvedType, snapshots } = resolveFieldChannelType(
+      channel,
+      encoding,
+      fieldName,
+      data,
+      semanticTypes,
+      context
+    );
+    const fc = resolveFieldSemantics(rawAnnotation || semanticType, fieldName, fieldValues);
+    const annotation = fc.semanticAnnotation;
+    const tickConstraint = resolveTickConstraint(annotation.semanticType, annotation.intrinsicDomain);
+    const reversed = resolveReversed(annotation.semanticType, channel);
+    const nice = resolveNice(annotation.semanticType, fc.domainConstraint);
+    const stackable = resolveStackable(annotation.semanticType);
+    const cs = {
+      field: fieldName,
+      semanticAnnotation: annotation,
+      type: resolvedType,
+      // From FieldSemantics (data identity)
+      format: fc.format,
+      tooltipFormat: fc.tooltipFormat,
+      aggregationDefault: fc.aggregationDefault,
+      scaleType: fc.scaleType,
+      domainConstraint: fc.domainConstraint,
+      cyclic: fc.cyclic || void 0,
+      sortDirection: fc.sortDirection,
+      binningSuggested: fc.binningSuggested || void 0,
+      // Channel-specific visualization decisions
+      nice,
+      tickConstraint,
+      reversed: reversed || void 0,
+      stackable,
+      ...snapshots && !encoding.aggregate ? { snapshots: true } : {}
+    };
+    if (encoding.aggregate) {
+      if (encoding.aggregate === "count") {
+        cs.field = "_count";
+        cs.type = "quantitative";
+      } else {
+        cs.field = `${fieldName}_${encoding.aggregate}`;
+        cs.type = "quantitative";
+      }
+    }
+    if ((channel === "color" || channel === "group") && fieldName) {
+      const named = schemeName(encoding.scheme);
+      if (named && named !== "default") {
+        cs.colorScheme = {
+          scheme: named,
+          type: "categorical",
+          reason: "explicit user scheme"
+        };
+      } else {
+        const encodingVLType = cs.type;
+        const colorHint = resolveColorSchemeHint(semanticType, annotation, fieldValues);
+        const uniqueValues = [...new Set(fieldValues)];
+        cs.colorScheme = getRecommendedColorScheme(
+          semanticType,
+          encodingVLType,
+          uniqueValues.length,
+          fieldName,
+          fieldValues,
+          { type: colorHint.type }
+        );
+        if (cs.colorScheme.type === "diverging" && encodingVLType === "quantitative") {
+          const nums = fieldValues.filter((v) => typeof v === "number" && !isNaN(v));
+          const divInfo = resolveDivergingInfo(semanticType, annotation, nums);
+          if (divInfo) {
+            cs.colorScheme.domainMid = divInfo.midpoint;
+            const neutral = typeof annotation.divergingNeutral === "number" && annotation.divergingNeutral >= 0 ? annotation.divergingNeutral : annotation.divergingNeutral === void 0 && divInfo.inherent ? "auto" : void 0;
+            if (neutral !== void 0) cs.colorScheme.neutral = neutral;
+          }
+          if (annotation.polarity === "higher-is-better") {
+            cs.colorScheme = { ...cs.colorScheme, scheme: "redblue", reason: "declared higher-is-better: red is the low side" };
+          } else if (annotation.polarity === "lower-is-better") {
+            cs.colorScheme = { ...cs.colorScheme, scheme: "blueorange", reason: "declared lower-is-better: the warm end is high" };
+          }
+        }
+      }
+    }
+    if (cs.type === "temporal" || semanticType && getVisCategory(semanticType) === "temporal") {
+      const convertedFieldValues = temporalData.map((r) => r[fieldName]);
+      const fmt2 = resolveTemporalFormat(convertedFieldValues, semanticType);
+      if (fmt2) cs.temporalFormat = fmt2;
+    }
+    if (cs.type === "ordinal" || cs.type === "nominal") {
+      if (encoding.sortBy === void 0) {
+        const ordinalSort = inferOrdinalSortOrder(semanticType, fieldValues);
+        if (ordinalSort) {
+          cs.ordinalSortOrder = ordinalSort;
+        } else if (isDateField(semanticType, fieldValues)) {
+          const chronological = chronologicalOrder(temporalData.map((r) => r[fieldName]));
+          if (chronological) cs.ordinalSortOrder = chronological;
+        }
+      }
+    }
+    result[channel] = cs;
+  }
+  return result;
+}
+
 // src/core/filter-overflow.ts
 function filterOverflow(channelSemantics, declaration, encodings, data, budgets, allMarkTypes) {
   const effectiveType = (ch) => declaration.resolvedTypes?.[ch] ?? channelSemantics[ch]?.type;
@@ -10694,6 +12100,7 @@ function filterOverflow(channelSemantics, declaration, encodings, data, budgets,
   };
   const truncations = [];
   const warnings = [];
+  const viewports = [];
   let filteredData = data;
   const groupField = channelSemantics.group?.field;
   if (groupField) {
@@ -10735,7 +12142,17 @@ function filterOverflow(channelSemantics, declaration, encodings, data, budgets,
     const uniqueValues = [...new Set(filteredData.map((r) => r[fieldName]))];
     nominalCounts[channel] = Math.min(uniqueValues.length, maxToKeep);
     if (uniqueValues.length > maxToKeep) {
-      const valuesToKeep = strategy(channel, fieldName, uniqueValues, maxToKeep, strategyContext);
+      const orderedValues = strategy === defaultOverflowStrategy ? defaultOverflowOrder(channel, fieldName, uniqueValues, strategyContext) : void 0;
+      const valuesToKeep = orderedValues ? orderedValues.slice(0, maxToKeep) : strategy(channel, fieldName, uniqueValues, maxToKeep, strategyContext);
+      if ((channel === "x" || channel === "y") && orderedValues) {
+        viewports.push({
+          channel,
+          field: fieldName,
+          orderedValues,
+          visibleCount: valuesToKeep.length,
+          totalCount: orderedValues.length
+        });
+      }
       const omittedCount = uniqueValues.length - valuesToKeep.length;
       const placeholder = `...${omittedCount} items omitted`;
       warnings.push({
@@ -10760,13 +12177,40 @@ function filterOverflow(channelSemantics, declaration, encodings, data, budgets,
       }
     }
   }
-  return { filteredData, nominalCounts, truncations, warnings };
+  return { filteredData, nominalCounts, truncations, warnings, viewports };
 }
-var defaultOverflowStrategy = (channel, fieldName, uniqueValues, maxToKeep, context) => {
+var defaultOverflowStrategy = (channel, fieldName, uniqueValues, maxToKeep, context) => defaultOverflowOrder(channel, fieldName, uniqueValues, context).slice(0, maxToKeep);
+function defaultOverflowOrder(channel, fieldName, uniqueValues, context) {
   const { data, channelSemantics, encodings, allMarkTypes } = context;
   const encoding = encodings[channel];
-  const sortBy = encoding?.sortBy;
-  const sortOrder = encoding?.sortOrder;
+  const { sort: explicitSort, sortBy, sortOrder } = inspectEncodingSort(
+    encoding ?? {},
+    channel,
+    encodings,
+    new Set(data.flatMap((row) => Object.keys(row)))
+  );
+  if (explicitSort?.kind === "field") {
+    const minimums = /* @__PURE__ */ new Map();
+    for (const row of data) {
+      const value = row[explicitSort.field];
+      if (value == null || value !== value) continue;
+      const category = row[fieldName];
+      if (!minimums.has(category) || value < minimums.get(category)) minimums.set(category, value);
+    }
+    const direction = sortOrder === "descending" ? -1 : 1;
+    return [...uniqueValues].sort((left, right) => {
+      const leftValue = minimums.get(left);
+      const rightValue = minimums.get(right);
+      if (leftValue == null) return rightValue == null ? 0 : -direction;
+      if (rightValue == null) return direction;
+      return direction * (leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0);
+    });
+  }
+  if (explicitSort?.kind === "values") {
+    const ordered = sortOrder === "descending" ? [...explicitSort.values].reverse() : explicitSort.values;
+    const present = new Set(uniqueValues);
+    return ordered.filter((value) => present.has(value));
+  }
   let sortField;
   let sortFieldType;
   let isDescending = false;
@@ -10776,16 +12220,6 @@ var defaultOverflowStrategy = (channel, fieldName, uniqueValues, maxToKeep, cont
       sortField = sortCS?.field;
       sortFieldType = sortCS?.type;
       isDescending = sortOrder === "descending" || sortOrder !== "ascending" && sortBy !== channel;
-    } else {
-      try {
-        const sortedList = JSON.parse(sortBy);
-        if (Array.isArray(sortedList)) {
-          const orderedValues = sortOrder === "descending" ? sortedList.reverse() : sortedList;
-          return orderedValues.filter((v) => uniqueValues.includes(v)).slice(0, maxToKeep);
-        }
-      } catch {
-      }
-      isDescending = sortOrder === "descending";
     }
   }
   if (sortField && sortFieldType === "quantitative") {
@@ -10805,36 +12239,323 @@ var defaultOverflowStrategy = (channel, fieldName, uniqueValues, maxToKeep, cont
         valueAggregates.set(fieldValue, aggregateOp(initialValue, sortValue));
       }
     }
-    return Array.from(valueAggregates.entries()).map(([value, agg]) => ({ value, agg })).sort((a, b) => isDescending ? b.agg - a.agg : a.agg - b.agg).slice(0, maxToKeep).map((v) => v.value);
+    return Array.from(valueAggregates.entries()).map(([value, agg]) => ({ value, agg })).sort((a, b) => isDescending ? b.agg - a.agg : a.agg - b.agg).map((v) => v.value);
   }
   const canonicalOrder = channelSemantics[channel]?.ordinalSortOrder;
-  if (!sortBy && !sortOrder && canonicalOrder?.length) {
+  if (!sortBy && canonicalOrder?.length) {
     const present = new Set(uniqueValues);
     const ordered = canonicalOrder.filter((value) => present.has(value));
     const canonicalValues = new Set(ordered);
     ordered.push(...uniqueValues.filter((value) => !canonicalValues.has(value)));
-    return ordered.slice(0, maxToKeep);
+    return sortOrder === "descending" ? ordered.reverse() : ordered;
   }
   const fieldOriginalType = inferVisCategory(data.map((r) => r[fieldName]));
   if (fieldOriginalType === "quantitative" || channel === "color") {
-    return [...uniqueValues].sort((a, b) => Number(a) - Number(b)).slice(0, maxToKeep);
+    return [...uniqueValues].sort((a, b) => Number(a) - Number(b));
   }
   if (channel === "column" || channel === "row") {
-    return uniqueValues.slice(0, maxToKeep);
+    return uniqueValues;
   }
   if (sortOrder === "descending") {
-    return [...uniqueValues].sort((a, b) => String(b).localeCompare(String(a), void 0, { numeric: true })).slice(0, maxToKeep);
+    return [...uniqueValues].sort((a, b) => String(b).localeCompare(String(a), void 0, { numeric: true }));
   }
   if (sortOrder === "ascending") {
-    return [...uniqueValues].sort((a, b) => String(a).localeCompare(String(b), void 0, { numeric: true })).slice(0, maxToKeep);
+    return [...uniqueValues].sort((a, b) => String(a).localeCompare(String(b), void 0, { numeric: true }));
   }
-  return uniqueValues.slice(0, maxToKeep);
+  return uniqueValues;
+}
+
+// src/core/text-case.ts
+var MINOR = /* @__PURE__ */ new Set(["a", "an", "and", "as", "at", "but", "by", "for", "in", "nor", "of", "on", "or", "per", "the", "to", "vs", "via"]);
+var capitalise = (word) => word.charAt(0).toUpperCase() + word.slice(1);
+function applyTextCase(text, textCase) {
+  if (!text || !textCase || textCase === "asIs") return text;
+  if (textCase === "upper") return text.toUpperCase();
+  if (textCase === "lower") return text.toLowerCase();
+  if (textCase === "sentence") return capitalise(text);
+  const words = text.split(/(\s+)/);
+  const last = words.length - 1;
+  return words.map((w, i) => {
+    if (!w.trim()) return w;
+    if (i > 0 && i < last && MINOR.has(w.toLowerCase())) return w.toLowerCase();
+    return capitalise(w);
+  }).join("");
+}
+
+// src/core/label-sequence.ts
+var KIND_OF = {
+  Time: "minute",
+  DateTime: "minute",
+  Hour: "hour",
+  Date: "day",
+  YearMonth: "month",
+  Month: "monthOfYear",
+  YearQuarter: "quarter",
+  Quarter: "cycle",
+  Year: "year",
+  Decade: "year",
+  Rank: "number",
+  Week: "cycle",
+  YearWeek: "cycle",
+  Day: "cycle"
 };
+var ROUND = {
+  minute: [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440],
+  hour: [1, 2, 3, 6, 12, 24],
+  day: [1, 2, 7, 14, 28],
+  month: [1, 2, 3, 6, 12, 24, 60, 120],
+  monthOfYear: [1, 2, 3, 6],
+  quarter: [1, 2, 4, 8, 20, 40],
+  year: [1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1e3],
+  number: [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1e3],
+  cycle: [1, 2, 3, 4, 5, 7, 10]
+};
+var MONTHS2 = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+var WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+function sequenceKindOf(semanticType) {
+  return semanticType ? KIND_OF[semanticType] : void 0;
+}
+function valueOf(kind, name) {
+  const text = name.trim();
+  const digits = () => Number(text.match(/-?\d+(\.\d+)?/)?.[0] ?? NaN);
+  switch (kind) {
+    case "minute": {
+      const time = text.match(/(\d{1,2}):(\d{2})/);
+      if (time) return Number(time[1]) * 60 + Number(time[2]);
+      const parsed = Date.parse(text);
+      return Number.isFinite(parsed) ? Math.round(parsed / 6e4) : NaN;
+    }
+    case "hour": {
+      const time = text.match(/^(\d{1,2})(:00)?/);
+      return time ? Number(time[1]) : NaN;
+    }
+    case "day": {
+      const parsed = Date.parse(text);
+      return Number.isFinite(parsed) ? Math.round(parsed / 864e5) : NaN;
+    }
+    case "month": {
+      const iso = text.match(/^(\d{4})-(\d{1,2})/);
+      if (iso) return Number(iso[1]) * 12 + Number(iso[2]) - 1;
+      const parsed = new Date(Date.parse(text));
+      return Number.isFinite(parsed.getTime()) ? parsed.getFullYear() * 12 + parsed.getMonth() : NaN;
+    }
+    case "monthOfYear": {
+      const index = MONTHS2.indexOf(text.slice(0, 3).toLowerCase());
+      return index >= 0 ? index : digits() - 1;
+    }
+    case "quarter": {
+      const match = text.match(/(\d{4})\D*Q?([1-4])$/i) ?? text.match(/Q([1-4])\D*(\d{4})/i);
+      if (!match) return NaN;
+      const [year, quarter] = match[1].length === 4 ? [match[1], match[2]] : [match[2], match[1]];
+      return Number(year) * 4 + Number(quarter) - 1;
+    }
+    case "cycle": {
+      const day = WEEKDAYS.indexOf(text.slice(0, 3).toLowerCase());
+      return day >= 0 ? day : digits();
+    }
+    default:
+      return digits();
+  }
+}
+function roundSkip(kind, names, band, needed) {
+  const values = names.map((name) => valueOf(kind, name));
+  if (values.some((value) => !Number.isFinite(value))) return void 0;
+  const sorted = [...new Set(values)].sort((a, b) => a - b);
+  let unit = Infinity;
+  for (let i = 1; i < sorted.length; i++) unit = Math.min(unit, sorted[i] - sorted[i - 1]);
+  if (!Number.isFinite(unit) || unit <= 0) return void 0;
+  for (const interval of ROUND[kind]) {
+    if (interval < unit || interval % unit !== 0) continue;
+    if (interval / unit * band < needed) continue;
+    const shown = names.filter((_, i) => (values[i] % interval + interval) % interval === 0);
+    if (shown.length >= 2) return { shown, spacing: interval / unit };
+    break;
+  }
+  return void 0;
+}
+
+// src/core/band-label-choice.ts
+var TURN_COST = { rotate45: 0.3, rotate90: 0.34 };
+var SHRINK_COST = 0.25;
+var SKIP_COST = 0.15;
+var WRAP_COST = 0.04;
+var EXPANSION_COST = 0.18;
+function cutLoss(texts, widthOf, limit, fontSize) {
+  if (!Number.isFinite(limit)) return 0;
+  let sum = 0;
+  for (const lines of texts) {
+    const full = lines.reduce((total, line) => total + widthOf(line), 0);
+    if (full <= 0) continue;
+    const kept = lines.reduce((total, line) => total + (widthOf(line) <= limit ? widthOf(line) : Math.max(0, limit - fontSize)), 0);
+    sum += Math.max(0, 1 - kept / full);
+  }
+  return sum / Math.max(1, texts.length);
+}
+function gapAt(thresholds, size) {
+  return thresholds.gapEm !== void 0 ? thresholds.gapEm * size : Math.max(6, size / 2);
+}
+function trimKeeps(width, fontSize, minChars) {
+  return width >= (minChars + 1) * fontSize * 0.6;
+}
+function chooseXLabels(input) {
+  const { values, shown, stated, floor, step, fillStep, thresholds } = input;
+  if (!shown.length || !(step > 0)) return void 0;
+  const may = (way) => input.steps.includes(way) && (way !== "skip" || input.sequence !== void 0);
+  const trim = !input.noTrim;
+  const count = shown.length;
+  const span = Math.max(1, input.baseSpan);
+  const widen = (band) => EXPANSION_COST * Math.max(0, Math.min(band * count, span) - Math.min(step * count, span)) / span;
+  const options = [];
+  const sizes = [];
+  for (let size2 = stated; size2 >= floor - 1e-9; size2 -= 0.5) sizes.push(Math.round(size2 * 2) / 2);
+  if (!sizes.length) sizes.push(stated);
+  for (const size2 of sizes) {
+    const widthOf2 = input.measure(size2);
+    const widest2 = Math.max(0, ...shown.map(widthOf2));
+    const gap = gapAt(thresholds, size2);
+    const needed = widest2 + gap;
+    const shrink = SHRINK_COST * (stated - size2) / stated;
+    const one2 = shown.map((text) => [text]);
+    const flatBand = Math.max(step, fillStep);
+    if (needed <= step) {
+      options.push({ step: "fit", trimmed: false, fontSize: size2, angle: 0, band: step, needed, cost: shrink });
+      continue;
+    }
+    for (const stretch of size2 === sizes[sizes.length - 1] ? [false, true] : [false]) {
+      const held = input.wrapAt(size2, stretch);
+      if (!held) continue;
+      const twoLines = held.lines.some((parts) => parts.length > 1);
+      const loss = cutLoss(held.lines, widthOf2, held.width, size2);
+      if (loss > 0 && (!trim || !trimKeeps(held.width, size2, thresholds.minChars))) continue;
+      if ((twoLines || loss > 0) && !may("wrap")) continue;
+      options.push({
+        step: twoLines || loss > 0 ? "wrap" : "fit",
+        trimmed: loss > 0,
+        fontSize: size2,
+        angle: 0,
+        band: held.step,
+        limit: held.width,
+        ...twoLines ? { lines: held.lines, lineHeight: held.lineHeight } : {},
+        needed,
+        cost: held.cost + shrink
+      });
+      break;
+    }
+    const cutWidth = flatBand - gap;
+    if (may("wrap") && trim && trimKeeps(cutWidth, size2, thresholds.minChars)) {
+      const fit = fitTwoLineLabels(shown, size2, cutWidth, true, widthOf2);
+      const lines = fit?.lines ?? one2;
+      const wrapped = lines.filter((parts) => parts.length > 1).length / lines.length;
+      options.push({
+        step: "wrap",
+        trimmed: true,
+        fontSize: size2,
+        angle: 0,
+        band: flatBand,
+        limit: Math.floor(cutWidth),
+        ...wrapped > 0 ? { lines, lineHeight: Math.ceil(size2 * 1.2) } : {},
+        needed,
+        cost: cutLoss(lines, widthOf2, cutWidth, size2) + WRAP_COST * wrapped + widen(flatBand) + shrink
+      });
+    }
+    if (may("skip") && input.sequence) {
+      const whole = roundSkip(input.sequence, values, flatBand, needed);
+      const room = trim ? roundSkip(input.sequence, values, flatBand, (thresholds.minChars + 1) * size2 * 0.6 + gap) : void 0;
+      for (const [found, trimmed] of [[whole, false], [whole ? void 0 : room, true]]) {
+        if (!found) continue;
+        const limit = Math.floor(found.spacing * flatBand - gap);
+        const printed = found.shown.map((name) => [shown[values.indexOf(name)] ?? name]);
+        options.push({
+          step: "skip",
+          trimmed,
+          fontSize: size2,
+          angle: 0,
+          band: flatBand,
+          shown: found.shown,
+          ...trimmed ? { limit } : {},
+          needed,
+          cost: SKIP_COST * (1 - found.shown.length / values.length) + (trimmed ? cutLoss(printed, widthOf2, limit, size2) : 0) + widen(flatBand) + shrink
+        });
+      }
+    }
+    const line = size2 * 1.2;
+    for (const [way, room] of [["rotate45", line * Math.SQRT2], ["rotate90", line]]) {
+      if (!may(way) || step < room) continue;
+      const loss = trim ? cutLoss(one2, widthOf2, thresholds.turnedLimit, size2) : 0;
+      options.push({
+        step: way,
+        trimmed: loss > 0,
+        fontSize: size2,
+        angle: way === "rotate45" ? -45 : -90,
+        band: step,
+        ...trim && Number.isFinite(thresholds.turnedLimit) ? { limit: Math.floor(thresholds.turnedLimit) } : {},
+        needed,
+        cost: TURN_COST[way] + loss + shrink
+      });
+    }
+  }
+  const at = (option) => option.step === "fit" ? -1 : input.steps.indexOf(option.step);
+  const wholeAt = Math.min(...options.filter((option) => !option.trimmed).map(at));
+  let open = Number.isFinite(wholeAt) ? options.filter((option) => at(option) <= wholeAt) : options;
+  if (open.some((option) => option.step === "skip")) open = open.filter((option) => option.angle === 0);
+  if (open.some((option) => option.angle === -45)) open = open.filter((option) => option.angle !== -90);
+  if (open.length) return open.reduce((best, option) => option.cost < best.cost ? option : best);
+  const size = Math.max(1, Math.min(floor, Math.floor(step / 1.2 * 2) / 2));
+  const widthOf = input.measure(size);
+  const widest = Math.max(0, ...shown.map(widthOf));
+  return {
+    step: "rotate90",
+    trimmed: trim && widest > thresholds.turnedLimit,
+    fontSize: size,
+    angle: -90,
+    band: step,
+    ...trim && Number.isFinite(thresholds.turnedLimit) ? { limit: Math.floor(thresholds.turnedLimit) } : {},
+    needed: widest + gapAt(thresholds, size),
+    cost: Infinity
+  };
+}
+
+// src/core/axis-labels.ts
+var DEFAULT_LABEL_OVERFLOW = ["wrap", "rotate90"];
+var DEFAULT_SEQUENCE_OVERFLOW = ["wrap", "skip", "rotate90"];
+var FIT_STEPS = ["wrap", "skip", "rotate45", "rotate90"];
+function statedSteps(stated) {
+  const list = (Array.isArray(stated) ? stated : stated != null ? [stated] : []).filter((step) => FIT_STEPS.includes(step));
+  return list.length ? list : void 0;
+}
+function resolveLabelOverflow(labels, chartOverflow, axis = "names") {
+  return statedSteps(chartOverflow) ?? statedSteps(labels?.overflow) ?? [...axis === "sequence" ? DEFAULT_SEQUENCE_OVERFLOW : DEFAULT_LABEL_OVERFLOW];
+}
+
+// src/core/natural-shape.ts
+var NATURAL_MIN_SPREAD = 1.25;
+var FALLBACK_WIDEN = 1.5;
+function naturalAspectRange(base, stretch, override = {}) {
+  const centre = override.centre && override.centre > 0 ? override.centre : base.width / Math.max(1, base.height);
+  if (override.spread && override.spread >= 1) return { lo: centre / override.spread, hi: centre * override.spread };
+  return {
+    lo: centre / Math.max(NATURAL_MIN_SPREAD, stretch.y),
+    hi: centre * Math.max(NATURAL_MIN_SPREAD, stretch.x)
+  };
+}
+function widenRange(range, factor) {
+  return { lo: range.lo / factor, hi: range.hi * factor };
+}
+function shapeDivergence(shape, range) {
+  if (shape.lo > range.hi) return shape.lo / range.hi;
+  if (shape.hi < range.lo) return shape.hi / range.lo;
+  return 1;
+}
 
 // src/core/compute-layout.ts
 var VL_SHORT_DISCRETE_CATEGORY_COUNT = 4;
 var VL_SHORT_DISCRETE_LABEL_MAX_LEN = 8;
 var APPROX_CHAR_WIDTH_RATIO = 0.62;
+var SPARSE_FIT_BAND_CEILING = 100;
+var SPARSE_FILL_SHARE = 0.85;
+var SPARSE_FILL_BAR_CAP = 200;
+var SPARSE_FILL_POINT_CAP = 360;
+var DEFAULT_MIN_STEP = 8;
 function computeDiscreteLabelStats(field, table) {
   if (!field) return null;
   const uniques = /* @__PURE__ */ new Set();
@@ -10848,6 +12569,7 @@ function computeDiscreteLabelStats(field, table) {
   return {
     count: labels.length,
     maxLen: Math.max(...labels.map((s) => s.length)),
+    meanLen: labels.reduce((sum, s) => sum + s.length, 0) / labels.length,
     allNumeric: labels.every((s) => s.trim() !== "" && isFinite(Number(s)))
   };
 }
@@ -10867,6 +12589,222 @@ function resolveStretchCaps(options) {
   };
 }
 var DEFAULT_BASE_SIZE = { width: 400, height: 320 };
+var CALENDAR_COST = 0.05;
+function flatCalendarFit(lines, at) {
+  const span = Math.max(1, at.baseSpan);
+  const count = lines.length;
+  let best;
+  for (let size = at.stated; size >= at.floor - 1e-9; size -= 0.5) {
+    const widthOf = at.measure(size);
+    const gap = at.gapEm !== void 0 ? at.gapEm * size : Math.max(6, size / 2);
+    const needed = Math.max(0, ...lines.flat().map(widthOf)) + gap;
+    const band = Math.max(at.step, needed);
+    if (band > at.step && band * count > span + 1e-9) continue;
+    const cost = SHRINK_COST * (at.stated - size) / at.stated + EXPANSION_COST * Math.max(0, band * count - at.step * count) / span;
+    if (!best || cost < best.cost) best = { step: "fit", trimmed: false, fontSize: size, angle: 0, band, needed, cost };
+  }
+  return best;
+}
+var AXIS_LABEL_LIMIT = 180;
+function planBandLabels(context, options = {}) {
+  const { layout, canvasSize, channelSemantics } = context;
+  const assembleOptions = context.assembleOptions ?? {};
+  const caps = resolveStretchCaps(assembleOptions);
+  for (const channel of ["x", "y"]) {
+    const semantics = channelSemantics[channel];
+    const discrete = channel === "x" ? layout.xNominalCount > 0 : layout.yNominalCount > 0;
+    if (!discrete || !semantics?.field || !["nominal", "ordinal"].includes(semantics.type)) continue;
+    if (options.skip?.(channel)) continue;
+    const labels = [...new Set(context.table.map((row) => row[semantics.field]).filter((value) => value != null).map(String))];
+    const numeric = labels.every((label) => label.trim() !== "" && Number.isFinite(Number(label)));
+    if (!labels.length || numeric && !(channel === "x" && options.sequence)) continue;
+    const sizing = channel === "x" ? layout.xLabel : layout.yLabel;
+    const step = channel === "x" ? layout.xStep : layout.yStep;
+    const panels = channel === "x" ? layout.facet?.columns ?? 1 : layout.facet?.rows ?? 1;
+    const fixed = channel === "x" ? assembleOptions.facetFixedPadding?.width ?? 0 : assembleOptions.facetFixedPadding?.height ?? 0;
+    const canvasSpan = channel === "x" ? canvasSize.width : canvasSize.height;
+    const subplotSpan = channel === "x" ? layout.subplotWidth : layout.subplotHeight;
+    const maxSpan = (canvasSpan * caps[channel] - fixed) / panels - layout.effectiveFacetGap;
+    const baseSpan = Math.min(subplotSpan, (canvasSpan - fixed) / panels - layout.effectiveFacetGap);
+    const stated = options.fontSize ?? (channel === "x" ? Math.max(sizing.fontSize, BASE_TICK_FONT_SIZE) : sizing.fontSize);
+    const shown = labels.map((label) => applyTextCase(label, options.textCase));
+    const givenRowWidth = channel === "y" ? assembleOptions.canvasTreatment?.rowNames : void 0;
+    const ownGutter = rowLabelLimit(options.fit, canvasSize.width, layout.subplotWidth);
+    const fitAt = (fontSize2, stretchToFit = false, compareBaseline = true, gutterLimit = givenRowWidth ?? ownGutter, texts = shown) => computeBandLabelLayout({
+      labels: texts,
+      axis: channel,
+      fontSize: fontSize2,
+      step,
+      baseSpan,
+      maxSpan,
+      gutterLimit,
+      baselineLimit: sizing.labelLimit,
+      elasticity: assembleOptions.elasticity ?? 0.5,
+      ...options.measure ? { measure: options.measure(fontSize2) } : {},
+      ...stretchToFit ? { stretchToFit } : {},
+      ...compareBaseline ? {} : { compareBaseline }
+    });
+    if (channel === "x") {
+      const sequence = options.overflow ?? (options.sequence ? DEFAULT_SEQUENCE_OVERFLOW : DEFAULT_LABEL_OVERFLOW);
+      const floor = Math.min(stated, Math.max(options.minFontSize ?? 0, stated * 0.75));
+      const measure2 = options.measure ?? ((fontSize2) => (text) => text.length * fontSize2 * APPROX_CHAR_WIDTH_RATIO);
+      const choiceInput = {
+        values: labels,
+        shown,
+        stated,
+        floor,
+        measure: measure2,
+        step,
+        fillStep: Math.floor(baseSpan / labels.length),
+        baseSpan,
+        wrapAt: (fontSize2, stretch) => fitAt(fontSize2, stretch, false),
+        steps: sequence,
+        ...options.sequence ? { sequence: options.sequence } : {},
+        noTrim: options.noLimit === true,
+        thresholds: labelFitThresholds(options.fit, layout.subplotHeight)
+      };
+      let choice = chooseXLabels(choiceInput);
+      if (!choice) continue;
+      let calendar;
+      if ((choice.step !== "fit" || choice.fontSize < stated) && isDateField(semantics.semanticAnnotation?.semanticType, labels)) {
+        const order = semantics.ordinalSortOrder?.map(String);
+        const axisOrder = order && labels.every((label) => order.includes(label)) ? order.filter((value) => labels.includes(value)) : labels;
+        const named = calendarLabels(axisOrder);
+        if (named) {
+          const byValue = new Map(axisOrder.map((value, index) => [value, named[index]]));
+          const lines = labels.map((label) => (byValue.get(label) ?? [label]).map((line) => applyTextCase(line, options.textCase)));
+          const alt = flatCalendarFit(lines, {
+            stated,
+            floor,
+            measure: measure2,
+            step,
+            baseSpan,
+            gapEm: labelFitThresholds(options.fit, layout.subplotHeight).gapEm
+          });
+          if (alt && alt.cost + CALENDAR_COST < choice.cost) {
+            choice = alt;
+            calendar = lines;
+          }
+        }
+      }
+      layout.xStep = choice.band;
+      const flat = choice.angle === 0;
+      Object.assign(sizing, {
+        fontSize: choice.fontSize,
+        labelAngle: choice.angle,
+        labelAlign: flat ? "center" : "right",
+        labelBaseline: flat ? "top" : choice.angle === -90 ? "middle" : "top",
+        labelLimit: choice.limit !== void 0 ? choice.limit + 2 : flat ? Math.ceil(Math.max(choice.needed, Math.min(choice.needed * 1.15, choice.band - 4))) + 2 : options.noLimit ? 0 : sizing.labelLimit,
+        ...choice.lines ? { labelValues: labels, labelLines: choice.lines, labelLineHeight: choice.lineHeight } : calendar ? {
+          labelValues: labels,
+          labelLines: calendar,
+          labelLineHeight: calendar.some((lines) => lines.length > 1) ? Math.ceil(choice.fontSize * 1.2) : void 0
+        } : { labelValues: void 0, labelLines: void 0, labelLineHeight: void 0 },
+        labelForm: calendar ? "calendar" : void 0,
+        ...choice.fontSize < stated ? { fittedFontSize: choice.fontSize } : { fittedFontSize: void 0 },
+        ...choice.step === "fit" ? { overflow: void 0 } : {
+          overflow: {
+            step: choice.step,
+            trimmed: choice.trimmed,
+            needed: choice.needed,
+            band: choice.band,
+            ...choice.shown ? { shown: choice.shown } : {}
+          }
+        }
+      });
+      continue;
+    }
+    const whole = (laid, size) => {
+      if (!laid || givenRowWidth === void 0) return laid;
+      const widthOf2 = options.measure?.(size) ?? ((text) => text.length * size * APPROX_CHAR_WIDTH_RATIO);
+      return laid.lines.every((row) => row.length <= 2 && row.every((line) => widthOf2(line) <= laid.width + 1)) ? laid : null;
+    };
+    let fontSize = stated;
+    let fit = whole(fitAt(stated, false, givenRowWidth === void 0), stated);
+    if (!fit && givenRowWidth !== void 0) {
+      const floor = Math.min(stated, Math.max(options.minFontSize ?? 0, stated * 0.75), sizing.fontSize);
+      for (let size = stated - 1; !fit && size >= floor; size--) {
+        fit = whole(fitAt(size, false, false), size);
+        fontSize = size;
+      }
+      if (!fit) {
+        fontSize = stated;
+        fit = fitAt(stated, false, true, ownGutter);
+      }
+    }
+    const widthOf = options.measure?.(fontSize) ?? ((text) => text.length * fontSize * APPROX_CHAR_WIDTH_RATIO);
+    const cap = options.rowCodes ? void 0 : adaptiveRowNameCap(shown.map(widthOf), layout.subplotWidth, fontSize);
+    const widest = fit ? Math.max(...fit.lines.flat().map(widthOf)) : Math.max(...shown.map(widthOf));
+    let cut = false;
+    if (cap !== void 0 && widest > cap + 1) {
+      const capped = fitAt(fontSize, false, false, cap);
+      if (!capped) {
+        Object.assign(sizing, {
+          fontSize,
+          labelAngle: 0,
+          labelAlign: "right",
+          labelBaseline: "middle",
+          labelLimit: Math.floor(cap),
+          labelCut: true,
+          labelValues: void 0,
+          labelLines: void 0,
+          labelLineHeight: void 0
+        });
+        continue;
+      }
+      fit = capped;
+      cut = !capped.lines.every((row) => row.length <= 2 && row.every((line) => widthOf(line) <= capped.width + 1));
+    }
+    if (!fit) continue;
+    layout.yStep = fit.step;
+    Object.assign(sizing, {
+      fontSize,
+      labelAngle: 0,
+      labelAlign: "right",
+      labelBaseline: "middle",
+      labelLimit: cut ? Math.floor(cap) : Math.ceil(fit.width) + 2,
+      labelValues: labels,
+      labelLines: fit.lines,
+      labelLineHeight: fit.lineHeight,
+      ...cut ? { labelCut: true } : {}
+    });
+  }
+}
+function rowNameCap(plotWidth, fontSize) {
+  return Math.max(ROW_NAME_CAP_EM * fontSize, plotWidth * ROW_NAME_CAP_SHARE - ROW_NAME_TICK_ROOM);
+}
+var ROW_NAME_CAP_EM = 12;
+function adaptiveRowNameCap(widths, plotWidth, fontSize) {
+  const soft = rowNameCap(plotWidth, fontSize);
+  if (!widths.length) return soft;
+  const ceiling = Math.max(soft, plotWidth - ROW_NAME_TICK_ROOM);
+  const long = widths.filter((width) => width > soft).map((width) => Math.min(width, ceiling));
+  if (!long.length) return soft;
+  const runTo = long.reduce((sum, width) => sum + width, 0) / long.length;
+  const lift = smoothstep((long.length / widths.length - ROW_NAME_FEW) / (ROW_NAME_MANY - ROW_NAME_FEW));
+  return Math.min(ceiling, soft + (runTo - soft) * lift);
+}
+var ROW_NAME_FEW = 0.1;
+var ROW_NAME_MANY = 0.4;
+function smoothstep(t) {
+  const x = Math.min(1, Math.max(0, t));
+  return x * x * (3 - 2 * x);
+}
+var ROW_NAME_CAP_SHARE = 0.6;
+var ROW_NAME_TICK_ROOM = 10;
+var BASE_TICK_FONT_SIZE = 10;
+function labelFitThresholds(fit, plotHeight) {
+  const turned = fit?.turnedLimit ?? "40%";
+  const turnedLimit = typeof turned === "number" ? turned : Math.max(30, Number.parseFloat(turned) / 100 * Math.max(1, plotHeight));
+  return { minChars: fit?.minChars ?? 4, turnedLimit, ...fit?.gap !== void 0 ? { gapEm: fit.gap } : {} };
+}
+function rowLabelLimit(fit, canvasWidth, plotWidth) {
+  const width = Math.min(canvasWidth, plotWidth || canvasWidth);
+  const stated = fit?.rowLimit;
+  if (typeof stated === "number") return stated;
+  if (typeof stated === "string") return Number.parseFloat(stated) / 100 * canvasWidth;
+  return Math.max(AXIS_LABEL_LIMIT, width / 4);
+}
 var DEFAULT_MAX_STRETCH = 1.5;
 function resolveBaseSize(specBaseSize, ceiling) {
   const base = specBaseSize ?? { ...DEFAULT_BASE_SIZE };
@@ -10875,6 +12813,10 @@ function resolveBaseSize(specBaseSize, ceiling) {
     width: Math.min(base.width, ceiling.width),
     height: Math.min(base.height, ceiling.height)
   };
+}
+function facetPanelLength(canvas, panels, cap, elasticity, fixed, gap) {
+  const stretch = Math.min(cap, Math.pow(panels, elasticity));
+  return (canvas * stretch - fixed) / panels - gap;
 }
 function resolveFacetColumnsOption(chartProperties) {
   const raw = chartProperties?.facetColumns;
@@ -10889,13 +12831,23 @@ function deriveStretchCaps(baseSize, ceiling, options) {
     maxStretchY: ceiling ? Math.max(1, ceiling.height / baseSize.height) : def
   };
 }
-function computeLayout(channelSemantics, declaration, table, canvasSize, options = {}, facetGrid) {
+var CELL_BAND_SIZE = 28;
+var SQUARE_CELL_TOLERANCE = 1.5;
+var CELL_GROWTH_MAX = 2;
+var LABEL_ROOM_SHARE = 0.3;
+var LABEL_ROOM_FLOOR = 40;
+var VALUE_LABEL_CHARS = [3, 6];
+var TICK_ROOM = 6;
+var BALANCE_STEP_GROWTH = 2;
+var BALANCE_SIDE_FLOOR = 0.5;
+function computeLayout(channelSemantics, declaration, table, canvasSize, options = {}, facetGrid, pinnedPlot) {
   const {
     elasticity: elasticityVal = 0.5,
     facetElasticity: facetElasticityVal = 0.3,
-    minStep: minStepVal = 6,
+    minStep: minStepVal = DEFAULT_MIN_STEP,
     minSubplotSize: minSubplotVal = 60,
     stepPadding: stepPaddingVal = 0.1,
+    bandStepFit: bandStepFitVal = 0,
     maintainContinuousAxisRatio = false,
     continuousMarkCrossSection,
     facetAspectRatioResistance = 0
@@ -10905,13 +12857,22 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
   const defaultChartHeight = canvasSize.height;
   const fixW = options.facetFixedPadding?.width ?? 0;
   const fixH = options.facetFixedPadding?.height ?? 0;
-  const gap = options.facetGap ?? 0;
+  const gapX = options.facetGapColumn ?? options.facetGap ?? 0;
+  const gapY = options.facetGapRow ?? options.facetGap ?? 0;
   const baseRefSize = 300;
   const sizeRatio = Math.max(defaultChartWidth, defaultChartHeight) / baseRefSize;
   const baseBandSize = options.defaultBandSize ?? 20;
   const defaultStepSize = Math.round(baseBandSize * Math.max(1, sizeRatio));
-  const maxBandSize = Math.max(baseBandSize, options.maxBandSize ?? baseBandSize);
-  const maxStepSize = Math.round(maxBandSize * Math.max(1, sizeRatio));
+  const r1 = (value) => Math.round(value * 10) / 10;
+  const trace = { width: [], height: [], xStep: [], yStep: [] };
+  const stage = (key, rule, value, read, note) => {
+    trace[key].push({ rule, value: typeof value === "number" ? r1(value) : value, ...read ? { read } : {}, ...note ? { note } : {} });
+  };
+  stage("width", "canvas", defaultChartWidth, { base: canvasSize.width, stretchCap: r1(maxStretchX) }, "the base width; the plot may stretch past it up to the cap");
+  stage("height", "canvas", defaultChartHeight, { base: canvasSize.height, stretchCap: r1(maxStretchY) }, "the base height; the plot may stretch past it up to the cap");
+  for (const key of ["xStep", "yStep"]) {
+    stage(key, "house band", defaultStepSize, { band: baseBandSize, sizeRatio: r1(sizeRatio) }, "the band one category gets, scaled with the canvas past 300 px");
+  }
   const isDiscreteType = (t) => t === "nominal" || t === "ordinal";
   const effectiveTypes = {};
   for (const [ch, cs] of Object.entries(channelSemantics)) {
@@ -10920,6 +12881,13 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
   const axisFlags = declaration.axisFlags || {};
   const xBanded = axisFlags.x?.banded ?? false;
   const yBanded = axisFlags.y?.banded ?? false;
+  const effectiveBandStepFit = xBanded && yBanded ? 0 : bandStepFitVal;
+  const maxBandSize = options.maxBandSize == null ? effectiveBandStepFit > 0 ? Math.max(baseBandSize, SPARSE_FIT_BAND_CEILING) : baseBandSize : Math.max(baseBandSize, options.maxBandSize);
+  const maxStepSize = options.maxBandSize == null && effectiveBandStepFit > 0 ? Math.max(defaultStepSize, SPARSE_FIT_BAND_CEILING) : Math.round(maxBandSize * Math.max(1, sizeRatio));
+  const rowScale = Math.max(1, options.rowNamesAbove?.scale ?? 1);
+  const yDefaultStep = Math.round(defaultStepSize * rowScale);
+  const yMinStep = Math.max(Math.round(minStepVal * rowScale), options.rowNamesAbove?.minStep ?? 0);
+  const yMaxStep = Math.round(maxStepSize * rowScale);
   const nominalCount = {
     x: 0,
     y: 0,
@@ -11015,24 +12983,24 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
   const minContinuousSizeY = Math.max(minContinuousSize, logBoostY);
   let subplotWidth;
   if (facetCols > 1) {
-    const stretch = Math.min(maxStretchX, Math.pow(facetCols, facetElasticityVal));
     subplotWidth = Math.round(Math.max(
       minContinuousSizeX,
-      (defaultChartWidth * stretch - fixW) / facetCols - gap
+      facetPanelLength(defaultChartWidth, facetCols, maxStretchX, facetElasticityVal, fixW, gapX)
     ));
   } else {
     subplotWidth = defaultChartWidth;
   }
   let subplotHeight;
   if (facetRows > 1) {
-    const stretch = Math.min(maxStretchY, Math.pow(facetRows, facetElasticityVal));
     subplotHeight = Math.round(Math.max(
       minContinuousSizeY,
-      (defaultChartHeight * stretch - fixH) / facetRows - gap
+      facetPanelLength(defaultChartHeight, facetRows, maxStretchY, facetElasticityVal, fixH, gapY)
     ));
   } else {
     subplotHeight = defaultChartHeight;
   }
+  if (facetCols > 1) stage("width", "facet panel", subplotWidth, { columns: facetCols, allowance: fixW, gap: gapX, elasticity: facetElasticityVal }, "the canvas stretched a little for its columns, less the allowance, shared between them");
+  if (facetRows > 1) stage("height", "facet panel", subplotHeight, { rows: facetRows, allowance: fixH, gap: gapY, elasticity: facetElasticityVal }, "the canvas stretched a little for its rows, less the allowance, shared between them");
   const xIsContinuousNonBanded = xTotalNominalCount === 0 && xContinuousAsDiscrete === 0;
   const yIsContinuousNonBanded = yTotalNominalCount === 0 && yContinuousAsDiscrete === 0;
   const bothContinuousNonBanded = xIsContinuousNonBanded && yIsContinuousNonBanded;
@@ -11115,11 +13083,11 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
         }
         const perSubplotCanvasW = facetCols > 1 ? Math.max(
           minContinuousSizeX,
-          (defaultChartWidth * Math.min(maxStretchX, Math.pow(facetCols, facetElasticityVal)) - fixW) / facetCols - gap
+          (defaultChartWidth * Math.min(maxStretchX, Math.pow(facetCols, facetElasticityVal)) - fixW) / facetCols - gapX
         ) : defaultChartWidth;
         const perSubplotCanvasH = facetRows > 1 ? Math.max(
           minContinuousSizeY,
-          (defaultChartHeight * Math.min(maxStretchY, Math.pow(facetRows, facetElasticityVal)) - fixH) / facetRows - gap
+          (defaultChartHeight * Math.min(maxStretchY, Math.pow(facetRows, facetElasticityVal)) - fixH) / facetRows - gapY
         ) : defaultChartHeight;
         const idealResult = computeGasPressure(
           xNumeric,
@@ -11177,8 +13145,8 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
           idealW = rawW;
           idealH = rawH;
         }
-        const availW = facetCols > 1 ? Math.max(minContinuousSizeX, (defaultChartWidth * maxStretchX - fixW) / facetCols - gap) : defaultChartWidth * maxStretchX;
-        const availH = facetRows > 1 ? Math.max(minContinuousSizeY, (defaultChartHeight * maxStretchY - fixH) / facetRows - gap) : defaultChartHeight * maxStretchY;
+        const availW = facetCols > 1 ? Math.max(minContinuousSizeX, (defaultChartWidth * maxStretchX - fixW) / facetCols - gapX) : defaultChartWidth * maxStretchX;
+        const availH = facetRows > 1 ? Math.max(minContinuousSizeY, (defaultChartHeight * maxStretchY - fixH) / facetRows - gapY) : defaultChartHeight * maxStretchY;
         const scaleX = idealW > availW ? availW / idealW : 1;
         const scaleY = idealH > availH ? availH / idealH : 1;
         const fitScale = Math.min(scaleX, scaleY);
@@ -11188,6 +13156,8 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
         finalH = Math.max(finalH, minContinuousSizeY);
         subplotWidth = Math.round(finalW);
         subplotHeight = Math.round(finalH);
+        stage("width", "crowding", subplotWidth, { points: xNumeric.length, stretchX: r1(idealResult.rawStretchX), banked: useBanking, budget: r1(availW) }, "both axes continuous: the points press the plot wider by their crowding, the shape is banked toward readable slopes, then fitted to the stretch budget");
+        stage("height", "crowding", subplotHeight, { points: yNumeric.length, stretchY: r1(idealResult.rawStretchY), banked: useBanking, budget: r1(availH) }, "both axes continuous: the points press the plot taller by their crowding, the shape is banked toward readable slopes, then fitted to the stretch budget");
       }
     }
   } else if (xIsContinuousNonBanded || yIsContinuousNonBanded) {
@@ -11243,14 +13213,34 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
       }
     }
   }
+  if (!bothContinuousNonBanded && (xIsContinuousNonBanded || yIsContinuousNonBanded)) {
+    const key = xIsContinuousNonBanded ? "width" : "height";
+    const value = xIsContinuousNonBanded ? subplotWidth : subplotHeight;
+    const last = trace[key][trace[key].length - 1];
+    if (last.value !== r1(value)) stage(key, "crowding", value, { rows: table.length }, "the values along the continuous axis press it longer, by a power of their crowding");
+  }
   const elasticParamsX = {
     elasticity: elasticityVal,
     maxStretch: maxStretchX,
-    defaultStepSize};
+    defaultStepSize,
+    bandStepFit: effectiveBandStepFit,
+    bandStepFitCapacity: Math.max(
+      1,
+      (options.bandStepFitCapacityX ?? defaultChartWidth) / defaultChartWidth
+    ),
+    minStep: minStepVal
+  };
   const elasticParamsY = {
     elasticity: elasticityVal,
     maxStretch: maxStretchY,
-    defaultStepSize};
+    defaultStepSize: yDefaultStep,
+    bandStepFit: effectiveBandStepFit,
+    bandStepFitCapacity: Math.max(
+      1,
+      (options.bandStepFitCapacityY ?? defaultChartHeight) / defaultChartHeight
+    ),
+    minStep: yMinStep
+  };
   const xAxis = computeAxisStep(xTotalNominalCount, xContinuousAsDiscrete, subplotWidth, elasticParamsX);
   const yAxis = computeAxisStep(yTotalNominalCount, yContinuousAsDiscrete, subplotHeight, elasticParamsY);
   const xIsDiscrete = xTotalNominalCount > 0;
@@ -11261,18 +13251,24 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
   let yStepSize;
   let xStepUnit;
   let yStepUnit;
+  let xStepFitted = false;
+  let yStepFitted = false;
   if (xIsDiscrete && xHasGrouping) {
     const itemsPerGroup = nominalCount.group;
     const defaultGroupStep = itemsPerGroup * maxStepSize;
     const minGroupStep = Math.max(Math.ceil(MIN_GROUP_GAP_PX / stepPaddingVal), 2 * itemsPerGroup);
-    const groupAxis2 = computeAxisStep(nominalCount.x, 0, subplotWidth, elasticParamsX);
+    const groupElasticX = {
+      ...elasticParamsX,
+      defaultStepSize: elasticParamsX.defaultStepSize * itemsPerGroup
+    };
+    const groupAxis2 = computeAxisStep(nominalCount.x, 0, subplotWidth, groupElasticX);
     const groupStep = Math.max(minGroupStep, Math.min(defaultGroupStep, groupAxis2.step));
     xStepSize = groupStep;
     xStepUnit = "group";
-  } else if (xIsDiscrete) {
+    xStepFitted = groupAxis2.fitted;
+  } else if (xIsDiscrete || xContinuousAsDiscrete > 0) {
     xStepSize = Math.max(minStepVal, Math.min(maxStepSize, xAxis.step));
-  } else if (xContinuousAsDiscrete > 0) {
-    xStepSize = Math.max(minStepVal, Math.min(maxStepSize, xAxis.step));
+    xStepFitted = xAxis.fitted;
   } else {
     xStepSize = defaultStepSize;
   }
@@ -11280,16 +13276,74 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
     const itemsPerGroup = nominalCount.group;
     const defaultGroupStep = itemsPerGroup * maxStepSize;
     const minGroupStep = Math.max(Math.ceil(MIN_GROUP_GAP_PX / stepPaddingVal), 2 * itemsPerGroup);
-    const groupAxis2 = computeAxisStep(nominalCount.y, 0, subplotHeight, elasticParamsY);
+    const groupElasticY = {
+      ...elasticParamsY,
+      defaultStepSize: elasticParamsY.defaultStepSize * itemsPerGroup
+    };
+    const groupAxis2 = computeAxisStep(nominalCount.y, 0, subplotHeight, groupElasticY);
     const groupStep = Math.max(minGroupStep, Math.min(defaultGroupStep, groupAxis2.step));
     yStepSize = groupStep;
     yStepUnit = "group";
-  } else if (yIsDiscrete) {
-    yStepSize = Math.max(minStepVal, Math.min(maxStepSize, yAxis.step));
-  } else if (yContinuousAsDiscrete > 0) {
-    yStepSize = Math.max(minStepVal, Math.min(maxStepSize, yAxis.step));
+    yStepFitted = groupAxis2.fitted;
+  } else if (yIsDiscrete || yContinuousAsDiscrete > 0) {
+    yStepSize = Math.max(yMinStep, Math.min(yMaxStep, yAxis.step));
+    yStepFitted = yAxis.fitted;
   } else {
     yStepSize = defaultStepSize;
+  }
+  for (const axis of ["x", "y"]) {
+    const key = axis === "x" ? "xStep" : "yStep";
+    const items = axis === "x" ? xTotalNominalCount || xContinuousAsDiscrete : yTotalNominalCount || yContinuousAsDiscrete;
+    const step = axis === "x" ? xStepSize : yStepSize;
+    if (items <= 0) {
+      stage(key, "no bands", step, {}, "the axis is continuous: no step sizes it");
+      continue;
+    }
+    const grouped = axis === "x" ? xIsDiscrete && xHasGrouping : yIsDiscrete && yHasGrouping;
+    const span = axis === "x" ? subplotWidth : subplotHeight;
+    const decision = axis === "x" ? xAxis : yAxis;
+    if (grouped) {
+      stage(key, "group step", step, { groups: axis === "x" ? nominalCount.x : nominalCount.y, lanes: nominalCount.group, span }, "one step holds a group of lanes: a house band per lane, held within the room the groups share");
+      continue;
+    }
+    const perBand = span / items;
+    const pressed = decision.step < defaultStepSize;
+    const stretched = decision.budget > span + 0.5;
+    stage(
+      key,
+      "bands in the span",
+      decision.step,
+      { bands: items, span, spanPerBand: r1(perBand), budget: r1(decision.budget), stretch: r1(decision.budget / span), fitted: decision.fitted },
+      pressed && stretched ? "the house band would overrun the span: the span stretches by a power of the pressure, to its cap, and the step shrinks to share it" : pressed ? "the house band would overrun the span and the cap allows no stretch, so the step is the span per band" : decision.fitted ? "sparse bands grow toward the room the canvas leaves" : "the house band fits the span and keeps its size"
+    );
+    if (step !== decision.step) stage(key, "clamped", step, axis === "y" ? { min: yMinStep, max: yMaxStep } : { min: minStepVal, max: maxStepSize }, "held between the smallest readable step and the widest a band may be");
+  }
+  const fill = options.sparseFill;
+  if (fill && true && facetCols === 1 && xTotalNominalCount > 0 && yTotalNominalCount === 0 && yContinuousAsDiscrete === 0) {
+    const tuning = typeof fill === "object" ? fill : {};
+    const share = Math.max(0, Math.min(1, tuning.share ?? SPARSE_FILL_SHARE));
+    const room = options.bandStepFitCapacityX ?? defaultChartWidth;
+    const tick = computeFontSizing(Math.min(subplotWidth, subplotHeight), { baseLabelFontSize: options.baseLabelFontSize, baseTitleFontSize: options.baseTitleFontSize }).tickBase;
+    const gutter = VALUE_LABEL_CHARS[1] * tick * APPROX_CHAR_WIDTH_RATIO + TICK_ROOM;
+    const grouped = xIsDiscrete && xHasGrouping;
+    const bands = grouped ? nominalCount.x : xTotalNominalCount;
+    const lanes = grouped ? nominalCount.group : 1;
+    const cap = (options.sparseFillBars === false ? tuning.pointCap ?? SPARSE_FILL_POINT_CAP : tuning.barCap ?? SPARSE_FILL_BAR_CAP) * lanes;
+    const want = Math.floor(Math.min(cap, Math.max(0, share * room - gutter) / bands));
+    if (want > xStepSize) {
+      const from = xStepSize;
+      xStepSize = want;
+      stage("xStep", "sparse fill", xStepSize, { from, bands, room: r1(room), gutter: r1(gutter), share, cap }, "few bands thicken until the drawing spans a share of the room the canvas leaves it, each band no wider than one mark reads");
+    }
+  }
+  for (const axis of ["x", "y"]) {
+    const need = options.labelStep?.[axis];
+    const banded = axis === "x" ? xIsDiscrete || xContinuousAsDiscrete > 0 : yIsDiscrete || yContinuousAsDiscrete > 0;
+    const step = axis === "x" ? xStepSize : yStepSize;
+    if (!need || !banded || need <= step) continue;
+    if (axis === "x") xStepSize = need;
+    else yStepSize = need;
+    stage(axis === "x" ? "xStep" : "yStep", "widened for value labels", need, { from: step }, "each band widens to hold its value label, into the room the canvas has");
   }
   for (const axis of ["x", "y"]) {
     const count = axis === "x" ? xContinuousAsDiscrete : yContinuousAsDiscrete;
@@ -11302,25 +13356,40 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
       subplotHeight = continuousSize;
     }
   }
-  const maxSubplotW = (defaultChartWidth * maxStretchX - fixW) / facetCols - gap;
-  const maxSubplotH = (defaultChartHeight * maxStretchY - fixH) / facetRows - gap;
+  const maxSubplotW = (defaultChartWidth * maxStretchX - fixW) / facetCols - gapX;
+  const maxSubplotH = (defaultChartHeight * maxStretchY - fixH) / facetRows - gapY;
+  const budgetNote = "the plot may stretch only to the cap times the base, less the allowance; the bands share that";
   if (xTotalNominalCount > 0) {
     const divisor = xStepUnit === "group" ? nominalCount.x : xTotalNominalCount;
     const cap = Math.max(minStepVal, Math.floor(maxSubplotW / divisor));
-    if (xStepSize > cap) xStepSize = cap;
+    if (xStepSize > cap) {
+      xStepSize = cap;
+      stage("xStep", "stretch budget", cap, { budget: r1(maxSubplotW), bands: divisor, stretchCap: r1(maxStretchX), allowance: fixW }, budgetNote);
+    }
   }
   if (xContinuousAsDiscrete > 0) {
     const cap = Math.max(minStepVal, Math.floor(maxSubplotW / (xContinuousAsDiscrete + 1)));
-    if (xStepSize > cap) xStepSize = cap;
+    if (xStepSize > cap) {
+      xStepSize = cap;
+      stage("xStep", "stretch budget", cap, { budget: r1(maxSubplotW), bands: xContinuousAsDiscrete + 1, stretchCap: r1(maxStretchX), allowance: fixW }, budgetNote);
+    }
   }
+  let rowNamesAboveFit;
   if (yTotalNominalCount > 0) {
     const divisor = yStepUnit === "group" ? nominalCount.y : yTotalNominalCount;
-    const cap = Math.max(minStepVal, Math.floor(maxSubplotH / divisor));
-    if (yStepSize > cap) yStepSize = cap;
+    if (rowScale > 1) rowNamesAboveFit = Math.floor(maxSubplotH / divisor) >= yMinStep;
+    const cap = Math.max(yStepUnit === "group" ? minStepVal : yMinStep, Math.floor(maxSubplotH / divisor));
+    if (yStepSize > cap) {
+      yStepSize = cap;
+      stage("yStep", "stretch budget", cap, { budget: r1(maxSubplotH), bands: divisor, stretchCap: r1(maxStretchY), allowance: fixH }, budgetNote);
+    }
   }
   if (yContinuousAsDiscrete > 0) {
     const cap = Math.max(minStepVal, Math.floor(maxSubplotH / (yContinuousAsDiscrete + 1)));
-    if (yStepSize > cap) yStepSize = cap;
+    if (yStepSize > cap) {
+      yStepSize = cap;
+      stage("yStep", "stretch budget", cap, { budget: r1(maxSubplotH), bands: yContinuousAsDiscrete + 1, stretchCap: r1(maxStretchY), allowance: fixH }, budgetNote);
+    }
   }
   for (const axis of ["x", "y"]) {
     const count = axis === "x" ? xContinuousAsDiscrete : yContinuousAsDiscrete;
@@ -11328,9 +13397,59 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
     const stepSize = axis === "x" ? xStepSize : yStepSize;
     if (axis === "x") subplotWidth = Math.round(stepSize * (count + 1));
     else subplotHeight = Math.round(stepSize * (count + 1));
+    stage(axis === "x" ? "width" : "height", "banded values", Math.round(stepSize * (count + 1)), { values: count, step: r1(stepSize) }, "a continuous field drawn in bands spans one step per value, plus one");
   }
+  const isConnectedMark = typeof continuousMarkCrossSection === "object" && !!continuousMarkCrossSection.seriesCountAxis;
+  const bothDiscreteConnected = isConnectedMark && xTotalNominalCount > 0 && yTotalNominalCount > 0 && !xHasGrouping && !yHasGrouping;
+  if (bothDiscreteConnected && typeof continuousMarkCrossSection === "object") {
+    const csX = continuousMarkCrossSection.x ?? 0;
+    const csY = continuousMarkCrossSection.y ?? 0;
+    if (csX > 0 && csY > 0) {
+      const RUN_AR_CAP = 2;
+      const runIsX = csX >= csY;
+      const crossCS = runIsX ? csY : csX;
+      const runBudget = runIsX ? Math.floor(maxSubplotW / xTotalNominalCount) : Math.floor(maxSubplotH / yTotalNominalCount);
+      const cross = Math.max(
+        minStepVal,
+        Math.min(runIsX ? yStepSize : xStepSize, crossCS)
+      );
+      const ratio = Math.min(RUN_AR_CAP, Math.max(1, Math.max(csX, csY) / Math.min(csX, csY)));
+      const run = Math.max(
+        runIsX ? xStepSize : yStepSize,
+        Math.min(runBudget, Math.round(cross * ratio))
+      );
+      if (runIsX) {
+        xStepSize = run;
+        yStepSize = cross;
+      } else {
+        yStepSize = run;
+        xStepSize = cross;
+      }
+    }
+  }
+  let squaredCells = false;
+  if (xTotalNominalCount > 0 && yTotalNominalCount > 0 && !xHasGrouping && !yHasGrouping && !bothDiscreteConnected) {
+    const capX = Math.floor(maxSubplotW / xTotalNominalCount);
+    const capY = Math.floor(maxSubplotH / yTotalNominalCount);
+    const fill2 = Math.min(defaultChartWidth / xTotalNominalCount, defaultChartHeight / yTotalNominalCount);
+    const growth = Math.min(1, Math.max(0, options.cellGrowth ?? 0));
+    const generous = CELL_BAND_SIZE + Math.max(0, Math.min(fill2, CELL_BAND_SIZE * CELL_GROWTH_MAX) - CELL_BAND_SIZE) * growth;
+    const wanted = Math.max(generous, Math.min(xStepSize, yStepSize));
+    const square = Math.min(capX, capY, wanted);
+    const widest = Math.max(xStepSize, yStepSize);
+    if (square >= minStepVal && square * SQUARE_CELL_TOLERANCE >= widest) {
+      xStepSize = square;
+      yStepSize = square;
+      squaredCells = true;
+      for (const key of ["xStep", "yStep"]) stage(key, "square cells", square, { wanted, capX, capY }, "both axes banded: the marks are cells, pulled to one size so tones compare by area");
+    }
+  }
+  if (subplotWidth > Math.round(maxSubplotW)) stage("width", "stretch budget", Math.round(maxSubplotW), { stretchCap: r1(maxStretchX), allowance: fixW, columns: facetCols, gap: gapX }, "held to the cap times the base, less the allowance and the gaps, shared by the columns");
+  if (subplotHeight > Math.round(maxSubplotH)) stage("height", "stretch budget", Math.round(maxSubplotH), { stretchCap: r1(maxStretchY), allowance: fixH, rows: facetRows, gap: gapY }, "held to the cap times the base, less the allowance and the gaps, shared by the rows");
   subplotWidth = Math.min(subplotWidth, Math.round(maxSubplotW));
   subplotHeight = Math.min(subplotHeight, Math.round(maxSubplotH));
+  if (xContinuousAsDiscrete > 0) xStepSize = Math.min(xStepSize, subplotWidth / (xContinuousAsDiscrete + 1));
+  if (yContinuousAsDiscrete > 0) yStepSize = Math.min(yStepSize, subplotHeight / (yContinuousAsDiscrete + 1));
   const targetBandAR = options.targetBandAR;
   if (targetBandAR && targetBandAR > 0) {
     const xIsBanded = xTotalNominalCount > 0 || xContinuousAsDiscrete > 0;
@@ -11345,6 +13464,7 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
         subplotHeight = Math.round(
           Math.max(minContinuousSizeY, Math.min(blendedH, subplotHeight))
         );
+        stage("height", "band shape", subplotHeight, { bandRatio: r1(actualBandAR), target: targetBandAR, step: r1(xStepSize), ideal: r1(idealH) }, "bars taller than the target ratio of their step blend halfway toward it, in log space");
       }
     } else if (yIsBanded && !xIsBanded) {
       const actualBandAR = subplotWidth / yStepSize;
@@ -11356,16 +13476,137 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
         subplotWidth = Math.round(
           Math.max(minContinuousSizeX, Math.min(blendedW, subplotWidth))
         );
+        stage("width", "band shape", subplotWidth, { bandRatio: r1(actualBandAR), target: targetBandAR, step: r1(yStepSize), ideal: r1(idealW) }, "bars longer than the target ratio of their step blend halfway toward it, in log space");
       }
     }
   }
-  const xHasDiscreteItems = xTotalNominalCount > 0 || xContinuousAsDiscrete > 0;
-  const yHasDiscreteItems = yTotalNominalCount > 0 || yContinuousAsDiscrete > 0;
+  {
+    const xBands = xTotalNominalCount > 0 && xContinuousAsDiscrete === 0 ? xStepUnit === "group" ? nominalCount.x : xTotalNominalCount : 0;
+    const yBands = yTotalNominalCount > 0 && yContinuousAsDiscrete === 0 ? yStepUnit === "group" ? nominalCount.y : yTotalNominalCount : 0;
+    const oneBanded = xBands > 0 && !yBands && yIsContinuousNonBanded || yBands > 0 && !xBands && xIsContinuousNonBanded;
+    if (options.bandBalance !== false && true && oneBanded) {
+      const xStats = xBands ? computeDiscreteLabelStats(channelSemantics.x?.field, table) : null;
+      const yStats = yBands && rowScale === 1 ? computeDiscreteLabelStats(channelSemantics.y?.field, table) : null;
+      const plotW = (z) => xBands ? z.xStep * xBands : z.w;
+      const plotH = (z) => yBands ? z.yStep * yBands : z.h;
+      const gridW = (z) => facetCols * plotW(z) + (facetCols - 1) * gapX;
+      const gridH = (z) => facetRows * plotH(z) + (facetRows - 1) * gapY;
+      const fontsOf = (z) => computeFontSizing(Math.min(plotW(z), plotH(z)), { baseLabelFontSize: options.baseLabelFontSize, baseTitleFontSize: options.baseTitleFontSize });
+      const nameFont = (step, z) => computeLabelSizing(step, true, { baseFont: fontsOf(z).tickBase, minFont: 6 });
+      const px = (chars, font) => chars * font * APPROX_CHAR_WIDTH_RATIO;
+      const titleLine = (z) => fontsOf(z).titleFontSize * 1.25 + 4;
+      const beside = (z) => {
+        const tick = fontsOf(z).tickBase;
+        let lo = px(VALUE_LABEL_CHARS[0], tick), hi = px(VALUE_LABEL_CHARS[1], tick);
+        if (yStats) {
+          const font = nameFont(z.yStep, z).fontSize;
+          const cap = Math.max(LABEL_ROOM_FLOOR, LABEL_ROOM_SHARE * plotW(z));
+          lo = Math.min(cap, px(yStats.meanLen, font));
+          hi = Math.min(cap, px(yStats.maxLen, font));
+        }
+        return { lo: lo + TICK_ROOM, hi: hi + TICK_ROOM + titleLine(z) + (facetRows > 1 ? titleLine(z) : 0) };
+      };
+      const below = (z) => {
+        let lo = fontsOf(z).tickBase * 1.25, hi = lo;
+        if (xStats) {
+          const sizing = nameFont(z.xStep, z);
+          const line = sizing.fontSize * 1.25;
+          const cap = Math.max(LABEL_ROOM_FLOOR, LABEL_ROOM_SHARE * plotH(z));
+          const mean = px(xStats.meanLen, sizing.fontSize), longest = px(xStats.maxLen, sizing.fontSize);
+          if (sizing.labelAngle === -90) {
+            lo = Math.min(cap, mean);
+            hi = Math.min(cap, longest);
+          } else {
+            lo = mean <= z.xStep ? line : 2 * line;
+            hi = longest <= z.xStep ? line : Math.max(2 * line, Math.min(cap, longest));
+          }
+        }
+        return { lo: lo + TICK_ROOM, hi: hi + TICK_ROOM + titleLine(z) + (facetCols > 1 ? titleLine(z) : 0) };
+      };
+      const shapeOf = (z) => {
+        const b = beside(z), u = below(z);
+        return { lo: (gridW(z) + b.lo) / (gridH(z) + u.hi), hi: (gridW(z) + b.hi) / (gridH(z) + u.lo) };
+      };
+      const off = (z, range) => Math.abs(Math.log(shapeDivergence(shapeOf(z), range))) > 0.01;
+      const panel = (total, n, gap) => (total - (n - 1) * gap) / n;
+      const stepCeiling = (bands, budget, rows = false) => Math.min(
+        Math.floor(budget / bands),
+        rows ? Math.max(yMaxStep, Math.round(yDefaultStep * BALANCE_STEP_GROWTH)) : Math.max(maxStepSize, Math.round(defaultStepSize * BALANCE_STEP_GROWTH))
+      );
+      const floorW = Math.max(Math.round(defaultChartWidth * BALANCE_SIDE_FLOOR / facetCols), minContinuousSizeX);
+      const floorH = Math.max(Math.round(defaultChartHeight * BALANCE_SIDE_FLOOR / facetRows), minContinuousSizeY);
+      const lean = (range, from) => {
+        const z = { ...from };
+        const wide = shapeDivergence(shapeOf(z), range) > 1;
+        if (wide) {
+          const wantH = () => panel((gridW(z) + beside(z).lo) / range.hi - below(z).hi, facetRows, gapY);
+          if (yBands) z.yStep = Math.max(z.yStep, Math.min(stepCeiling(yBands, maxSubplotH, true), Math.ceil(wantH() / yBands)));
+          else z.h = Math.max(z.h, Math.min(Math.round(maxSubplotH), Math.ceil(wantH())));
+          if (yBands && off(z, range)) z.w = Math.min(z.w, Math.max(floorW, Math.floor(panel(range.hi * (gridH(z) + below(z).hi) - beside(z).lo, facetCols, gapX))));
+        } else {
+          const wantW = () => panel(range.lo * (gridH(z) + below(z).lo) - beside(z).hi, facetCols, gapX);
+          if (xBands) z.xStep = Math.max(z.xStep, Math.min(stepCeiling(xBands, maxSubplotW), Math.ceil(wantW() / xBands)));
+          else z.w = Math.max(z.w, Math.min(Math.round(maxSubplotW), Math.ceil(wantW())));
+          if (xBands && off(z, range)) z.h = Math.min(z.h, Math.max(floorH, Math.floor(panel((gridW(z) + beside(z).hi) / range.lo - below(z).lo, facetRows, gapY))));
+        }
+        return z;
+      };
+      const natural = naturalAspectRange(
+        { width: defaultChartWidth, height: defaultChartHeight },
+        { x: maxStretchX, y: maxStretchY },
+        { centre: options.targetAspect, spread: options.aspectTolerance }
+      );
+      const start = { w: subplotWidth, h: subplotHeight, xStep: xStepSize, yStep: yStepSize };
+      if (off(start, natural)) {
+        let range = natural;
+        let tier = "its own range";
+        let next = lean(natural, start);
+        if (off(next, natural)) {
+          range = widenRange(natural, FALLBACK_WIDEN);
+          tier = "the looser range round its base";
+          next = lean(range, start);
+        }
+        const shape = shapeOf(start);
+        const read = { shape: `${r1(shape.lo)}\u2013${r1(shape.hi)}`, range: `${r1(range.lo)}\u2013${r1(range.hi)}`, columns: facetCols, rows: facetRows };
+        const note = `with the labels it cannot drop, the chart fell outside the shapes its base takes on its own; it leans back to the nearer end of ${tier}, by its free sides`;
+        if (next.xStep !== xStepSize) {
+          xStepSize = next.xStep;
+          stage("xStep", "band balance", xStepSize, read, note);
+        }
+        if (next.yStep !== yStepSize) {
+          yStepSize = next.yStep;
+          stage("yStep", "band balance", yStepSize, read, note);
+        }
+        if (next.w !== subplotWidth) {
+          subplotWidth = next.w;
+          stage("width", "band balance", subplotWidth, read, note);
+        }
+        if (next.h !== subplotHeight) {
+          subplotHeight = next.h;
+          stage("height", "band balance", subplotHeight, read, note);
+        }
+      }
+    }
+  }
+  const given = options.canvasTreatment?.plotSpace;
+  if (given && true && facetCols === 1 && facetRows === 1) {
+    const note = "the room the box leaves once what is around the chart is settled";
+    if (given.width && xIsContinuousNonBanded) {
+      subplotWidth = Math.max(minContinuousSizeX, Math.round(given.width));
+      stage("width", "given space", subplotWidth, { given: r1(given.width) }, note);
+    }
+    if (given.height && yIsContinuousNonBanded) {
+      subplotHeight = Math.max(minContinuousSizeY, Math.round(given.height));
+      stage("height", "given space", subplotHeight, { given: r1(given.height) }, note);
+    }
+  }
+  const xHasDiscreteItems = !declaration.binnedAxes?.x && (xTotalNominalCount > 0 || xContinuousAsDiscrete > 0);
+  const yHasDiscreteItems = !declaration.binnedAxes?.y && (yTotalNominalCount > 0 || yContinuousAsDiscrete > 0);
   const fontSizing = computeFontSizing(Math.min(subplotWidth, subplotHeight), {
     baseLabelFontSize: options.baseLabelFontSize,
     baseTitleFontSize: options.baseTitleFontSize
   });
-  const labelOpts = { baseFont: fontSizing.tickBase, minFont: 6 };
+  const labelOpts = { baseFont: fontSizing.tickBase, minFont: options.minLabelFontSize ?? 6 };
   let xLabel = computeLabelSizing(xStepSize, xHasDiscreteItems, labelOpts);
   let yLabel = computeLabelSizing(yStepSize, yHasDiscreteItems, labelOpts);
   if (xHasDiscreteItems) {
@@ -11382,6 +13623,11 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
           const cap = Math.max(minStepVal, Math.floor(maxSubplotW / stats.count));
           if (desiredStep <= cap) {
             xStepSize = Math.max(xStepSize, desiredStep);
+            stage("xStep", "room for names", xStepSize, { widestName: r1(labelPx), wanted: desiredStep, cap }, "a few short names read straight, so the band widens to hold the widest with a gap, within the stretch budget");
+            if (squaredCells && yStepSize < xStepSize && xStepSize <= Math.floor(maxSubplotH / yTotalNominalCount)) {
+              yStepSize = xStepSize;
+              stage("yStep", "square cells", yStepSize, { columns: xStepSize }, "the columns widened for their names, so the rows widen with them and the cells stay square");
+            }
             xLabel = computeLabelSizing(xStepSize, xHasDiscreteItems, labelOpts);
             labelPx = stats.maxLen * xLabel.fontSize * APPROX_CHAR_WIDTH_RATIO;
           }
@@ -11396,17 +13642,17 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
         } else {
           xLabel = {
             ...xLabel,
-            labelAngle: -45,
+            labelAngle: -90,
             labelAlign: "right",
-            labelBaseline: "top"
+            labelBaseline: "middle"
           };
         }
       } else if (numericLike && labelPx > xStepSize && xLabel.labelAngle === void 0) {
         xLabel = {
           ...xLabel,
-          labelAngle: -45,
+          labelAngle: -90,
           labelAlign: "right",
-          labelBaseline: "top"
+          labelBaseline: "middle"
         };
       }
     }
@@ -11431,8 +13677,11 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
     subplotHeight,
     xStep: xStepSize,
     yStep: yStepSize,
+    ...rowNamesAboveFit !== void 0 ? { rowNamesAboveFit } : {},
     xStepUnit,
     yStepUnit,
+    xStepFitted,
+    yStepFitted,
     xContinuousAsDiscrete,
     yContinuousAsDiscrete,
     xNominalCount: xTotalNominalCount,
@@ -11448,9 +13697,10 @@ function computeLayout(channelSemantics, declaration, table, canvasSize, options
       subplotWidth,
       subplotHeight
     } : void 0,
-    effectiveFacetGap: gap,
-    truncations: []
+    effectiveFacetGap: gapX,
+    truncations: [],
     // Overflow truncations are handled by filterOverflow
+    trace
   };
 }
 function countDistinctSeries(channelSemantics, data) {
@@ -11560,7 +13810,7 @@ function computeBankingAR(xValues, yValues, xDomain, yDomain, seriesKeys, isConn
 }
 function computeChannelBudgets(channelSemantics, declaration, data, canvasSize, options) {
   const {
-    minStep: minStepVal = 6,
+    minStep: minStepVal = DEFAULT_MIN_STEP,
     stepPadding: stepPaddingVal = 0.1,
     maxColorValues: maxColorVal = 24
   } = options;
@@ -11648,7 +13898,7 @@ function computeFacetGrid(channelSemantics, declaration, data, canvasSize, optio
   const fixW = options.facetFixedPadding?.width ?? 0;
   const fixH = options.facetFixedPadding?.height ?? 0;
   const gap = options.facetGap ?? 0;
-  const minStep = options.minStep ?? 6;
+  const minStep = options.minStep ?? DEFAULT_MIN_STEP;
   const stepPadding = options.stepPadding ?? 0.1;
   const baseMinSubplot = options.minSubplotSize ?? 60;
   const isDiscreteType = (t) => t === "nominal" || t === "ordinal";
@@ -11835,6 +14085,1563 @@ function computeFacetGrid(channelSemantics, declaration, data, canvasSize, optio
     maxColumnValues: maxFacetColumns,
     maxRowValues: maxFacetRows
   };
+}
+
+// src/core/title-fit.ts
+var MIN_HEADLINE_SCALE = 0.82;
+function fullestLines(text, count, block, shortest, fontSize, measure2) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const n = words.length;
+  if (count < 1 || count > n) return void 0;
+  const widths = /* @__PURE__ */ new Map();
+  const widthOf = (from2, to) => {
+    const key = `${from2}:${to}`;
+    let width = widths.get(key);
+    if (width === void 0) widths.set(key, width = measure2(words.slice(from2, to).join(" "), fontSize));
+    return width;
+  };
+  const cost = Array.from({ length: count + 1 }, () => new Array(n + 1).fill(Infinity));
+  const from = Array.from({ length: count + 1 }, () => new Array(n + 1).fill(-1));
+  cost[0][0] = 0;
+  for (let k = 1; k <= count; k++) {
+    const last = k === count;
+    for (let j = last ? n : k; j <= n - (count - k); j++) {
+      for (let i = k - 1; i < j; i++) {
+        if (cost[k - 1][i] === Infinity) continue;
+        const width = widthOf(i, j);
+        if (width > block || last && width < shortest) continue;
+        const c = cost[k - 1][i] + (last ? 0 : (block - width) ** 2);
+        if (c < cost[k][j]) {
+          cost[k][j] = c;
+          from[k][j] = i;
+        }
+      }
+    }
+  }
+  if (cost[count][n] === Infinity) return void 0;
+  const out = [];
+  for (let k = count, j = n; k > 0; j = from[k][j], k--) out.unshift(words.slice(from[k][j], j).join(" "));
+  return out;
+}
+function filledLines(text, block, fontSize, measure2) {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length <= 1) return [text];
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (line && measure2(candidate, fontSize) > block) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  const shortest = block * WIDOW_SHARE;
+  if (lines.length >= 2 && measure2(lines[lines.length - 1], fontSize) < shortest) {
+    return fullestLines(text, lines.length, block, shortest, fontSize, measure2) ?? lines;
+  }
+  return lines;
+}
+var WIDOW_SHARE = 1 / 3;
+var MIN_PLOT_HEIGHT = 80;
+function plotHeightAfter(height, px) {
+  return Math.max(MIN_PLOT_HEIGHT, height - px);
+}
+function fitHeadlineText(text, block, fontSize, deckFontSize, measure2) {
+  if (measure2(text, fontSize) <= block) return void 0;
+  const smaller = Math.max(Math.round(fontSize * MIN_HEADLINE_SCALE), deckFontSize + 1);
+  if (smaller < fontSize && measure2(text, smaller) <= block) return { smaller, fontSize: smaller, taken: 0 };
+  const own = filledLines(text, block, fontSize, measure2);
+  const down = smaller < fontSize ? filledLines(text, block, smaller, measure2) : own;
+  const size = down.length < own.length ? smaller : fontSize;
+  const lines = size === fontSize ? own : down;
+  if (lines.length < 2) return void 0;
+  return { smaller, ...size < fontSize ? { fontSize: size } : {}, lines, taken: Math.round((lines.length - 1) * size * 1.3) };
+}
+function fitDeckText(text, block, fontSize, measure2) {
+  if (measure2(text, fontSize) <= block) return void 0;
+  const lines = filledLines(text, block, fontSize, measure2);
+  if (lines.length < 2) return void 0;
+  return { lines, taken: Math.round((lines.length - 1) * fontSize * 1.3) };
+}
+
+// src/core/ruler.ts
+var E10 = Math.sqrt(50);
+var E5 = Math.sqrt(10);
+var E2 = Math.SQRT2;
+function tickIncrement(start, stop, count) {
+  const step = (stop - start) / Math.max(0, count);
+  const power = Math.floor(Math.log10(step));
+  const error = step / 10 ** power;
+  const factor = error >= E10 ? 10 : error >= E5 ? 5 : error >= E2 ? 2 : 1;
+  return power >= 0 ? factor * 10 ** power : -(10 ** -power) / factor;
+}
+function niceTicks(start, stop, count) {
+  if (!(count > 0)) return [];
+  if (start === stop) return [start];
+  const step = tickIncrement(start, stop, count);
+  if (!Number.isFinite(step) || step === 0) return [];
+  return multiples(start, stop, step);
+}
+function multiples(start, stop, step) {
+  const out = [];
+  if (step < 0) {
+    const inc = -step;
+    let i1 = Math.round(start * inc);
+    let i2 = Math.round(stop * inc);
+    if (i1 / inc < start) i1 += 1;
+    if (i2 / inc > stop) i2 -= 1;
+    for (let i = i1; i <= i2; i += 1) out.push(i / inc);
+  } else {
+    let i1 = Math.round(start / step);
+    let i2 = Math.round(stop / step);
+    if (i1 * step < start) i1 += 1;
+    if (i2 * step > stop) i2 -= 1;
+    for (let i = i1; i <= i2; i += 1) out.push(i * step);
+  }
+  return out;
+}
+
+// src/core/header-gaps.ts
+var KEY_STACK_GAP_EM = 0.6;
+var KEY_ROW_GAP_EM = 2.25;
+var EASE = { from: 100, to: 500, least: 0.7, most: 1.3 };
+var GAP_FLOOR = 4;
+function gapEase(plotSide) {
+  if (!plotSide || !Number.isFinite(plotSide)) return 1;
+  const t = Math.min(1, Math.max(0, (plotSide - EASE.from) / (EASE.to - EASE.from)));
+  return EASE.least + (EASE.most - EASE.least) * t * t * (3 - 2 * t);
+}
+function gapPx(em, labelFontSize, plotSide, floor = GAP_FLOOR, scale = 1) {
+  return Math.max(floor, Math.round(em * labelFontSize * gapEase(plotSide) * scale));
+}
+function keyStackGap(labelFontSize, plotSide, spec, scale = 1) {
+  return gapPx(spec?.stack ?? KEY_STACK_GAP_EM, labelFontSize, plotSide, GAP_FLOOR, scale);
+}
+function keyRowGap(labelFontSize, plotSide, spec, scale = 1) {
+  return gapPx(spec?.row ?? KEY_ROW_GAP_EM, labelFontSize, plotSide, GAP_FLOOR, scale);
+}
+
+// src/core/layout-costs.ts
+var LAYOUT_COSTS = {
+  /** Where keys stand, and how several share an edge. */
+  keys: {
+    /** A key moved off its preferred edge, to the left, or to an edge its house did not rank. */
+    otherEdge: 0.25,
+    leftEdge: 0.45,
+    unrankedEdge: 0.75,
+    /**
+     * A key's title set against the house's stated position. Where the house states none, either
+     * seat costs nothing: the title stays on its entries' line where the row holds it, a line saved.
+     */
+    offSeat: 0.3,
+    quietInlineTop: 0,
+    /**
+     * A row of keys where some titles stand above and others do not: one key reads as wrapped
+     * and the other not, so a row seats its titles alike, or the keys stack.
+     */
+    mixedSeats: 1.2,
+    /**
+     * Several keys too wide to stand at the house's anchor, which moves them (`keys-anchor-moved`).
+     * Less than a key moved to another edge: keys standing apart are worse than a moved anchor.
+     */
+    offAnchor: 0.2,
+    /** Keys standing against the house's stated arrangement. */
+    offArrangement: 0.6,
+    /** Each extra row of keys above or below the plot, where the house did not ask for a stack. */
+    stackedRow: 0.5,
+    /** Each edge beyond the first that holds keys: keys split across edges are read in two places. */
+    extraEdge: 0.3,
+    /** Keys running past their edge's budget, per share past it: across the plot, beside it. */
+    overflowAcross: 20,
+    overflowBeside: 4,
+    /** The share of its edge's budget the keys take. */
+    edgeShare: 0.15
+  },
+  /** How a key's entries are set: their columns, widths and line breaks. */
+  keyEntries: {
+    /** Entries running past their budget, per share past it: in height; in width across the plot, beside it. */
+    overflowHeight: 10,
+    overflowAcross: 10,
+    overflowBeside: 2,
+    /** The share of the room the entries' width takes: across the plot, beside it. */
+    widthAcross: 0.12,
+    widthBeside: 1,
+    /** A name broken onto a second line, and each line past the second, on average over the names. */
+    wrapped: 0.6,
+    extraLine: 1.4,
+    /** How unevenly the names fill their columns. */
+    imbalance: 0.25,
+    /** The share of a name cut, on average, and any cut at all. */
+    cut: 4,
+    anyCut: 0.25,
+    /** The share of the height budget a row of entries takes above or below the plot. */
+    rowHeight: 0.6,
+    /** Each column, so the fewest that hold win a tie. */
+    column: 5e-3
+  }
+};
+
+// src/core/legend-layout.ts
+var TITLE_PADDING = 5;
+var GRADIENT_FLOOR = 60;
+var GRADIENT_FLOOR_LINES = 5;
+var INLINE_TITLE_GAP = 1.5;
+var K = LAYOUT_COSTS.keys;
+var E = LAYOUT_COSTS.keyEntries;
+var KEY_LINE_EM = 1.6;
+var SHARE_FRACTIONS = [1, 0.65, 0.5, 0.35];
+var SIDE_KEY_SHARE = 0.6;
+var wrapLines = (text, width, maxLines, widthOf) => {
+  if (text.includes("\n")) return text.split("\n");
+  const words = text.split(/\s+/);
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (line && widthOf(next) > width && lines.length < maxLines - 1) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = next;
+    }
+  }
+  return [...lines, line];
+};
+function symbolGridWidth(key, columns, symbol, labelWidthFallback, labelWidth) {
+  const s = key.style;
+  const texts = s.labelsStated ? void 0 : key.labels ?? key.valueLabels;
+  if (!texts?.length) return columns * (labelWidthFallback + symbol + 4);
+  const widths = new Array(Math.min(columns, texts.length)).fill(0);
+  texts.forEach((text, index) => {
+    const column = index % widths.length;
+    widths[column] = Math.max(widths[column], Math.min(s.labelLimit || Infinity, labelWidth(text)));
+  });
+  const gap = s.columnPadding ?? 10;
+  return widths.reduce((sum, width) => sum + symbol + (s.labelOffset ?? 4) + width, 0) + gap * (widths.length - 1);
+}
+function fitKey(key, at, block, plotHeight, measure2, budget) {
+  const s = key.style;
+  const fontSize = s.labelFontSize;
+  const titleFontSize = s.titleFontSize;
+  const measureLabel = measure2(fontSize, s.labelFont, s.labelFontWeight, s.labelFontStyle);
+  const labelWidth = (text) => measureLabel(applyTextCase(text, s.labelCase));
+  const measureTitle = measure2(titleFontSize, s.titleFont, s.titleFontWeight, s.titleFontStyle);
+  const sideWidth = fontSize * 18;
+  const horizontal = ["top", "bottom"].includes(at.orient) && at.direction !== "vertical";
+  const inlineTitle = horizontal && ["left", "right"].includes(at.titleOrient ?? "");
+  const titleWidth = horizontal ? inlineTitle ? block / 3 : block : sideWidth;
+  const layout = {
+    orient: at.orient,
+    moved: false,
+    inlineTitle: false,
+    labelsFitted: false,
+    titleFitted: false,
+    ...at.direction !== void 0 ? { direction: at.direction } : {},
+    ...at.titleOrient !== void 0 ? { titleOrient: at.titleOrient } : {},
+    labelFontSize: fontSize,
+    labelLimit: s.labelLimit ?? 0,
+    rowPadding: s.rowPadding ?? 2,
+    width: 0,
+    height: 0,
+    ...s.symbolSize !== void 0 ? { symbolSize: s.symbolSize } : {}
+  };
+  let titleLines;
+  if (typeof key.title === "string" && s.titleLimit === void 0) {
+    layout.titleFitted = true;
+    const lines = wrapLines(key.title, titleWidth, 3, measureTitle);
+    if (lines.length > 1) {
+      titleLines = lines;
+      layout.titleLines = lines;
+      layout.titleLineHeight = Math.ceil(titleFontSize * 1.2);
+    }
+  }
+  const titleTexts = titleLines ?? (key.title ? [key.title] : []);
+  let titleExtent = 0;
+  if (inlineTitle && key.title) {
+    const gap = s.titlePadding ?? Math.round(INLINE_TITLE_GAP * (s.columnPadding ?? 10));
+    layout.titlePadding = gap;
+    titleExtent = Math.min(s.titleLimit || Infinity, Math.max(...titleTexts.map(measureTitle))) + gap;
+  }
+  const titleCount = titleTexts.length;
+  const titleHeight = inlineTitle ? 0 : titleCount * Math.ceil(titleFontSize * 1.2) + (titleCount ? s.titlePadding ?? TITLE_PADDING : 0);
+  const count = key.count;
+  const nativeRows = Math.ceil(count / (s.columns || (horizontal ? count : 1)));
+  const nativeSymbol = Math.sqrt(s.symbolSize ?? key.largestSymbol ?? 100) + 2;
+  const nativeLabelWidth = s.labelLimit ?? Math.min(sideWidth, Math.max(fontSize * 4, ...(key.labels ?? key.valueLabels ?? []).map(labelWidth)));
+  let gradientLength = s.gradientLength ?? 200;
+  if (key.gradient && !horizontal) {
+    const room = (budget?.height ?? plotHeight) - titleHeight - 2 * s.padding;
+    const floor = Math.max(GRADIENT_FLOOR, Math.ceil(fontSize * 1.2 * GRADIENT_FLOOR_LINES));
+    const fitted = Math.max(floor, Math.min(gradientLength, Math.floor(room)));
+    if (fitted < gradientLength) {
+      gradientLength = fitted;
+      layout.gradientLength = fitted;
+    }
+  }
+  if ((key.gradient || key.bar) && s.gradientThickness !== void 0) layout.gradientThickness = s.gradientThickness;
+  const nativeColumns = s.columns || (horizontal ? count : 1);
+  const ramp = key.gradient || key.bar === true && horizontal;
+  let box = {
+    width: titleExtent + (ramp ? horizontal ? gradientLength : (s.gradientThickness ?? 16) + nativeLabelWidth + 6 : symbolGridWidth(key, nativeColumns, nativeSymbol, nativeLabelWidth, labelWidth)) + 2 * s.padding,
+    height: titleHeight + (ramp ? horizontal ? (s.gradientThickness ?? 16) + fontSize * 1.5 : gradientLength : nativeRows * (Math.max(fontSize * 1.2, nativeSymbol) + (s.rowPadding ?? 2))) + 2 * s.padding,
+    fontSize,
+    cost: 0,
+    entryRows: ramp ? 1 : nativeRows,
+    entryLines: 1,
+    layout
+  };
+  if (horizontal && !key.gradient && !key.bar && !key.labels?.length && s.columns === void 0) {
+    const room = (budget?.width ?? block) - titleExtent - 2 * s.padding;
+    const gridWidth = (columns2) => symbolGridWidth(key, columns2, nativeSymbol, nativeLabelWidth, labelWidth);
+    let columns = nativeColumns;
+    while (columns > 1 && gridWidth(columns) > room) columns--;
+    if (columns < nativeColumns) {
+      const rows = Math.ceil(count / columns);
+      layout.columns = columns;
+      box = {
+        ...box,
+        width: titleExtent + gridWidth(columns) + 2 * s.padding,
+        height: titleHeight + rows * (Math.max(fontSize * 1.2, nativeSymbol) + (s.rowPadding ?? 2)) + 2 * s.padding,
+        entryRows: rows
+      };
+    }
+  }
+  const labels = key.labels ?? [];
+  if (!key.gradient && labels.length && !s.labelsStated && s.labelLimit === void 0) {
+    layout.labelsFitted = true;
+    const gap = s.columnPadding ?? 10;
+    const symbol = Math.sqrt(s.symbolSize ?? 100) + (s.labelOffset ?? 4);
+    const available = Math.max(1, (budget?.width ?? (horizontal ? block : sideWidth + symbol)) - titleExtent - 2 * s.padding);
+    const heightBudget = budget?.height ?? (horizontal ? Math.max(48, plotHeight * 0.4) : plotHeight);
+    const rowGap = s.rowPadding ?? 6;
+    let bestCost = Infinity;
+    let columns = 1;
+    let selectedLines;
+    let selectedLimit = 0;
+    const columnCounts = typeof s.columns === "number" ? [s.columns > 0 ? Math.min(s.columns, labels.length) : labels.length] : Array.from({ length: labels.length }, (_, index) => index + 1);
+    const naturalWidth = Math.max(...labels.map(labelWidth));
+    const lineHeight2 = Math.ceil(fontSize * 1.2);
+    const headingWidth = inlineTitle || !key.title ? 0 : Math.min(s.titleLimit || Infinity, Math.max(...titleTexts.map(measureTitle)));
+    const ellipsis = labelWidth("\u2026");
+    const wrapped = /* @__PURE__ */ new Map();
+    const wrapAll = (width, maxLines) => {
+      const at2 = `${width}|${maxLines}`;
+      let wrapping = wrapped.get(at2);
+      if (!wrapping) {
+        const lines = labels.map((label) => wrapLines(applyTextCase(label, s.labelCase), width, maxLines, measureLabel));
+        wrapping = {
+          lines,
+          rowLines: Math.max(...lines.map((entry) => entry.length)),
+          heights: lines.map((entry) => Math.max(Math.sqrt(s.symbolSize ?? 100) + 2, lineHeight2 * entry.length))
+        };
+        wrapped.set(at2, wrapping);
+      }
+      return wrapping;
+    };
+    const settle = (wrapping, width) => {
+      if (wrapping.widths === void 0) {
+        const { lines } = wrapping;
+        wrapping.widths = lines.map((entry) => Math.max(...entry.map((line) => Math.min(width, labelWidth(line)))));
+        wrapping.loss = lines.reduce((total, entry, index) => total + entry.reduce((lost, line) => lost + (labelWidth(line) > width ? labelWidth(line) - Math.max(0, width - ellipsis) : 0), 0) / Math.max(1, labelWidth(labels[index])), 0) / labels.length;
+        wrapping.wrappingCost = lines.reduce((sum, entry) => sum + (entry.length > 1 ? E.wrapped : 0) + Math.max(0, entry.length - 2) * E.extraLine, 0) / labels.length;
+      }
+      return wrapping;
+    };
+    for (const columnCount of columnCounts) {
+      const limit = columnCount === labels.length ? available - symbol : (available - gap * (columnCount - 1)) / columnCount - symbol;
+      if (limit < fontSize * 4 && columnCount > 1) continue;
+      const startWidth = Math.max(Math.min(naturalWidth, fontSize * 4), Math.min(naturalWidth, limit));
+      const minWidth = Math.min(startWidth, fontSize * 4);
+      const steps = startWidth > minWidth ? 24 : 0;
+      for (let step = 0; step <= steps; step++) {
+        const textWidth2 = startWidth - (startWidth - minWidth) * step / Math.max(1, steps);
+        let wrapping;
+        let height = 0;
+        for (let maxLines = 3; maxLines >= 1; maxLines--) {
+          wrapping = wrapAll(textWidth2, maxLines);
+          const { rowLines, heights } = wrapping;
+          const rowCount = Math.ceil(labels.length / columnCount);
+          height = titleHeight + Math.max(0, rowCount - 1) * rowGap + 2 * s.padding;
+          for (let row = 0; row < rowCount; row++) {
+            height += horizontal && rowLines > 1 ? Math.max(fontSize + (rowLines - 1) * lineHeight2, Math.sqrt(s.symbolSize ?? 100)) + 4 : Math.max(...heights.slice(row * columnCount, (row + 1) * columnCount));
+          }
+          if (height <= heightBudget) break;
+        }
+        const { lines, widths, loss, wrappingCost } = settle(wrapping, textWidth2);
+        const columnWidths = Array.from({ length: columnCount }, (_, column) => Math.max(...widths.filter((_2, index) => index % columnCount === column)));
+        const extent = columnWidths.reduce((sum, column) => sum + column + symbol, 0) + gap * (columnCount - 1);
+        const width = Math.max(extent + titleExtent, headingWidth) + 2 * s.padding;
+        const widest = Math.max(...widths, 1);
+        const imbalance = (widest - widths.reduce((sum, value) => sum + value, 0) / widths.length) / widest;
+        const overflow = Math.max(0, height / heightBudget - 1) * E.overflowHeight + Math.max(0, extent / available - 1) * (horizontal ? E.overflowAcross : E.overflowBeside);
+        const widthCost = (horizontal ? E.widthAcross : E.widthBeside) * width / (available + titleExtent + 2 * s.padding);
+        const cost = overflow + widthCost + wrappingCost + E.imbalance * imbalance + E.cut * loss + (loss ? E.anyCut : 0) + (horizontal ? E.rowHeight * height / heightBudget : 0) + E.column * columnCount;
+        if (cost < bestCost) {
+          bestCost = cost;
+          columns = columnCount;
+          selectedLines = lines;
+          selectedLimit = loss ? textWidth2 : 0;
+          box = {
+            width,
+            height,
+            fontSize,
+            cost: cost - overflow - widthCost,
+            entryRows: Math.ceil(labels.length / columnCount),
+            entryLines: Math.max(...lines.map((entry) => entry.length)),
+            layout
+          };
+        }
+      }
+    }
+    if (s.columns === void 0 && (!horizontal || columns < labels.length)) layout.columns = columns;
+    layout.labelLimit = selectedLimit;
+    layout.rowPadding = rowGap;
+    if (selectedLines?.some((lines) => lines.length > 1)) layout.labelLines = selectedLines;
+  }
+  if (key.title) {
+    const measuredTitleWidth = Math.min(s.titleLimit || Infinity, Math.max(...titleTexts.map(measureTitle)));
+    if (!inlineTitle) box.width = Math.max(box.width, measuredTitleWidth + 2 * s.padding);
+    else box.height = Math.max(box.height, titleTexts.length * Math.ceil(titleFontSize * 1.2) + 2 * s.padding);
+  }
+  layout.width = box.width;
+  layout.height = box.height;
+  return box;
+}
+function planKeyLayout(keys, plot, measure2, preferences = {}) {
+  const laid = keys.map((key, index) => ({ key, index })).filter((entry) => Boolean(entry.key));
+  const out = { keys: keys.map(() => void 0), edges: [], footprint: [], overflow: [], plot, notes: [] };
+  if (!laid.length) return out;
+  const labelSize = laid[0].key.style.labelFontSize;
+  const nativeSide = labelSize * 24 + 14;
+  const sides = laid.map(({ key }) => {
+    if (key.gradient || !key.labels?.length || key.style.labelsStated || key.style.labelLimit !== void 0) return { text: 0, swatch: 0, wrapped: 0 };
+    const widthOf = measure2(key.style.labelFontSize, key.style.labelFont, key.style.labelFontWeight, key.style.labelFontStyle);
+    const text = Math.max(...key.labels.map((label) => widthOf(applyTextCase(label, key.style.labelCase))));
+    const swatch2 = Math.sqrt(key.style.symbolSize ?? 100) + (key.style.labelOffset ?? 4) + 2 * key.style.padding;
+    return { text, swatch: swatch2, wrapped: text / 3 * 1.25 + swatch2 };
+  });
+  const phrases = sides.some((side) => side.text > labelSize * 18);
+  const swatch = Math.max(0, ...sides.map((side) => side.swatch));
+  const wrappedSide = Math.max(0, ...sides.map((side) => side.wrapped));
+  const narrowSide = Math.max(labelSize * 12 + swatch, plot.width * SIDE_KEY_SHARE);
+  const standsWhole = (width) => {
+    let height = 0;
+    for (const { key } of laid) {
+      const style = key.style;
+      const lineHeight2 = Math.ceil(style.labelFontSize * 1.2);
+      const symbol = Math.sqrt(style.symbolSize ?? 100) + 2;
+      const titleHeight = key.title ? Math.ceil(style.titleFontSize * 1.2) + (style.titlePadding ?? TITLE_PADDING) : 0;
+      if (key.gradient || !key.labels?.length || style.labelsStated || style.labelLimit !== void 0) {
+        height += titleHeight + key.count * (symbol + (style.rowPadding ?? 2));
+        continue;
+      }
+      const widthOf = measure2(style.labelFontSize, style.labelFont, style.labelFontWeight, style.labelFontStyle);
+      const room = width - (Math.sqrt(style.symbolSize ?? 100) + (style.labelOffset ?? 4) + 2 * style.padding);
+      if (room <= 0) return false;
+      for (const label of key.labels) {
+        const lines = Math.ceil(widthOf(applyTextCase(label, style.labelCase)) * 1.15 / room);
+        if (lines > 3) return false;
+        height += Math.max(symbol, lines * lineHeight2) + (style.rowPadding ?? 2);
+      }
+      height += titleHeight + 2 * style.padding;
+    }
+    return height <= plot.height;
+  };
+  const widen = (width) => {
+    for (let at = Math.round(width); at < nativeSide; at += 8) if (standsWhole(at)) return at;
+    return nativeSide;
+  };
+  const narrowBudget = preferences.sideWidth !== void 0 ? widen(Math.max(preferences.sideWidth, Math.min(nativeSide, wrappedSide))) : phrases && narrowSide < nativeSide ? widen(Math.max(narrowSide, Math.min(nativeSide, wrappedSide))) : nativeSide;
+  const layoutAt = (sideBudget) => {
+    const out2 = { keys: keys.map(() => void 0), edges: [], footprint: [], overflow: [], plot, notes: [] };
+    const horizontalBudget = Math.max(48, plot.height * 0.4);
+    const rowWidth = plot.width + (preferences.besidePlot?.start ?? 0) + (preferences.besidePlot?.end ?? 0);
+    const plotSide = Math.min(plot.width, plot.height);
+    const edgeGap = keyRowGap(laid[0].key.style.labelFontSize, plotSide, preferences.gaps, preferences.gapScale);
+    const stackGap = keyStackGap(laid[0].key.style.labelFontSize, plotSide, preferences.gaps, preferences.gapScale);
+    const houseAnchor = preferences.align === "center" ? "middle" : preferences.align === "end" ? "end" : "start";
+    const fitsAnchor = (width) => {
+      const start = preferences.besidePlot?.start ?? 0;
+      const end = preferences.besidePlot?.end ?? 0;
+      return houseAnchor === "start" ? width <= plot.width + end : houseAnchor === "end" ? width <= plot.width + start : (width - plot.width) / 2 <= Math.min(start, end);
+    };
+    const candidatesOf = laid.map(({ key }) => {
+      const candidates = [];
+      const fitted = /* @__PURE__ */ new Map();
+      const symbolLines = key.largestSymbol === void 0 ? 0 : Math.max(0, Math.round(Math.sqrt(key.style.symbolSize ?? key.largestSymbol) / (key.style.labelFontSize * KEY_LINE_EM)) - 1);
+      const preferred = key.orient;
+      const orients = key.fixed ? [preferred] : key.moveTo ? [key.moveTo] : [.../* @__PURE__ */ new Set([preferred, ...key.edges ?? [], "right", "bottom", "top", "left"])];
+      for (const orient of orients) {
+        const horizontal = orient === "top" || orient === "bottom";
+        for (const fraction of laid.length > 1 ? SHARE_FRACTIONS : [1]) {
+          for (const inline of horizontal && !key.fixedTitle ? [false, true] : [false]) {
+            const at = orient === preferred ? { orient, direction: key.ownDirection ?? key.direction, titleOrient: key.ownTitleOrient ?? key.titleOrient } : { orient, direction: key.ownDirection ?? (horizontal ? "horizontal" : "vertical"), titleOrient: key.ownTitleOrient ?? "top" };
+            if (inline) at.titleOrient = "left";
+            const budget = {
+              width: horizontal ? rowWidth * fraction : sideBudget,
+              height: horizontal ? horizontalBudget : plot.height * fraction
+            };
+            const fit = `${horizontal}|${at.direction}|${at.titleOrient}|${budget.width}|${budget.height}`;
+            let shared = fitted.get(fit);
+            if (!shared) fitted.set(fit, shared = fitKey(key, at, horizontal ? rowWidth : plot.width, plot.height, measure2, budget));
+            const box = { ...shared, layout: { ...shared.layout, orient } };
+            box.layout.moved = orient !== preferred;
+            box.layout.inlineTitle = inline;
+            if (inline && (box.entryRows !== 1 || box.entryLines !== 1 || box.width > (horizontal ? rowWidth : plot.width) * fraction || (box.layout.titleLines?.length ?? 1) > 1)) continue;
+            const edge = orient === preferred ? 0 : key.edges && !key.edges.includes(orient) ? K.unrankedEdge : orient === "left" ? K.leftEdge : K.otherEdge;
+            const seat = !horizontal || !key.title || key.fixedTitle ? 0 : preferences.titlePosition ? inline === (preferences.titlePosition === "inline") ? 0 : K.offSeat : orient === "top" && inline ? K.quietInlineTop : 0;
+            candidates.push({ ...box, orient, preference: edge + seat, titleAbove: Boolean(key.title) && !inline && at.titleOrient !== "left", symbolLines: symbolLines * Math.max(1, box.entryRows), forced: Boolean(key.moveTo) });
+          }
+        }
+      }
+      const fittingSide = candidates.some((candidate) => ["left", "right"].includes(candidate.orient) && candidate.width <= sideBudget && candidate.height <= plot.height);
+      return !key.fixed && fittingSide ? candidates.filter((candidate) => !["top", "bottom"].includes(candidate.orient) || candidate.entryRows <= 2 && candidate.entryLines <= 2) : candidates;
+    });
+    const footprint = (choices) => {
+      const edges = [...new Set(choices.map((choice) => choice.orient))].map((orient) => {
+        const entries = choices.filter((choice) => choice.orient === orient);
+        const horizontal = orient === "top" || orient === "bottom";
+        const widthBudget = horizontal ? rowWidth : sideBudget;
+        const heightBudget = horizontal ? horizontalBudget : plot.height;
+        const shared = entries.length > 1;
+        const asked = horizontal && shared ? preferences.arrangement : void 0;
+        const alternatives = ["vertical", "horizontal"].map((direction) => {
+          const width = direction === "vertical" ? Math.max(...entries.map((entry) => entry.width)) : entries.reduce((sum, entry) => sum + entry.width, 0) + edgeGap * (entries.length - 1);
+          const height = direction === "horizontal" ? Math.max(...entries.map((entry) => entry.height)) : entries.reduce((sum, entry) => sum + entry.height, 0) + (horizontal ? stackGap : edgeGap) * (entries.length - 1);
+          const overflow = Math.max(0, width / widthBudget - 1) + Math.max(0, height / heightBudget - 1);
+          const row = direction === "horizontal";
+          const rows = entries.map((entry) => Math.max(1, entry.entryRows) * Math.max(1, entry.entryLines));
+          const lines = row ? Math.max(...rows) : rows.reduce((sum, count) => sum + count, 0);
+          const natural = !row && asked === "stack" ? entries.length : 1;
+          const tall = entries.map((entry) => entry.symbolLines);
+          const taller = row ? Math.max(...tall) : tall.reduce((sum, count) => sum + count, 0);
+          const stacked = horizontal && shared ? Math.max(0, lines + taller - natural) * K.stackedRow : 0;
+          const arrangement = asked && row !== (asked === "row") ? K.offArrangement : 0;
+          const seats = horizontal && row && shared && entries.some((entry) => entry.titleAbove) && entries.some((entry) => !entry.titleAbove) ? K.mixedSeats : 0;
+          const anchored = horizontal && shared && !fitsAnchor(width) ? K.offAnchor : 0;
+          return {
+            orient,
+            direction,
+            width,
+            height,
+            widthBudget,
+            heightBudget,
+            overflow,
+            asked,
+            count: entries.length,
+            cost: stacked + arrangement + seats + anchored + Math.max(0, height / heightBudget - 1) * K.overflowAcross + Math.max(0, width / widthBudget - 1) * (horizontal ? K.overflowAcross : K.overflowBeside) + K.edgeShare * (horizontal ? height / heightBudget : width / widthBudget)
+          };
+        });
+        return alternatives.sort((first, second) => first.cost - second.cost)[0];
+      });
+      const split = choices.some((choice) => choice.forced) ? 0 : Math.max(0, edges.length - 1) * K.extraEdge;
+      const cost = edges.reduce((sum, edge) => sum + edge.cost, 0) + choices.reduce((sum, choice) => sum + choice.cost + choice.preference, 0) + split;
+      return { cost, edges };
+    };
+    let plans = [{ choices: [], cost: 0 }];
+    for (const candidates of candidatesOf) {
+      plans = plans.flatMap((plan) => candidates.map((candidate) => {
+        const choices = [...plan.choices, candidate];
+        return { choices, cost: footprint(choices).cost };
+      })).sort((first, second) => first.cost - second.cost).slice(0, 32);
+    }
+    const chosen = plans[0].choices;
+    const result = footprint(chosen);
+    laid.forEach(({ index }, position) => {
+      out2.keys[index] = chosen[position].layout;
+    });
+    const anchor = preferences.align === "center" ? "middle" : preferences.align === "end" ? "end" : "start";
+    const beside = (side) => result.edges.filter((edge) => edge.orient === side).reduce((sum, edge) => sum + edge.width + edgeGap, 0);
+    const room = {
+      start: (preferences.besidePlot?.start ?? 0) + beside("left"),
+      end: (preferences.besidePlot?.end ?? 0) + beside("right")
+    };
+    const anchorOf = (edge) => {
+      if (edge.orient !== "top" && edge.orient !== "bottom") return anchor;
+      const width = edge.width;
+      const fits = (at) => at === "start" ? width <= plot.width + room.end : at === "end" ? width <= plot.width + room.start : (width - plot.width) / 2 <= Math.min(room.start, room.end);
+      if (fits(anchor)) return anchor;
+      const nearest = anchor === "middle" ? room.start >= room.end ? ["end", "start"] : ["start", "end"] : anchor === "start" ? ["middle", "end"] : ["middle", "start"];
+      const moved = nearest.find(fits);
+      if (!moved) return anchor;
+      out2.notes.push({ path: "legend.align", code: "keys-anchor-moved", message: `the ${edge.orient} keys stand at the ${moved === "middle" ? "middle" : moved} of the plot rather than its ${anchor === "middle" ? "middle" : anchor} \u2014 ${Math.round(width)}px wide, they would run past the drawing's edge there` });
+      return moved;
+    };
+    out2.edges = result.edges.map((edge) => ({ edge, anchor: anchorOf(edge) })).filter(({ edge, anchor: at }) => edge.count >= 2 || at !== "start").map(({ edge, anchor: anchor2 }) => {
+      const horizontal = edge.orient === "top" || edge.orient === "bottom";
+      const entries = chosen.filter((choice) => choice.orient === edge.orient);
+      const along = horizontal === (edge.direction === "horizontal");
+      let gap = edge.direction === "vertical" && horizontal ? stackGap : edgeGap;
+      if (preferences.align === "spread" && along && entries.length > 1) {
+        const extent = (entry) => horizontal ? entry.width : entry.height;
+        const spare = (horizontal ? plot.width : plot.height) - entries.reduce((sum, entry) => sum + extent(entry), 0);
+        if (spare / (entries.length - 1) >= Math.min(...entries.map(extent))) gap = Math.floor(spare / (entries.length - 1));
+        else out2.notes.push({ path: "legend.align", code: "keys-spread-gave-way", message: `the ${edge.orient} keys stand together rather than spread \u2014 ${Math.round(spare)}px left over would read as a gap, not a spread` });
+      }
+      if (edge.asked && edge.direction === "horizontal" !== (edge.asked === "row")) {
+        out2.notes.push({ path: "legend.arrangement", code: "keys-arrangement-gave-way", message: `the ${edge.orient} keys ${edge.direction === "horizontal" ? "share a row" : "stand one above another"} \u2014 ${edge.asked === "row" ? "a row" : "a stack"} would overflow the edge` });
+      }
+      return { orient: edge.orient, direction: edge.direction, anchor: anchor2, gap };
+    });
+    out2.footprint = result.edges.map(({ orient, width, height }) => ({ orient, width, height }));
+    out2.overflow = result.edges.filter((edge) => edge.overflow > 0).map(({ orient, width, height, widthBudget, heightBudget }) => ({ orient, width, height, widthBudget, heightBudget }));
+    return out2;
+  };
+  const narrowed = layoutAt(narrowBudget);
+  if (narrowBudget >= nativeSide) return narrowed;
+  const cuts = (planned) => planned.keys.some((key) => key && (key.orient === "left" || key.orient === "right") && key.labelsFitted && key.labelLimit > 0);
+  if (!cuts(narrowed)) return narrowed;
+  const native = layoutAt(nativeSide);
+  return cuts(native) ? narrowed : native;
+}
+
+// src/core/axis-title-fit.ts
+function fitAxisTitle(text, length, widthOf, fontSize) {
+  if (!text || !(length > 0) || widthOf(text) <= length) return void 0;
+  const lineHeight2 = Math.ceil(fontSize * 1.2);
+  const limit = Math.floor(length);
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length < 2) return { lines: [text], limit, cut: true, lineHeight: lineHeight2 };
+  let best;
+  for (let at2 = 1; at2 < words.length; at2++) {
+    const lines = [words.slice(0, at2).join(" "), words.slice(at2).join(" ")];
+    const widest = Math.max(...lines.map(widthOf));
+    if (!best || widest < best.widest) best = { lines, widest };
+  }
+  if (best && best.widest <= length) return { lines: best.lines, limit, cut: false, lineHeight: lineHeight2 };
+  let at = 1;
+  while (at < words.length && widthOf(words.slice(0, at + 1).join(" ")) <= length) at++;
+  return { lines: [words.slice(0, at).join(" "), words.slice(at).join(" ")], limit, cut: true, lineHeight: lineHeight2 };
+}
+
+// src/core/canvas-fit.ts
+var CANVAS_FIT_LIMITS = {
+  /** The share of the drawing's height or width the title, keys and chrome may take. */
+  around: 0.4,
+  /** The share of a panel's width (or height) its own y (or x) labels may take. */
+  labels: 0.4,
+  /** How far what is around the chart may stretch the drawing's shape from its box's, as a ratio of aspects. */
+  stretch: 1.35,
+  /** The smallest a host may shrink the drawing to enter its box before its text is too small. */
+  scale: 0.7,
+  /** A single plot's widest shape either way, as a ratio of its sides. */
+  aspect: 3,
+  /** A single plot's shortest side, as shown. */
+  minSide: 100
+};
+var HEADER_ALLOWANCE = 0.25;
+var SIDE_ALLOWANCE = 0.33;
+var DRAWING_PADDING = 5;
+var over = (value, limit) => Math.max(0, value - limit) / limit;
+var ESTIMATE_MARGIN = 0.95;
+function judgeCanvas(parts) {
+  const { panel, grid, reserve, chrome, box, base } = parts;
+  const p = reserve.parts;
+  const gridWidth = panel.width * grid.columns + grid.gapX * Math.max(0, grid.columns - 1);
+  const gridHeight = panel.height * grid.rows + grid.gapY * Math.max(0, grid.rows - 1);
+  const yOwn = (p.yLabels ?? 0) + (p.yTitle ?? 0);
+  const xOwn = (p.xLabels ?? 0) + (p.xTitle ?? 0);
+  const area = { width: gridWidth + yOwn, height: gridHeight + xOwn + (p.facetHeaders ?? 0) };
+  const aroundWidth = (p.sideKeys ?? 0) + (p.seriesEnd ?? 0);
+  const aroundHeight = (p.title ?? 0) + (p.flatYTitle ?? 0) + (p.stackedKeys ?? 0) + chrome.top + chrome.bottom;
+  const pad2 = parts.padding ?? DRAWING_PADDING;
+  const drawing = {
+    width: Math.max(area.width + aroundWidth, parts.keyRowWidth ?? 0) + 2 * pad2,
+    height: area.height + aroundHeight + 2 * pad2
+  };
+  const around = { height: aroundHeight / (drawing.height || 1), width: aroundWidth / (drawing.width || 1) };
+  const labels = { y: yOwn / (yOwn + panel.width || 1), x: xOwn / (xOwn + panel.height || 1) };
+  const aspect = (size) => size.width / (size.height || 1);
+  const shaped = {
+    width: area.width + Math.max(0, drawing.width - area.width - area.width * SIDE_ALLOWANCE),
+    height: area.height + Math.max(0, drawing.height - area.height - area.height * HEADER_ALLOWANCE)
+  };
+  const own = parts.ownPanel ? { width: area.width - (parts.panel.width - parts.ownPanel.width), height: area.height - (parts.panel.height - parts.ownPanel.height) } : area;
+  const stretch = aspect(shaped) / aspect(box) / (aspect(own) / aspect(base));
+  const scale = Math.min(1, box.width / (drawing.width || 1), box.height / (drawing.height || 1));
+  const strict = (limit) => limit * ESTIMATE_MARGIN;
+  const L = {
+    ...CANVAS_FIT_LIMITS,
+    around: strict(CANVAS_FIT_LIMITS.around),
+    labels: strict(CANVAS_FIT_LIMITS.labels),
+    // The shape, padding and all, runs a little large in the estimate already: no margin on it.
+    stretch: CANVAS_FIT_LIMITS.stretch,
+    scale: CANVAS_FIT_LIMITS.scale / ESTIMATE_MARGIN
+  };
+  const flags = [];
+  const kinds = [];
+  let excess = 0;
+  const flag = (amount, message, kind) => {
+    if (amount <= 0) return;
+    flags.push(message);
+    kinds.push(kind);
+    excess += amount;
+  };
+  const pct = (value) => `${Math.round(value * 100)}%`;
+  const held = scale < 0.99;
+  const designedHeight = (parts.designed ?? panel).height;
+  const takenFromPlot = (designedHeight - panel.height) / (designedHeight || 1) > TAKEN_FROM_PLOT;
+  flag(held || takenFromPlot ? over(around.height, L.around) : 0, `title, keys and chrome take ${pct(around.height)} of the height`, "height");
+  flag(held ? over(around.width, L.around) : 0, `keys take ${pct(around.width)} of the width`, "width");
+  flag(over(labels.y, L.labels), `y labels take ${pct(labels.y)} of the plot's width`, "yLabels");
+  flag(over(labels.x, L.labels), `x labels take ${pct(labels.x)} of the plot's height`, "xLabels");
+  const stretchExcess = held ? Math.max(0, Math.abs(Math.log(stretch)) - Math.log(L.stretch)) / Math.log(L.stretch) : 0;
+  flag(stretchExcess, `what is around the chart stretches the drawing ${(stretch > 1 ? stretch : 1 / stretch).toFixed(1)}\xD7 ${stretch > 1 ? "wider" : "taller"} than its box`, stretch > 1 ? "wider" : "taller");
+  flag(scale < L.scale ? 3 * (L.scale - scale) / L.scale : 0, `shrunk to ${pct(scale)} to fit its box`, "shrunk");
+  const plotFlags = [];
+  let plotExcess = 0;
+  if (grid.columns * grid.rows === 1) {
+    const plotFlag = (amount, message) => {
+      if (amount <= 0) return;
+      plotFlags.push(message);
+      plotExcess += amount;
+    };
+    const shape = aspect(panel);
+    plotFlag(Math.max(0, Math.abs(Math.log(shape)) - Math.log(L.aspect)) / Math.log(L.aspect), `the plot is ${shape.toFixed(1)}:1`);
+    const side = Math.min(panel.width, panel.height) * scale;
+    plotFlag(side < L.minSide ? (L.minSide - side) / L.minSide : 0, `the plot's short side shows ${Math.round(side)}px`);
+  }
+  return { drawing, panel, designed: parts.designed ?? panel, area, around, labels, stretch, scale, flags, kinds, plotFlags, plotExcess, excess: excess + plotExcess };
+}
+var TAKEN_FROM_PLOT = 0.1;
+function plotFitScale(estimate, box) {
+  const furniture = { width: estimate.drawing.width - estimate.area.width, height: estimate.drawing.height - estimate.area.height };
+  if (estimate.scale >= CANVAS_FIT_LIMITS.scale / ESTIMATE_MARGIN) return void 0;
+  const scale = Math.min((box.width - furniture.width) / estimate.area.width, (box.height - furniture.height) / estimate.area.height) * 0.93;
+  if (!(scale < 0.97)) return void 0;
+  return Math.max(PLOT_SCALE_FLOOR, Math.round(scale * 100) / 100);
+}
+var PLOT_SCALE_FLOOR = 0.6;
+
+// src/core/line-density.ts
+var MIN_DENSE_STROKE = 0.75;
+var LINE_INK_SHARE = 0.15;
+function panelCount(rows, channelSemantics) {
+  let panels = 1;
+  for (const field of [channelSemantics.column?.field, channelSemantics.row?.field]) {
+    if (field) panels *= Math.max(1, new Set(rows.map((row) => row?.[field]).filter((value) => value != null)).size);
+  }
+  return panels;
+}
+function linesPerPanel(rows, channelSemantics) {
+  const seriesFields = ["color", "detail", "strokeDash"].map((channel) => channelSemantics[channel]?.field).filter((field) => !!field);
+  if (seriesFields.length === 0 || rows.length === 0) return 0;
+  const facetFields = [channelSemantics.column?.field, channelSemantics.row?.field].filter((field) => !!field);
+  const keys = new Set(rows.map((row) => [...facetFields, ...seriesFields].map((field) => String(row?.[field])).join("\0")));
+  return keys.size / panelCount(rows, channelSemantics);
+}
+function denseLineWidth(base, lines, plotHeight) {
+  if (!(plotHeight > 0) || !(lines > 0)) return void 0;
+  const width = Math.max(MIN_DENSE_STROKE, Math.min(base, Math.round(plotHeight * LINE_INK_SHARE / lines * 100) / 100));
+  return width < base ? width : void 0;
+}
+
+// src/core/plan.ts
+var IDENTIFIER_TYPES = /* @__PURE__ */ new Set(["ID", "ZipCode"]);
+function xLabelOverflow(theme, chartProperties, channelSemantics) {
+  const semanticType = channelSemantics.x?.semanticAnnotation?.semanticType;
+  const sequence = sequenceKindOf(semanticType);
+  const code = IDENTIFIER_TYPES.has(semanticType);
+  const overflow = resolveLabelOverflow(theme?.labels, chartProperties?.labelOverflow, sequence ? "sequence" : "names").filter((step) => !(channelSemantics.x?.snapshots && step === "skip"));
+  return {
+    overflow,
+    ...sequence ? { sequence } : {},
+    ...code ? { noLimit: true } : {},
+    ...code ? { codes: true } : {},
+    ...IDENTIFIER_TYPES.has(channelSemantics.y?.semanticAnnotation?.semanticType) ? { rowCodes: true } : {},
+    ...{}
+  };
+}
+
+// src/core/backend-frame.ts
+var BACKEND_MIN_LABEL_SIZE = 10;
+function lineHeightOf(style) {
+  return Math.ceil(style.fontSize * (style.lineHeight ?? 1.2));
+}
+function planTitleBlock(text, width, style, measure2 = tableTextMeasurer) {
+  const headlineText = text.title?.trim();
+  const deckText = text.subtitle?.trim();
+  if (!headlineText && !deckText) return void 0;
+  const titleMeasure = (s) => (value, fontSize) => measure2(fontSize, s.font ?? "sans-serif", s.fontWeight ?? "normal", "normal")(value);
+  const block = Math.max(40, width);
+  let headline;
+  if (headlineText) {
+    const m = titleMeasure(style.headline);
+    const fit = fitHeadlineText(headlineText, block, style.headline.fontSize, style.deck.fontSize, m);
+    const fontSize = fit?.fontSize ?? style.headline.fontSize;
+    const lines = fit?.lines ?? [headlineText];
+    headline = {
+      text: headlineText,
+      lines,
+      fontSize,
+      lineHeight: lineHeightOf({ ...style.headline, fontSize }),
+      width: Math.max(...lines.map((line) => m(line, fontSize)))
+    };
+  }
+  let deck;
+  if (deckText) {
+    const m = titleMeasure(style.deck);
+    const fit = fitDeckText(deckText, block, style.deck.fontSize, m);
+    const lines = fit?.lines ?? [deckText];
+    deck = {
+      text: deckText,
+      lines,
+      fontSize: style.deck.fontSize,
+      lineHeight: lineHeightOf(style.deck),
+      width: Math.max(...lines.map((line) => m(line, style.deck.fontSize)))
+    };
+  }
+  const linesHeight = (part) => part ? part.lines.length * part.lineHeight : 0;
+  const height = linesHeight(headline) + linesHeight(deck) + (headline && deck ? style.gap : 0);
+  const broken = (headline ? (headline.lines.length - 1) * headline.lineHeight : 0) + (deck ? (deck.lines.length - 1) * deck.lineHeight : 0);
+  return { headline, deck, height, broken, width: Math.max(headline?.width ?? 0, deck?.width ?? 0) };
+}
+function widestLine(labels, widthOf) {
+  let widest = 0;
+  for (const label of labels) {
+    for (const line of typeof label === "string" ? [label] : label) widest = Math.max(widest, widthOf(line));
+  }
+  return widest;
+}
+function cutToWidth(text, limit, widthOf) {
+  if (!(limit && limit > 0) || widthOf(text) <= limit) return text;
+  let end = text.length;
+  while (end > 1 && widthOf(`${text.slice(0, end).trimEnd()}\u2026`) > limit) end--;
+  return `${text.slice(0, end).trimEnd()}\u2026`;
+}
+function onNiceTick(value, domain, count = 5) {
+  const [lo, hi] = domain;
+  if (!Number.isFinite(value) || !(hi > lo)) return true;
+  return niceTicks(lo, hi, count).some((tick) => Math.abs(tick - value) <= (hi - lo) * 1e-9);
+}
+function valueTickLabels(domain, count = 5, format2 = (v) => v.toLocaleString("en-US")) {
+  const [lo, hi] = domain;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [];
+  if (lo === hi) return [format2(lo)];
+  return niceTicks(Math.min(lo, hi), Math.max(lo, hi), count).map(format2);
+}
+function fitBox(baseSize, canvasSize, maxStretch) {
+  const stretch = maxStretch ?? DEFAULT_MAX_STRETCH;
+  return canvasSize ?? { width: baseSize.width * stretch, height: baseSize.height * stretch };
+}
+function judgeBackendCanvas(chrome) {
+  const parts = chrome.parts;
+  const width = Object.entries(parts).filter(([k]) => ["yLabels", "yTitle", "sideKeys", "seriesEnd"].includes(k)).reduce((s, [, v]) => s + (v ?? 0), 0);
+  const height = Object.entries(parts).filter(([k]) => !["yLabels", "yTitle", "sideKeys", "seriesEnd"].includes(k)).reduce((s, [, v]) => s + (v ?? 0), 0);
+  const estimate = judgeCanvas({
+    panel: chrome.plot,
+    ...chrome.designed ? { designed: chrome.designed } : {},
+    grid: chrome.grid ?? { columns: 1, rows: 1, gapX: 0, gapY: 0 },
+    reserve: { width, height, parts },
+    chrome: chrome.chrome ?? { top: 0, bottom: 0 },
+    ...chrome.keyRowWidth !== void 0 ? { keyRowWidth: chrome.keyRowWidth } : {},
+    ...chrome.padding !== void 0 ? { padding: chrome.padding } : {},
+    box: chrome.box,
+    base: chrome.base
+  });
+  return { estimate, plotScale: plotFitScale(estimate, chrome.box), stackedKeys: (parts.stackedKeys ?? 0) > 0, box: chrome.box };
+}
+function canvasFitSummary(estimate, box, treatment) {
+  return {
+    box,
+    drawing: { width: Math.round(estimate.drawing.width), height: Math.round(estimate.drawing.height) },
+    scale: Math.round(estimate.scale * 100) / 100,
+    flags: estimate.flags,
+    excess: Math.round(estimate.excess * 1e3) / 1e3,
+    ...treatment?.plotScale !== void 0 ? { plotScale: treatment.plotScale } : {},
+    ...treatment ? { treatment } : {}
+  };
+}
+var REFIT_MARGIN = 0.01;
+var SHORT_KEY_NAMES = { keyWidth: 120 };
+var SHORTER_KEY_NAMES = { keyWidth: 90 };
+var HOST_SCALE_TARGET = 0.9;
+function fitScore(fit) {
+  return fit.excess + Math.max(0, HOST_SCALE_TARGET - fit.scale);
+}
+function refitCanvas(judged, options, reassemble) {
+  if (options?.canvasFit === "off" || options?.canvasTreatment) return void 0;
+  const kinds = judged.estimate.kinds;
+  const held = judged.estimate.scale < HOST_SCALE_TARGET;
+  const keysWide = held || kinds.includes("width") || kinds.includes("wider") || kinds.includes("shrunk");
+  const keysTall = judged.stackedKeys === true && (held || kinds.includes("height") || kinds.includes("taller") || kinds.includes("shrunk"));
+  const plotScale = judged.plotScale;
+  const smaller = { keyScale: KEY_SCALE };
+  const smallType = { keyScale: KEY_SCALE, labelScale: LABEL_SCALE, titleScale: TITLE_SCALE };
+  const short = { names: SHORT_KEY_NAMES };
+  const tries = [
+    ...keysTall ? [{ keys: "side" }, { keys: "side", ...short }, { keys: "side", ...short, ...smaller }] : [],
+    ...keysTall && held ? [{ keys: "side", names: SHORTER_KEY_NAMES, ...smaller }] : [],
+    ...keysWide ? [short, { keys: "bottom" }, { ...short, ...smaller }] : [],
+    ...keysWide && held ? [{ names: SHORTER_KEY_NAMES, ...smaller }, { ...short, ...smallType }] : [],
+    ...keysTall && held ? [{ keys: "side", ...short, ...smallType }] : [],
+    ...held && !keysWide && !keysTall ? [smallType] : [],
+    ...plotScale ? [{ plotScale }] : [],
+    ...keysWide && plotScale ? [{ ...short, plotScale }, { keys: "bottom", plotScale }] : []
+  ];
+  let best;
+  let bestScore = fitScore(judged.estimate) - REFIT_MARGIN;
+  for (const treatment of tries) {
+    const refit = reassemble(treatment);
+    const fit = refit?._canvasFit;
+    if (!fit) continue;
+    if (treatment.labelScale && fit.scale * treatment.labelScale < judged.estimate.scale - 5e-3) continue;
+    const score = fitScore(fit) + treatmentPenalty(treatment);
+    if (score < bestScore) {
+      best = refit;
+      bestScore = score - REFIT_MARGIN;
+    }
+  }
+  return best;
+}
+var KEY_SCALE = 0.84;
+var LABEL_SCALE = 0.84;
+var TITLE_SCALE = 0.85;
+function treatmentPenalty(t) {
+  return (t.keyScale ? 0.01 : 0) + (t.labelScale ? 0.03 : 0) + (t.titleScale ? 0.02 : 0) + (t.names ? t.names.keyWidth < 120 ? 0.02 : 5e-3 : 0) + (t.plotScale ? 0.02 : 0);
+}
+function treatedKeyFontSize(size, options) {
+  const scale = options?.canvasTreatment?.keyScale;
+  return scale ? Math.max(BACKEND_MIN_LABEL_SIZE, Math.min(size, Math.round(size * scale * 2) / 2)) : size;
+}
+function withTreatment(input, treatment, box) {
+  const base = resolveBaseSize(input.chart_spec.baseSize, input.chart_spec.canvasSize);
+  const scale = treatment.plotScale;
+  return {
+    ...input,
+    chart_spec: {
+      ...input.chart_spec,
+      ...scale ? { baseSize: { width: Math.round(base.width * scale), height: Math.round(base.height * scale) }, canvasSize: box } : {}
+    },
+    options: { ...input.options ?? {}, canvasTreatment: { ...input.options?.canvasTreatment ?? {}, ...treatment } }
+  };
+}
+function treatedKeyEdge(options) {
+  const keys = options?.canvasTreatment?.keys;
+  return keys === "top" || keys === "bottom" ? keys : void 0;
+}
+function treatedKeySide(options, key) {
+  const names = options?.canvasTreatment?.names?.keyWidth;
+  return names === void 0 ? void 0 : names + key.lead + 2 * key.pad.x;
+}
+
+// src/core/backend-profile.ts
+function keyBlock(g, input) {
+  const { entries, fontSize, widthOf } = input;
+  const titleLines = input.title?.lines ?? [];
+  const titleWidth = titleLines.length ? Math.max(...titleLines.map(input.title.widthOf)) : 0;
+  const titleHeight = titleLines.length ? titleLines.length * input.title.fontSize * g.lineHeight : 0;
+  const heights = entries.map((lines) => g.entryHeight(fontSize, Math.max(1, lines.length)));
+  const widths = entries.map((lines) => g.lead + Math.max(0, ...lines.map(widthOf)));
+  const inset = g.pad.y + Math.max(0, (g.entryHeight(fontSize, 1) - fontSize * g.lineHeight) / 2);
+  if (!entries.length) return { width: 0, height: 0, rows: 0, inset: 0 };
+  if (input.orientation === "vertical") {
+    const body = heights.reduce((sum, h) => sum + h, 0) + g.rowGap * (entries.length - 1);
+    const top2 = titleHeight ? titleHeight + g.titleRowGap : 0;
+    return {
+      width: Math.ceil(Math.max(Math.max(...widths), titleWidth) + 2 * g.pad.x),
+      height: Math.ceil(top2 + body + 2 * g.pad.y),
+      rows: entries.length,
+      inset: titleHeight ? g.pad.y : inset
+    };
+  }
+  const inlineTitle = titleHeight > 0 && g.rowTitle === "start" ? titleWidth + g.titleGap : 0;
+  const room = Math.max(1, (input.room ?? Infinity) - 2 * g.pad.x);
+  const oneRow = widths.reduce((sum, w) => sum + w, 0) + g.gap * (widths.length - 1) < room;
+  const widest = Math.max(...widths);
+  const cell = (w) => g.wrap === "grid" && !oneRow ? widest : w;
+  let rows = 1;
+  let run = 0;
+  let rowHeight = 0;
+  let height = 0;
+  let rowWidth = 0;
+  entries.forEach((_, i) => {
+    const w = cell(widths[i]);
+    const end = run + (run > 0 ? g.gap : 0) + w;
+    const past = g.breakAt === "reach" ? end >= room : g.breakAt === "overWithGap" ? end + g.gap > room : end > room;
+    if (run > 0 && past) {
+      rows += 1;
+      height += rowHeight + g.rowGap;
+      rowWidth = Math.max(rowWidth, run);
+      run = w;
+      rowHeight = heights[i];
+    } else {
+      run = end;
+      rowHeight = Math.max(rowHeight, heights[i]);
+    }
+  });
+  height += rowHeight;
+  rowWidth = Math.max(rowWidth, run);
+  const top = titleHeight && g.rowTitle === "top" ? titleHeight + g.titleRowGap : 0;
+  return {
+    width: Math.ceil(inlineTitle + rowWidth + 2 * g.pad.x),
+    height: Math.ceil(Math.max(height, g.rowTitle === "start" ? titleHeight : 0) + top + 2 * g.pad.y),
+    rows,
+    inset: top ? g.pad.y : inset
+  };
+}
+function keyPlanStyle(g) {
+  return {
+    symbolSize: g.symbol * g.symbol,
+    labelOffset: Math.max(0, g.lead - g.symbol),
+    padding: Math.max(g.pad.x, g.pad.y),
+    rowPadding: g.rowGap,
+    columnPadding: g.gap,
+    ...g.sideColumns === "one" ? { columns: 1 } : {}
+  };
+}
+
+// src/echarts/profile.ts
+var ECHARTS_FONT = "sans-serif";
+var lineHeight = 1.2;
+var ECHARTS_PROFILE = {
+  key: {
+    lead: 25 + 5,
+    symbol: 14,
+    gap: 10,
+    rowGap: 10,
+    pad: { x: 5, y: 5 },
+    entryHeight: (fontSize, lines) => Math.max(14, lines * Math.ceil(fontSize * lineHeight)),
+    lineHeight,
+    wrap: "flow",
+    breakAt: "over",
+    rowTitle: "top",
+    titleGap: 0,
+    titleRowGap: 6,
+    sideColumns: "one"
+  }};
+function ecKeyGeometry(component, defaults = {}) {
+  const base = ECHARTS_PROFILE.key;
+  const itemWidth = component?.itemWidth ?? defaults.itemWidth ?? 25;
+  const itemHeight = component?.itemHeight ?? defaults.itemHeight ?? 14;
+  const gap = component?.itemGap ?? base.gap;
+  const pad2 = typeof component?.padding === "number" ? component.padding : base.pad.x;
+  return {
+    ...base,
+    lead: itemWidth + 5,
+    symbol: itemHeight,
+    gap,
+    rowGap: gap,
+    pad: { x: pad2, y: pad2 },
+    entryHeight: (fontSize, lines) => Math.max(itemHeight, lines * Math.ceil(fontSize * lineHeight))
+  };
+}
+
+// src/echarts/frame.ts
+var FONT = ECHARTS_FONT;
+var EC_TITLE = {
+  top: 15,
+  padding: 5,
+  gap: 10,
+  headline: { fontSize: 18, fontWeight: "bold", font: FONT, lineHeight: 1.25 },
+  deck: { fontSize: 12, fontWeight: "normal", font: FONT, lineHeight: 1.4 }
+};
+var CANVAS_BUFFER = 16;
+var LABEL_MARGIN = 8;
+var NAME_GAP = 10;
+var KEY_GAP = 12;
+var TITLE_GAP = 8;
+var FOOT_LEGEND = 30;
+var FOOT_GAP = 8;
+var TOP_OVERHANG = 12;
+var EC_LINE_WIDTH = 2;
+var measure = (fontSize, weight = "normal") => tableTextMeasurer(fontSize, FONT, weight);
+var one = (value) => Array.isArray(value) ? value.length === 1 ? value[0] : void 0 : value;
+function singleGrid(option) {
+  const grid = one(option.grid);
+  const xAxis = one(option.xAxis);
+  const yAxis = one(option.yAxis);
+  if (!grid || !xAxis || !yAxis || typeof grid.left !== "number" || typeof grid.top !== "number") return void 0;
+  if (!(Number(option._width) > 0) || !(Number(option._height) > 0)) return void 0;
+  return { grid, xAxis, yAxis };
+}
+function bandTexts(axis, sizing) {
+  if (axis?.type !== "category" || !Array.isArray(axis.data)) return void 0;
+  const values = axis.data.map((d) => String(d?.value ?? d));
+  const fontSize = axis.axisLabel?.fontSize ?? sizing.fontSize ?? 12;
+  const widthOf = measure(fontSize);
+  const lines = new Map((sizing.labelValues ?? []).map((value, index) => [value, sizing.labelLines?.[index]]));
+  const limit = sizing.labelLimit > 0 && sizing.labelForm !== "calendar" ? sizing.labelLimit : void 0;
+  return new Map(values.map((value) => [value, (lines.get(value) ?? [value]).map((line) => cutToWidth(line, limit, widthOf))]));
+}
+function realizeBandLabels(axis, channel, sizing) {
+  const texts = bandTexts(axis, sizing);
+  if (!texts) return;
+  const label = axis.axisLabel ?? (axis.axisLabel = {});
+  if (sizing.fontSize) label.fontSize = sizing.fontSize;
+  const fontSize = label.fontSize ?? 12;
+  const byValue = new Map([...texts].map(([value, lines]) => [value, lines.join("\n")]));
+  if ([...byValue].some(([value, text]) => text !== value)) label.formatter = (value) => byValue.get(String(value)) ?? String(value);
+  else if (label.formatter?._flintCalendar) delete label.formatter;
+  if ([...texts.values()].some((lines) => lines.length > 1)) label.lineHeight = sizing.labelLineHeight ?? Math.ceil(fontSize * 1.2);
+  if (channel === "x") {
+    label.rotate = sizing.labelAngle ? -sizing.labelAngle : 0;
+    const shown = sizing.overflow?.step === "skip" && sizing.overflow.shown ? new Set(sizing.overflow.shown) : void 0;
+    label.interval = shown ? (_index, value) => shown.has(String(value)) : 0;
+  } else {
+    label.interval = 0;
+  }
+}
+function seriesExtent(option, valueChannel) {
+  const index = valueChannel === "y" ? 1 : 0;
+  const stacks = /* @__PURE__ */ new Map();
+  let lo = Infinity;
+  let hi = -Infinity;
+  const read = (item) => {
+    const raw = item && typeof item === "object" && !Array.isArray(item) ? item.value : item;
+    const value = Array.isArray(raw) ? raw[index] : raw;
+    return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+  };
+  for (const series of option.series ?? []) {
+    if (!Array.isArray(series?.data)) continue;
+    const stack = series.stack != null ? String(series.stack) : void 0;
+    series.data.forEach((item, i) => {
+      const value = read(item);
+      if (value === void 0) return;
+      if (stack) {
+        const sums = stacks.get(stack) ?? [];
+        sums[i] = (sums[i] ?? 0) + value;
+        stacks.set(stack, sums);
+      }
+      lo = Math.min(lo, value);
+      hi = Math.max(hi, value);
+    });
+  }
+  for (const sums of stacks.values()) for (const sum of sums) if (sum !== void 0) {
+    lo = Math.min(lo, sum);
+    hi = Math.max(hi, sum);
+  }
+  return Number.isFinite(lo) && Number.isFinite(hi) ? [lo, hi] : void 0;
+}
+function printedLabels(option, axis, channel) {
+  if (axis?.axisLabel?.show === false) return [];
+  const formatter = axis.axisLabel?.formatter;
+  const format2 = (value) => {
+    if (typeof formatter === "function") {
+      try {
+        return String(formatter(value, 0));
+      } catch {
+        return String(value);
+      }
+    }
+    if (typeof formatter === "string") return formatter.replace("{value}", String(value));
+    return typeof value === "number" ? value.toLocaleString("en-US") : String(value);
+  };
+  if (axis.type === "category" && Array.isArray(axis.data)) {
+    return axis.data.map((d) => format2(d?.value ?? d).split("\n"));
+  }
+  if (axis.type === "value" || axis.type === "log" || axis.type == null) {
+    const extent = seriesExtent(option, channel);
+    if (!extent) return [];
+    const min = typeof axis.min === "number" ? axis.min : axis.scale ? extent[0] : Math.min(0, extent[0]);
+    const max = typeof axis.max === "number" ? axis.max : axis.scale ? extent[1] : Math.max(0, extent[1]);
+    return valueTickLabels([min, max], 5, (value) => format2(value)).map((text) => text.split("\n"));
+  }
+  return [["Sep 2024"]];
+}
+function labelRun(option, axis, channel) {
+  const labels = printedLabels(option, axis, channel);
+  if (!labels.length) return 0;
+  const fontSize = axis.axisLabel?.fontSize ?? 12;
+  const widest = widestLine(labels, measure(fontSize));
+  const lineHeight2 = axis.axisLabel?.lineHeight ?? Math.ceil(fontSize * 1.2);
+  const lines = Math.max(1, ...labels.map((l) => l.length));
+  const angle = Math.abs(Number(axis.axisLabel?.rotate) || 0) * Math.PI / 180;
+  if (channel === "y") return angle ? Math.ceil(Math.cos(angle) * widest + Math.sin(angle) * fontSize) : Math.ceil(widest);
+  return angle ? Math.ceil(Math.sin(angle) * widest + Math.cos(angle) * lines * lineHeight2) : lines * lineHeight2;
+}
+function hidePaddedEnds(axis) {
+  if (axis?.type !== "value" || typeof axis.min !== "number" || typeof axis.max !== "number") return;
+  const domain = [axis.min, axis.max];
+  const label = axis.axisLabel ?? (axis.axisLabel = {});
+  if (!onNiceTick(axis.min, domain) && label.showMinLabel == null) label.showMinLabel = false;
+  if (!onNiceTick(axis.max, domain) && label.showMaxLabel == null) label.showMaxLabel = false;
+}
+function flattenTimeLabels(axis, plotWidth) {
+  if (axis?.type !== "time" || Math.abs(Number(axis.axisLabel?.rotate) || 0) !== 90) return;
+  const formatter = axis.axisLabel?.formatter;
+  const sampleAt = Date.UTC(2024, 8, 28, 12, 0, 0);
+  let sample = "Sep 2024";
+  if (typeof formatter === "function") {
+    try {
+      sample = String(formatter(sampleAt, 0));
+    } catch {
+    }
+  } else if (typeof formatter === "string") {
+    const parts = { yyyy: "2024", yy: "24", MMMM: "September", MMM: "Sep", MM: "09", M: "9", dd: "28", d: "28", HH: "12", H: "12", hh: "12", mm: "00", ss: "00" };
+    sample = formatter.replace(/\{(\w+)\}/g, (_m, key) => parts[key] ?? key);
+  }
+  const fontSize = axis.axisLabel?.fontSize ?? 12;
+  const widest = Math.max(...sample.split("\n").map(measure(fontSize)));
+  if (6 * (widest + 12) > plotWidth) return;
+  axis.axisLabel.rotate = 0;
+  axis.axisLabel.hideOverlap = true;
+}
+function fitAxisName(axis, length) {
+  const name = axis?.name;
+  if (typeof name !== "string" || !name.trim()) return 0;
+  const fontSize = axis.nameTextStyle?.fontSize ?? 12;
+  const widthOf = measure(fontSize);
+  const fit = fitAxisTitle(name.replace(/\n/g, " "), length, widthOf, fontSize);
+  const lineHeight2 = Math.ceil(fontSize * 1.2);
+  if (fit) {
+    axis.name = fit.lines.map((line) => cutToWidth(line, fit.limit, widthOf)).join("\n");
+    axis.nameTextStyle = { ...axis.nameTextStyle ?? {}, lineHeight: lineHeight2 };
+  }
+  return (fit?.lines.length ?? name.split("\n").length) * lineHeight2;
+}
+function legendTitleGraphic(option) {
+  const graphics = Array.isArray(option.graphic) ? option.graphic : option.graphic ? [option.graphic] : [];
+  return graphics.find((g) => g?.id === EC_LEGEND_TITLE_ID);
+}
+function placeLegend(option, plot, canvasWidth, sideWidth, moveTo) {
+  const legend = one(option.legend);
+  if (!legend || option.visualMap || legend.orient !== "vertical" || legend.right !== CANVAS_BUFFER) return void 0;
+  const names = (Array.isArray(legend.data) ? legend.data : (option.series ?? []).map((s) => s?.name)).map((d) => typeof d === "string" ? d : d?.name).filter((name) => typeof name === "string" && name.length > 0);
+  if (!names.length) return void 0;
+  const fontSize = legend.textStyle?.fontSize ?? 12;
+  const titleGraphic = legendTitleGraphic(option);
+  const title = titleGraphic?.style?.text ? String(titleGraphic.style.text) : null;
+  const geometry = ecKeyGeometry(legend);
+  const itemWidth = legend.itemWidth ?? 25;
+  const key = {
+    gradient: false,
+    labels: names,
+    count: names.length,
+    title,
+    style: {
+      labelFont: FONT,
+      labelFontSize: fontSize,
+      labelFontWeight: "normal",
+      labelFontStyle: "normal",
+      titleFont: FONT,
+      titleFontSize: titleGraphic?.style?.fontSize ?? fontSize,
+      titleFontWeight: "bold",
+      titleFontStyle: "normal",
+      // ECharts sets a key beside the plot in one column, scrolling past its height.
+      ...keyPlanStyle(geometry),
+      titlePadding: 6
+    },
+    orient: "right",
+    edges: ["right", "bottom"],
+    fixed: false,
+    fixedTitle: false,
+    ...moveTo ? { moveTo: "bottom" } : {}
+  };
+  const laid = planKeyLayout([key], plot, tableTextMeasurer, sideWidth !== void 0 ? { sideWidth } : {}).keys[0];
+  if (!laid) return void 0;
+  const cutAt = laid.labelLimit > 0 ? laid.labelLimit : void 0;
+  const lineWidthOf = measure(fontSize);
+  const lines = new Map(names.map((name, index) => [name, (laid.labelLines?.[index] ?? [name]).map((line) => cutToWidth(line, cutAt, lineWidthOf))]));
+  const multiline = [...lines.values()].some((l) => l.length > 1);
+  const lineHeight2 = Math.ceil(fontSize * 1.2);
+  const titleLines = laid.titleLines ?? (title ? [title] : []);
+  const titleFontSize = key.style.titleFontSize;
+  const titleHeight = titleLines.length ? titleLines.length * Math.ceil(titleFontSize * 1.2) + 6 : 0;
+  const formatter = (name) => (lines.get(name) ?? [name]).join("\n");
+  const textStyle = { ...legend.textStyle ?? {}, ...multiline ? { lineHeight: lineHeight2 } : {} };
+  if (laid.orient === "bottom" || laid.orient === "top") {
+    const { right: _r, top: _t, formatter: _f, ...rest } = legend;
+    const widthOf2 = measure(fontSize);
+    const room = canvasWidth - 2 * CANVAS_BUFFER - itemWidth - 5;
+    const cut = new Map(names.map((name) => [name, cutToWidth(name, room, widthOf2)]));
+    option.legend = {
+      ...rest,
+      orient: "horizontal",
+      left: "center",
+      bottom: CANVAS_BUFFER,
+      textStyle: legend.textStyle ?? {},
+      ...[...cut].some(([name, text]) => text !== name) ? { formatter: (name) => cut.get(name) ?? name } : {}
+    };
+    if (titleGraphic) {
+      const { right: _gr, top: _gt, ...g } = titleGraphic;
+      Object.assign(titleGraphic, { ...g, left: "center", style: { ...g.style, text: title, textAlign: "center", width: void 0 } });
+      delete titleGraphic.right;
+      delete titleGraphic.top;
+    }
+    return { bottom: footRows(option, option.legend, canvasWidth) };
+  }
+  const top = typeof legend.top === "number" ? legend.top : 0;
+  option.legend = {
+    ...legend,
+    top: titleHeight ? Math.max(top, 4 + titleHeight) : top,
+    formatter,
+    textStyle,
+    ...laid.height > plot.height + 24 ? { type: "scroll" } : {}
+  };
+  const widthOf = measure(fontSize);
+  const padding = geometry.pad.x;
+  const titleWidthOf = measure(titleFontSize, "bold");
+  const titleWidth = titleLines.length ? Math.max(...titleLines.map(titleWidthOf)) : 0;
+  const box = keyBlock(geometry, {
+    entries: names.map((name) => lines.get(name) ?? [name]),
+    fontSize,
+    widthOf,
+    orientation: "vertical",
+    ...titleLines.length ? { title: { lines: titleLines, fontSize: titleFontSize, widthOf: titleWidthOf } } : {}
+  }).width;
+  if (titleGraphic) {
+    const { width: _w, ...style } = titleGraphic.style ?? {};
+    titleGraphic.style = { ...style, text: titleLines.join("\n"), textAlign: "left", ...titleLines.length > 1 ? { lineHeight: Math.ceil(titleFontSize * 1.2) } : {} };
+    titleGraphic.right = CANVAS_BUFFER + Math.max(0, box - padding - Math.ceil(titleWidth));
+  }
+  return { right: box + KEY_GAP };
+}
+function footRows(option, legend, canvasWidth) {
+  const names = (Array.isArray(legend.data) ? legend.data : (option.series ?? []).map((s) => s?.name)).map((d) => typeof d === "string" ? d : d?.name).filter((name) => typeof name === "string" && name.length > 0);
+  if (!names.length) return FOOT_LEGEND;
+  const fontSize = legend.textStyle?.fontSize ?? 12;
+  const rowsHeight = keyBlock(ecKeyGeometry(legend), {
+    entries: names.map((name) => [String(legend.formatter?.(name) ?? name)]),
+    fontSize,
+    widthOf: measure(fontSize),
+    orientation: "horizontal",
+    room: canvasWidth
+  }).height;
+  const bottom = typeof legend.bottom === "number" ? legend.bottom : 0;
+  const title = legendTitleGraphic(option);
+  if (title) {
+    title.bottom = bottom + rowsHeight + 2;
+    return bottom + rowsHeight + 2 + Math.ceil((title.style?.fontSize ?? fontSize) * 1.2) + 4;
+  }
+  return bottom + rowsHeight + 4;
+}
+function placeSideRamps(option, graphics, plotTop) {
+  const maps = (Array.isArray(option.visualMap) ? option.visualMap : option.visualMap ? [option.visualMap] : []).filter((m) => m && m.show !== false && m.type !== "piecewise" && m.orient === "vertical" && typeof m.id === "string" && m.id.startsWith("flint-ramp:") && typeof m.right === "number").sort((a, b) => a.right - b.right);
+  let needed = 0;
+  let leftmost = -Infinity;
+  for (const map2 of maps) {
+    const itemWidth = map2.itemWidth ?? 20;
+    const title = graphics.find((g) => g?.id === map2.id.replace("flint-ramp:", "flint-ramp-title:"));
+    const fontSize = title?.style?.fontSize ?? 11;
+    const titleWidth = title?.style?.text ? measure(fontSize, "bold")(String(title.style.text)) : 0;
+    let centre = map2.right + itemWidth / 2;
+    if (titleWidth && centre - titleWidth / 2 < leftmost + 8) {
+      centre = leftmost + 8 + titleWidth / 2;
+      map2.right = Math.round(centre - itemWidth / 2);
+    }
+    const titleRight = Math.max(4, Math.round(centre - titleWidth / 2));
+    const titleHeight = titleWidth ? Math.ceil(fontSize * 1.2) + 4 : 0;
+    if (title) {
+      title.right = titleRight;
+      title.top = plotTop;
+      title.style = { ...title.style, textAlign: "left" };
+    }
+    map2.top = plotTop + titleHeight;
+    delete map2.bottom;
+    leftmost = Math.max(titleRight + titleWidth, map2.right + itemWidth + 6);
+    needed = Math.max(needed, Math.ceil(leftmost) + KEY_GAP);
+  }
+  return needed;
+}
+function footRamps(option, canvasWidth) {
+  const maps = Array.isArray(option.visualMap) ? option.visualMap : option.visualMap ? [option.visualMap] : [];
+  let foot = 0;
+  for (const map2 of maps) {
+    if (!map2 || map2.show === false || map2.orient !== "horizontal" || map2.top != null) continue;
+    const bottom = typeof map2.bottom === "number" ? map2.bottom : 0;
+    const fontSize = map2.textStyle?.fontSize ?? 12;
+    const padding = typeof map2.padding === "number" ? map2.padding : 5;
+    let block;
+    if (map2.type === "piecewise") {
+      const count = Array.isArray(map2.pieces) ? map2.pieces.length : Array.isArray(map2.categories) ? map2.categories.length : map2.splitNumber ?? 5;
+      const labels = Array.isArray(map2.pieces) && map2.pieces.every((p) => p?.label) ? map2.pieces.map((p) => String(p.label)) : new Array(count).fill(`${Math.round(Number(map2.min) || 0)} - ${Math.round(Number(map2.max) || 0)}`);
+      block = keyBlock(ecKeyGeometry(map2, { itemWidth: 20 }), {
+        entries: labels.map((label) => [label]),
+        fontSize,
+        widthOf: measure(fontSize),
+        orientation: "horizontal",
+        room: canvasWidth
+      }).height - 2 * padding;
+    } else {
+      block = (map2.itemWidth ?? 20) + (map2.calculable ? Math.ceil(fontSize * 1.2) + 8 : 0);
+    }
+    foot = Math.max(foot, bottom + block + 2 * padding);
+  }
+  return foot;
+}
+function contentTop(option, width, height) {
+  const px = (value, of) => typeof value === "number" ? value : typeof value === "string" && value.endsWith("%") ? parseFloat(value) / 100 * of : typeof value === "string" && value.endsWith("px") ? parseFloat(value) : void 0;
+  let top = Infinity;
+  for (const series of option.series ?? []) {
+    if (series?.type !== "pie" && series?.type !== "sunburst") return void 0;
+    const [, cy] = Array.isArray(series.center) ? series.center : ["50%", "50%"];
+    const radius = Array.isArray(series.radius) ? series.radius[series.radius.length - 1] : series.radius ?? "75%";
+    const y = px(cy, height);
+    const r = px(radius, Math.min(width, height) / 2);
+    if (y === void 0 || r === void 0) return void 0;
+    const outside = series.type === "pie" && series.label?.show !== false && series.label?.position !== "inside" && series.label?.position !== "center";
+    const labels = outside ? (series.labelLine?.length ?? 15) + 2 * Math.ceil((series.label?.fontSize ?? 12) * 1.2) : 0;
+    top = Math.min(top, y - r - labels);
+  }
+  for (const key of ["legend", "visualMap", "graphic", "polar", "radar", "singleAxis", "calendar", "parallel", "geo"]) {
+    const value = option[key];
+    for (const component of Array.isArray(value) ? value : value ? [value] : []) {
+      if (key === "graphic" || key === "legend" || key === "visualMap") {
+        if (component?.show === false) continue;
+        if (typeof component?.top === "number") {
+          top = Math.min(top, component.top);
+          continue;
+        }
+        if (component?.top == null && component?.bottom != null) continue;
+      }
+      return void 0;
+    }
+  }
+  return Number.isFinite(top) ? Math.max(0, Math.floor(top)) : void 0;
+}
+function shiftDown(option, by, oldHeight, oldWidth) {
+  if (!(by > 0)) return;
+  const shift = (component) => {
+    if (!component || typeof component !== "object") return;
+    const pct = (value) => typeof value === "string" && value.endsWith("%") ? parseFloat(value) / 100 * oldHeight : void 0;
+    if (typeof component.top === "number") component.top += by;
+    else if (pct(component.top) !== void 0) component.top = pct(component.top) + by;
+    if (pct(component.bottom) !== void 0) component.bottom = pct(component.bottom);
+    if (Array.isArray(component.center) && component.center.length === 2) {
+      const [cx, cy] = component.center;
+      const y = typeof cy === "string" && cy.endsWith("%") ? parseFloat(cy) / 100 * oldHeight : typeof cy === "string" && cy.endsWith("px") ? parseFloat(cy) : typeof cy === "number" ? cy : void 0;
+      if (y !== void 0) component.center = [cx, y + by];
+      const r = component.radius;
+      const toPx = (v) => typeof v === "string" && v.endsWith("%") ? parseFloat(v) / 100 * Math.min(oldWidth, oldHeight) / 2 : v;
+      if (Array.isArray(r)) component.radius = r.map(toPx);
+      else if (r !== void 0) component.radius = toPx(r);
+    }
+  };
+  for (const key of ["grid", "legend", "visualMap", "graphic", "polar", "radar", "singleAxis", "calendar", "parallel", "series", "geo", "matrix"]) {
+    const value = option[key];
+    for (const component of Array.isArray(value) ? value : [value]) {
+      if (key === "series" && component?.coordinateSystem && component.coordinateSystem !== "none" && component.type !== "pie") continue;
+      shift(component);
+    }
+  }
+}
+function writeTitle(option, block) {
+  const existing = typeof option.title === "object" && !Array.isArray(option.title) ? option.title : {};
+  option.title = {
+    ...existing,
+    left: "center",
+    top: EC_TITLE.top,
+    itemGap: EC_TITLE.gap,
+    ...block.headline ? {
+      text: block.headline.lines.join("\n"),
+      textStyle: { ...existing.textStyle ?? {}, fontSize: block.headline.fontSize, lineHeight: block.headline.lineHeight }
+    } : { text: "" },
+    ...block.deck ? {
+      subtext: block.deck.lines.join("\n"),
+      subtextStyle: { ...existing.subtextStyle ?? {}, fontSize: block.deck.fontSize, lineHeight: block.deck.lineHeight }
+    } : {}
+  };
+}
+function thinLines(option, context, plotHeight) {
+  const lines = (option.series ?? []).filter((s) => s?.type === "line" && !s._companion);
+  if (lines.length < 2) return;
+  const width = denseLineWidth(EC_LINE_WIDTH, Math.max(lines.length, linesPerPanel(context.table, context.channelSemantics)), plotHeight);
+  if (width === void 0) return;
+  for (const series of lines) {
+    if (series.lineStyle?.width != null && series.lineStyle.width !== EC_LINE_WIDTH) continue;
+    series.lineStyle = { ...series.lineStyle ?? {}, width };
+  }
+}
+function ecFitFrame(option, context, text, planned, titleRoom = 0) {
+  const { layout } = context;
+  const single = singleGrid(option);
+  const parts = {};
+  if (!single) {
+    const width2 = Number(option._width) || context.canvasSize.width;
+    const height = Number(option._height) || context.canvasSize.height;
+    const block2 = planTitleBlock(text, width2 - 2 * (EC_TITLE.padding + CANVAS_BUFFER), EC_TITLE);
+    let titleRoom2 = 0;
+    if (block2) {
+      titleRoom2 = EC_TITLE.top + 2 * EC_TITLE.padding + block2.height + TITLE_GAP;
+      const top = contentTop(option, width2, height);
+      const by = top === void 0 ? titleRoom2 : Math.max(0, titleRoom2 - top);
+      shiftDown(option, by, height, width2);
+      writeTitle(option, block2);
+      option._width = width2;
+      option._height = height + by;
+      parts.title = titleRoom2;
+    }
+    const plot2 = { width: width2, height };
+    return { plot: plot2, designed: plot2, parts, ...block2 ? { title: block2 } : {} };
+  }
+  const { grid, xAxis, yAxis } = single;
+  const plot = {
+    width: Math.max(1, option._width - grid.left - grid.right),
+    height: Math.max(1, option._height - grid.top - grid.bottom)
+  };
+  const designed = { ...plot };
+  if (planned.x) realizeBandLabels(xAxis, "x", layout.xLabel);
+  if (planned.y) realizeBandLabels(yAxis, "y", layout.yLabel);
+  hidePaddedEnds(xAxis);
+  hidePaddedEnds(yAxis);
+  flattenTimeLabels(xAxis, plot.width);
+  const yLeft = yAxis.position !== "right";
+  const yRun = labelRun(option, yAxis, "y");
+  const yName = fitAxisName(yAxis, plot.height);
+  if (yName) yAxis.nameGap = LABEL_MARGIN + yRun + NAME_GAP;
+  const yRoom = CANVAS_BUFFER + LABEL_MARGIN + yRun;
+  const yNameRoom = yName ? NAME_GAP + yName : 0;
+  if (yLeft) grid.left = Math.max(CANVAS_BUFFER + 24, yRoom + yNameRoom);
+  const xRun = labelRun(option, xAxis, "x");
+  const xName = fitAxisName(xAxis, plot.width);
+  if (xName) xAxis.nameGap = LABEL_MARGIN + xRun + NAME_GAP;
+  const xRoom = CANVAS_BUFFER + LABEL_MARGIN + xRun;
+  const xNameRoom = xName ? NAME_GAP + xName : 0;
+  const shown = one(option.legend);
+  if (shown && context.assembleOptions?.canvasTreatment?.keyScale) {
+    shown.textStyle = { ...shown.textStyle ?? {}, fontSize: treatedKeyFontSize(shown.textStyle?.fontSize ?? 12, context.assembleOptions) };
+  }
+  const legend = placeLegend(option, plot, plot.width + grid.left + CANVAS_BUFFER + 22, treatedKeySide(context.assembleOptions, ecKeyGeometry(shown ?? {})), treatedKeyEdge(context.assembleOptions));
+  if (legend?.right !== void 0) grid.right = CANVAS_BUFFER + legend.right;
+  else if (legend?.bottom !== void 0) grid.right = Math.min(grid.right, CANVAS_BUFFER + 22);
+  const footKeys = legend?.bottom ?? 0;
+  const footLegend = one(option.legend);
+  const keptFoot = !legend && footLegend && footLegend.orient === "horizontal" && footLegend.bottom != null ? footRows(option, footLegend, plot.width + grid.left + grid.right) : 0;
+  const rampFoot = footRamps(option, plot.width + grid.left + grid.right);
+  const foot = Math.max(footKeys, keptFoot, rampFoot);
+  grid.bottom = xRoom + xNameRoom + (foot ? Math.max(0, foot + FOOT_GAP - CANVAS_BUFFER) : 0);
+  const width = plot.width + grid.left + grid.right;
+  const pad2 = 2 * (EC_TITLE.padding + CANVAS_BUFFER);
+  const block = planTitleBlock(text, Math.max(width, titleRoom) - pad2, EC_TITLE);
+  if (block && block.width + pad2 > width) plot.width += Math.ceil(block.width + pad2 - width);
+  if (block) {
+    const room = EC_TITLE.top + 2 * EC_TITLE.padding + block.height + TITLE_GAP;
+    const continuousY = yAxis.type !== "category";
+    if (continuousY && block.broken > 0) plot.height = plotHeightAfter(plot.height, block.broken);
+    const by = Math.max(0, room + TOP_OVERHANG - grid.top);
+    shiftDown(option, by, option._height, option._width);
+    const sideLegend = one(option.legend);
+    if (legend?.right !== void 0 && sideLegend && typeof sideLegend.top === "number") {
+      const titleGraphic = legendTitleGraphic(option);
+      const topmost = typeof titleGraphic?.top === "number" ? titleGraphic.top : sideLegend.top;
+      const under = Math.max(0, room - topmost);
+      sideLegend.top += under;
+      if (titleGraphic && typeof titleGraphic.top === "number") titleGraphic.top += under;
+    }
+    writeTitle(option, block);
+  }
+  thinLines(option, context, plot.height);
+  const graphics = Array.isArray(option.graphic) ? option.graphic : option.graphic ? [option.graphic] : [];
+  const sizeKey = graphics.find((g) => g?.id === EC_SIZE_KEY_ID);
+  if (sizeKey) sizeKey.top = grid.top;
+  grid.right = Math.max(grid.right, placeSideRamps(option, graphics, grid.top));
+  option._width = Math.round(plot.width + grid.left + grid.right);
+  option._height = Math.round(plot.height + grid.top + grid.bottom);
+  option._planned = { plot: { width: Math.round(plot.width), height: Math.round(plot.height) }, left: grid.left, right: grid.right, top: grid.top, bottom: grid.bottom };
+  Object.assign(parts, {
+    yLabels: yRoom,
+    ...yNameRoom ? { yTitle: yNameRoom } : {},
+    xLabels: xRoom,
+    ...xNameRoom ? { xTitle: xNameRoom } : {},
+    title: grid.top,
+    sideKeys: grid.right,
+    ...footKeys || keptFoot ? { stackedKeys: Math.max(footKeys, keptFoot) } : {}
+  });
+  return { plot, designed, parts, ...block ? { title: block } : {} };
 }
 
 // src/echarts/facet.ts
@@ -12223,13 +16030,13 @@ function repositionFacetedLegendBesideGrids(combined) {
   const GAP = 12;
   const BUFFER = 16;
   const rightMost = Math.max(...grids.map((g) => (g.left ?? 0) + (g.width ?? 0)));
+  const { left: _ignoredLeft, ...legendRest } = combined.legend;
   combined.legend = {
-    ...combined.legend,
-    left: rightMost + GAP,
+    ...legendRest,
+    right: BUFFER,
     top: combined.legend.top ?? 20,
     orient: combined.legend.orient || "vertical",
     align: "left",
-    right: void 0,
     textStyle: {
       fontSize: highCardinality ? 8 : 11,
       ...combined.legend.textStyle || {}
@@ -12258,13 +16065,13 @@ function repositionFacetedPolarLegend(combined) {
     const r = Number(p?.radius) || 0;
     return cx + r;
   }));
+  const { left: _ignoredLeft, ...legendRest } = combined.legend;
   combined.legend = {
-    ...combined.legend,
-    left: rightMost + GAP,
+    ...legendRest,
+    right: BUFFER,
     top: combined.legend.top ?? 20,
     orient: combined.legend.orient || "vertical",
     align: "left",
-    right: void 0,
     textStyle: {
       fontSize: highCardinality ? 8 : 11,
       ...combined.legend.textStyle || {}
@@ -12330,13 +16137,14 @@ function decideColorForChannel(channel, ctx) {
   if (!encoding || !cs?.field) return void 0;
   const dataDriven = true;
   const primary = inferColorChannelPrimary(channel);
-  if (encoding.scheme && encoding.scheme !== "default") {
+  const named = schemeName(encoding.scheme);
+  if (named && named !== "default") {
     const distinct2 = countDistinctValues(ctx.table, cs.field);
     const { schemeType: schemeType2 } = decideSchemeTypeFromChannel(channel, cs);
     return {
       channel,
       schemeType: schemeType2,
-      schemeId: encoding.scheme,
+      schemeId: named,
       categoryCount: distinct2,
       primary,
       dataDriven
@@ -12390,8 +16198,19 @@ function normalizeEncodingShorthand(encodings) {
   }
   return out;
 }
-function normalizeStaticSeries(rawEncodings, data, semanticTypes) {
-  const encodings = normalizeEncodingShorthand(rawEncodings);
+function normalizeChartEncodingAliases(chartType, encodings) {
+  if (chartType !== "Grouped Bar Chart" || encodings.group || !encodings.color) {
+    return encodings;
+  }
+  const normalized = { ...encodings, group: encodings.color };
+  delete normalized.color;
+  return normalized;
+}
+function normalizeStaticSeries(rawEncodings, data, semanticTypes, chartType = "") {
+  const encodings = normalizeChartEncodingAliases(
+    chartType,
+    normalizeEncodingShorthand(rawEncodings)
+  );
   const arrayChannels = [];
   for (const [channel2, enc] of Object.entries(encodings)) {
     if (Array.isArray(enc)) {
@@ -12525,6 +16344,10 @@ function foldData(data, fields) {
 }
 
 // src/core/normalize-properties.ts
+function sameOptionValue(option, value) {
+  if (option === value) return true;
+  return Array.isArray(option) && Array.isArray(value) && option.length === value.length && option.every((entry, index) => entry === value[index]);
+}
 function normalizeChartProperties(properties, chartProperties) {
   const warnings = [];
   if (!properties || !chartProperties) {
@@ -12540,7 +16363,8 @@ function normalizeChartProperties(properties, chartProperties) {
     if (!(def.key in chartProperties)) continue;
     const value = chartProperties[def.key];
     if (value == null) continue;
-    if (def.options.some((o) => o.value === value)) continue;
+    if (def.options.some((o) => sameOptionValue(o.value, value))) continue;
+    if (def.accepts?.(value)) continue;
     const byLabel = typeof value === "string" ? def.options.find(
       (o) => o.label != null && o.label.toLowerCase() === value.trim().toLowerCase()
     ) : void 0;
@@ -12554,21 +16378,39 @@ function normalizeChartProperties(properties, chartProperties) {
       continue;
     }
     const accepted = def.options.map((o) => o.value == null ? "(default)" : `'${o.value}'`).join(", ");
+    const shown = typeof value === "object" ? JSON.stringify(value).slice(0, 80) : `'${value}'`;
     const copy = ensureCopy();
     delete copy[def.key];
     warnings.push({
       severity: "warning",
       code: "invalid-option-value",
-      message: `chartProperties.${def.key}: '${value}' is not a valid option (accepted: ${accepted}). Falling back to the default.`
+      message: `chartProperties.${def.key}: ${shown} is not a valid option (accepted: ${accepted}${def.acceptsLabel ? `, or ${def.acceptsLabel}` : ""}). Falling back to the default.`
     });
   }
   return { chartProperties: result ?? chartProperties, warnings };
 }
 
 // src/echarts/assemble.ts
+function applyFieldDisplayNames(option, names) {
+  if (!names) return;
+  const displayName = (value) => typeof value === "string" ? names[value] ?? value : value;
+  for (const axisKey of ["xAxis", "yAxis", "singleAxis"]) {
+    const axes = Array.isArray(option[axisKey]) ? option[axisKey] : [option[axisKey]];
+    for (const axis of axes) {
+      if (axis?.name) axis.name = displayName(axis.name);
+    }
+  }
+  for (const series of option.series ?? []) {
+    if (series?.name) series.name = displayName(series.name);
+  }
+  const graphics = Array.isArray(option.graphic) ? option.graphic : option.graphic ? [option.graphic] : [];
+  for (const graphic of graphics) {
+    if (graphic?.style?.text) graphic.style.text = displayName(graphic.style.text);
+  }
+}
 function assembleECharts(input) {
   const chartType = input.chart_spec.chartType;
-  const semanticTypes = input.semantic_types ?? {};
+  const semanticTypes = withEncodingColorAnnotations(input.semantic_types ?? {}, input.chart_spec.encodings);
   const sizeCeiling = input.chart_spec.canvasSize;
   const baseSize = resolveBaseSize(input.chart_spec.baseSize, sizeCeiling);
   const canvasSize = baseSize;
@@ -12585,10 +16427,13 @@ function assembleECharts(input) {
   const chartProperties = normalizedProps.chartProperties;
   warnings.push(...normalizedProps.warnings);
   const rawData = input.data.values ?? [];
+  const sortRepair = repairEncodingSorts(input.chart_spec.encodings, rawData, { fieldSort: false });
+  warnings.push(...sortRepair.warnings);
   const normalized = normalizeStaticSeries(
-    input.chart_spec.encodings,
+    sortRepair.encodings,
     rawData,
-    semanticTypes
+    semanticTypes,
+    chartType
   );
   let data = normalized.data;
   const staticSeries = normalized.staticSeries;
@@ -12597,7 +16442,8 @@ function assembleECharts(input) {
     normalized.encodings,
     data,
     semanticTypes,
-    prelimConvertedData
+    prelimConvertedData,
+    { chartType: chartTemplate.chart }
   );
   const typedRawEncodings = {};
   for (const [ch, enc] of Object.entries(normalized.encodings)) {
@@ -12609,7 +16455,10 @@ function assembleECharts(input) {
     const swapped = ecGetTemplateDef(transformed.chartType);
     if (swapped) chartTemplate = swapped;
   }
-  const encodings = applyEncodingOverrides(chartTemplate, transformed.encodings, chartProperties);
+  const overridden = applyEncodingOverrides(chartTemplate, transformed.encodings, chartProperties);
+  const implicit = resolveImplicitAggregation(chartTemplate.chart, overridden, data, semanticTypes);
+  const encodings = implicit.encodings;
+  warnings.push(...implicit.warnings);
   data = applyAggregation(encodings, data);
   const tplMark = chartTemplate.template?.mark;
   const templateMarkType = typeof tplMark === "string" ? tplMark : tplMark?.type;
@@ -12618,9 +16467,10 @@ function assembleECharts(input) {
     encodings,
     data,
     semanticTypes,
-    convertedData
+    convertedData,
+    { chartType: chartTemplate.chart }
   );
-  const effectiveMarkType = templateMarkType || "point";
+  const effectiveMarkType = zeroMarkType(chartTemplate.chart, templateMarkType);
   for (const [channel, cs] of Object.entries(channelSemantics)) {
     if ((channel === "x" || channel === "y") && cs.type === "quantitative") {
       const numericValues = data.map((r) => r[cs.field]).filter((v) => v != null && typeof v === "number" && !isNaN(v));
@@ -12638,6 +16488,8 @@ function assembleECharts(input) {
     // but adds ~120-160px grid margins on top.  A 24px base band gives
     // bars close to ECharts's native auto-sizing at typical category counts.
     defaultBandSize: 24,
+    // ECharts bars natively distribute across the available grid.
+    bandStepFit: 1,
     // ECharts fills its grid natively (bars sized by barCategoryGap), so
     // sparse categories spread out. Allow bands to expand past the base to
     // match that, capped so a couple of bars don't span the whole canvas.
@@ -12655,6 +16507,8 @@ function assembleECharts(input) {
     effectiveOptions.facetGap = 14;
   }
   Object.assign(effectiveOptions, deriveStretchCaps(baseSize, sizeCeiling, effectiveOptions));
+  effectiveOptions.bandStepFitCapacityX = sizeCeiling?.width ?? baseSize.width;
+  effectiveOptions.bandStepFitCapacityY = sizeCeiling?.height ?? baseSize.height;
   effectiveOptions.facetColumns = resolveFacetColumnsOption(input.chart_spec.chartProperties);
   const {
     addTooltips: addTooltipsOpt = true
@@ -12716,6 +16570,16 @@ function assembleECharts(input) {
     chartType,
     assembleOptions: effectiveOptions,
     colorDecisions
+  };
+  const labelsBefore = { x: JSON.stringify(layoutResult.xLabel), y: JSON.stringify(layoutResult.yLabel) };
+  planBandLabels(instantiateContext, {
+    measure: (fontSize) => tableTextMeasurer(fontSize, "sans-serif", "normal"),
+    minFontSize: BACKEND_MIN_LABEL_SIZE,
+    ...xLabelOverflow(void 0, chartProperties, channelSemantics)
+  });
+  const plannedLabels = {
+    x: JSON.stringify(layoutResult.xLabel) !== labelsBefore.x,
+    y: JSON.stringify(layoutResult.yLabel) !== labelsBefore.y
   };
   const colField = channelSemantics.column?.field;
   const rowField = channelSemantics.row?.field;
@@ -12863,8 +16727,30 @@ function assembleECharts(input) {
       chartTemplate.postProcess(ecOption, instantiateContext);
     }
   }
+  const authoredColor = authoredColorScale(input.chart_spec.encodings);
+  if (authoredColor) {
+    const colorSemantics = Object.values(channelSemantics).find((cs) => cs?.field === authoredColor.field && cs.colorScheme);
+    const pivot = colorSemantics?.colorScheme?.type === "diverging" ? colorSemantics.colorScheme.domainMid ?? 0 : void 0;
+    applyAuthoredColorScaleEC(ecOption, authoredColor, values, pivot, colorSemantics?.colorScheme?.neutral);
+  }
+  applyFieldDisplayNames(ecOption, input.field_display_names);
+  const frame = ecFitFrame(
+    ecOption,
+    instantiateContext,
+    { title: input.chart_spec.title, subtitle: input.chart_spec.subtitle },
+    plannedLabels,
+    fitBox(baseSize, sizeCeiling, options.maxStretch).width
+  );
+  const box = fitBox(baseSize, sizeCeiling, options.maxStretch);
+  const judged = judgeBackendCanvas({ plot: frame.plot, designed: frame.designed, parts: frame.parts, padding: 0, box, base: baseSize });
+  const refit = refitCanvas(judged, options, (treatment) => assembleECharts(withTreatment(input, treatment, box)));
+  if (refit) return refit;
+  ecOption._canvasFit = canvasFitSummary(judged.estimate, box, options.canvasTreatment);
   if (warnings.length > 0) {
     ecOption._warnings = warnings;
+  }
+  if (overflowResult.viewports.length > 0) {
+    ecOption._viewports = overflowResult.viewports;
   }
   ecOption._dataLength = values.length;
   if (transformed.surface) {
@@ -12875,7 +16761,7 @@ function assembleECharts(input) {
     ecOption._pivot = legacyPivot.surface;
   }
   delete ecOption._legendWidth;
-  return ecOption;
+  return noteSpecUpdates(ecOption, input);
 }
 function getEChartsPivot(input) {
   const spec = assembleECharts(input);
@@ -13181,6 +17067,8 @@ var CHART_ROLE_MAP = {
   // Histogram / Density
   "Histogram": FAMILY_HISTOGRAM,
   "Density Plot": FAMILY_DENSITY,
+  "Ridgeline Plot": FAMILY_DENSITY,
+  "Marginal Plot": FAMILY_XY_STANDARD,
   "Density Contour": FAMILY_DENSITY_2D,
   // Geographic
   "Map": FAMILY_MAP,
@@ -14076,5 +17964,3 @@ function ecRecommendCharts(data, semanticTypes, options = {}) {
 }
 
 export { assembleECharts, ecAdaptChart, ecAllTemplateDefs, ecApplyLayoutToSpec, ecApplyTooltips, ecGetTemplateChannels, ecGetTemplateDef, ecRecommendChartTypes, ecRecommendCharts, ecRecommendEncodings, ecTemplateDefs, getEChartsPivot, getEChartsTransform };
-//# sourceMappingURL=index.js.map
-//# sourceMappingURL=index.js.map
