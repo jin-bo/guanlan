@@ -62,6 +62,7 @@
 - [P4.18-MCP2.0迁移](P4.18-MCP2.0迁移.md) —— 底座迁到官方 SDK v2 / 协议 `2026-07-28`(等价迁移,旧客户端不掉线)
 - [P4.19-Web-MCP诊断](P4.19-Web-MCP诊断.md) —— **反方向**:观澜作 MCP 客户端时被注入的外部 server 一览 + 显式连接检查(只读叠加层)
 - [P4.20-Web-flint图表渲染](P4.20-Web-flint图表渲染.md) —— Web 端 ```flint``` 规格块浏览器内编译成数据图表(vendored ESM + 入口白名单/键域出口断言 + 三档失败文案)
+- [P4.20.1-flint升级1.1](P4.20.1-flint升级1.1.md) —— **(已实现)** vendored flint 编译器 0.4.1 → 1.1.1(ECharts 版面改进);formatter 压平只剥 flint 自拼的 br/b/span、不再剥坏含尖括号的类别名;`flint-chart-author` 改为推荐 `field_display_names`
 - [P4.21-IM宿主](P4.21-IM宿主.md) —— `guanlan im`:第三种传输,让人在微信/飞书里问知识库(平台无关核心 + 薄适配器;默认 deny 的白名单是新的信任线)
 - [P4.21.1-IM日志出口](P4.21.1-IM日志出口.md) —— `guanlan im --log-level`:只作用于观澜自身 logger,不放开第三方 SDK 的 DEBUG
 - [P4.22-IM可点引用](P4.22-IM可点引用.md) —— 答案里的 `[[引用]]` 在飞书里点一下就把那一页发回来(零 LLM 的 `/page` 平台无关 + 点击=一条**合成的入站消息**,五道闸原样复用)

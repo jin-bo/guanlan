@@ -1,6 +1,6 @@
 # Flint 规格参考（ECharts 后端）
 
-> 对应 `flint-chart@0.4.1` 的 ECharts 后端。图型表与语义类型表**由该版本的导出数据直接生成**
+> 对应 `flint-chart@1.1.1` 的 ECharts 后端。图型表与语义类型表**由该版本的导出数据直接生成**
 > （生成命令见文末），升级钉版时重跑即可、不会与实现漂移。
 > 用法与自校验清单见 [`../SKILL.md`](../SKILL.md)。
 
@@ -17,8 +17,7 @@
     "canvasSize": { "width": 900, "height": 700 }      // 可选；**布局提示不是硬钳位**（实测请求 377 得 492）。
                                                        // 一般不用写：渲染端会按正文栏宽自动重编译
   },
-  // 注：**没有** field_display_names 这种字段——`flint-chart@0.4.1` 的实现里根本不读它
-  //（整包 grep 计数为 0）。写了不报错、也不生效，轴上仍是原列名。要改显示名就**改数据里的列名**。
+  "field_display_names": { "列名": "显示名" }         // 可选；轴标题、图例名用显示名，数据列名保持原样
 }
 ```
 
@@ -26,6 +25,8 @@
   `type`（`quantitative`/`nominal`/`ordinal`/`temporal`）、`sortOrder`、`sortBy`、`scheme`。
 - **不写** `data.url`（会被拒绝）、**不写** ECharts/Vega 原生配置（会被丢弃）、
   **不写**自定义字段（不会被读取）。
+- **不写** `theme_spec`（主题）、`interaction_spec`（交互）、`updates`（批注、覆盖层）：flint 1.x 的这三项
+  只在 Vega-Lite 后端生效，观澜 Web 端用的是 ECharts 后端，渲染端在入口就会丢掉它们。
 
 ## 2. 图型 × 编码通道（37 种，按用途分组）
 
@@ -51,7 +52,7 @@
 
 | chartType | 通道 | 数据形状要点 |
 |---|---|---|
-| `Line Chart` | x/y/color/opacity/column/row | **默认首选**；x 为时间或有序类别 |
+| `Line Chart` | x/y/color/strokeDash/opacity/column/row | **默认首选**；x 为时间或有序类别 |
 | `Area Chart` | x/y/color/opacity/column/row | 强调累积量 |
 | `Streamgraph` | x/y/color/column/row | 多序列构成随时间演变 |
 | `Range Area Chart` | x/y/y2/color/column/row | 区间带（`y`/`y2` 两列，如 P50/P95） |
@@ -113,6 +114,7 @@
 | `color` | 按类别着色（同时生成图例）；也可按数值做连续色 |
 | `size` | 点/块大小、扇区占比 |
 | `opacity` | 透明度（次要维度，慎用） |
+| `strokeDash` | 按类别区分线型（实线 / 虚线），只有 Line Chart 有 |
 | `column` / `row` | **分面**：按该列切成一排/一列小图 |
 | `group` | 簇内分组（Grouped Bar / Sunburst） |
 | `detail` | 标识每条线/每个节点，但不着色 |
@@ -191,7 +193,7 @@ Status Boolean Direction Range Number Unknown`
 | 带「渲染失败」徽标，但 JSON、图型、列名都对 | 写了 `data.url` 或把数据放在块外——渲染器**只认内联** `data.values`，一律拒且不出网 | 把数据整体内联进 `data.values` |
 | 带「数据被截断」徽标 | 类别/分面数超出图表容量，flint 会**整批丢掉**多余取值（`color` 通道尤其无声）——宁可不画也不画一张少了一半类别的图 | 先聚合成更少的类别（Top-N + 其余归「其他」），或换一个不靠颜色区分的图型 |
 | 时间轴变成不想要的等距/非等距 | 时间类 `semantic_types` 改变了轴类型 | 想要等距类别就别标时间类型，或标 `Category` |
-| 自定义字段（来源、备注、`field_display_names`）不见了 | 规格只认第 1 节那几个顶层键，其余一律丢弃；`field_display_names` 更是**连 flint 自己都不读** | 来源写在块外正文；要改显示名就改数据里的列名 |
+| 自定义字段（来源、备注、`theme_spec` 等）不见了 | 规格只认第 1 节那几个顶层键，其余一律丢弃 | 来源写在块外正文；要改轴标题、图例的显示名用 `field_display_names` |
 
 ## 7. 重新生成本文的表
 

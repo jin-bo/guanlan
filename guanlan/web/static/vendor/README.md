@@ -152,12 +152,12 @@ shasum -a 256 guanlan/web/static/vendor/highlight/highlight.min.js
 
 | 项 | 值 |
 |----|----|
-| 版本 | `0.4.1`（钉版；升级走显式 PR 复核，见决策P4.20-4） |
-| 上游 | https://cdn.jsdelivr.net/npm/flint-chart@0.4.1/dist/echarts/index.js |
+| 版本 | `1.1.1`（钉版；升级走显式 PR 复核，见决策P4.20-4；0.4.1 → 1.1.1 的复核记录见 `docs/P4.20.1-flint升级1.1.md`） |
+| 上游 | https://cdn.jsdelivr.net/npm/flint-chart@1.1.1/dist/echarts/index.js |
 | 包 | [flint-chart](https://www.npmjs.com/package/flint-chart)（npm，MIT License；Microsoft Research + 人大 IDEAS Lab） |
-| 字节 | 531443 |
-| SHA256 | `fc3895f0e755fbd62accb3aa12477d1ffab6ae1979de1fb0556e6162f468734e` |
-| 形态 | **自包含单文件 ESM**——**零 bare import、零动态 `import(`**，浏览器可直接 `import()`；具名导出 `assembleECharts` / `ecAllTemplateDefs` / `ecGetTemplateDef` / `ecGetTemplateChannels` / `ecTemplateDefs`。**不挂 `window`** |
+| 字节 | 741848 |
+| SHA256 | `7423aea461501f3f621befeecf217aac7b4a5bca23b578838acafaf147e2a3fc` |
+| 形态 | **自包含单文件 ESM**——**零 bare import、零动态 `import(`**，浏览器可直接 `import()`；具名导出 `assembleECharts` / `ecAllTemplateDefs` / `ecGetTemplateDef` / `ecGetTemplateChannels` / `ecTemplateDefs`。**不挂 `window`**。1.x 的 `package.json` 不再声明 echarts peer 依赖，与 `echarts.min.js` 的兼容只能靠 `scripts/smoke_p420.py` 实测 |
 | 安全 | flint 是**生成式白名单**：按 `chartType`/`encodings` 从模板**生成** option，**不 merge 用户私货**——实测三条走私路径（`chartProperties` 塞 `backgroundColor.image` / `graphic[type=image]`、顶层 `options` 塞带尖括号 `formatter`、`symbol:'image://…'`）产物与干净输入逐键相同。前端另有**入口白名单**（五个顶层键、拒 `data.url`）与**键域出口断言**兜底（决策P4.20-4/-5） |
 
 **为何是本仓唯一走 ESM `import()` 的 vendored 资产**（决策P4.20-3）：flint-js 用 tsup 出 ESM+CJS，
@@ -168,7 +168,7 @@ shasum -a 256 guanlan/web/static/vendor/highlight/highlight.min.js
 
 ```bash
 shasum -a 256 guanlan/web/static/vendor/flint/echarts.js
-# 应得 fc3895f0e755fbd62accb3aa12477d1ffab6ae1979de1fb0556e6162f468734e
+# 应得 7423aea461501f3f621befeecf217aac7b4a5bca23b578838acafaf147e2a3fc
 ```
 
 ### 升级步骤（**与 UMD 三件不同**）
@@ -187,13 +187,15 @@ shasum -a 256 guanlan/web/static/vendor/flint/echarts.js
 3. 更新本表版本 + 字节 + SHA256；重跑 `flint-chart-author` 的图型/语义类型表生成命令
    （见 [`skills/flint-chart-author/references/flint-spec.md`](../../../../skills/flint-chart-author/references/flint-spec.md) §7），
    随附于同一 PR——**表不重跑就会与钉版漂移**。
-4. 经显式 PR 复核（决策P4.20-4），复核项**固定为五条**：
+4. 经显式 PR 复核（决策P4.20-4），复核项**固定为以下各条**：
    - 三条走私路径仍**零残留**（无 `image://` / 无 `http(s):` / 无 `formatter` / 无 `graphic`）；
    - 注入 payload（`<img src=x onerror=alert(1)>` 当类别名）仍落成**转义文本**；
    - **语义色常量仍只有 waterfall 一处**：`grep -nE '(startEnd|increase|decrease|positive|negative)[[:space:]]*:[[:space:]]*"#' echarts.js`
      —— 多出来的模板必须补进 `flint_enhance.js` 的 `FLINT_SEMANTIC_COLOR_CHARTS`，否则逐槽换色会改掉它的含义（决策P4.20-22）；
    - `chart_spec.canvasSize` 仍能让 flint **重新布局**（而不仅是缩画布）——按栏宽重编译靠这条（决策P4.20-19）；
    - `baseSize` 仍**不被上游钳制**（若上游开始钳制，尺寸闸不必撤、但复核结论要更新）；
+   - **flint 拼进 formatter 的 HTML 标签仍只有 br / b / span**：`grep -oE '<\/?[a-zA-Z][a-zA-Z0-9]*' echarts.js | sort | uniq -c`
+     —— 出现新标签就补进 `flint_enhance.js` 的 `FLINT_MARKUP_TAG`；**不要**改回剥任意 `<…>`，那会把类别名里的尖括号剥掉（P4.20.1）；
    - **37 个图型逐个走一遍前端整链**（入口白名单 → 编译 → 尺寸闸 → 出口断言），确认没有新图型被
      `FLINT_BAD_KEYS` / `bad-renderItem` / `not-echarts-option` **误杀**（决策P4.20-16：这三条正是
      首版实测揪出 `Waterfall`/`Sankey`/`Network Graph`/`Sunburst` 四例误杀的地方）。

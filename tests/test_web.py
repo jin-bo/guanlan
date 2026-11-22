@@ -7516,7 +7516,7 @@ def test_vendored_flint_assets_match_pinned_digests() -> None:
     import hashlib
 
     readme = (STATIC_DIR / "vendor" / "README.md").read_text(encoding="utf-8")
-    for rel, size in (("vendor/flint/echarts.js", 531443), ("vendor/echarts.min.js", 1121883)):
+    for rel, size in (("vendor/flint/echarts.js", 741848), ("vendor/echarts.min.js", 1121883)):
         blob = (STATIC_DIR / rel).read_bytes()
         digest = hashlib.sha256(blob).hexdigest()
         assert len(blob) == size, f"{rel} 字节数与 README 记录不符"
@@ -7605,6 +7605,12 @@ def test_flint_post_edits_of_compiled_option_are_bounded() -> None:
     # ② tooltip：flint 的 formatter 是**函数**且返回 HTML 串，而 richText 不解析 HTML。
     assert "plainTextFormatters" in src and "htmlToPlainText" in src
     assert 'renderMode: "richText"' in src  # 安全铰链不撤，改的是喂给它的东西
+    #    只剥 flint 自己拼的标签（P4.20.1）：flint 不转义数据值，1.1 起类目轴也装函数 formatter——
+    #    剥任意 `<…>` 会把类别名「<img src=x …>」剥成空串（真生效走冒烟 3 的「两段载荷原样落成文本」）。
+    assert "FLINT_MARKUP_TAG" in src
+    plain = src[src.index("function htmlToPlainText"):src.index("function plainTextFormatters")]
+    # 写法变体（`/<[^>]+>/g`、`/<.*?>/` 等）同样算「剥任意标签」，按形态匹配而非逐字比对
+    assert not re.search(r"/<(?:\[\^>\]|\.)[*+]\??>/", plain), "htmlToPlainText 不得剥任意标签，只剥 FLINT_MARKUP_TAG"
     # ③ flint 自己的截断不许静默：读完 _warnings 再剥 `_` 私有键。
     assert "assertNoSilentTruncation" in src and '"overflow"' in src
     body = src[src.index("async function enhanceFlint"):]
