@@ -1043,3 +1043,42 @@ def test_url_markdown_code_and_anchor_untouched():
     out = oneclick._md_images_to_links(md, "https://h.org/r/README.md")
     assert "let v = vec![1, 2];" in out and "`vec![0; n]`" in out
     assert out.endswith("[图：logo](#top)")
+
+
+# ── P5.2.2 §5-4：残留的 MinerU 图片引用在任务日志里单独提示（CLI 与 Web 共用这份日志）──────────
+def _pdf_prepare(kb: Path, tmp_path: Path, monkeypatch, doc_refs: int) -> str:
+    from guanlan.imageio import ConvertResult
+
+    src = tmp_path / "扫描件.pdf"
+    src.write_bytes(b"%PDF-1.4 fake")
+    md = "# 一份文件\n\n" + "正文。" * 50 + "\n\n![Image block](doc:060dfdd/tier:standard/page:3/block:7)\n"
+    monkeypatch.setattr(
+        oneclick, "convert_to_markdown",
+        lambda *a, **k: ConvertResult(markdown=md, backend="mineru", doc_refs=doc_refs),
+    )
+    with acquire(kb, "test"):
+        task = prepare(kb, src, origin_kind="cli")
+    return oneclick._log_file(kb, task["task_id"]).read_text(encoding="utf-8")
+
+
+def test_task_log_reports_unexported_mineru_images(kb: Path, tmp_path: Path, monkeypatch):
+    log = _pdf_prepare(kb, tmp_path, monkeypatch, doc_refs=1)
+    assert "有 1 处 MinerU 图片引用未能导出（doc:），可用原文件重新转换。" in log
+
+
+def test_task_log_silent_without_leftover_refs(kb: Path, tmp_path: Path, monkeypatch):
+    assert "MinerU 图片引用" not in _pdf_prepare(kb, tmp_path, monkeypatch, doc_refs=0)
+
+
+def test_task_log_md_import_points_to_source_document(kb: Path, tmp_path: Path):
+    """直接导入的 .md 带 doc: 引用：没有「原文件」可重转，提示改为找生成它的源文档。"""
+    src = tmp_path / "旧产物.md"
+    src.write_text(
+        "# 旧产物\n\n" + "正文。" * 50 + "\n\n![Image block](doc:060dfdd/tier:standard/page:3/block:7)\n",
+        encoding="utf-8",
+    )
+    with acquire(kb, "test"):
+        task = prepare(kb, src, origin_kind="cli")
+    log = oneclick._log_file(kb, task["task_id"]).read_text(encoding="utf-8")
+    assert "有 1 处 MinerU 图片引用（doc:）无法显示。如有生成此 Markdown 的源文档，请重新转换源文档后再导入。" in log
+    assert "可用原文件重新转换" not in log

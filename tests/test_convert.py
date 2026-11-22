@@ -467,6 +467,38 @@ def test_collect_remote_and_missing_preserved(tmp_path):
     assert res.markdown == body  # 逐字不动
 
 
+# ── 残留的 MinerU 4 文档库引用单独计数（P5.2.2 决策4）────────────────────────────────
+DOC_LOC = "doc:060dfdd/tier:standard/page:8/block:3"
+
+
+def test_collect_counts_doc_refs_apart_from_skipped(tmp_path):
+    """skill 导图失败残留的 `doc:` 引用：按引用次数计入 doc_refs，不计入 skipped；引用原样保留。"""
+    body = f"![a]({DOC_LOC})\n\n![a]({DOC_LOC})\n\n![](https://x/a.png)\n"
+    res = _collect(tmp_path, "报告/报告.md", body, {})
+    assert res.doc_refs == 2 and res.skipped == 1
+    assert res.markdown == body
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_convert_reports_doc_refs_separately(tmp_path, monkeypatch, kb, capsys, dry_run):
+    src = _src(tmp_path)
+    monkeypatch.setattr(
+        "guanlan.convert.convert_to_markdown",
+        lambda *a, **k: ConvertResult(markdown=f"正文\n\n![a]({DOC_LOC})\n", skipped=1, doc_refs=1),
+    )
+    assert run_convert(src, root=kb, dry_run=dry_run) == EXIT_OK
+    err = capsys.readouterr().err
+    assert "有 1 处 MinerU 图片引用未能导出（doc:），可用原文件重新转换。" in err
+    assert "另有 1 处图片引用未准入" in err  # 通用提示只报扣除后的数
+
+
+def test_convert_no_doc_refs_no_extra_notice(tmp_path, monkeypatch, kb, capsys):
+    src = _src(tmp_path)
+    monkeypatch.setattr("guanlan.convert.convert_to_markdown", _mock_convert("正文\n"))
+    assert run_convert(src, root=kb) == EXIT_OK
+    assert "MinerU 图片引用" not in capsys.readouterr().err
+
+
 # ── 路径准入安全闸（决策P5.2.1-5，安全硬门）─────────────────────────────────────────
 def test_collect_path_admission_security(tmp_path):
     """越界/绝对/编码穿越/symlink-逃逸/非白名单扩展一律拒收；合法相对图仍正常收集（不误伤）。"""

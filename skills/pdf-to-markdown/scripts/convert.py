@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 
 # Extensions the document backends (MinerU / marker) can convert.
@@ -332,6 +333,18 @@ def parse_json_stdout(text: str) -> dict:
     return found
 
 
+def _normalize_error(payload: dict) -> dict:
+    """Make `payload["error"]` a dict so the error branches can call `.get` on it.
+
+    MinerU reports `{"error": {"code", "message"}}`; anything else (a bare string, a list)
+    is kept as the diagnostic message, so a failed parse still falls through to the next
+    backend instead of raising AttributeError."""
+    err = payload.get("error")
+    if err is not None and not isinstance(err, dict):
+        payload["error"] = {"code": None, "message": str(err)}
+    return payload
+
+
 def run_mineru_v4(input_path: Path, output_dir: Path, args) -> Path:
     """MinerU 4.x: `mineru parse` via the local document-library service."""
     for flag, value in (("--method", args.method), ("--lang", args.lang),
@@ -361,7 +374,7 @@ def run_mineru_v4(input_path: Path, output_dir: Path, args) -> Path:
         # MinerU 4 always writes UTF-8 to its std streams, whatever the locale; decoding
         # with the Windows code page would garble Chinese output paths in the JSON.
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, encoding="utf-8", errors="replace")
-        return proc.returncode, parse_json_stdout(proc.stdout)
+        return proc.returncode, _normalize_error(parse_json_stdout(proc.stdout))
 
     if args.remote:
         log("[mineru] --remote: the document is uploaded to the mineru.net parse service")
@@ -421,7 +434,7 @@ def run_mineru_v4(input_path: Path, output_dir: Path, args) -> Path:
             # Restarting a server that may be parsing for someone else is the user's call.
             log("[mineru] the running mineru server predates this CLI; restart it: "
                 "mineru server stop && mineru server start")
-        detail = f"{err.get('code')}: {err.get('message')}" if err else f"exit {rc}"
+        detail = ": ".join(str(x) for x in (err.get("code"), err.get("message")) if x) or f"exit {rc}"
         raise BackendFailed(f"mineru parse failed ({detail})")
 
     def produced() -> Path:
@@ -449,9 +462,13 @@ def run_mineru_v4(input_path: Path, output_dir: Path, args) -> Path:
             if total and seen < total:
                 raise BackendFailed(f"mineru output still covers only {seen} of {total} pages")
 
-    tier = (payload.get("parse") or {}).get("tier")
+    parse = payload.get("parse") or {}
+    tier = parse.get("tier")
     if tier:
         log(f"[mineru] tier={tier}")
+    # Which document this output belongs to: image locators are checked against it before export.
+    if parse.get("sha256"):
+        MINERU_DOCS[str(out)] = {"sha256": parse["sha256"], "tier": tier}
     return out
 
 
@@ -464,6 +481,190 @@ def page_coverage(markdown: str) -> tuple[int, int]:
     if not marks:
         return 0, 0
     return max(a for a, _ in marks), max(b for _, b in marks)
+
+
+# --------------------------------------------------------------------------- #
+# MinerU 4 image export (P5.2.2)
+# --------------------------------------------------------------------------- #
+# MinerU 4 keeps figures and charts in its document library and writes library locators
+# into the Markdown, `![Image block](doc:060dfdd/tier:standard/page:8/block:3)`, instead of
+# image files next to it. A Markdown viewer cannot open them, and callers that collect
+# relative image references (guanlan) see an external link. `mineru read <locator> -f image`
+# exports one block as PNG, but only while the registered source file still exists -- that
+# is, during this run, before a caller deletes its staged copy.
+# Output path -> {"sha256", "tier"} of the parse that produced it (set by run_mineru_v4).
+MINERU_DOCS: dict[str, dict] = {}
+DOC_IMAGE_REF = re.compile(
+    r"(?P<head>!\[[^\]]*\]\()\s*(?P<loc>doc:(?P<id>[0-9a-f]+)/tier:(?P<tier>[a-z]+)"
+    r"/page:(?P<page>\d+)/block:(?P<block>\d+))\s*\)"
+)
+IMAGE_EXPORT_TIMEOUT = 60  # seconds for one `mineru read`; the first timeout stops the export
+# The same three caps guanlan applies when it collects images (guanlan/imageio.py, P5.2.1).
+# Staying under them here means a figure-heavy document still converts: the blocks over a cap
+# keep their doc: links instead of making guanlan reject the whole result.
+MAX_IMAGE_COUNT = 500
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_IMAGES_TOTAL_BYTES = 200 * 1024 * 1024
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_LOCAL_IMAGE_REF = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
+_URL_SCHEME = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*:")
+
+
+class _ExportTimeout(Exception):
+    """`mineru read` did not answer in time: the server is likely stuck, stop asking."""
+
+
+def _read_block_image(locator: str, target: Path) -> str | None:
+    """Export one block to `target`. None on success, else a short reason.
+    Raises _ExportTimeout when `mineru read` times out."""
+    target.unlink(missing_ok=True)  # only a file this call writes counts as success
+    cmd = ["mineru", "read", locator, "-f", "image", "-o", str(target), "--json"]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              encoding="utf-8", errors="replace", timeout=IMAGE_EXPORT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        target.unlink(missing_ok=True)
+        raise _ExportTimeout(f"timed out after {IMAGE_EXPORT_TIMEOUT}s") from None
+    except OSError as e:
+        return str(e)
+    payload = parse_json_stdout(proc.stdout)
+    if proc.returncode != 0:
+        err = payload.get("error")
+        code = err.get("code") if isinstance(err, dict) else None
+        return code or f"exit {proc.returncode}"
+    try:
+        with target.open("rb") as fh:
+            ok = fh.read(len(_PNG_MAGIC)) == _PNG_MAGIC
+    except OSError:
+        ok = False
+    if not ok:
+        target.unlink(missing_ok=True)
+        return "no PNG written"
+    return None
+
+
+def _local_images(text: str, base: Path) -> tuple[int, int]:
+    """(count, bytes) of the distinct local image files the Markdown already references:
+    they take their share of the same budget when guanlan collects them."""
+    seen: set[Path] = set()
+    total = 0
+    for url in _LOCAL_IMAGE_REF.findall(text):
+        if _URL_SCHEME.match(url) or url.startswith(("/", "~")):
+            continue
+        try:
+            # guanlan percent-decodes a reference before it resolves it (imageio._admit_image_ref):
+            # count the same file, or `a%20b.png` slips past this budget and guanlan rejects the lot.
+            path = (base / urllib.parse.unquote(url)).resolve()
+            if path in seen or not path.is_file():
+                continue
+            size = path.stat().st_size
+        except (OSError, ValueError):
+            continue
+        seen.add(path)
+        total += size
+    return len(seen), total
+
+
+def export_doc_images(md_path: Path) -> tuple[int, int]:
+    """Export the MinerU 4 image blocks referenced in `md_path` to `images/` beside it and
+    rewrite those references to the exported files. Returns (exported, referenced) counts of
+    distinct locators. A block that is not exported keeps its `doc:` reference.
+
+    Blocks are taken in order of first appearance. Not exported: blocks of another document,
+    blocks `mineru read` fails on, blocks over the count/size caps, and every block after the
+    first timeout. Bytes outside the rewritten references stay as they were (line endings,
+    stray invalid UTF-8)."""
+    # newline="" + surrogateescape: read and write back byte for byte, except the references.
+    with md_path.open(encoding="utf-8", errors="surrogateescape", newline="") as fh:
+        text = fh.read()
+    locators: dict[str, re.Match] = {}
+    for m in DOC_IMAGE_REF.finditer(text):
+        locators.setdefault(m.group("loc"), m)
+    if not locators:
+        return 0, 0
+    doc = MINERU_DOCS.get(str(md_path)) or {}
+    sha, tier = doc.get("sha256") or "", doc.get("tier")
+    images = md_path.parent / "images"
+    count, total = _local_images(text, md_path.parent)
+    log(f"[mineru] exporting {len(locators)} image block(s)")
+    names: dict[str, str] = {}  # locator -> file name under images/
+    used: set[str] = set()
+    kept = {"foreign": 0, "failed": 0, "over cap": 0, "after timeout": 0}
+    stop: str | None = None  # why the remaining blocks are not tried
+    for loc, m in locators.items():
+        # Only blocks of the document parsed in this run: the library holds other files too.
+        if not sha or not sha.startswith(m.group("id")) or (tier and m.group("tier") != tier):
+            log(f"[mineru] image {loc}: not from this document; kept as a doc: link")
+            kept["foreign"] += 1
+            continue
+        if stop:
+            kept["over cap" if stop.startswith("cap") else "after timeout"] += 1
+            continue
+        if count >= MAX_IMAGE_COUNT:
+            stop = f"cap: more than {MAX_IMAGE_COUNT} images"
+            kept["over cap"] += 1
+            continue
+        base = f"p{m.group('page')}-b{m.group('block')}"
+        name, k = f"{base}.png", 2
+        while name in used:  # different locators, same page/block: never share a file
+            name, k = f"{base}-{k}.png", k + 1
+        images.mkdir(exist_ok=True)
+        target = images / name
+        try:
+            reason = _read_block_image(loc, target)
+        except _ExportTimeout as e:
+            log(f"[mineru] image {loc}: {e}; stopping the image export")
+            stop = f"timeout: {e}"
+            kept["after timeout"] += 1
+            continue
+        if reason:
+            log(f"[mineru] image {loc}: {reason}; kept as a doc: link")
+            kept["failed"] += 1
+            continue
+        size = target.stat().st_size
+        if size > MAX_IMAGE_BYTES:
+            target.unlink(missing_ok=True)
+            log(f"[mineru] image {loc}: {size} bytes, over the {MAX_IMAGE_BYTES}-byte cap; kept as a doc: link")
+            kept["over cap"] += 1
+            continue
+        if total + size > MAX_IMAGES_TOTAL_BYTES:
+            target.unlink(missing_ok=True)
+            stop = f"cap: more than {MAX_IMAGES_TOTAL_BYTES} bytes of images"
+            kept["over cap"] += 1
+            continue
+        count += 1
+        total += size
+        used.add(name)
+        names[loc] = name
+
+    def repl(m: re.Match) -> str:
+        name = names.get(m.group("loc"))
+        return f"{m.group('head')}images/{name})" if name else m.group(0)
+
+    if names:
+        # Write a sibling temp file and swap it in: a failed write (disk full) must leave the
+        # original output intact, because the caller still hands that file back as a success.
+        fd, tmp_name = tempfile.mkstemp(prefix=".imgexport-", suffix=".md", dir=md_path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape", newline="") as fh:
+                fh.write(DOC_IMAGE_REF.sub(repl, text))
+            os.chmod(tmp_name, md_path.stat().st_mode & 0o7777)  # mkstemp makes it 0600
+            os.replace(tmp_name, md_path)
+        except BaseException:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
+    if images.is_dir() and not any(images.iterdir()):
+        images.rmdir()
+    exported = len(names)
+    summary = f"[mineru] exported {exported} of {len(locators)} image block(s)"
+    rest = sum(kept.values())
+    if rest:
+        why = ", ".join(f"{n} {k}" for k, n in kept.items() if n)
+        summary += f"; {rest} kept as doc: links ({why})"
+    if stop:
+        summary += f"; stopped early ({stop.split(': ', 1)[1]})"
+    log(summary)
+    return exported, len(locators)
 
 
 def run_mineru_legacy(input_path: Path, output_dir: Path, args) -> Path:
@@ -821,6 +1022,13 @@ def _run_backends(order, input_path, output_dir, args, env_vars) -> None:
                 errors.append(f"{name}: failed (garbled text layer: {reason})")
                 out.unlink(missing_ok=True)  # never leave the gibberish where a caller could pick it up
                 continue
+        if name == "mineru":
+            # After the garbled check (a rejected output exports nothing) and while the source
+            # file still exists. Images are an extra: a failure here never fails the conversion.
+            try:
+                export_doc_images(out)
+            except Exception as e:  # noqa: BLE001 -- any export error, not only OSError
+                log(f"[mineru] image export skipped: {e}")
         log(f"[done] backend={name}")
         print(out)
         return

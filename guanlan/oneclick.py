@@ -28,7 +28,7 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 from .check import run_check
-from .convert import _default_origin, convert_to_markdown
+from .convert import _DOC_REFS_MSG, _default_origin, convert_to_markdown
 from .errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from .formats import BATCH_IMPORT_EXTS
 from .sourcerec import THIRD_PARTY_FALLBACKS, read_source_record, redact_url
@@ -64,6 +64,9 @@ from .stopscope import StopRequested, stop_scope
 from .stopscope import check as stop_check
 from .splitdoc import index_name, render_index, render_part, split_document
 from .tocnorm import TocReviewer, toc_title_lines
+
+# P5.2.2 §5-4：直接导入的 Markdown 里残留 MinerU 文档库引用（多是 MinerU 4 转出、未导图的旧产物）
+_DOC_REFS_MD_MSG = "有 {n} 处 MinerU 图片引用（doc:）无法显示。如有生成此 Markdown 的源文档，请重新转换源文档后再导入。"
 
 __all__ = [
     "ACTIVE_STATES",
@@ -1183,6 +1186,10 @@ def _prepare_steps(
     atomic_write_text(parsed / f"{sample}.origin.md", res.markdown)
     task["stages"]["parse"] = "done"
     log(f"  解析完成（{'backend=' + backend_used if backend_used else '已是 markdown'}，{len(res.images)} 张图片）")
+    if res.doc_refs:  # P5.2.2 §5-4：没导出来的 MinerU 图片单独提示
+        # 直接导入的 .md 没有「原文件」可重转：告诉用户找生成它的源文档
+        msg = _DOC_REFS_MD_MSG if src.suffix.lower() == ".md" else _DOC_REFS_MSG
+        log("  注：" + msg.format(n=res.doc_refs))
     stop_check()
 
     # ② 整理
