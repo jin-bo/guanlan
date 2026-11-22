@@ -48,6 +48,8 @@ MAX_IMAGE_COUNT = 500  # 单次张数 ≤ 500
 _MD_IMAGE = re.compile(r"(?P<head>!\[[^\]]*\]\()(?P<pre>\s*)(?P<url>[^)\s]+)(?P<post>[^)]*)\)")
 # scheme（`http:`/`https:`/`file:`/`data:`/Windows 盘符 `C:` 等）：拒一切带 scheme 的 url（决策P5.2.1-5(a)）。
 _URL_SCHEME = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*:")
+# MinerU 4 文档库定位符（`doc:<id>/tier:<tier>/page:<n>/block:<m>`，P5.2.2）：skill 本该已把它导成本地图。
+_MINERU_DOC_REF = re.compile(r"doc:[0-9a-f]+/tier:[a-z]+/page:\d+/block:\d+$")
 
 
 class ConvertError(Exception):
@@ -68,8 +70,11 @@ class ConvertResult:
 
     markdown: str  # 引用已重写为 images/<stem>/<stem>-<n>.<ext>
     images: tuple[ConvertedImage, ...] = ()  # 按 md 内首次出现序；无图 → 空 tuple
-    skipped: int = 0  # 未准入/未搬运的图片引用数（原样保留），供命令壳 stderr 计数
+    skipped: int = 0  # 未准入/未搬运的图片引用数（原样保留），供命令壳 stderr 计数；不含下面的 doc_refs
     backend: str | None = None  # 实际生效的转换后端（skill stderr `[done] backend=`）；读不到 → None
+    # 残留的 MinerU 4 文档库定位符引用次数（`![…](doc:…)`，P5.2.2）：skill 导图失败时才会剩下；
+    # 单独计数、单独提示「可用原文件重新转换」，不计入 skipped，免得和真正的远程图混在一起重复报数。
+    doc_refs: int = 0
 
 
 @dataclass(frozen=True)
@@ -150,12 +155,12 @@ def collect_and_rewrite(
     md_parent = produced_md.parent
     collected: dict[str, ConvertedImage] = {}  # realpath -> 已收集图片（去重）
     order: list[ConvertedImage] = []  # 按首次出现序
-    stats = {"skipped": 0, "total_bytes": 0}
+    stats = {"skipped": 0, "total_bytes": 0, "doc_refs": 0}
 
     def repl(m: re.Match[str]) -> str:
         resolved = _admit_image_ref(m.group("url"), md_parent, root)
         if resolved is None:  # 未准入 → 原样保留引用、不编号
-            stats["skipped"] += 1
+            stats["doc_refs" if _MINERU_DOC_REF.match(m.group("url")) else "skipped"] += 1
             return m.group(0)
         key = str(resolved)
         img = collected.get(key)
@@ -174,7 +179,9 @@ def collect_and_rewrite(
         return f"{m.group('head')}{m.group('pre')}{new_url}{m.group('post')})"
 
     rewritten = _MD_IMAGE.sub(repl, markdown)
-    return ConvertResult(markdown=rewritten, images=tuple(order), skipped=stats["skipped"])
+    return ConvertResult(
+        markdown=rewritten, images=tuple(order), skipped=stats["skipped"], doc_refs=stats["doc_refs"]
+    )
 
 
 def collect_for_promotion(

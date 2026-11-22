@@ -109,6 +109,11 @@ def parse_backend_marker(stderr: str) -> str | None:
     return backend
 
 
+# P5.2.2：skill 导出 MinerU 4 文档库图片失败时，md 里会残留 `doc:` 定位符引用（按引用次数计）。
+# 与「未准入」的远程图分开报：它不是外链，是本该落盘却没导出来的图，重转能补回。
+_DOC_REFS_MSG = "有 {n} 处 MinerU 图片引用未能导出（doc:），可用原文件重新转换。"
+
+
 def _collect_and_rewrite_images(
     markdown: str, *, produced_md: Path, tmp_root: Path, stem: str
 ) -> ConvertResult:
@@ -386,6 +391,8 @@ def run_convert(
             )
         if result.skipped:
             print(f"另有 {result.skipped} 处图片引用未准入、原样保留。", file=sys.stderr)
+        if result.doc_refs:
+            print(_DOC_REFS_MSG.format(n=result.doc_refs), file=sys.stderr)
         return EXIT_OK
 
     # 落图（staging-swap），随后 md 末步提交（决策P5.2.1-9）。须动图目录 = 有新图，或 overwrite 且旧图
@@ -433,6 +440,8 @@ def run_convert(
             f"  注：另有 {result.skipped} 处图片引用未准入、原样保留（远程/越界/非图片）。",
             file=sys.stderr,
         )
+    if result.doc_refs:
+        print("  注：" + _DOC_REFS_MSG.format(n=result.doc_refs), file=sys.stderr)
     if overwrite:
         print(
             "  注：覆盖了已被引用的源可能让 wiki 页失真，建议覆盖后重 `ingest` + `check`。",

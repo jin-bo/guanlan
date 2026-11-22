@@ -137,6 +137,19 @@ The script reads `mineru --version` and picks the matching CLI:
     `mineru config set parse_server.local.managed_tier standard`). Since 4.2 a managed
     engine serves only tiers up to its own: `standard` serves flash/basic/standard, and
     `--tier advanced` needs `managed_tier advanced` (it reuses the standard models).
+  - **Figures and charts are exported to `images/`.** MinerU 4 keeps them in its document
+    library and writes locators such as `![Image block](doc:060dfdd/tier:standard/page:8/block:3)`,
+    which no Markdown viewer can open. After the output passes the garbled-text check, the
+    script runs `mineru read <locator> -f image` for each distinct locator (60 s timeout
+    each) and rewrites the reference to `images/p<page>-b<block>.png` next to the `.md`.
+    Only locators of the document parsed in this run are exported. The export stops at the
+    first timeout (the server is likely stuck) and stays under 500 images, 20 MiB per image
+    and 200 MiB in total, counting images the output already references. A block that is
+    not exported keeps its `doc:` reference and is listed in the log
+    (`[mineru] exported k of N image block(s); M kept as doc: links (…)`); the conversion
+    still succeeds. Only the image URLs change in the file: line endings and other bytes
+    stay as they were. Export needs the source file at the path MinerU parsed it from, so
+    it happens inside this run.
   - **Restart a pre-upgrade server.** After upgrading from 4.0.x, a still-running old
     server is refused with `doclib_upgrade_required` (4.2 added token auth). The script
     logs `mineru server stop && mineru server start` and fails the mineru tier; it does
