@@ -348,6 +348,7 @@ def test_string_error_falls_through_to_next_backend(conv, tmp_path, monkeypatch,
 
     monkeypatch.setattr(conv.subprocess, "run", fake)
     monkeypatch.setattr(conv, "mineru_major_version", lambda: 4)
+    monkeypatch.setattr(conv.shutil, "which", lambda name: f"/usr/bin/{name}")  # CI 机器上没装 mineru
     monkeypatch.setitem(conv.BACKENDS, "python", python)
     args = SimpleNamespace(method=None, lang=None, mineru_backend=None, wait=10, start=None, end=None,
                            tier="standard", force=False, remote=False, engine_wait=0)
