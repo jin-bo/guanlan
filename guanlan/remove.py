@@ -174,10 +174,31 @@ def _raw_identity(path: Path) -> list[int]:
     return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
 
 
+# 续跑保护宁可不移：声明了多篇原始资料、其中含本篇的合并页也算认领（移走原文会让它少一个来源）。
+_OWNER_BASES = frozenset({"raw_digest", "原始资料声明", "声明了多篇原始资料，含本篇"})
+
+
+def _raw_claimed_by_live_page(root: Path, raw_rel: str) -> bool:
+    """库里是否已有摘要页认领 `raw_rel`：文件名命中、唯一归属页、多张页都有归属依据（冲突也算已认领），
+    或某页声明了多篇原始资料且含本篇。
+
+    只在正文里提到这条路径的候选不算认领（可能只是引用）。`locate_source_page` 按路径逐字比，而页里记的
+    可能是同一文件的另一种 Unicode 写法（macOS 上 NFC 键入 vs 盘上 NFD），故 NFC / NFD 两形都查。"""
+    import unicodedata
+
+    from .sourcepage import locate_source_page
+
+    rel = PurePosixPath(raw_rel).relative_to("raw").as_posix()
+    for form in dict.fromkeys((rel, unicodedata.normalize("NFC", rel), unicodedata.normalize("NFD", rel))):
+        loc = locate_source_page(root, form)
+        if loc.page is not None or any(basis in _OWNER_BASES for _page, basis in loc.candidates):
+            return True
+    return False
+
+
 def _pending_legacy_raw(root: Path, slug: str) -> str | None:
     """旧名页已移走时，用回收区的摘要页和 manifest 认回尚未移动的同一份 raw。"""
     from .provenance import admit_raw_path
-    from .rawio import find_source_page
 
     trash = root / ".trash"
     if not trash.is_dir():
@@ -193,15 +214,18 @@ def _pending_legacy_raw(root: Path, slug: str) -> str | None:
             raw = admit_raw_path(root, raw_rel)
             if raw is None:
                 continue
-            # 中断后若重新摄入过，这份 raw 已归库里的新页；按旧名只移原文会让新页失源。
-            if find_source_page(root / "wiki" / "sources", PurePosixPath(raw_rel).stem, raw_rel) is not None:
-                continue
             manifest = json.loads((entry / "manifest.json").read_text(encoding="utf-8"))
-            if isinstance(manifest, dict) and manifest.get("pending_legacy_raw") == {
+            if not isinstance(manifest, dict) or manifest.get("pending_legacy_raw") != {
                 "path": raw_rel,
                 "identity": _raw_identity(raw),
             }:
-                matches.add(raw_rel)
+                continue
+            # 中断后若重新摄入过、或有改名页经 raw_digest / 原始资料声明认领了这份 raw，按旧名只移原文会让
+            # 那张页失源。按文件名之外还要认改名页，故用 locate_source_page；多张页都有归属依据也算已被认领。
+            # 放在 manifest 比对之后：要扫全部摘要页，只对真正待续跑的条目付这笔开销。
+            if _raw_claimed_by_live_page(root, raw_rel):
+                continue
+            matches.add(raw_rel)
         except (OSError, ValueError):
             continue
     if len(matches) > 1:
