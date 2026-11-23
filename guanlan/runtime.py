@@ -8,7 +8,7 @@ wrapper 以工作目录 = 知识库根调用：
                 --interaction-policy reject \
                 [--model M] [--max-iterations N] [--thinking LEVEL]
 
-prompt 不走命令行，经 **stdin 的 run spec**（`{"prompt": …}`）交给子进程，见 `run_spec_text`。
+prompt 不走命令行，经 **stdin 的 run spec**（`{"prompt": …}`，可选 `instructions`）交给子进程，见 `run_spec_text`。
 stdout 是 `RunResult` JSON 信封；字段名是 `error.type`（非 `error.kind`）。信封的编码是
 **协议的一部分、固定 UTF-8**，父子两端都显式钉死、不随 locale 变（issue #50，见 `envelope_child_env`）。
 `runner` 可注入以便测试——fake runner 模拟"写 wiki + 返回摘要"，不起子进程、不打真实 LLM。
@@ -61,15 +61,22 @@ def run_agent_task(
     model: str | None = None,
     max_iterations: int = 200,
     thinking: str | None = None,
+    instructions: str | None = None,
     runner: AgentRunner | None = None,
 ) -> AgentRunResult:
     """跑一段 prompt、拿结构化结果。`runner is None` 时用默认子进程 runner。
 
     `thinking`：推理档位，原样透传 `agentao run --thinking`（agentao ≥0.5.15）；可选值由模型端决定，
     观澜不维护档位表。**未指定时不向 runner 传这个关键字**——既有调用的 runner 入参逐字不变。
+
+    `instructions`：进 run spec 的 `instructions`，agentao 把它当 `project_instructions` 渲染在系统提示
+    最前的「Project Instructions」段，并**顶替** `AGENTAO.md` 的读盘——调用方须自己带上项目指令
+    （P5.5 画像见 `query.build_profile_instructions`）。未指定时同样不传这个关键字。
     """
     runner = runner or _subprocess_runner
-    extra = {"thinking": thinking} if thinking else {}
+    extra: dict = {"thinking": thinking} if thinking else {}
+    if instructions:
+        extra["instructions"] = instructions
     return runner(
         prompt,
         working_directory=working_directory,
@@ -231,7 +238,7 @@ def drop_poisoned_api_keys() -> list[str]:
 _YAML_UNSAFE_RE = re.compile("[\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff\ud800-\udfff]")
 
 
-def run_spec_text(prompt: str) -> str:
+def run_spec_text(prompt: str, instructions: str | None = None) -> str:
     r"""把 prompt 编成喂给 `agentao run` stdin 的 run spec 文本（JSON，可被 `yaml.safe_load` 原样读回）。
 
     **为什么不用 `--prompt`**：prompt 会带上整库名录（ingest），千页级库达数十万字节；Linux 单个
@@ -242,8 +249,13 @@ def run_spec_text(prompt: str) -> str:
     C1 控制符（PyYAML 拒收）与 NEL/LS/PS（PyYAML 在双引号标量里折成空格）。故按 UTF-8 原样写，只把
     `_YAML_UNSAFE_RE` 命中的字符转成 `\uXXXX`——这些都在 BMP 内、PyYAML 读回不走样；孤立代理无法
     编码进 UTF-8 管道，同样转义。spec 不声明 `parameters`，agentao 不做 Jinja 渲染，`{{ }}` 原样保留。
+
+    `instructions`（P5.5）：非空时一并写进 spec，转义规则相同；为空不写该字段，spec 逐字不变。
     """
-    text = json.dumps({"prompt": prompt}, ensure_ascii=False)
+    spec = {"prompt": prompt}
+    if instructions:
+        spec["instructions"] = instructions
+    text = json.dumps(spec, ensure_ascii=False)
     return _YAML_UNSAFE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
 
 
@@ -287,6 +299,7 @@ def _subprocess_runner(
     model: str | None,
     max_iterations: int,
     thinking: str | None = None,
+    instructions: str | None = None,
     new_session: bool = False,
 ) -> AgentRunResult:
     # `new_session=True`（P4.30 `guanlan import`）：子进程放进新会话，终端 Ctrl+C 只送到观澜自己——
@@ -337,7 +350,7 @@ def _subprocess_runner(
                 # prompt 经 stdin 的 run spec 传入（见 `run_spec_text`）：`input=` 让子进程 stdin 是
                 # 我们自己的管道、不继承父进程 stdin——父进程被管道/重定向喂 stdin 时也不会串进来。
                 # 编码随上面的 encoding 走 UTF-8，子端 stdin 由 envelope_child_env 的 PYTHONIOENCODING 钉死。
-                input=run_spec_text(prompt),
+                input=run_spec_text(prompt, instructions),
                 # 显式传 env（不再裸继承）：剔除毒空 `*_API_KEY`（见 scrubbed_environ）+ 钉死子端
                 # std 流编码（见 envelope_child_env），其余逐项照传。
                 env=envelope_child_env(),

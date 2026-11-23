@@ -790,6 +790,34 @@ def test_stdin_run_spec_reaches_agentao_verbatim() -> None:
     assert spec.prompt == prompt
 
 
+def test_stdin_run_spec_instructions_reach_agentao_verbatim() -> None:
+    """P5.5：spec 的 `instructions` 经上游解析后逐字不变，且仍是 agentao 送进 `project_instructions` 的字段。"""
+    import inspect
+
+    from agentao.cli import run as run_mod
+    from agentao.cli.run import _parse_spec_text
+    from agentao.cli.run_template import render_spec
+
+    from guanlan.runtime import run_spec_text
+
+    ins = "# 库规约 {{ x }} 😀 \x85\n## 提问者画像\n画像正文"
+    spec = render_spec(_parse_spec_text(run_spec_text("q", ins), source="<stdin>"), {})
+    assert spec.instructions == ins
+    # 上游若不再把 instructions 接到 project_instructions，画像会悄悄不进系统提示。
+    assert 'factory_kwargs["project_instructions"] = spec.instructions' in inspect.getsource(run_mod)
+
+
+def test_load_project_instructions_is_public_and_falls_back(tmp_path) -> None:
+    """P5.5 用 agentao 导出的 `load_project_instructions` 拼项目指令：AGENTAO.md 优先、AGENTS.md 回退、去 frontmatter。"""
+    from agentao.prompts import load_project_instructions
+
+    assert load_project_instructions(tmp_path) is None
+    (tmp_path / "AGENTS.md").write_text("agents", encoding="utf-8")
+    assert load_project_instructions(tmp_path).strip() == "agents"
+    (tmp_path / "AGENTAO.md").write_text("---\nx: 1\n---\nagentao", encoding="utf-8")
+    assert load_project_instructions(tmp_path).strip() == "agentao"
+
+
 def test_compat_transport_still_exposes_the_ask_user_seam(real_conv) -> None:
     """P4.15b 把 `SdkTransport._ask_user` 换成富回调——这个接缝还在，且我们换上去了。"""
     transport = real_conv.agent.transport
