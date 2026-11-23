@@ -44,7 +44,7 @@ from ..pages import (
     resolve_owner,
     validate_page_arg,
 )
-from ..query import QUERY_PROMPT
+from ..query import build_query_prompt
 from ..runtime import AgentRunner, run_agent_task
 from ..search import CorpusCache, search_result_dict
 
@@ -323,10 +323,11 @@ def tool_ask(
     root: Path,
     startup_model: str | None,
     runner: AgentRunner | None,
+    search_cache: CorpusCache | None = None,
 ) -> AskEnvelope:
     """把问题交给观澜只读 Agentao 综合出**带 `[[引用]]`** 的答案（决策P4.10-5/15）。
 
-    复用 CLI query 只读子进程路径（`run_agent_task(QUERY_PROMPT.format(...),
+    复用 CLI query 只读子进程路径（`run_agent_task(build_query_prompt(...),
     permission_mode="read-only")`，query.py 同款）：故 **P4-8 嵌入四坑不适用**（走子进程，与
     heal/backfill 同理）、**无 session 状态**（单次无状态调用），与 `guanlan query` 字节同源。
 
@@ -336,12 +337,12 @@ def tool_ask(
     故 `ok=False` 一律 → in-band tool error（`ToolError`），不影响零 LLM 工具可用（决策P4.10-7）。
 
     空/纯空白 question 先就地拒（in-band error），与 Web backfill 的 `field_validator` strip-非空同口径
-    （app.py `RawBody`/backfill）——否则把空问题灌进 `QUERY_PROMPT` 白白拉起一次昂贵的 agentao 子进程。
+    （app.py `RawBody`/backfill）——否则把空问题灌进查询提示白白拉起一次昂贵的 agentao 子进程。
     """
     if not isinstance(question, str) or not question.strip():
         raise ToolError("question 不能为空（含纯空白）。")
     run_result = run_agent_task(
-        QUERY_PROMPT.format(question=question),
+        build_query_prompt(root, question, search_cache=search_cache),
         working_directory=root,
         permission_mode="read-only",
         model=model or startup_model,

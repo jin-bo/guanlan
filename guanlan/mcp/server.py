@@ -212,7 +212,13 @@ def build_mcp(
             # model（工具入参）or startup_model（启动 --model）or None，在 tool_ask 内解析（决策P4.10-5）。
             return await anyio.to_thread.run_sync(
                 functools.partial(
-                    tool_ask, question, model, root=root, startup_model=startup_model, runner=runner
+                    tool_ask,
+                    question,
+                    model,
+                    root=root,
+                    startup_model=startup_model,
+                    runner=runner,
+                    search_cache=cache,  # 宿主召回复用 server 级（已预热的）cache，免每问全库冷算
                 )
             )
 

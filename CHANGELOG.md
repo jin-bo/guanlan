@@ -17,6 +17,12 @@
 
 ### 修复
 
+- **`guanlan query` 只读问答不再因模型试用 shell 而整次失败**（决策P5.1-6 修订，见 `docs/P5.1-Web检索接入.md`）：查询提示原本建议用「`guanlan search` CLI」召回，但 `query`、`--backfill` 和 MCP `query` 工具的运行里都用不了 shell，而 Agentao 遇到一次拒绝就终止整次运行，结果直接报「Agentao 运行失败（permission_denied）」。在真实资料库上，4 次只读提问全部这样失败。
+  - 现在观澜在调用模型前先按问题做一次检索（与 `guanlan search` 同一实现，不用模型），把前 8 个候选页写进提示，并明确告诉模型不要调用 shell。检索没有结果或出错时，提示改为用文件内容搜索定位，问答照常进行。
+  - `guanlan mcp` 的 `query` 工具复用服务启动时预热的检索缓存，不会每次提问都把全库重新扫一遍；CLI 没有常驻缓存，每次提问前多一次全库检索。
+  - `guanlan-wiki` 技能的 query 步骤同步说明：提示里已有候选页时直接使用，没有候选页时用文件内容搜索定位，这些运行里一律不调用 shell。已全局安装技能的，运行 `guanlan install-skill --force` 更新。
+  - 修复后在同一资料库上用 `guanlan query` 实问 3 题，全部成功，回答带引用。
+
 - **MinerU 4 转换的插图不再是断链**（设计见 `docs/P5.2.2-MinerU4图片导出.md`）：MinerU 4 把插图、图表存在自己的文档库里，markdown 只写 `![Image block](doc:…)` 这样的定位符；观澜把它当作远程图原样保留，`guanlan convert` / 一键入库落进 `raw/` 的这类引用全部打不开，图中文字也进不了库。现在 `pdf-to-markdown` 技能在转换当场用 `mineru read` 把它们导出成 PNG，随源落进 `raw/images/<slug>/`。
   - 只导本次解析的文档的图；单张超时 60 秒，确认写出了有效 PNG 才改写引用。导不出来的保留原引用，转换仍算成功。
   - 按观澜收图的同样上限限量（500 张、单图 20 MiB、累计 200 MiB）：图特别多的文档，超出的图保留原引用，正文照常转换，不会整份被拒。

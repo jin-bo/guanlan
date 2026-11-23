@@ -112,6 +112,7 @@ wrapper 确定性生成最小模板（`AGENTAO.md`、`SCHEMA.md`、`raw/`、含 
 ### query — `guanlan query "…"` / `--backfill`
 
 1. **召回**：先用 search 入口取 top-N 候选页路径（确定性整页 BM25，中文 2-gram，含 aliases）。按可用的能力选一个：
+   - 提示里已附宿主召回结果（`guanlan query`、`--backfill`、MCP `query`）：有候选页就直接用；召回没有命中时跳到最后一条用 `search_file_content` 定位。这些运行里**都不要调用 shell**（包括下面的 `guanlan search`）——调 shell 会使整次运行失败。
    - 只读 Web 会话：宿主的 `guanlan_search` 工具（没有 shell 也能调用）。
    - 有 shell：`guanlan search "<关键词>"`。
    - 都不可用或没有结果：用 `search_file_content` 在 `wiki/index.md` 与相关目录中按关键词定位条目，结合现有页 `aliases`，或请用户补充关键词。
