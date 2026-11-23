@@ -738,6 +738,47 @@ def test_legacy_page_name_rerun_skips_raw_claimed_by_new_page(tmp_path, monkeypa
     assert raw.is_file()
 
 
+def _interrupt_before_raw(root: Path, raw: Path, monkeypatch) -> None:
+    """按旧名 `re-sume` 撤回，移完摘要页、移 raw 前中断。"""
+    orig_move = rmmod._move_into_trash
+
+    def fail_before_raw(src, root_, trash_dir):
+        if src == raw:
+            raise OSError("模拟中断")
+        return orig_move(src, root_, trash_dir)
+
+    monkeypatch.setattr(rmmod, "_move_into_trash", fail_before_raw)
+    assert remove_entrypoint(root, src="re-sume", yes=True, json_output=False) == EXIT_USAGE
+    monkeypatch.setattr(rmmod, "_move_into_trash", orig_move)
+
+
+def test_legacy_page_name_rerun_skips_raw_claimed_by_renamed_page(tmp_path, monkeypatch):
+    """中断后有一张任意改名的摘要页经 raw_digest 认领了这份 raw（按文件名认不出）：按旧名重跑不移原文。"""
+    root, raw, _summary = _legacy_kb(tmp_path)
+    _interrupt_before_raw(root, raw, monkeypatch)
+    rel = raw.relative_to(root).as_posix()
+    renamed = _source_page(root, "renamed-page")
+    assert stamp_raw_digest(renamed, format_digest_value(rel, compute_raw_digest(raw)))
+    assert find_source_page(root / "wiki" / "sources", raw.stem, rel) is None  # 按文件名确实认不出
+    assert not run_remove_result(root, "re-sume").ok
+    assert remove_entrypoint(root, src="re-sume", yes=True, json_output=False) != EXIT_OK
+    assert raw.is_file()
+
+
+def test_legacy_page_name_rerun_still_claims_raw_when_page_only_mentions_it(tmp_path, monkeypatch):
+    """只在正文里提到这条 raw 路径的页不算认领：按旧名重跑照常把原文移走（防过滤把续跑整个吞掉）。"""
+    root, raw, _summary = _legacy_kb(tmp_path)
+    _interrupt_before_raw(root, raw, monkeypatch)
+    rel = raw.relative_to(root).as_posix()
+    mention = _source_page(root, "other-note")
+    mention.write_text(mention.read_text(encoding="utf-8") + f"\n参见 `{rel}`。\n", encoding="utf-8")
+    assert locate_source_page(root, rel.removeprefix("raw/")).candidates  # 确实是候选
+    plan = run_remove_result(root, "re-sume")
+    assert plan.ok and rel in plan.relocate
+    assert remove_entrypoint(root, src="re-sume", yes=True, json_output=False) == EXIT_OK
+    assert not raw.exists()
+
+
 def test_remove_renamed_page_does_not_drag_other_raw(tmp_path: Path):
     """普通的改名页（raw_digest 指向 `raw/foo.md`，但 foo 的页身份是 `foo`）：按页名撤回只动页，不牵连原文。"""
     root = _kb(tmp_path)
