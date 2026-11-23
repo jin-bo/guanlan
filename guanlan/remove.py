@@ -177,6 +177,7 @@ def _raw_identity(path: Path) -> list[int]:
 def _pending_legacy_raw(root: Path, slug: str) -> str | None:
     """旧名页已移走时，用回收区的摘要页和 manifest 认回尚未移动的同一份 raw。"""
     from .provenance import admit_raw_path
+    from .rawio import find_source_page
 
     trash = root / ".trash"
     if not trash.is_dir():
@@ -191,6 +192,9 @@ def _pending_legacy_raw(root: Path, slug: str) -> str | None:
                 continue
             raw = admit_raw_path(root, raw_rel)
             if raw is None:
+                continue
+            # 中断后若重新摄入过，这份 raw 已归库里的新页；按旧名只移原文会让新页失源。
+            if find_source_page(root / "wiki" / "sources", PurePosixPath(raw_rel).stem, raw_rel) is not None:
                 continue
             manifest = json.loads((entry / "manifest.json").read_text(encoding="utf-8"))
             if isinstance(manifest, dict) and manifest.get("pending_legacy_raw") == {

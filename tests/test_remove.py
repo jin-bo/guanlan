@@ -13,7 +13,7 @@ from guanlan.errors import EXIT_OK, EXIT_USAGE
 from guanlan.lint import run_lint
 from guanlan.pages import iter_pages, split_frontmatter
 from guanlan.provenance import compute_raw_digest, format_digest_value, stamp_raw_digest
-from guanlan.rawio import find_source_page
+from guanlan.rawio import find_source_page, raw_slug
 from guanlan.remove import _resolve_slug, remove_entrypoint, run_remove_result
 from guanlan.sourcepage import locate_source_page
 
@@ -718,6 +718,24 @@ def test_legacy_page_name_rerun_after_summary_move(tmp_path, monkeypatch, replac
         assert run_remove_result(root, "re-sume").relocate == [raw.relative_to(root).as_posix()]
         assert remove_entrypoint(root, src="re-sume", yes=True, json_output=False) == EXIT_OK
         assert not raw.parent.exists()
+
+
+def test_legacy_page_name_rerun_skips_raw_claimed_by_new_page(tmp_path, monkeypatch):
+    """旧名页已移、raw 尚在，其间重新摄入建了新名页：按旧名重跑不认领这份 raw，免新页失源。"""
+    root, raw, summary = _legacy_kb(tmp_path)
+    orig_move = rmmod._move_into_trash
+
+    def fail_before_raw(src, root_, trash_dir):
+        if src == raw:
+            raise OSError("模拟中断")
+        return orig_move(src, root_, trash_dir)
+
+    monkeypatch.setattr(rmmod, "_move_into_trash", fail_before_raw)
+    assert remove_entrypoint(root, src="re-sume", yes=True, json_output=False) == EXIT_USAGE
+    monkeypatch.setattr(rmmod, "_move_into_trash", orig_move)
+    _source_page(root, raw_slug(raw.stem))
+    assert not run_remove_result(root, "re-sume").ok
+    assert raw.is_file()
 
 
 def test_remove_renamed_page_does_not_drag_other_raw(tmp_path: Path):
