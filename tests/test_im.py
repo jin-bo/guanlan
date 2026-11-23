@@ -1989,7 +1989,7 @@ def test_platform_choices_come_from_the_registry(kb_im, monkeypatch):
     """`--platform` 的合法值取自注册表，cli 里**不许再抄一份**。
 
     抄一份的代价不抽象：`test_core_has_no_platform_branch` 只扫 `guanlan/im/*.py`、**扫不到
-    cli.py**，于是"新增平台 = 注册一行、核心零改"这条对外承诺（CLAUDE.md 也这么写）会在
+    cli.py**，于是"新增平台 = 注册一行、核心零改"这条对外承诺（guanlan/im/CLAUDE.md 也这么写）会在
     argparse 这一层悄悄失效——注册了却仍被 `invalid choice` 挡在门外，且没有任何测试报警。
     """
     from guanlan.cli import build_parser
