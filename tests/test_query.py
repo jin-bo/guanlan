@@ -33,6 +33,87 @@ def test_query_prompt_does_not_read_whole_index():
     assert "不整读 index" in _BACKFILL_SUFFIX
 
 
+# --- 宿主召回 + 不调 shell（agentao run 遇任何一次拒绝即终止整次运行）---
+
+
+def _concept(kb: Path, title: str, body: str) -> None:
+    p = kb / "wiki" / "concepts" / f"{title}.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        f'---\ntitle: "{title}"\ntype: concept\ntags: []\nsources: []\nlast_updated: 2026-06-03\n---\n\n{body}\n',
+        encoding="utf-8",
+    )
+
+
+def test_query_prompt_forbids_shell_and_drops_cli_search():
+    """回归：旧提示建议「`guanlan search` CLI」，只读 CLI query 里模型一试 shell 就被硬拒、整次运行终止
+    （permission_denied）。提示须明说不要调 shell，且不再把 CLI search 当可用入口。"""
+    from guanlan.query import QUERY_PROMPT
+
+    assert "不要调用 `run_shell_command`" in QUERY_PROMPT
+    assert "guanlan search" not in QUERY_PROMPT
+
+
+def test_query_prompt_carries_prefetched_candidates(kb: Path):
+    """只读路径：提示里带宿主 BM25 召回的候选页路径（零 LLM，与 `guanlan search` 同一实现）。"""
+    _concept(kb, "注意力机制", "注意力机制依赖查询、键与值三组向量。")
+    _concept(kb, "无关页", "完全不相干的内容。")
+    runner = make_runner(None, final_text="ans")
+    assert run_query("注意力机制需要什么前提？", root=kb, runner=runner) == EXIT_OK
+    prompt = runner.calls[0]["prompt"]
+    assert "`wiki/concepts/注意力机制.md` — 注意力机制" in prompt
+    assert "无关页" not in prompt
+
+
+def test_query_prompt_no_hits_falls_back_to_locate(kb: Path):
+    """召回无命中不阻断：退化为「用 search_file_content 定位」的指引，仍然发起问答。"""
+    runner = make_runner(None, final_text="ans")
+    assert run_query("完全不存在的主题词", root=kb, runner=runner) == EXIT_OK
+    prompt = runner.calls[0]["prompt"]
+    assert "没有命中" in prompt and "search_file_content" in prompt
+
+
+def test_query_prefetch_failure_does_not_block(kb: Path, monkeypatch):
+    """召回本身抛错（坏页等）也只退化，不让问答失败。"""
+    import guanlan.search as search_mod
+
+    def boom(*a, **k):
+        raise RuntimeError("坏页")
+
+    monkeypatch.setattr(search_mod, "search_pages", boom)
+    runner = make_runner(None, final_text="ans")
+    assert run_query("q", root=kb, runner=runner) == EXIT_OK
+    assert "没有命中" in runner.calls[0]["prompt"]
+
+
+def test_query_prompt_question_with_braces(kb: Path):
+    """问题里的花括号原样进提示（format 只替换模板占位，不解析问题文本）。"""
+    runner = make_runner(None, final_text="ans")
+    assert run_query("{candidates} 与 {x} 是什么", root=kb, runner=runner) == EXIT_OK
+    assert "{candidates} 与 {x} 是什么" in runner.calls[0]["prompt"]
+
+
+def test_backfill_prompt_also_prefetched(kb: Path):
+    """`--backfill`（workspace-write）同样不能用 shell（要确认 → reject 策略即终止），提示同样带召回。"""
+    _concept(kb, "注意力机制", "注意力机制依赖查询、键与值。")
+    runner = make_runner(None, final_text="ans")
+    run_query("注意力机制", root=kb, backfill=True, runner=runner)
+    prompt = runner.calls[0]["prompt"]
+    assert "不要调用 `run_shell_command`" in prompt
+    assert "`wiki/concepts/注意力机制.md`" in prompt
+
+
+def test_query_prompt_cache_path_matches_cold(kb: Path):
+    """长驻宿主（MCP `query`）传 `CorpusCache` 复用预热语料：提示与 CLI 冷算字节一致。"""
+    from guanlan.query import build_query_prompt
+    from guanlan.search import CorpusCache
+
+    _concept(kb, "注意力机制", "注意力机制依赖查询、键与值。")
+    cold = build_query_prompt(kb, "注意力机制")
+    assert "`wiki/concepts/注意力机制.md`" in cold
+    assert build_query_prompt(kb, "注意力机制", search_cache=CorpusCache()) == cold
+
+
 # --- 默认只读路径 ---
 
 

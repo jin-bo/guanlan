@@ -5695,13 +5695,14 @@ def test_guanlan_search_in_tools_introspection(chat_client) -> None:
     assert hit["blocked"] is False  # is_read_only → 只读姿态不拦（镜像 _blocked_in_readonly）
 
 
-def test_query_prompt_transport_neutral() -> None:
-    """召回措辞传输中立（决策P5.1-6）：QUERY_PROMPT 不再硬编码「先用 `guanlan search` CLI」死指令。"""
+def test_query_prompt_no_shell_search_entry() -> None:
+    """决策P5.1-6 修订：QUERY_PROMPT 只给 agentao run 子进程用，那里既无 `guanlan_search` 工具、也不能用 shell，
+    召回改由宿主先做；提示不得再把 `guanlan search` CLI 列为入口（模型一试 shell，整次运行即被终止）。"""
     from guanlan.query import QUERY_PROMPT
 
-    assert "guanlan_search" in QUERY_PROMPT  # 提宿主工具
-    assert "可用的 search 入口" in QUERY_PROMPT  # 传输中立措辞
-    assert "先用 `guanlan search" not in QUERY_PROMPT  # 不再硬编码 CLI-only 死指令
+    assert "{candidates}" in QUERY_PROMPT  # 宿主召回的候选段
+    assert "guanlan search" not in QUERY_PROMPT
+    assert "不要调用 `run_shell_command`" in QUERY_PROMPT
 
 
 # ══════════════════════════════════════════════════════════════════════════════
