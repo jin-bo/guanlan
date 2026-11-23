@@ -350,17 +350,16 @@ def test_provenance_preserves_other_frontmatter_keys(tmp_path):
 
 def test_partial_interrupt_then_rerun_converges(tmp_path, monkeypatch):
     root = _kb(tmp_path)
-    _raw(root, "foo")
-    _source_page(root, "foo")
+    raw = _part(root, "book", "foo", image=True)
+    image = raw.parent / "images" / "foo" / "foo-1.png"
+    summary = _source_page(root, "foo")
     multi = _page(root, "wiki/concepts/x.md", sources="['foo', 'bar']")
 
-    # 模拟"摘 slug + 删 index + 移 raw 已做，移摘要页时 IO 中断"：第一次移摘要页抛 OSError
+    # 移摘要页时中断：图片已移，raw 仍可用于定位。
     orig_move = rmmod._move_into_trash
-    state = {"failed": False}
 
     def flaky_move(src, root_, trash_dir):
-        if src.name == "foo.md" and "sources" in src.parts and not state["failed"]:
-            state["failed"] = True
+        if src == summary:
             raise OSError("模拟中断")
         return orig_move(src, root_, trash_dir)
 
@@ -368,15 +367,42 @@ def test_partial_interrupt_then_rerun_converges(tmp_path, monkeypatch):
     rc1 = remove_entrypoint(root, src="foo", yes=True, json_output=False)
     assert rc1 == EXIT_USAGE  # 报 partial
     assert _sources_of(multi) == ["bar"]  # slug 已摘（移源前完成）
-    assert not (root / "raw" / "foo.md").exists()  # raw 已移
-    assert (root / "wiki" / "sources" / "foo.md").exists()  # 摘要页因中断仍在
+    assert raw.is_file() and summary.is_file()
+    [entry] = _trash_entries(root)
+    assert not image.exists() and (entry / image.relative_to(root)).is_file()
+    assert (entry / "manifest.json").is_file()
 
-    # 重跑同命令（移源锚仍在）→ 向前收敛
     monkeypatch.setattr(rmmod, "_move_into_trash", orig_move)
     rc2 = remove_entrypoint(root, src="foo", yes=True, json_output=False)
     assert rc2 == EXIT_OK
-    assert not (root / "wiki" / "sources" / "foo.md").exists()  # 摘要页终被移走
+    assert not raw.exists() and not summary.exists()
+    assert not raw.parent.exists()
     assert _sources_of(multi) == ["bar"]  # 幂等：slug 摘除不重复/不回退
+
+
+def test_interrupt_immediately_after_moving_raw_leaves_no_source_files(tmp_path, monkeypatch):
+    root = _kb(tmp_path)
+    raw = _part(root, "book", "foo", image=True)
+    image = raw.parent / "images" / "foo" / "foo-1.png"
+    summary = _source_page(root, "foo")
+    originals = {path: path.read_bytes() for path in (raw, image, summary)}
+    orig_move = rmmod._move_into_trash
+
+    def interrupt_after_raw(src, root_, trash_dir):
+        moved = orig_move(src, root_, trash_dir)
+        if src == raw:
+            raise KeyboardInterrupt
+        return moved
+
+    monkeypatch.setattr(rmmod, "_move_into_trash", interrupt_after_raw)
+    with pytest.raises(KeyboardInterrupt):
+        remove_entrypoint(root, src="foo", yes=True, json_output=False)
+
+    [entry] = _trash_entries(root)
+    for path, contents in originals.items():
+        assert not path.exists()
+        assert (entry / path.relative_to(root)).read_bytes() == contents
+    assert not run_remove_result(root, "foo").ok
 
 
 def test_index_comment_mentioning_slug_is_not_pruned(tmp_path):
@@ -665,6 +691,33 @@ def test_remove_by_legacy_page_name_takes_raw_along(tmp_path: Path):
     plan = run_remove_result(root, "re-sume")
     assert plan.ok and plan.slug == "re-sume"
     assert set(plan.relocate) >= {f"raw/x/{_NFD_RESUME}.md", "wiki/sources/re-sume.md"}
+
+
+@pytest.mark.parametrize("replace_raw", [False, True])
+def test_legacy_page_name_rerun_after_summary_move(tmp_path, monkeypatch, replace_raw):
+    root, raw, summary = _legacy_kb(tmp_path)
+    image = raw.parent / "images" / raw.stem / "1.png"
+    orig_move = rmmod._move_into_trash
+
+    def fail_before_raw(src, root_, trash_dir):
+        if src == raw:
+            raise OSError("模拟中断")
+        return orig_move(src, root_, trash_dir)
+
+    monkeypatch.setattr(rmmod, "_move_into_trash", fail_before_raw)
+    assert remove_entrypoint(root, src="re-sume", yes=True, json_output=False) == EXIT_USAGE
+    assert raw.is_file() and not summary.exists() and not image.exists()
+
+    monkeypatch.setattr(rmmod, "_move_into_trash", orig_move)
+    if replace_raw:
+        replacement = raw.with_name("replacement.md")
+        replacement.write_bytes(raw.read_bytes())
+        replacement.replace(raw)
+        assert not run_remove_result(root, "re-sume").ok
+    else:
+        assert run_remove_result(root, "re-sume").relocate == [raw.relative_to(root).as_posix()]
+        assert remove_entrypoint(root, src="re-sume", yes=True, json_output=False) == EXIT_OK
+        assert not raw.parent.exists()
 
 
 def test_remove_renamed_page_does_not_drag_other_raw(tmp_path: Path):
