@@ -426,7 +426,7 @@ def test_im_parser_touches_neither_the_sdk_nor_the_host_module():
     **不塞 `sys.modules['lark_oapi'] = None` 那种哨兵**：塞了之后"`lark_oapi` 不在 sys.modules"
     永真（哨兵自己就是 None、被任何 `is not None` 过滤掉），而真正的漏法——工厂外某处
     `try: import lark_oapi / except ImportError: ...`——照样静默通过。裸断即可：CI 两个 im extra
-    都装（见 CLAUDE.md），真有顶层 import 时 `lark_oapi` 会实打实出现在 sys.modules 里。
+    都装（见 guanlan/im/CLAUDE.md），真有顶层 import 时 `lark_oapi` 会实打实出现在 sys.modules 里。
     """
     import subprocess
     import sys

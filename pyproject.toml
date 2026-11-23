@@ -192,6 +192,8 @@ path = "guanlan/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["guanlan"]
+# 子目录里的 CLAUDE.md（guanlan/im/、guanlan/mcp/）是给开发时的 Claude Code 按需加载的说明，不进 wheel（sdist 照旧携带，与仓根 CLAUDE.md 一致）。
+exclude = ["**/CLAUDE.md"]
 # 注：Web 宿主前端静态资源（guanlan/web/static/*）随 `packages = ["guanlan"]` 自动入 wheel
 # ——hatchling 对选中的包目录连同其非 .py 文件一并打包（已 `uv build` 验证），无需额外 artifacts。
 
