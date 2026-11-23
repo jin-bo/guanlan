@@ -765,6 +765,44 @@ def test_legacy_page_name_rerun_skips_raw_claimed_by_renamed_page(tmp_path, monk
     assert raw.is_file()
 
 
+@pytest.mark.parametrize("form", ["NFD", "NFC"])
+def test_legacy_page_name_rerun_skips_raw_declared_by_renamed_page(tmp_path, monkeypatch, form):
+    """改名页只靠「> 原始资料：」声明认领（无 raw_digest），且声明里可能是另一种 Unicode 写法：重跑不移原文。"""
+    root, raw, _summary = _legacy_kb(tmp_path)
+    _interrupt_before_raw(root, raw, monkeypatch)
+    rel = unicodedata.normalize(form, raw.relative_to(root).as_posix())
+    declared = _source_page(root, "renamed-page")
+    declared.write_text(declared.read_text(encoding="utf-8") + f"\n> 原始资料：`{rel}`\n", encoding="utf-8")
+    assert not run_remove_result(root, "re-sume").ok
+    assert raw.is_file()
+
+
+def test_legacy_page_name_rerun_skips_raw_declared_by_merged_page(tmp_path, monkeypatch):
+    """合并页声明了多篇原始资料、其中含这份原文：也算认领，重跑不移原文（宁可报找不到，不让页静默少来源）。"""
+    root, raw, _summary = _legacy_kb(tmp_path)
+    _interrupt_before_raw(root, raw, monkeypatch)
+    rel = raw.relative_to(root).as_posix()
+    merged = _source_page(root, "merged-page")
+    merged.write_text(
+        merged.read_text(encoding="utf-8") + f"\n> 原始资料：`{rel}`\n> 原始资料：`raw/other.md`\n", encoding="utf-8"
+    )
+    loc = locate_source_page(root, rel.removeprefix("raw/"))
+    assert loc.page is None and [b for _p, b in loc.candidates] == ["声明了多篇原始资料，含本篇"]
+    assert not run_remove_result(root, "re-sume").ok
+    assert raw.is_file()
+
+
+def test_legacy_page_name_rerun_skips_raw_digest_in_nfc_form(tmp_path, monkeypatch):
+    """改名页的 raw_digest 记的是 NFC 写法（盘上与旧页记的是 NFD）：同一份原文，重跑不移。"""
+    root, raw, _summary = _legacy_kb(tmp_path)
+    _interrupt_before_raw(root, raw, monkeypatch)
+    nfc = unicodedata.normalize("NFC", raw.relative_to(root).as_posix())
+    renamed = _source_page(root, "renamed-page")
+    assert stamp_raw_digest(renamed, format_digest_value(nfc, compute_raw_digest(raw)))
+    assert not run_remove_result(root, "re-sume").ok
+    assert raw.is_file()
+
+
 def test_legacy_page_name_rerun_still_claims_raw_when_page_only_mentions_it(tmp_path, monkeypatch):
     """只在正文里提到这条 raw 路径的页不算认领：按旧名重跑照常把原文移走（防过滤把续跑整个吞掉）。"""
     root, raw, _summary = _legacy_kb(tmp_path)
