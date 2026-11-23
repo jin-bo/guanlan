@@ -329,3 +329,47 @@ def test_run_agent_task_omits_thinking_kwarg_when_unset(tmp_path: Path):
     run_agent_task("q", working_directory=tmp_path, runner=runner, thinking="high")
     assert "thinking" not in calls[0]
     assert calls[1]["thinking"] == "high"
+
+
+# --- P5.5：run spec 的 instructions（画像进系统提示的通道）---
+
+
+def test_run_spec_text_without_instructions_unchanged():
+    """不给 instructions：spec 只有 prompt，与旧格式逐字相同。"""
+    assert run_spec_text("q") == run_spec_text("q", None) == run_spec_text("q", "") == '{"prompt": "q"}'
+
+
+@pytest.mark.parametrize("instructions", [_TRICKY, "# 规约\n{{ x }} 😀\n" * 200])
+def test_run_spec_text_instructions_round_trip(instructions: str):
+    import yaml
+
+    text = run_spec_text("问题", instructions)
+    text.encode("utf-8")
+    assert yaml.safe_load(text) == {"prompt": "问题", "instructions": instructions}
+
+
+def test_run_agent_task_passes_instructions_only_when_set(tmp_path: Path):
+    seen: list = []
+
+    def runner(prompt, **kw):
+        seen.append(kw)
+        return AgentRunResult(True, "x")
+
+    run_agent_task("q", working_directory=tmp_path, runner=runner)
+    run_agent_task("q", working_directory=tmp_path, instructions="画像", runner=runner)
+    assert "instructions" not in seen[0]
+    assert seen[1]["instructions"] == "画像"
+
+
+def test_subprocess_runner_sends_instructions_via_stdin(tmp_path: Path, monkeypatch):
+    """instructions 随 stdin spec 进子进程，不上命令行。"""
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs, cmd=cmd)
+        return subprocess.CompletedProcess(cmd, 0, '{"status":"ok","final_text":"x"}', "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert run_agent_task("q", working_directory=tmp_path, skills=(), instructions="画像").ok
+    assert captured["input"] == run_spec_text("q", "画像")
+    assert "画像" not in " ".join(captured["cmd"])

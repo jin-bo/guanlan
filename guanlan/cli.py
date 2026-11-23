@@ -69,7 +69,11 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
 
 def _cmd_query(args: argparse.Namespace) -> int:
     return run_query(
-        args.question, root=args.dir, backfill=args.backfill, model=args.model
+        args.question,
+        root=args.dir,
+        backfill=args.backfill,
+        profile=args.profile,
+        model=args.model,
     )
 
 
@@ -326,8 +330,18 @@ def _add_ingest_parser(sub, dir_parent) -> None:
 def _add_query_parser(sub, dir_parent) -> None:
     p = sub.add_parser("query", parents=[dir_parent], help="对知识库提问（默认只读）")
     p.add_argument("question", help="问题文本")
-    p.add_argument(
+    # 互斥在解析时拦（P5.5 决策D4）：--backfill 会先取库级写锁，晚拦会让锁冲突提示抢在前面。
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument(
         "--backfill", action="store_true", help="把好答案回填 wiki/syntheses/（走完整门禁）"
+    )
+    mode.add_argument(
+        "--profile",
+        default=None,
+        metavar="路径",
+        help="附上库外的提问者画像（UTF-8 markdown，≤1500 字），放进系统提示，回答按画像调整角度、"
+        "详略和术语；不参与检索。画像会发给配置的模型提供方，并以明文记入库根 agentao.log"
+        "（写不进时记入 ~/.agentao/agentao.log）。不能与 --backfill 同用",
     )
     p.add_argument("--model", default=None, help="覆盖 Agentao 模型")
     p.set_defaults(func=_cmd_query)
