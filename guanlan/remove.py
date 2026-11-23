@@ -144,7 +144,10 @@ def _resolve_target(root: Path, slug: str) -> tuple[str | None, str]:
     raw_rel = _raw_file(root, slug)
     if raw_rel is not None:
         return raw_rel, source_identity(sources, PurePosixPath(raw_rel).stem, raw_rel)
-    return _raw_from_page(root, sources, slug), slug
+    raw_rel = _raw_from_page(root, sources, slug)
+    if raw_rel is None and not (sources / f"{slug}.md").exists():
+        raw_rel = _pending_legacy_raw(root, slug)
+    return raw_rel, slug
 
 
 def _raw_from_page(root: Path, sources: Path, slug: str) -> str | None:
@@ -164,6 +167,46 @@ def _raw_from_page(root: Path, sources: Path, slug: str) -> str | None:
     if same_name_key(source_identity(sources, PurePosixPath(rel).stem, rel)) != same_name_key(slug):
         return None
     return rel
+
+
+def _raw_identity(path: Path) -> list[int]:
+    st = path.stat()
+    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+
+
+def _pending_legacy_raw(root: Path, slug: str) -> str | None:
+    """旧名页已移走时，用回收区的摘要页和 manifest 认回尚未移动的同一份 raw。"""
+    from .provenance import admit_raw_path
+    from .rawio import find_source_page
+
+    trash = root / ".trash"
+    if not trash.is_dir():
+        return None
+    matches: set[str] = set()
+    for entry in trash.iterdir():
+        if not entry.name.startswith(f"{slug}@"):
+            continue
+        try:
+            raw_rel = _raw_from_page(root, entry / "wiki" / "sources", slug)
+            if raw_rel is None or (entry / raw_rel).exists():
+                continue
+            raw = admit_raw_path(root, raw_rel)
+            if raw is None:
+                continue
+            # 中断后若重新摄入过，这份 raw 已归库里的新页；按旧名只移原文会让新页失源。
+            if find_source_page(root / "wiki" / "sources", PurePosixPath(raw_rel).stem, raw_rel) is not None:
+                continue
+            manifest = json.loads((entry / "manifest.json").read_text(encoding="utf-8"))
+            if isinstance(manifest, dict) and manifest.get("pending_legacy_raw") == {
+                "path": raw_rel,
+                "identity": _raw_identity(raw),
+            }:
+                matches.add(raw_rel)
+        except (OSError, ValueError):
+            continue
+    if len(matches) > 1:
+        raise ValueError(f"有多份旧名页 {slug!r} 对应的原文尚未移走，认不准要撤回哪一份。")
+    return next(iter(matches), None)
 
 
 def _locate(root: Path, raw_rel: str | None, page_slug: str) -> list[str]:
@@ -346,9 +389,13 @@ def _execute(root: Path, plan: RemovePlan) -> Path:
     """按 manifest-先写 + 幂等 + **移源放最后** 落盘（决策P3.9-10）。返回 trash_dir。
 
     执行序：① 写 manifest（意图先落） → ② 摘多源页 slug → ③ 删 index 行 → ④ **最后**移源落盘物。
-    移源放最后：源文件是 `_locate` 的锚，先移走会让中断后重跑 locate 失败而无法收敛。每步幂等，
+    ④ 内先移图片和摘要页，再移 raw。raw 是 `_locate` 定位图片的锚。每步幂等，
     故中途 IO 失败后**重跑同命令向前收敛**（不假装事务回滚）。
     """
+    raw_rel = next(
+        (rel for rel in plan.relocate if rel.startswith("raw/") and (root / rel).is_file()),
+        None,
+    )
     now = datetime.now()
     # 碰撞安全建目录：微秒级时间戳几乎不撞，但若撞（或人为预建）则 exist_ok=True 会把后续
     # `shutil.move` 的目录套嵌（`images/<slug>/<slug>`），故用 exist_ok=False + 序号兜底，保证全新目录。
@@ -376,6 +423,13 @@ def _execute(root: Path, plan: RemovePlan) -> Path:
         "backlinks": list(plan.backlinks),  # 入链页（未改动）——同属 blast-radius，二期 restore 的复核面
         "index_lines_removed": list(plan.index_lines),
     }
+    if (
+        raw_rel is not None
+        and raw_slug(PurePosixPath(raw_rel).stem) != plan.slug
+        and f"wiki/sources/{plan.slug}.md" in plan.relocate
+    ):
+        # 摘要页与 raw 不同名：若在两次移动之间中断，旧页名可凭这条记录认回原件。
+        manifest["pending_legacy_raw"] = {"path": raw_rel, "identity": _raw_identity(root / raw_rel)}
     # 原子写：半写的恢复配方会让二期 restore 无法解析 JSON；新建文件下失败则不残留半截。
     atomic_write_text(
         trash_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
@@ -385,16 +439,19 @@ def _execute(root: Path, plan: RemovePlan) -> Path:
     for d in plan.drop_slug:
         _drop_slug_from_page(root / d.page, plan.slug)
     _prune_index_line(root / "wiki" / "index.md", plan.slug)
-    for rel in plan.relocate:
+    for rel in sorted(plan.relocate, key=lambda rel: rel == raw_rel):
         _move_into_trash(root / rel, root, trash_dir)
-    _prune_empty_raw_dirs(root, plan.relocate)
+    _prune_empty_raw_dirs(root, plan.relocate, raw_rel)
     return trash_dir
 
 
-def _prune_empty_raw_dirs(root: Path, moved: list[str]) -> None:
+def _prune_empty_raw_dirs(root: Path, moved: list[str], raw_rel: str | None) -> None:
     """分卷全撤完后，`raw/<sample>/`（及其下的 `images/`）空了就删掉；`raw/` 本身与非空目录不动。"""
     raw = (root / "raw").resolve()
     dirs = {(root / rel).parent for rel in moved if rel.startswith("raw/")}
+    if raw_rel is not None:
+        # 重跑时图片目录可能已移走，留下的空 images/ 仍可从 raw 路径找到。
+        dirs.add((root / raw_rel).parent / "images")
     for d in sorted(dirs, key=lambda x: len(x.parts), reverse=True):
         cur = d
         while cur.resolve() != raw and raw in cur.resolve().parents:
