@@ -27,7 +27,7 @@
 |---|---|---|
 | `guanlan init` | 初始化一个知识库(确定性模板) | 否 |
 | `guanlan ingest` | 投喂一篇资料,Agent 生成/更新 wiki 页（`--flash` 只建摘要页、几十秒进库，以后再加深） | 是 |
-| `guanlan import` | 一键入库整本书/长报告:解析 · 整理 · 拆分 → 确认 → 逐份 ingest,可暂停续跑 | 是 |
+| `guanlan import` | 一键入库整本书/长报告:解析 · 整理 · 拆分 → 确认 → 逐份 ingest,可暂停续跑(`--flash` 逐份快速收录) | 是 |
 | `guanlan query` | 对知识库提问(`--backfill` 可把答案沉淀回 wiki) | 是 |
 | `guanlan search` | 整页全文检索(BM25 + 中文分词) | 否 |
 | `guanlan check` / `health` / `lint` | 校验 / 体检 / 结构 lint | 否 |

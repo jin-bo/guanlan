@@ -21,6 +21,8 @@ guanlan -C my-wiki health --strict     # fail with exit 6 if there are findings 
 
 Advisory by default: exits `0` even with findings. `index_missing_page` (a page on disk not in the index) is fixed by [`reindex`](#guanlan-reindex).
 
+**To deepen**: the report ends with the sources that were [quick-captured](03-cli-commands.md#guanlan-ingest-target) (`ingest --flash`) and have only a summary page; run `guanlan ingest raw/<source>` again without `--flash` to integrate each into entity/concept pages. This is a status, not a problem: it is not counted as a finding and does not affect `--strict`. `--json` adds a `flash_pending` field only when such pages exist; otherwise the output is byte-for-byte unchanged.
+
 `duplicate_stem`: when two pages share a file name (case-insensitive, regardless of directory), `[[name]]` can only resolve to the one that sorts first by path; the others are unreachable by name and share one graph node. The finding is reported on each unreachable page. Fix it by merging the pages, or by renaming one and updating the links to it (the old name cannot then be its alias — it would collide with the other page). See [`P3.13`](../../P3.13-同名页检测.md).
 
 ---
@@ -69,6 +71,8 @@ Reading the result:
 - `unsupported`: not found in the source — mostly paraphrases, labels or the wiki's own wording put in quotes; advisory only.
 - Verbatim but source unverified: the quote exists word for word, just not in the source this line cites. Citation styles vary too much to judge, so the command only counts these.
 - Not checked: no source, unreadable source (e.g. a citation to an entity page that has no raw), or an incomplete raw walk — "could not check", not "checked and missing". Under `--strict`, an incomplete raw walk is itself a failure: a partial check must not let CI pass.
+
+Both sides are normalized before comparison: punctuation and whitespace removed, link syntax reduced to its display text, footnote numbers dropped. HTML in the raw (converters often emit tables as `<table><td><p>…`) has common tags stripped and entities such as `&amp;` decoded, so a quote that crosses a line break inside a table cell still matches verbatim.
 
 When the raw is OCR output, a mismatch may come from recognition errors; `ocr_hint` shows the raw's parse info, such findings never count for strict, and should be checked against the scan before editing. Writing rules: the skill's conventions 〈直接引语〉; design and measurement: [`P3.14`](../../P3.14-引语核对.md).
 
@@ -165,13 +169,30 @@ guanlan -C my-wiki remove raw/old-report.md --yes  # confirm and execute (move i
 
 | Arg | Meaning |
 |---|---|
-| `src` | Source id: `<slug>` / `raw/<slug>.md` / `wiki/sources/<slug>.md` |
+| `src` | Source id: `<slug>` / `raw/<slug>.md` / `wiki/sources/<slug>.md`; when the file name has characters such as full-width brackets, give it exactly as on disk (e.g. `报告（2024）`) |
 | `--yes` | Confirm and execute (without it, only prints the worklist with zero disk write — more conservative than `reindex`/`convert`) |
 | `--json` | JSON contract (includes `backlinks`: the pages linking to this summary page) |
 
 **The preview tells you upfront who will be left dangling**: a `⚠ 入链页` (incoming links) section lists the pages whose body `[[links]]` point at this summary page — retract it and those links dangle. Aliases and case variants count, and `[[…]]` inside code blocks does not (the same scanning chokepoint `check`/`graph` use). It stays advisory: the linking pages are not touched, so run `guanlan lint` after a retraction to re-check broken links base-wide. **Two pages sharing a stem share one graph node**, so on the target side an ambiguity (`sources/foo` and `entities/foo` both existing) falls back to an empty list — in that case the links are still caught by the same-stem page after the retraction and would not dangle anyway; on the source side the rule is inverted and it would rather over-list, because under-listing would hide the one thing this feature exists to say.
 
-A **human-initiated correction path**, symmetric with feeding (a human adding a source) — just the opposite direction. Re-synthesizing a page that lost a source is an LLM job that `remove` does **not** do; it's left to a later `ingest`/human (an advisory is emitted). The recycle area is the audit trail; to undo, recover manually from `.trash/`.
+A **human-initiated correction path**, symmetric with feeding (a human adding a source) — just the opposite direction. Re-synthesizing a page that lost a source is an LLM job that `remove` does **not** do; it's left to a later `ingest`/human (an advisory is emitted). The recycle area is the audit trail; to undo, put it back with [`guanlan trash restore`](#guanlan-trash).
+
+---
+
+## `guanlan trash`
+
+Browse and manage the recycle area `.trash/`. **Zero-LLM.** Entries come from `remove` (one source or all parts of an original), task rollbacks and checkup page deletions.
+
+```bash
+guanlan -C my-wiki trash list                 # list entries (read-only)
+guanlan -C my-wiki trash show <entry>         # one entry's details: what was moved, can it be restored, why not
+guanlan -C my-wiki trash restore <entry>      # preview a restore; add --yes to run it
+guanlan -C my-wiki trash purge <entry>        # preview a permanent delete; add --yes to delete (cannot be undone)
+```
+
+- **Restore** puts the raw file, image directory and summary page back where they were, adds the source back to the pages it was stripped from (in place if the page has not changed since, otherwise appended at the end with a note to review), and re-registers the summary page in the index. Only an entry left by the **first** run of a retraction can be restored; entries from a resumed retraction, old-format entries, rollback entries and incomplete ones are view-only, and `show` says why (restore them by hand from `manifest.json`). If anything already occupies an original location, the whole restore is refused and the conflicts are listed — nothing is merged, overwritten or renamed. A restored entry keeps only its records and shows as "restored".
+- **Purge** is refused while the entry may still be needed: a retraction or restore that has not finished, or a task rollback that could still resume.
+- `restore` and `purge` take the exclusive KB write lock. In the Web host the same features are the "Trash" tab of the task center. Design: [`P4.36-Web回收区.md`](../../P4.36-Web回收区.md).
 
 ---
 
