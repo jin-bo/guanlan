@@ -85,7 +85,7 @@
     <button id="backfill-btn" class="btn" data-i18n-title="tip.backfill" title="backfill：把一次好问答沉淀为 wiki/syntheses/ 综合页，走写门禁">
       <svg class="ico"><use href="#i-backfill"/></svg><span class="btn-zh" data-i18n="btn.backfill">回填</span></button>
     <!-- 后台任务中心（P4.33）：补录/沉淀/heal/审计提交后在后台跑，这里看进度与结果；徽标 = 运行 + 排队 + 需处理。 -->
-    <button id="tasks-btn" class="btn" data-i18n-title="tip.tasks" title="任务：后台运行的补录、回填、补全、审计、索引修复与一键入库">
+    <button id="tasks-btn" class="btn" data-i18n-title="tip.tasks" title="任务：后台运行的补录、回填、补全、审计、索引修复、撤回与一键入库；另有回收区页签">
       <svg class="ico"><use href="#i-tasks"/></svg><span class="btn-zh" data-i18n="btn.tasks">任务</span><span id="task-badge" class="task-badge" hidden></span></button>
     <span class="act-sep" aria-hidden="true"></span>
     <!-- 体检（P4.34）：合并原「校验 / 健康 / 巡检」三个按钮，一张分组清单 + 修复入口；
@@ -160,6 +160,11 @@
     <h3 id="task-drawer-title" data-i18n="task.drawerTitle">后台任务</h3>
     <button id="task-drawer-close" data-i18n-aria="aria.overlayClose" aria-label="关闭">×</button>
   </div>
+  <!-- P4.36：任务 | 回收区 两个页签 -->
+  <div class="task-tabs" role="tablist">
+    <button type="button" class="task-tab active" role="tab" aria-selected="true" data-tab="tasks" data-i18n="task.tab.tasks">任务</button>
+    <button type="button" class="task-tab" role="tab" aria-selected="false" data-tab="trash" data-i18n="task.tab.trash">回收区</button>
+  </div>
   <div id="task-drawer-body" class="task-drawer-body"></div>
 </aside>
 
@@ -187,6 +192,7 @@
 <script src="/static/jobs.js"></script>
 <script src="/static/tasks.js"></script>
 <script src="/static/remove.js"></script>
+<script src="/static/trash.js"></script>
 <script src="/static/staging.js"></script>
 <script src="/static/attach.js"></script>
 <script src="/static/chat.js"></script>

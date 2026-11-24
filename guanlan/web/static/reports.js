@@ -89,6 +89,12 @@ function renderDoctor(data, openKeys = null) {
     ? `<p class="report-bad">${escapeHtml(t("doctor.bad", nBlock, data.pages_checked))}</p>`
     : `<p class="report-ok">${escapeHtml(t("doctor.ok", data.pages_checked))}</p>`;
   html += `<p class="muted">${escapeHtml(nSuggest ? t("doctor.suggest", nSuggest) : t("doctor.clean"))} · ${escapeHtml(t("doctor.elapsed", fmtElapsed(data.elapsed_s)))}</p>`;
+  // 回收区一行（P4.36 §2）：信息，不计入问题数；空时也显示「0 项」。reader 下服务端不给 trash 字段。
+  if (data.trash) {
+    const tr = data.trash;
+    const txt = tr.error ? t("doctor.trashError", tr.error) : t("doctor.trash", tr.count, fmtBytes(tr.size));
+    html += `<p class="muted"><a href="#" class="doctor-trash">${escapeHtml(txt)}</a></p>`;
+  }
   let section = null;
   for (const cat of cats) {
     // 为零的类别（含必须修）不显示：必须修为零时，上面的总评已说明。
@@ -122,6 +128,11 @@ function paintDoctor() {
     e.preventDefault();
     $("#overlay").classList.add("hidden");
     navigate({ kind: "page", path: a.dataset.page });
+  }));
+  body.querySelectorAll("a.doctor-trash").forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault();
+    $("#overlay").classList.add("hidden");
+    openTrashEntry(null);
   }));
   body.querySelectorAll("a.doctor-raw").forEach((a) => a.addEventListener("click", (e) => {
     e.preventDefault();
