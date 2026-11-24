@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -189,6 +191,124 @@ def build_profile_instructions(kb: Path, profile: str) -> str:
     return f"{project.rstrip()}\n\n{section}" if project and project.strip() else section
 
 
+# ───────── P5.5.1 画像默认路径（`~/.guanlan/USER.md`，见 docs/P5.5.1-画像默认路径.md）─────────
+
+# 默认画像相对主目录的位置；`~` 是运行 guanlan 进程的用户（决策D2：只有 CLI 入口认它）。
+DEFAULT_PROFILE_RELPATH = Path(".guanlan") / "USER.md"
+# 首次提示的状态文件（决策D3）：只存最近一次提示过的画像摘要，不存原文。
+PROFILE_NOTICE_RELPATH = Path(".guanlan") / "profile-notice"
+
+
+def _home() -> Path | None:
+    """主目录；`HOME`/`USERPROFILE` 都缺失、`Path.home()` 确定不了时返回 None（§2）。"""
+    try:
+        return Path.home()
+    except RuntimeError:
+        return None
+
+
+def _display_path(p: Path, home: Path | None) -> str:
+    """主目录下的路径显示成 `~/…`，用户更认得出。"""
+    if home is not None:
+        try:
+            return str(Path("~") / p.relative_to(home))
+        except ValueError:
+            pass
+    return str(p)
+
+
+def resolve_default_profile() -> Path | None:
+    """默认画像路径「存在与否」（决策D1）：存在返回路径，否则 None。
+
+    只判存在、不做校验（校验归 `load_profile`，决策D4）。悬空符号链接也算存在：链接本身表明用户想用它，
+    交给 `load_profile` 报「不存在」并降级警告，不当作没有而静默跳过。主目录拿不到时警告一行并返回 None。
+    """
+    home = _home()
+    if home is None:
+        print("⚠ 找不到主目录，未查找默认画像。", file=sys.stderr)
+        return None
+    p = home / DEFAULT_PROFILE_RELPATH
+    try:
+        os.lstat(p)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        # 权限不足等：`lexists` 会当作不存在而静默跳过；这里算存在，交给 `load_profile` 报原因并降级警告。
+        return p
+    return p
+
+
+def _notice_already_shown(home: Path, digest: str) -> bool:
+    try:
+        return (home / PROFILE_NOTICE_RELPATH).read_text(encoding="utf-8").strip() == digest
+    except (OSError, UnicodeDecodeError):
+        return False  # 读不了 → 当作没提示过：失效方向只能是「多提示」
+
+
+def _record_notice(home: Path, digest: str) -> bool:
+    """原子写入摘要（临时文件 + `os.replace`），返回是否写成；写不进就算了，下次照打提示。"""
+    target = home / PROFILE_NOTICE_RELPATH
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".profile-notice.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(digest + "\n")
+            os.replace(tmp, target)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+    except OSError:
+        return False
+    return True
+
+
+def _stderr_is_tty() -> bool:
+    try:
+        return sys.stderr.isatty()
+    except (AttributeError, ValueError):  # 被替换成无 isatty 的对象、或已关闭
+        return False
+
+
+def _notify_default_profile(path: Path, text: str) -> None:
+    """默认画像生效时的提示（决策D3）：内容与上次提示过的不同才打。
+
+    只在 stderr 是终端时记为已提示：重定向（`2>/dev/null`、cron、由别的 Agent 代为调用）时没人看得到，
+    照打但不记，免得唯一一次提示被吞掉。状态读写失败都只会导致多提示，不影响问答。
+    """
+    home = _home()
+    shown = _display_path(path, home)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    tty = _stderr_is_tty()
+    if home is not None and _notice_already_shown(home, digest):
+        return
+    # 先记再打：只有确实记下了，才说「之后不再提示」，状态写不进时不许下这个承诺。
+    recorded = tty and home is not None and _record_notice(home, digest)
+    tail = "之后不再提示；本次不带：--no-profile" if recorded else "本次不带：--no-profile"
+    print(f"ℹ 已附提问者画像：{shown}（{tail}）", file=sys.stderr)
+
+
+def _load_default_profile(kb: Path) -> str | None:
+    """解析并读取默认画像（决策D1/D3/D4）。合格返回全文并按需提示；不存在返回 None；
+    不合格打警告后返回 None（不带画像继续，不改退出码）。`kb` 用于判「画像在库内」。
+    """
+    path = resolve_default_profile()
+    if path is None:
+        return None
+    # 传 `~/…` 写法给 load_profile：报错原因里的路径与提示同样好认（`Path.home()` 即 `expanduser("~")`，等价）。
+    shown = _display_path(path, _home())
+    try:
+        text = load_profile(shown, kb)
+    except GuanlanError as exc:
+        print(
+            f"⚠ 默认画像未使用：{exc}。本次不带画像；修正或移走该文件可消除此警告。",
+            file=sys.stderr,
+        )
+        return None
+    _notify_default_profile(path, text)
+    return text
+
+
 # --backfill 时追加：允许把好答案回填 syntheses/。
 _BACKFILL_SUFFIX = (
     " 若这是一个值得沉淀的好答案，把它回填到 `wiki/syntheses/<slug>.md`"
@@ -205,22 +325,30 @@ def run_query(
     root: str | Path = ".",
     backfill: bool = False,
     profile: str | Path | None = None,
+    use_default_profile: bool = False,
     model: str | None = None,
     runner: AgentRunner | None = None,
 ) -> int:
-    """对知识库提问，返回退出码（见 errors.py）。`profile`：库外画像文件路径（P5.5，仅只读）。"""
+    """对知识库提问，返回退出码（见 errors.py）。
+
+    `profile`：库外画像文件路径（P5.5，仅只读），不合格即 `EXIT_USAGE`。
+    `use_default_profile`：未给 `profile` 时认 `~/.guanlan/USER.md`（P5.5.1）。默认 False：只有 CLI 只读
+    query 打开它，Web 回填作业等其它调用者不会无意间带上画像（决策D2）；回填时忽略（决策D5）。
+    画像只读一次：校验、首次提示与注入用的是同一份文本。
+    """
     if backfill and profile is not None:
         # CLI 已由 argparse 互斥组在解析时拦下（早于取锁）；这里只给直接调用者兜底。
         print("--profile 不能与 --backfill 同用：回填内容进共享的 wiki/syntheses/。", file=sys.stderr)
         return EXIT_USAGE
     try:
         kb = require_kb_root(root, writable=backfill)
-        instructions = (
-            build_profile_instructions(kb, load_profile(profile, kb)) if profile is not None else None
-        )
+        text = load_profile(profile, kb) if profile is not None else None
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
+    if text is None and use_default_profile and not backfill:
+        text = _load_default_profile(kb)  # 不合格只警告、不带画像（决策D4），不会抛
+    instructions = build_profile_instructions(kb, text) if text is not None else None
 
     if not backfill:
         return _run_readonly(question, kb, model, runner, instructions)

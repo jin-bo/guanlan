@@ -73,6 +73,8 @@ def _cmd_query(args: argparse.Namespace) -> int:
         root=args.dir,
         backfill=args.backfill,
         profile=args.profile,
+        # P5.5.1：只读、未显式给 --profile / --no-profile 时才认 ~/.guanlan/USER.md（回填不看，决策D5）。
+        use_default_profile=not (args.backfill or args.no_profile or args.profile is not None),
         model=args.model,
     )
 
@@ -340,8 +342,16 @@ def _add_query_parser(sub, dir_parent) -> None:
         default=None,
         metavar="路径",
         help="附上库外的提问者画像（UTF-8 markdown，≤1500 字），放进系统提示，回答按画像调整角度、"
-        "详略和术语；不参与检索。画像会发给配置的模型提供方，并以明文记入库根 agentao.log"
-        "（写不进时记入 ~/.agentao/agentao.log）。不能与 --backfill 同用",
+        "详略和术语；不参与检索。不给时若 ~/.guanlan/USER.md 存在则自动带上（不合格只警告、不带画像）。"
+        "画像会发给配置的模型提供方，并以明文记入库根 agentao.log"
+        "（写不进时记入 ~/.agentao/agentao.log）。不能与 --backfill 同用；--backfill 一律不带画像",
+    )
+    # 不进上面的互斥组（P5.5.1 决策D1）：--no-profile 可与 --backfill 同用，只与 --profile 冲突，
+    # argparse 互斥组表达不了，由 main 在解析后立刻检查（仍早于取锁）。
+    p.add_argument(
+        "--no-profile",
+        action="store_true",
+        help="本次不带画像（包括 ~/.guanlan/USER.md）",
     )
     p.add_argument("--model", default=None, help="覆盖 Agentao 模型")
     p.set_defaults(func=_cmd_query)
@@ -940,6 +950,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "no_profile", False) and getattr(args, "profile", None) is not None:
+        parser.error("--no-profile 不能与 --profile 同用")
     # -C/--dir 用 SUPPRESS 默认（顶层与子命令共享），未给时统一回落到当前目录。
     if not hasattr(args, "dir"):
         args.dir = "."
