@@ -17,6 +17,17 @@ def _jobs_home(tmp_path_factory, monkeypatch) -> Path:
     return home
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path_factory, monkeypatch) -> Path:
+    """`~` 一律指向空临时目录（P5.5.1 §4）：CLI query 会认 `~/.guanlan/USER.md`，不隔离的话旧用例会读到
+    开发机上的真实画像——作者本机挂、CI（没有画像）却一直绿，看不出来。Windows 的 `Path.home()` 读 `USERPROFILE`。
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
+
+
 @pytest.fixture
 def kb(tmp_path: Path) -> Path:
     """最小但合法的知识库根（满足 require_kb_root 写入口）。"""

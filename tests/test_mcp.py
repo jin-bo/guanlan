@@ -586,6 +586,22 @@ def test_ask_returns_cited_answer(kb_mcp):
     assert seen["permission_mode"] == "read-only"  # 只读姿态（与 CLI query 同源）
 
 
+def test_ask_ignores_default_profile(kb_mcp):
+    """P5.5.1 决策D2：`~/.guanlan/USER.md` 存在时 ask 也不带画像——MCP 客户端是另一个 Agent，不是宿主机主人。"""
+    prof = Path.home() / ".guanlan" / "USER.md"  # conftest 已把 ~ 指到临时目录
+    prof.parent.mkdir(parents=True, exist_ok=True)
+    prof.write_text("## 回答方式\n先给结论。", encoding="utf-8")
+    seen = {}
+
+    def runner(prompt, **kw):
+        seen.update(kw)
+        return AgentRunResult(ok=True, final_text="x")
+
+    mcp = build_mcp(kb_mcp, runner=runner)
+    _run(mcp, lambda c: c.call_tool("ask", {"question": "q"}))
+    assert seen and "instructions" not in seen
+
+
 def test_ask_model_resolution(kb_mcp):
     """model = 工具入参 or 启动 --model or None（不照搬 Web body.model 口径）。"""
     seen = []
