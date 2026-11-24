@@ -89,10 +89,17 @@ __all__ = [
 
 ACTIVE_STATES = ("preparing", "awaiting_confirm", "running", "paused")
 DEFAULT_ITEM_SECONDS = 600  # 没有本库实测记录时，按每篇 10 分钟估
+FLASH_DEFAULT_ITEM_SECONDS = 90  # 快速收录（P5.6）没有实测记录时，按每篇 1.5 分钟估
+FLASH_MODE = "flash"  # 任务清单 `ingest_mode`：缺省 = 完整 ingest；在确认时写定，续跑沿用（P5.6 第二期）
 _RECENT_SAMPLES = 20  # 预计耗时取最近若干篇的均值
 
 Emit = Callable[[str], None]
-IngestFn = Callable[[str, Path], int]
+# 逐篇入库函数：`(raw_rel, root)`；快速收录任务另传关键字 `flash=True`（只对 flash 任务传，旧注入函数不受影响）。
+IngestFn = Callable[..., int]
+
+
+def is_flash_task(task: dict) -> bool:
+    return task.get("ingest_mode") == FLASH_MODE
 
 
 class OneClickError(GuanlanError):
@@ -437,14 +444,19 @@ def _precheck_signature(pc: dict) -> list:
 # ── ①–④ 准备 ────────────────────────────────────────────────────────────────
 
 
-def _average_item_seconds(root: Path) -> float:
+def _average_item_seconds(root: Path, *, flash: bool = False) -> float:
+    """最近若干篇的平均耗时；只取同一模式（完整 / 快速收录）的任务，两种模式耗时差两三倍。"""
     samples: list[float] = []
     for task in iter_tasks(root):
+        if is_flash_task(task) != flash:
+            continue
         for it in task.get("items", []):
             if it.get("state") == "done" and isinstance(it.get("seconds"), (int, float)):
                 samples.append(float(it["seconds"]))
     samples = samples[-_RECENT_SAMPLES:]
-    return sum(samples) / len(samples) if samples else float(DEFAULT_ITEM_SECONDS)
+    if samples:
+        return sum(samples) / len(samples)
+    return float(FLASH_DEFAULT_ITEM_SECONDS if flash else DEFAULT_ITEM_SECONDS)
 
 
 def _rate(items) -> float | None:
@@ -457,10 +469,10 @@ def _rate(items) -> float | None:
     return sec / chars if chars > 0 and sec > 0 else None
 
 
-def _history_rate(root: Path, skip: str | None) -> float | None:
+def _history_rate(root: Path, skip: str | None, *, flash: bool = False) -> float | None:
     recent: list[dict] = []
     for task in iter_tasks(root):
-        if task.get("task_id") != skip:
+        if task.get("task_id") != skip and is_flash_task(task) == flash:
             recent += [it for it in task.get("items", []) if it.get("state") == "done"]
     return _rate(recent[-_RECENT_SAMPLES:])
 
@@ -498,13 +510,14 @@ def progress_info(root: Path, task: dict) -> dict:
     rate = _rate(items)
     basis = "task"
     if rate is None:
-        rate = _history_rate(root, task.get("task_id"))
+        rate = _history_rate(root, task.get("task_id"), flash=is_flash_task(task))
         basis = "history"
     eta = 0.0
     for i, it in enumerate(items):
         if it.get("state") == "done":
             continue
-        est = rate * (it.get("chars") or 0) if rate is not None else float(DEFAULT_ITEM_SECONDS)
+        default = FLASH_DEFAULT_ITEM_SECONDS if is_flash_task(task) else DEFAULT_ITEM_SECONDS
+        est = rate * (it.get("chars") or 0) if rate is not None else float(default)
         eta += max(0.0, est - cur_elapsed) if i == cur_idx else est
     if rate is None:
         basis = "default"
@@ -1335,8 +1348,13 @@ def confirm(
     emit: Emit | None = None,
     ingest: IngestFn,
     should_pause: Callable[[], bool] = lambda: False,
+    flash: bool = False,
 ) -> tuple[int, dict]:
-    """确认开始（**调用方持锁**）：复检 ①–④ 产物哈希与冲突预检 → ⑤ 落 raw/ → ⑥ 依次入库。"""
+    """确认开始（**调用方持锁**）：复检 ①–④ 产物哈希与冲突预检 → ⑤ 落 raw/ → ⑥ 依次入库。
+
+    `flash=True`：本任务逐篇走快速收录（P5.6）。模式在这里写进清单，暂停后续跑（CLI 或 Web）一律沿用，
+    一次导入不会混用两种深度。
+    """
     task = load_task(root, task_id)
     log = TaskLog(root, task_id, emit)
     if task.get("state") != "awaiting_confirm":
@@ -1360,11 +1378,15 @@ def confirm(
     if pc["status"] == "overwritable" and not overwrite:
         raise OneClickError("raw/ 中已有本次的目标文件；确认覆盖才能继续（--overwrite / 勾选「覆盖」）。")
     task["overwrite"] = pc["status"] == "overwritable"
+    if flash:
+        task["ingest_mode"] = FLASH_MODE
+        task["estimate_seconds"] = round(_average_item_seconds(root, flash=True) * len(task["items"]))
     task["stages"]["confirm"] = "done"
     task["state"] = "running"
     task["confirmed"] = _now()
     save_task(root, task)
-    log(f"✓ 已确认，开始入库（{len(task['items'])} {_unit(task)}）")
+    mode = "，快速收录：只建摘要页" if flash else ""
+    log(f"✓ 已确认，开始入库（{len(task['items'])} {_unit(task)}{mode}）")
     # 刚复检过、其间 raw/ 未动：把结果交给 ⑤，不再整扫 raw/、重哈希本任务已写文件一遍
     return _execute(root, task, log=log, ingest=ingest, should_pause=should_pause, pc=pc)
 
@@ -1594,7 +1616,7 @@ def _ingest_items(
         before = wiki_now if wiki_now is not None else _wiki_state(root)
         t0 = time.monotonic()
         try:
-            rc = ingest(it["raw"], root)
+            rc = ingest(it["raw"], root, flash=True) if is_flash_task(task) else ingest(it["raw"], root)
         except KeyboardInterrupt:
             it["state"] = "pending"
             _pause(root, task, log, f"已立即中止；{it['raw']} 的 wiki 写入可能未经门禁收尾，请先运行 `guanlan check`")
@@ -1630,6 +1652,8 @@ def _ingest_items(
     lb, la = task.get("links_before"), task.get("links_after")
     if lb is not None and la is not None:
         log(f"断链：入库前 {lb} 处 → 入库后 {la} 处" + ("；可运行 `guanlan heal --dry-run` 查看可补的页面" if la else ""))
+    if is_flash_task(task):
+        log("本任务为快速收录：只建了摘要页；要整合进实体/概念页，逐篇跑 `guanlan ingest raw/<资料>`（`guanlan health` 列出待加深的篇目）")
     return EXIT_OK, task
 
 
@@ -1651,6 +1675,8 @@ def summary_lines(task: dict, *, detail: bool = False, root: Path | None = None)
     est = task.get("estimate_seconds")
     label = "预演，未建任务" if task.get("dry_run") else _STATE_LABEL.get(task.get("state"), task.get("state"))
     lines = [f"任务 {task['task_id']}（{label}）"]
+    if is_flash_task(task):
+        lines.append("  模式：快速收录（只建摘要页，以后再加深）")
     if task.get("kind") == "batch":
         lines += _batch_doc_lines(task)
         lines.append(f"  合计：{len(items)} 篇" + (f" · 预计耗时约 {_fmt_duration(est)}" if est else ""))
@@ -1801,10 +1827,14 @@ def _default_ingest(model: str | None, thinking: str | None) -> IngestFn:
 
     runner = functools.partial(_subprocess_runner, new_session=True)
 
-    def run(raw_rel: str, root: Path) -> int:
+    def run(raw_rel: str, root: Path, *, flash: bool = False) -> int:
         # ingest 的人读回执（Agent 摘要、门禁结论）打在 stdout；import 的 stdout 只留最终回执（--json 时为 JSON），
         # 故逐篇 ingest 的输出一律转到 stderr，与进展日志同处。
         with contextlib.redirect_stdout(sys.stderr):
+            if flash:
+                from .flash import run_flash_ingest
+
+                return run_flash_ingest(raw_rel, root=root, model=model, thinking=thinking, runner=runner)
             return run_ingest(raw_rel, root=root, model=model, thinking=thinking, runner=runner)
 
     return run
@@ -1840,7 +1870,7 @@ def _progress(line: str) -> None:
 def _receipt(task: dict, json_output: bool, *, root: Path | None = None) -> None:
     if json_output:
         keep = (
-            "task_id", "kind", "state", "reason", "upload", "sample", "split", "docs", "skipped",
+            "task_id", "kind", "ingest_mode", "state", "reason", "upload", "sample", "split", "docs", "skipped",
             "precheck", "normalized", "warnings", "estimate_seconds", "links_before", "links_after",
         )
         out = {k: task.get(k) for k in keep if k in task}
@@ -1874,6 +1904,7 @@ def import_entrypoint(
     interactive: bool | None = None,
     toc_review: bool = True,
     toc_reviewer: TocReviewer | None = None,
+    flash: bool = False,
 ) -> int:
     """`guanlan import` 的单一落地。`ingest` / `interactive` / `toc_reviewer` 供测试注入。
 
@@ -1898,6 +1929,7 @@ def import_entrypoint(
             interactive=interactive,
             toc_review=toc_review,
             toc_reviewer=toc_reviewer,
+            flash=flash,
         )
     except Exception as exc:  # 意外异常（任务已就地暂停）：--json 照样给一份 JSON，再原样上抛
         if json_output and not _JSON_OUT["emitted"]:
@@ -1927,6 +1959,7 @@ def _import_main(
     interactive: bool | None,
     toc_review: bool = True,
     toc_reviewer: TocReviewer | None = None,
+    flash: bool = False,
 ) -> int:
     modes = sum(bool(x) for x in (src, do_resume, status, do_cancel))
     if modes != 1:
@@ -1934,6 +1967,9 @@ def _import_main(
         return EXIT_USAGE
     if dry_run and not src:  # --dry-run 只对 `import <file>` 有意义：别让 `--resume --dry-run` 悄悄真跑入库 / 真放弃
         _stderr("--dry-run 只能与 `import <文件或目录>` 同用（--resume / --status / --cancel 不支持预演）。")
+        return EXIT_USAGE
+    if flash and not src:  # 模式在确认时写进任务清单，续跑沿用；不让 `--resume --flash` 中途换深度
+        _stderr("--flash 只能与 `import <文件或目录>` 同用；续跑沿用任务确认时的模式。")
         return EXIT_USAGE
     try:
         root = require_kb_root(root_dir, writable=not status)
@@ -1970,6 +2006,7 @@ def _import_main(
             backend=backend,
             ingest=run_ingest_fn,
             interactive=interactive,
+            flash=flash,
             # 目录审校默认开启（#175），--dry-run 也审：预演的拆分结果须与正式运行一致；--no-toc-review 关掉
             toc_reviewer=(toc_reviewer or _default_toc_reviewer(root, model, thinking)) if toc_review else None,
         )
@@ -2135,6 +2172,7 @@ def _cli_import(
     ingest: IngestFn,
     interactive: bool,
     toc_reviewer: TocReviewer | None = None,
+    flash: bool = False,
 ) -> int:
     origin = "cli: import --dry-run" if dry_run else "cli: import"
     # 目录 = 一个批量任务（P4.32）；其后的确认、落盘、入库与单份同一条路
@@ -2159,6 +2197,8 @@ def _cli_import(
             print("（--dry-run：未创建任务记录，未写 raw/；中间产物在 workspace/parsed/）")
         return EXIT_OK
     _stderr("\n".join(summary_lines(task, detail=False)))
+    if flash:
+        _stderr("  模式：快速收录（只建摘要页，以后再加深）")
     pc = task["precheck"]
     if pc["status"] == "conflict":
         task = _cancel_locked(root, task["task_id"])
@@ -2183,6 +2223,8 @@ def _cli_import(
             _receipt(task, True)
         return EXIT_OK
     with acquire(root, "cli: import"):
-        code, task = _run_with_pause(confirm, root, task["task_id"], overwrite=overwrite, emit=_progress, ingest=ingest)
+        code, task = _run_with_pause(
+            confirm, root, task["task_id"], overwrite=overwrite, emit=_progress, ingest=ingest, flash=flash
+        )
     _receipt(task, json_output)
     return code

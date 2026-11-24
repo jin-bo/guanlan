@@ -177,6 +177,7 @@ def _cmd_import(args: argparse.Namespace) -> int:
         thinking=args.thinking,
         backend=args.backend,
         toc_review=args.toc_review,
+        flash=args.flash,
     )
 
 
@@ -634,6 +635,12 @@ def _add_import_parser(sub, dir_parent) -> None:
         dest="toc_review",
         action="store_false",
         help="整理时目录只用规则解析，不交模型审校（默认有目录时审校一次，含 --dry-run）",
+    )
+    p.add_argument(
+        "--flash",
+        action="store_true",
+        help="逐篇走快速收录（P5.6）：只建摘要页、index/log 由 wrapper 登记，以后不带 --flash 再 ingest 即加深；"
+        "模式在确认时写进任务，续跑沿用",
     )
     p.set_defaults(func=_cmd_import)
 

@@ -93,6 +93,7 @@ class OneClickBody(ImportOptions):
 
 class ConfirmBody(BaseModel):
     overwrite: bool = False
+    flash: bool = False  # P5.6：逐篇快速收录；确认时写进任务清单，续跑沿用
 
 
 def _log_tail(root: Path, task: dict) -> list[str]:
@@ -138,6 +139,7 @@ def task_view(root: Path, task: dict, *, job_id: str | None = None, pausing: boo
         "log",
         "source_url",  # 网址导入来的任务：任务卡显示原网址（已脱敏，P4.31 §5）
         "kind",  # P4.32：CLI 发起的目录批量任务（"batch"）；单份任务没有这个字段
+        "ingest_mode",  # P5.6：快速收录任务为 "flash"；完整入库没有这个字段
         "docs",
         "skipped",
     )
@@ -207,7 +209,12 @@ def register(
         if owns:
             recover_stale(root)
 
-    def _ingest(raw_rel: str, kb: Path) -> int:
+    def _ingest(raw_rel: str, kb: Path, *, flash: bool = False) -> int:
+        # 快速收录任务（CLI `import --flash` 确认的，或以后 Web 开关确认的）在 Web 续跑时沿用该模式
+        if flash:
+            from ..flash import run_flash_ingest
+
+            return run_flash_ingest(raw_rel, root=kb, model=model, runner=runner)
         return run_ingest(raw_rel, root=kb, model=model, runner=runner)
 
     def _running(task_id: str) -> tuple[str, threading.Event] | None:
@@ -412,10 +419,11 @@ def register(
             raise HTTPException(status_code=409, detail="该任务已确认，正在排队执行。")
         flag = threading.Event()  # 每个作业一枚新标志
         overwrite = body.overwrite
+        flash = body.flash
 
         def _run(emit) -> int:
             code, _task = confirm(
-                root, task_id, overwrite=overwrite, emit=emit, ingest=_ingest, should_pause=flag.is_set
+                root, task_id, overwrite=overwrite, emit=emit, ingest=_ingest, should_pause=flag.is_set, flash=flash
             )
             return code
 

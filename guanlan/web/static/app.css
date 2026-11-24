@@ -635,7 +635,7 @@ body.hide-thinking .chat-think { display: none; }
 .oc-card p { margin: .25rem 0; }
 .oc-actions { display: flex; gap: .4rem; flex-wrap: wrap; margin: .35rem 0; }
 .stage-act.stage-act-quiet { background: transparent; color: var(--lan-deep); border: 1px solid var(--lan-mist); }
-.oc-overwrite { display: block; margin: .3rem 0; font-size: .82rem; }
+.oc-overwrite, .oc-flash { display: block; margin: .3rem 0; font-size: .82rem; }
 .oc-items { margin: .3rem 0; padding-left: 1.4rem; font-size: .8rem; }
 .oc-log { max-height: 14rem; overflow: auto; font-size: .625rem; white-space: pre-wrap; word-break: break-word; }
 .oc-progress-row { display: flex; align-items: center; gap: .6rem; margin: .4rem 0 .2rem; }
