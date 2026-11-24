@@ -3,7 +3,7 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
-## [Unreleased]
+## [0.1.40] - 2026-11-24
 
 ### 新增
 
@@ -40,7 +40,7 @@
   - 撤回任务不拍前像：只能在开始前取消，没有「回滚 / 保留现状」；中断后从任务中心「重新预览」，确认后完成剩余步骤。任务中心的「重试」对撤回改为重新预览。
 - **Web 对话也带提问者画像**（设计见 `docs/P5.5.2-Web问答画像.md`）：`guanlan web` 的对话会话按与 CLI 相同的规则带上画像——`~/.guanlan/USER.md` 存在即带，`--profile <路径>` 指定另一份，`--no-profile` 不带。
   - 每个新会话建立时读一次画像，作为本会话的快照：改了画像文件对新会话生效，已打开的会话不变；启动后才建的默认画像也不用重启。
-  - 会话头部显示画像标记（「画像」/「画像（可写）」/「画像已关」/「⚠ 画像未加载」）；`/profile` 查看本会话状态，`/profile off`、`/profile on` 开关本会话的画像。关闭状态不落盘，会话恢复后回到带画像。
+  - 会话头部显示画像标记：圆形人像图标，可写时变橙色，关闭时加斜杠、淡色虚线，未加载时加感叹号、红色；状态名在无障碍标签里，悬停给全文说明；`/profile` 查看本会话状态，`/profile off`、`/profile on` 开关本会话的画像。关闭状态不落盘，会话恢复后回到带画像。
   - 画像与姿态无关：可写轮也带着画像，Agent 改 wiki 时同样受它影响；想让某次写入不受影响，先 `/profile off`。回填、入库等作业不带画像。
   - 启动时校验一次：显式 `--profile` 不合格拒绝启动，默认画像不合格只警告。`--reader` 一律不带画像（`--reader --profile` 报错）；IM、MCP 不带。
   - 留痕：画像以明文记入库根 `agentao.log`；按画像写的回答随会话快照存进库内 `.agentao/sessions/`（可用 `--no-agent-log`、`--no-session-persist` 关闭）。
@@ -83,6 +83,7 @@
 
 ### 变更
 
+- **用户指南与文档索引跟上近期功能**：中英两份指南补上快速收录、`guanlan trash`、体检（取代原来的 check·health·lint 说法）、Web 撤回源与回收区、问答画像、`--goal` / `--profile` 参数，更正「运行中的任务不能取消」；`docs/README.md` 补齐漏收的分期文档。
 - **agentao 下限升到 0.5.23**：取消现在能打断卡在网络上的模型请求——Web 问答点「停止」、后台任务取消、`agentao run` 收到 SIGINT/SIGTERM，不再要等到请求超时。同版 shell 权限规则收紧、SIGTERM 退出码改为 143，观澜都不受影响。
 - **跟上 MinerU 4.2 的变化**（对照 4.0.12 与 4.2.3 源码；Markdown 输出格式——页标记、页脚注包装、图片语法——未变，观澜的解析后处理无需改）：
   - **托管档位说明更正**（使用指南「MinerU 解析档位」、`pdf-to-markdown` 技能）：4.2 起托管档位有 `basic` / `standard` / `advanced` 三种，`standard` 引擎不再提供 `advanced`；要用 `--tier advanced` 得设 `managed_tier advanced`（复用 standard 的模型）。旧说明照做会得到 `quality_tier_unavailable`。
