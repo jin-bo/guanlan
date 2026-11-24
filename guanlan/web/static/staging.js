@@ -871,12 +871,16 @@ function renderOneclickPanel(panel, data) {
   const name = (task.upload || "").split("/").pop();
   const batch = task.kind === "batch"; // P4.32：CLI 发起的目录批量任务
   const summary = document.createElement("p");
-  summary.textContent = batch
-    ? t("oc.batchSummary", name, (task.docs || []).length, task.items.length, fmtMinutes(task.estimate_seconds))
-    : t("oc.summary", name, task.items.length, fmtMinutes(task.estimate_seconds));
-  if (task.source_url) { // 网址导入（P4.31 §5）：任务卡显示原网址（服务端已去掉签名参数）
-    summary.appendChild(linkMark(task.source_url));
-  }
+  // 估时随确认区的「快速收录」勾选切换（P5.6）：准备时两种模式都估好了，确认前就能比较
+  const setSummary = (seconds) => {
+    summary.textContent = batch
+      ? t("oc.batchSummary", name, (task.docs || []).length, task.items.length, fmtMinutes(seconds))
+      : t("oc.summary", name, task.items.length, fmtMinutes(seconds));
+    if (task.source_url) { // 网址导入（P4.31 §5）：任务卡显示原网址（服务端已去掉签名参数）
+      summary.appendChild(linkMark(task.source_url));
+    }
+  };
+  setSummary(task.estimate_seconds);
   card.append(head, summary);
   if (task.ingest_mode === "flash") { // P5.6：确认时选了快速收录，续跑沿用
     const m = document.createElement("p");
@@ -923,6 +927,10 @@ function renderOneclickPanel(panel, data) {
       flash.type = "checkbox";
       flashLabel.append(flash, document.createTextNode(" " + t("oc.flash")));
       card.appendChild(flashLabel);
+      if (task.estimate_flash_seconds) { // 旧任务清单没有这一项：估时不随勾选变
+        flash.addEventListener("change", () =>
+          setSummary(flash.checked ? task.estimate_flash_seconds : task.estimate_seconds));
+      }
       actions.appendChild(ocButton(t("oc.start"), async () => {
         if (overwrite && !overwrite.checked) { status.textContent = t("oc.overwriteNeeded"); return; }
         try {

@@ -528,6 +528,8 @@ def test_web_confirm_with_flash_runs_quick_capture(kb, fake_convert, monkeypatch
     monkeypatch.setattr(flash_mod, "run_flash_ingest", quick)
     with TestClient(create_app(kb)) as client:
         task = _prepare(client)
+        # 确认前就带两种估时，勾选快速收录时前端据此切换（P5.6）
+        assert task["estimate_flash_seconds"] < task["estimate_seconds"]
         r = client.post(f"/api/oneclick/{task['task_id']}/confirm", json={"flash": True})
         job = _wait(client, r.json()["job_id"])
         assert job["exit_code"] == 0, job["output"]

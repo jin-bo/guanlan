@@ -130,6 +130,7 @@ def task_view(root: Path, task: dict, *, job_id: str | None = None, pausing: boo
         "overwrite",
         "warnings",
         "estimate_seconds",
+        "estimate_flash_seconds",
         "links_before",
         "links_after",
         "created",

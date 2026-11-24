@@ -18,7 +18,7 @@ from fastapi import HTTPException, Query
 from pydantic import BaseModel
 
 from ..errors import EXIT_OK, EXIT_USAGE
-from ..remove import _resolve_slug, _resolve_target, execute_plan, format_plan, plan_digest, run_remove_result
+from ..remove import _resolve_target, resolve_source, execute_plan, format_plan, plan_digest, run_remove_result
 from ..remove_batch import (
     BatchConflict,
     BatchError,
@@ -143,7 +143,7 @@ class RemoveService:
     # ── 预览 ───────────────────────────────────────────────────────────────────
 
     def _slug(self, source: str) -> str:
-        # 按页路径给的源只认 wiki/sources/ 顶层：_resolve_slug 会剥掉目录成分，子目录页会被解析成顶层另一份同名源。
+        # 按页路径给的源只认 wiki/sources/ 顶层：resolve_source 会剥掉目录成分，子目录页会被解析成顶层另一份同名源。
         # 先去掉空段与 `.`：`/wiki/sources/sub/x.md`、`./wiki/sources/sub/x.md` 不能绕过这道检查。
         parts = [p for p in source.strip().replace("\\", "/").split("/") if p not in ("", ".")]
         low = [x.lower() for x in parts]  # 大小写不敏感的盘上 Wiki/Sources 同样是子目录页
@@ -151,7 +151,7 @@ class RemoveService:
         if ".." in parts or ("sources" in low and len(parts) - low.index("sources") > 2):
             raise HTTPException(status_code=400, detail="只能撤回 wiki/sources/ 顶层的摘要页对应的源。")
         try:
-            return _resolve_slug(source)
+            return resolve_source(self.root, source)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
