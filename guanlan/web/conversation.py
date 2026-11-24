@@ -1064,7 +1064,8 @@ class Conversation:
                 "total": len(result.violations),
                 "resolved": resolved,
                 "violations": [
-                    {"page": v.page, "kind": v.kind, "detail": v.detail} for v in new
+                    # 本轮新增的失效来源多半是刚写错的 slug：去掉「可直接摘除」提示（同 _render_violations）
+                    {"page": v.page, "kind": v.kind, "detail": _violation_key(v)[2]} for v in new
                 ],
             }
             if new:

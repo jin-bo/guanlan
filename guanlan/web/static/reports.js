@@ -36,6 +36,7 @@ function doctorActionLabel(action) {
     case "ingest": return t("doctor.action.ingest");
     case "audit": return t("doctor.action.audit");
     case "reindex": return t("doctor.action.reindex");
+    case "dropsrc": return t("doctor.action.dropSources");
     case "graph": return t("doctor.action.graph");
     default: return "";
   }
@@ -53,6 +54,7 @@ function runDoctorAction(action, key) {
   else if (action === "ingest") openIngestPicker();
   else if (action === "audit") openAuditPreview();
   else if (action === "reindex") openReindexPreview();
+  else if (action === "dropsrc") openDropSourcesPreview();
   else if (action === "graph") openGraph({ view: "overview" });
 }
 

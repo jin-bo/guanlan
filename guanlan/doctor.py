@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .audit import audit_preview
 from .check import run_check
+from .deadsrc import plan_dead_sources
 from .gate import partition_violations
 from .graph import build_graph
 from .health import run_health
@@ -70,7 +71,8 @@ def run_doctor(root: Path) -> dict:
     """跑一次体检，返回 `{ok, pages_checked, total, elapsed_s, categories: [...]}`。
 
     `categories` 按展示顺序排列，每项 `{key, section, count, items, action}`：`section` ∈ blocking / suggest / structure；
-    `action` 是修复入口（heal / ingest / audit / reindex / graph，或 None）。`count == len(items)`，即最终展示项数。
+    `action` 是修复入口（heal / ingest / audit / reindex / dropsrc / graph，或 None）。`count == len(items)`，即最终展示项数。
+    必须修里能一键修的只有失效来源（§6.3 摘除 / §6.4 删页）：这些条目带 `fix: "dropsrc"`，有一条以上时该类 action 为 dropsrc。
     """
     started = time.monotonic()
     root = Path(root)
@@ -120,8 +122,27 @@ def run_doctor(root: Path) -> dict:
     preview = audit_preview(wiki)
     drift_items = list(preview.get("groups") or []) + list(preview.get("postponed") or [])  # 全量：limit 只管一批审几组
 
+    # 失效来源的修复入口（§6.3 / §6.4）：同页另有有效来源 → 摘掉失效项；全部失效的内容页 → 可整页删进回收区。
+    # 两种都由同一个预览浮层处理，故按页标到 sources.unresolved 条目上即可，不解析 detail 里的 slug。
+    # 全部失效的摘要页两样都不适用（随源走，归撤回 / 恢复），不标。
+    # 没有 sources.unresolved 就不必再整库读一遍。
+    droppable = (
+        {d.page for d in plan_dead_sources(root) if d.droppable or not d.page.startswith("wiki/sources/")}
+        if any(v.kind == "sources.unresolved" for v in blocking)
+        else set()
+    )
+
+    def _blocking_item(v) -> dict:
+        item = {"page": v.page, "kind": v.kind, "detail": v.detail}
+        if v.kind == "sources.unresolved" and v.page in droppable:
+            item["fix"] = "dropsrc"
+        return item
+
+    blocking_items = [_blocking_item(v) for v in blocking]
+    blocking_action = "dropsrc" if any(i.get("fix") for i in blocking_items) else None
+
     categories = [
-        _category("blocking", "blocking", [{"page": v.page, "kind": v.kind, "detail": v.detail} for v in blocking]),
+        _category("blocking", "blocking", blocking_items, blocking_action),
         _category("missing_entity", "suggest", missing_items, "heal"),
         _category("broken_link", "suggest", broken_items, "heal"),  # 前端以 min_refs=1 打开 heal 预览（原顶栏 heal 可调到 1）
         _category("pending_raw", "suggest", _pending_raw(root), "ingest"),

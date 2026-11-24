@@ -60,6 +60,8 @@ function taskTitle(row) {
         : t("task.title.heal", p.limit || "");
     case "audit": return t("task.title.audit", p.limit || "");
     case "reindex": return p.prune ? t("task.title.reindexPrune") : t("task.title.reindex");
+    case "dropsrc": return t("task.title.dropSources");
+    case "prune": return t("task.title.prune", (p.pages || []).length);
     case "remove": return p.scope === "all" ? t("task.title.removeAll", p.raw_dir || "") : t("task.title.remove", p.source || "");
     case "restore": return t("task.title.restore", p.name || "");
     case "import": return t("task.title.import", row.title || row.id);
@@ -196,8 +198,8 @@ function onTaskFinished(row) {
   else if (row.state === "cancelled") showToast(t("task.toast.cancelled", title), "info");
   else showToast(t("task.toast.failed", title, taskStateLabel(row.state)), "bad");
   loadPages(); // 写任务可能新建/改了页：刷新右栏列表
-  // 撤回 / 恢复 / 回滚会改回收区（P4.36）：回收区页签开着就重拉，免得还显示旧状态与「恢复」按钮
-  const touchesTrash = ["remove", "restore"].includes(row.kind) || !!row.rollback;
+  // 撤回 / 恢复 / 删页 / 回滚会改回收区（P4.36、P4.34 §6.4）：回收区页签开着就重拉，免得还显示旧状态与「恢复」按钮
+  const touchesTrash = ["remove", "restore", "prune"].includes(row.kind) || !!row.rollback;
   if (touchesTrash && taskDrawerOpen() && taskDrawerTab === "trash") loadTrash();
 }
 

@@ -117,31 +117,45 @@ def _check_wikilinks(page: str, body: str, idx: dict[str, str]) -> list[Violatio
     return violations
 
 
+# `sources.unresolved` 文案里「可直接摘除」提示的起头。提示随同页其它来源的存活而变，**不属于违规身份**：
+# 写门禁的基线 diff（`gate._vkey`）按它截掉提示，否则补上新来源会让既有违规换了文案、被当成本次新引入。
+SOURCES_HINT_SEP = "；该页另有 "
+SOURCES_HINT_TAIL = " 个有效来源，此项可直接摘除（Web 体检一键处理，或手改 frontmatter）"
+SOURCES_HINT_RE = re.compile(re.escape(SOURCES_HINT_SEP) + r"\d+" + re.escape(SOURCES_HINT_TAIL) + "$")  # 只认文末那句提示，slug 里碰巧含同样字样不误截
+
+
+def source_resolves(wiki: Path, slug: str) -> bool:
+    """`sources` 里的一个 slug 是否解析到 `wiki/sources/<slug>.md`（check 与失效来源摘除共用的判据）。
+
+    slug 必须解析为 wiki/sources/ 下的**直接**文件：禁止路径分隔符与 `..`，否则像 `../concepts/Foo`
+    这样的 slug 会借 is_file() 跟随 `..` 命中 sources/ 之外的页面，绕过"每个 source 必须落在
+    wiki/sources/"的硬约束。
+    """
+    safe = "/" not in slug and "\\" not in slug and slug not in (".", "..")
+    return safe and (wiki / "sources" / f"{slug}.md").is_file()
+
+
 def _check_sources(page: str, meta: dict | None, wiki: Path) -> list[Violation]:
-    """frontmatter `sources` 里每个 slug 必须有对应的 wiki/sources/<slug>.md。"""
+    """frontmatter `sources` 里每个 slug 必须有对应的 wiki/sources/<slug>.md。
+
+    同页另有能解析的来源时，文案补一句「可直接摘除」（`deadsrc` 的判据，见 docs/P4.34 §6.3）：
+    典型是先撤回独源页的唯一来源、后来再入库补上新来源——撤回时没摘、之后也没有哪一步再摘。
+    """
     if meta is None:
         return []
     sources = meta.get("sources")
     if not isinstance(sources, list):
         return []  # 类型问题已由 frontmatter 校验记账，这里不重复。
 
-    violations: list[Violation] = []
-    for slug in sources:
-        if not isinstance(slug, str):
-            continue
-        # slug 必须解析为 wiki/sources/ 下的**直接**文件：禁止路径分隔符与 `..`，否则像
-        # `../concepts/Foo` 这样的 slug 会借 is_file() 跟随 `..` 命中 sources/ 之外的页面，
-        # 绕过"每个 source 必须落在 wiki/sources/"的硬约束。
-        safe = "/" not in slug and "\\" not in slug and slug not in (".", "..")
-        if not (safe and (wiki / "sources" / f"{slug}.md").is_file()):
-            violations.append(
-                Violation(
-                    page,
-                    "sources.unresolved",
-                    f"sources 列出的 {slug!r} 无 wiki/sources/{slug}.md",
-                )
-            )
-    return violations
+    slugs = [s for s in sources if isinstance(s, str)]
+    dead = [s for s in slugs if not source_resolves(wiki, s)]
+    live = len(set(slugs) - set(dead))
+    # 混有非字符串项的 `sources` 由 frontmatter 校验记账，`deadsrc` 不碰（`_trusted_sources` 为 None）：不能说「可直接摘除」。
+    hint = f"{SOURCES_HINT_SEP}{live}{SOURCES_HINT_TAIL}" if live and len(slugs) == len(sources) else ""
+    return [
+        Violation(page, "sources.unresolved", f"sources 列出的 {slug!r} 无 wiki/sources/{slug}.md{hint}")
+        for slug in dead
+    ]
 
 
 def _check_aliases_type(page: str, meta: dict) -> tuple[list[Violation], list[str]]:

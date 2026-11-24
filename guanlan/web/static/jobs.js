@@ -619,6 +619,126 @@ async function triggerReindex(prune) {
   });
 }
 
+// ── 摘除失效来源（P4.34 §6.3）：体检「必须修」里 sources.unresolved 的修复入口 ─────────────────
+// GET /api/sources/drop-dead/preview（零 LLM）分两组：另有有效来源、可直接摘的页；全部来源都失效、要人工处理的页。
+// 提交后进任务中心，作业执行时服务端重算，只摘第一组。
+async function openDropSourcesPreview() {
+  showOverlay("overlay.dropSources", `<p class="muted">${escapeHtml(t("common.running"))}</p>`);
+  let data;
+  try {
+    data = await getJSON("/api/sources/drop-dead/preview");
+  } catch (e) {
+    $("#overlay-body").innerHTML = `<p class="report-bad">${escapeHtml(t("dropSources.previewFail", e.message))}</p>`;
+    return;
+  }
+  // 删页（§6.4）默认全选；勾选状态跨语言切换保留
+  const picked = new Set((data.prunable || []).map((d) => d.page));
+  const paint = () => renderDropSourcesPreview(data, picked);
+  paint();
+  overlayRepaint = paint; // 语言切换纯重渲染（吃缓存 data）
+}
+
+function renderDropSourcesPreview(data, picked) {
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  const droppable = data.droppable || [];
+  const prunable = data.prunable || [];
+  const manual = data.manual || [];
+  const para = (text, cls) => {
+    const el = document.createElement("p");
+    if (cls) el.className = cls;
+    el.textContent = text;
+    box.appendChild(el);
+    return el;
+  };
+  const list = (head, items, render) => {
+    para(head);
+    for (const it of items) {
+      const row = document.createElement("div");
+      row.className = "heal-item postponed";
+      row.textContent = render(it); // textContent：页名、slug 按字面显示，无注入
+      box.appendChild(row);
+    }
+  };
+  const button = (label, disabled, onClick) => {
+    const top = document.createElement("div");
+    top.className = "heal-top";
+    const go = document.createElement("button");
+    go.className = "heal-go";
+    go.textContent = label;
+    go.disabled = disabled;
+    go.addEventListener("click", onClick);
+    top.appendChild(go);
+    box.appendChild(top);
+  };
+  if (!droppable.length && !prunable.length && !manual.length) {
+    para(t("dropSources.none"), "report-ok");
+    return;
+  }
+  // 一、另有有效来源：摘掉失效项（§6.3）
+  if (droppable.length) {
+    button(t("dropSources.go", droppable.length), false, () => triggerDropSources(droppable));
+    list(t("dropSources.head", droppable.length), droppable,
+      (d) => `− ${d.page}: ${d.dead.join(", ")}  ${t("dropSources.keep", d.live.length)}` +
+        ((d.in_trash || []).length ? "  " + t("dropSources.inTrash", d.in_trash.join(", ")) : ""));
+    para(t("dropSources.note"), "muted");
+  }
+  // 二、全部来源失效的内容页：整页删进回收区（§6.4），逐页勾选
+  if (prunable.length) {
+    const indexOk = data.index_readable !== false;
+    button(t("prune.go", picked.size), !picked.size || !indexOk, () => triggerPrune([...picked]));
+    if (!indexOk) para(t("prune.indexUnreadable"), "report-bad");
+    para(t("prune.head", prunable.length));
+    for (const d of prunable) {
+      const label = document.createElement("label");
+      label.className = "heal-item";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = picked.has(d.page);
+      cb.addEventListener("change", () => {
+        if (cb.checked) picked.add(d.page); else picked.delete(d.page);
+        // 整块重画会先清空浮层、滚动位置归零：长列表里每点一个勾选框都会跳回顶部，故记下再还原
+        const top = box.scrollTop;
+        renderDropSourcesPreview(data, picked);
+        box.scrollTop = top;
+      });
+      // 入链按勾选现算：同样被勾选删除的页不算（它也走了）；没勾选的页留下来，删后就是断链
+      const linkers = picked.has(d.page) ? (d.backlinks || []).filter((p) => !picked.has(p)) : [];
+      const links = linkers.length ? "  " + t("prune.linkedBy", linkers.join(", ")) : "";
+      const trashed = (d.in_trash || []).length ? "  " + t("prune.inTrash", d.in_trash.join(", ")) : "";
+      label.append(cb, document.createTextNode(` ${d.page}: ${d.dead.join(", ")}${links}${trashed}`));
+      box.appendChild(label);
+    }
+    // 将删的 index 行 = 勾选页各自登记行的并集（执行时以服务端重算为准）
+    // 一行链向多张可删页（index_lines_shared）：这些页全被勾选才删（同执行时 `_prune_dangling` 的口径）
+    const lines = [...new Set(prunable.filter((d) => picked.has(d.page)).flatMap((d) => [
+      ...(d.index_lines || []),
+      ...(d.index_lines_shared || []).filter((x) => (x.pages || []).every((p) => picked.has(p))).map((x) => x.line),
+    ]))];
+    if (lines.length) list(t("prune.indexHead", lines.length), lines, (ln) => `− ${ln}`);
+    para(t("prune.note"), "muted");
+  }
+  if (manual.length) list(t("dropSources.manualHead", manual.length), manual, (d) => `· ${d.page}: ${d.dead.join(", ")}`);
+}
+
+// 带上预览里每页列出的失效 slug：执行时只摘这些（预览之后才失效的不碰）。
+async function triggerDropSources(rows) {
+  const drops = {};
+  for (const d of [...rows].sort((a, b) => (a.page < b.page ? -1 : a.page > b.page ? 1 : 0))) drops[d.page] = [...d.dead].sort();
+  await submitBackgroundTask("/api/sources/drop-dead", { drops }, "dropsrc", { drops }, async (jobId) => {
+    showOverlay("overlay.dropSources", `<p class="muted">${escapeHtml(t("dropSources.submitted"))}</p>`);
+    await pollJob(jobId, t("overlay.dropSources"));
+  });
+}
+
+async function triggerPrune(pages) {
+  const sorted = [...pages].sort();
+  await submitBackgroundTask("/api/pages/prune", { pages: sorted }, "prune", { pages: sorted }, async (jobId) => {
+    showOverlay("overlay.dropSources", `<p class="muted">${escapeHtml(t("prune.submitted"))}</p>`);
+    await pollJob(jobId, t("overlay.dropSources"));
+  });
+}
+
 function renderAuditDone(job, box) {
   if (!box) {
     box = $("#overlay-body");

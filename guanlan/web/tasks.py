@@ -41,7 +41,7 @@ from ..oneclick import iter_tasks as iter_import_tasks
 from ..rawio import atomic_write_text
 from .jobs import CANCELLED_BEFORE_START, Emit, Job
 
-TASK_KINDS = ("ingest", "backfill", "heal", "audit", "reindex", "remove", "restore")  # reindex：索引修复（P4.34 §6.2）；remove：撤回源（P4.35）；restore：恢复撤回条目（P4.36）
+TASK_KINDS = ("ingest", "backfill", "heal", "audit", "reindex", "dropsrc", "prune", "remove", "restore")  # reindex：索引修复（P4.34 §6.2）；dropsrc：摘除失效来源（P4.34 §6.3）；prune：删除失源页（§6.4）；remove：撤回源（P4.35）；restore：恢复撤回条目（P4.36）
 # 不拍前像的任务（P4.35 §2）：撤回的核心动作是移走 raw，前像不含 raw/，回滚必然 rollback_failed 且留下更糟的半态。
 # 这类任务只能在开始前取消，运行中取消 → 409；中断后不给「回滚 / 保留现状」，按「重新预览再提交」向前收敛。
 NO_PREIMAGE_KINDS = ("remove", "restore")  # 恢复同理：要往 raw/ 写，前像不覆盖 raw/（P4.36 §5.3）

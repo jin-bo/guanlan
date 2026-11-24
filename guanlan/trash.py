@@ -28,6 +28,8 @@ from .paths import require_kb_root
 TRASH = ".trash"
 REMOVE_MANIFEST = "manifest.json"
 ROLLBACK_LOG = "manifest.jsonl"  # 与 preimage.TRASH_LOG 同名（回滚的逐项记录）
+PRUNE_RECORD = "prune.json"  # 删失源页（P4.34 §6.4）的记录文件；与撤回的 manifest.json 分开，旧版本只会认作「未知」
+PRUNE_FORMAT = 1
 RESTORE_RECORD = "restore.json"  # 恢复进度（§5.3）：有则 restoring / restored
 MANIFEST_FORMAT = 2  # 撤回 manifest 格式：2 = before_sources 保留原顺序、带 origin（§5.1）
 
@@ -87,7 +89,7 @@ class TrashItem:
 @dataclass
 class TrashEntry:
     name: str
-    kind: str  # remove / remove_batch / rollback / unknown
+    kind: str  # remove / remove_batch / rollback / prune / unknown
     state: str  # complete / incomplete / partial / restoring / restored / unknown
     when: str
     size: int
@@ -146,6 +148,10 @@ class TrashEntry:
                         if isinstance(m, dict)
                     ],
                 }
+        elif self.kind == "prune":
+            d["index_lines_removed"] = [str(x) for x in _as_list(rec.get("index_lines_removed")) if isinstance(x, str)]
+            bl = rec.get("backlinks") if isinstance(rec.get("backlinks"), dict) else {}
+            d["backlinks"] = sorted({str(x) for v in bl.values() for x in _as_list(v) if isinstance(x, str)})
         elif self.kind == "rollback":
             d["meta"] = {k: v for k, v in rec.items() if isinstance(v, (str, int, float, bool))}
         if self.restore is not None:
@@ -335,6 +341,9 @@ def _entry(root: Path, trash: Path, name: str) -> TrashEntry:
         base.note = "名字不是系统条目的形态"
         return base
 
+    prune = _read_json(path / PRUNE_RECORD)
+    if isinstance(prune, dict) and prune.get("kind") == "prune" and isinstance(prune.get("moved"), list):
+        return _prune_entry(root, path, base, prune)
     manifest = _read_json(path / REMOVE_MANIFEST)
     if isinstance(manifest, dict) and isinstance(manifest.get("moved"), list):
         return _remove_entry(root, path, base, manifest)
@@ -386,6 +395,69 @@ def _remove_entry(root: Path, path: Path, e: TrashEntry, manifest: dict) -> Tras
     else:
         e.state = "complete"
     _apply_restore(path, e)
+    return e
+
+
+def _prune_entry(root: Path, path: Path, e: TrashEntry, record: dict) -> TrashEntry:
+    """删失源页条目（P4.34 §6.4）：移走的只能是 wiki/ 下、非摘要页、非 config 页的 .md。状态判定同撤回（只看归档侧）。"""
+    e.kind = "prune"
+    e.record = record
+    if isinstance(record.get("pruned_at"), str):
+        e.when = record["pruned_at"]
+    moved = record["moved"]
+    # 不分语言：页名（stem）列前三个，多出的记 +N（同 remove_batch 的 `dir · n`，不写死中文量词）
+    stems = [PurePosixPath(str(x)).stem for x in moved]
+    e.subject = ", ".join(stems[:3]) + (f" +{len(stems) - 3}" if len(stems) > 3 else "")
+    for rel in moved:
+        clean = _clean_rel(rel)
+        bad = None
+        if clean is None:
+            bad = "路径不合规（须是库内相对路径、不含 ..）"
+        elif (
+            not clean.startswith("wiki/")
+            or clean.startswith("wiki/sources/")
+            or not clean.endswith(".md")
+            or clean in _CONFIG_PAGES
+        ):
+            bad = "不是 wiki/ 下的内容页"
+        item = TrashItem(path=clean or str(rel), saved_as=clean or str(rel), invalid=bad)
+        if clean is not None:
+            if bad is None:
+                link = _link_component(root, clean)
+                if link is not None:
+                    item.invalid = f"路径途经软链接（{link}/）"
+                elif _has_link_component(path, clean):
+                    item.invalid = "回收区里的路径途经软链接"
+            item.archived = not _has_link_component(path, clean) and os.path.lexists(path / clean)
+            item.origin_exists = os.path.lexists(root / clean)
+        e.items.append(item)
+    missing = [it for it in e.items if not it.archived and _clean_rel(it.path) is not None]
+    if any(it.origin_exists for it in missing):
+        e.state = "incomplete"
+    elif missing:
+        e.state = "partial"
+    else:
+        e.state = "complete"
+    # 删页的最后一步是删 index 登记行：中断在那之前（或任务中断后选了「保留现状」），页已进回收区、登记行还在。
+    # 不另设状态（体检「索引不同步」会报、可一键修），只在条目上说一句。
+    index = root / "wiki" / "index.md"
+    planned = [x for x in _as_list(record.get("index_lines_removed")) if isinstance(x, str)]
+    if planned and index.is_file() and not os.path.islink(index):
+        try:
+            present = set(index.read_text(encoding="utf-8").splitlines())
+        except (OSError, UnicodeDecodeError):
+            present = set()
+        # 只算目标页仍不在原处的行：取消回滚把页与 index 一并放回后，这些行指向的页又在了、不是悬空项，
+        # 再提示「用 reindex --prune 删」就是错的（它不会删、也不该删）。
+        from .pages import index_md_links
+
+        left = [
+            x
+            for x in planned
+            if x in present and not any(os.path.lexists(root / "wiki" / t) for t in index_md_links(x))
+        ]
+        if left:
+            e.note = f"index.md 里还有 {len(left)} 条指向被删页的登记行没删：用体检「索引不同步」的修复，或运行 guanlan reindex --prune"
     return e
 
 
@@ -580,7 +652,9 @@ def protections(root: Path, entry: TrashEntry, envelopes: list[dict] | None = No
     """条目当前受哪些删除保护（§4.2），返回原因列表；空表 = 可删。"""
     root = Path(root)
     reasons: list[str] = []
-    if entry.state == "incomplete":
+    # 删页（P4.34 §6.4）没做完不保护：没有续跑步骤要用这份记录，仍在原处的页本来就没丢。
+    # （取消回滚把页放回原处时，回收区那份副本仍在、条目显示「完整」——只是多一份副本，可彻底删。）
+    if entry.state == "incomplete" and entry.kind != "prune":
         reasons.append("撤回尚未完成，续跑还要用这份记录（重新预览撤回或重跑 guanlan remove 完成后再删）")
     if entry.state == "restoring":
         reasons.append("恢复做了一半，续跑要用这份进度")
@@ -666,7 +740,7 @@ def purge(root: Path, name: str, *, origin: str = "trash purge") -> TrashEntry:
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 
-_KIND_LABEL = {"remove": "撤回", "remove_batch": "整批撤回", "rollback": "回滚", "unknown": "未知"}
+_KIND_LABEL = {"remove": "撤回", "remove_batch": "整批撤回", "rollback": "回滚", "prune": "删页", "unknown": "未知"}
 _STATE_LABEL = {
     "complete": "完整",
     "incomplete": "撤回未完成",
@@ -675,6 +749,13 @@ _STATE_LABEL = {
     "restored": "已恢复",
     "unknown": "未知",
 }
+
+
+def _state_label(e: TrashEntry) -> str:
+    """「未完成」按种类说：删页条目不是撤回（P4.34 §6.4）。"""
+    if e.kind == "prune" and e.state == "incomplete":
+        return "删页未完成"
+    return _STATE_LABEL.get(e.state, e.state)
 
 
 def fmt_size(n: int) -> str:
@@ -694,7 +775,7 @@ def _line(e: TrashEntry) -> str:
     tail = f"  [{'，'.join(flags)}]" if flags else ""
     subject = f"  {e.subject}" if e.subject else ""
     return (
-        f"{e.name}\n    {_KIND_LABEL.get(e.kind, e.kind)} · {_STATE_LABEL.get(e.state, e.state)} · {e.when} · "
+        f"{e.name}\n    {_KIND_LABEL.get(e.kind, e.kind)} · {_state_label(e)} · {e.when} · "
         f"{fmt_size(e.size)} · {e.files} 个文件{subject}{tail}"
     )
 
@@ -719,6 +800,9 @@ def _print_detail(e: TrashEntry) -> None:
         print(f"  摘除来源：{x.get('page')} ← {x.get('dropped_slug')}")
     for ln in d.get("index_lines_removed") or []:
         print(f"  删除的 index 行：{ln}")
+    if e.kind == "prune":
+        for p in d.get("backlinks") or []:
+            print(f"  删除时仍链向被删页：{p}")
     for reason in e.protected:
         print(f"  受保护：{reason}")
 
