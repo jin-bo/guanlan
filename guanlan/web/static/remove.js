@@ -156,7 +156,7 @@ function renderRemovePreview(st) {
   } else {
     removeList(box, t("remove.relocateHead", (d.relocate || []).length), d.relocate || [], (r) => `· ${r}`);
     removeList(box, t("remove.dropHead"), d.drop_slug || [], (x) =>
-      `· ${x.page}：${t("remove.dropItem", d.slug, (x.before_sources || []).filter((s) => s !== d.slug).length)}`);
+      `· ${x.page}：${t("remove.dropItem", d.slug, new Set((x.before_sources || []).filter((s) => s !== d.slug)).size)}`); // before_sources 保留原列表（可能重复），按不同源计，与 CLI 一致
   }
   removeList(box, t("remove.indexHead"), d.index_lines || [], (ln) => `− ${ln}`);
   removeList(box, t("remove.orphansHead"), d.orphans || [], (p) => `⚠ ${p}`, "report-bad");

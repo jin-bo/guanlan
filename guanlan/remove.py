@@ -46,6 +46,7 @@ from .rawio import (  # slug 归一 + 逐字读写（避免半写、不静默改
     same_name_key,
     source_identity,
 )
+from .trash import MANIFEST_FORMAT, detect_origin  # P4.36：manifest 格式与续撤判定
 from .reindex import (  # index 行删除的单一归口
     _join_lines,
     _prune_dangling,
@@ -275,7 +276,8 @@ def _scan_derivatives(root: Path, slug: str) -> tuple[list[DropSlug], list[str]]
         if sources == frozenset({slug}):
             orphans.append(rel)  # 独源：一期只 advisory、不删（决策P3.9-3）
         else:
-            drops.append(DropSlug(page=rel, before_sources=sorted(sources)))
+            # 记页面原列表（P4.36 T2：恢复按原位补回），不再排序去重；_trusted_sources 已保证是字符串列表
+            drops.append(DropSlug(page=rel, before_sources=list(meta["sources"])))
     return drops, orphans
 
 
@@ -440,11 +442,14 @@ def _execute(root: Path, plan: RemovePlan, *, before_write: Callable[[], None] |
     )
     if before_write is not None:
         before_write()  # P4.35：任务信封记下「开始写」；抛异常则不写任何东西
+    origin = detect_origin(root, plan.relocate)  # 建新目录之前判定：本次的空目录不参与续撤判定
     now = datetime.now()
     trash_dir = _new_trash_dir(root, plan.slug, now)
 
     # ① manifest 先写（纯记录：审计 + 人工恢复配方 + 二期 restore 输入）
     manifest = {
+        "format": MANIFEST_FORMAT,  # P4.36：2 = before_sources 保留原顺序、带 origin
+        "origin": origin,
         "slug": plan.slug,
         "removed_at": now.isoformat(timespec="seconds"),
         "moved": list(plan.relocate),
@@ -594,7 +599,7 @@ def format_plan(plan: RemovePlan, *, executed: bool, json_output: bool) -> str:
     if plan.relocate:
         out.append(f"    移入 .trash/：{', '.join(plan.relocate)}")
     for d in plan.drop_slug:
-        rest = len([s for s in d.before_sources if s != plan.slug])
+        rest = len({s for s in d.before_sources if s != plan.slug})  # before_sources 现保留原列表（可能有重复），按不同源计
         out.append(f"    摘 slug（多源页保留，剩 {rest} 源）：{d.page}")
     for ln in plan.index_lines:
         out.append(f"    删 index 行：{ln}")

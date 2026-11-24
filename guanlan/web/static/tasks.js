@@ -61,6 +61,7 @@ function taskTitle(row) {
     case "audit": return t("task.title.audit", p.limit || "");
     case "reindex": return p.prune ? t("task.title.reindexPrune") : t("task.title.reindex");
     case "remove": return p.scope === "all" ? t("task.title.removeAll", p.raw_dir || "") : t("task.title.remove", p.source || "");
+    case "restore": return t("task.title.restore", p.name || "");
     case "import": return t("task.title.import", row.title || row.id);
     default: return (row && (row.title || row.id)) || "";
   }
@@ -195,6 +196,9 @@ function onTaskFinished(row) {
   else if (row.state === "cancelled") showToast(t("task.toast.cancelled", title), "info");
   else showToast(t("task.toast.failed", title, taskStateLabel(row.state)), "bad");
   loadPages(); // 写任务可能新建/改了页：刷新右栏列表
+  // 撤回 / 恢复 / 回滚会改回收区（P4.36）：回收区页签开着就重拉，免得还显示旧状态与「恢复」按钮
+  const touchesTrash = ["remove", "restore"].includes(row.kind) || !!row.rollback;
+  if (touchesTrash && taskDrawerOpen() && taskDrawerTab === "trash") loadTrash();
 }
 
 // ── 顶栏徽标 ────────────────────────────────────────────────────────────────
@@ -384,8 +388,9 @@ async function refreshExpandedTask() {
 // 详情顶部的操作按钮（P4.33 T2）：排队 / 等锁 / 运行中的可取消（运行中的取消会回滚）；中断 / 回滚失败的
 // 可回滚或保留现状（有前像时）；已结束的可重试；没有前像的可删除记录。
 function renderTaskActions(row, box) {
-  const actions = row.kind === "remove" ? removeTaskActions(row) : [];
-  if (row.kind !== "remove") pushTaskActions(row, actions);
+  const noPreimage = row.kind === "remove" || row.kind === "restore"; // 不拍前像（P4.35 / P4.36）
+  const actions = noPreimage ? removeTaskActions(row) : [];
+  if (!noPreimage) pushTaskActions(row, actions);
   if (!actions.length) return;
   const bar = document.createElement("div");
   bar.className = "task-actions";
@@ -441,6 +446,7 @@ function taskActionConfirm(row, act) {
 }
 
 async function taskAction(row, act, btn) {
+  if (act === "repreview" && row.kind === "restore") { openRestorePreview((row.params || {}).name); return; } // 恢复：回收区重新预览（trash.js）
   if (act === "repreview") { reopenRemoveFromTask(row); return; } // 撤回：重新预览（remove.js）
   if (!taskActionConfirm(row, act)) return;
   btn.disabled = true;
@@ -521,6 +527,11 @@ function renderTaskDetail(row, box) {
     // 撤回没有前像（P4.35 §3.5）：不说「检查后重新提交」，引导重新预览；回收区可能已有本次的 manifest
     if (row.superseded_by) taskHint(box, t("task.remove.supersededHint"), "muted");
     else taskHint(box, t("task.remove.interruptedHint"), "report-bad");
+  } else if (row.state === "interrupted" && row.kind === "restore") {
+    if (row.superseded_by) taskHint(box, t("task.restore.supersededHint"), "muted");
+    else taskHint(box, t("task.restore.interruptedHint"), "report-bad");
+  } else if (row.state === "cancelled" && row.kind === "restore") {
+    taskHint(box, t("task.restore.cancelledHint"));
   } else if (row.state === "cancelled" && row.kind === "remove") {
     taskHint(box, t("task.remove.cancelledHint")); // 撤回没有「重试」：引导重新预览
   } else if (row.state === "interrupted") {

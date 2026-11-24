@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from guanlan import kblock  # noqa: E402
 from guanlan.remove import remove_entrypoint  # noqa: E402
 from guanlan.web.app import create_app  # noqa: E402
+from guanlan.web.tasks import RESTORE_INTERRUPTED, RESTORE_NOT_STARTED, TaskStore, jobs_dir  # noqa: E402
 
 _CLI_HOLDER = """
 import sys
@@ -137,3 +140,97 @@ def test_frontend_wired() -> None:
     assert "/static/trash.js" in html and 'data-tab="trash"' in html
     js = (static / "trash.js").read_text(encoding="utf-8")
     assert "/api/trash/purge" in js and "confirm(" not in js  # 二次确认在浮层里，不弹浏览器 confirm
+    # 被别的文件调用的函数须在顶层（经典脚本共享全局）：嵌进别的函数体里 node --check 也查不出
+    import re
+
+    for fn in ("openRestorePreview", "openTrashEntry", "renderTrashTab", "renderTrashLinks", "setTaskDrawerTab"):
+        assert re.search(rf"^(async )?function {fn}\(", js, re.M), fn
+
+
+# ---------- T2 恢复 ----------
+
+_ACTIVE = ("queued", "waiting_lock", "running", "cancelling", "rolling_back")
+
+
+def _wait(client, task_id: str, timeout: float = 10.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        data = client.get(f"/api/tasks/{task_id}").json()
+        if data["state"] not in _ACTIVE:
+            return data
+        time.sleep(0.02)
+    raise AssertionError(f"任务 {task_id} 未在 {timeout}s 内结束")
+
+
+def test_restore_preview_and_submit(kb) -> None:
+    name = _removed(kb)
+    with TestClient(create_app(kb)) as client:
+        assert client.get("/api/trash").json()["entries"][0]["restorable"] is True
+        p = client.get("/api/trash/restore/preview", params={"name": name}).json()
+        assert p["ok"] and [i["path"] for i in p["items"]] == ["raw/foo.md", "wiki/sources/foo.md"]
+        r = client.post("/api/restore", json={"name": name, "plan_digest": p["digest"]})
+        assert r.status_code == 200, r.text
+        tid = r.json()["task_id"]
+        done = _wait(client, tid)
+        assert done["state"] == "succeeded" and done["kind"] == "restore"
+        env = json.loads((jobs_dir(kb) / f"{tid}.json").read_text(encoding="utf-8"))
+        assert env["restore_writes_began"] and env["params"]["name"] == name
+        entry = client.get(f"/api/trash/{name}").json()
+        assert entry["state"] == "restored" and entry["restorable"] is False
+        assert client.post(f"/api/tasks/{tid}/retry").status_code == 409  # 恢复不能直接重试
+    assert (kb / "raw" / "foo.md").is_file()
+
+
+def test_restore_digest_mismatch_and_blocked(kb) -> None:
+    name = _removed(kb)
+    with TestClient(create_app(kb)) as client:
+        r = client.post("/api/restore", json={"name": name, "plan_digest": "x"})
+        assert r.status_code == 409 and r.json()["detail"]["reason"] == "stale"  # 前端据此自动重新预览
+        (kb / "raw" / "foo.md").write_text("占位", encoding="utf-8")  # 原位被占：冲突
+        p = client.get("/api/trash/restore/preview", params={"name": name}).json()
+        assert not p["ok"] and p["conflicts"]
+        r = client.post("/api/restore", json={"name": name, "plan_digest": p["digest"]})
+        assert r.status_code == 409 and r.json()["detail"]["conflicts"]
+        assert client.get("/api/trash/restore/preview", params={"name": "nope"}).status_code == 404
+    assert (kb / "raw" / "foo.md").read_text(encoding="utf-8") == "占位"
+
+
+def test_restore_submit_degraded_lock_is_409(kb, monkeypatch) -> None:
+    name = _removed(kb)
+
+    def no_lockfile(root, origin):
+        raise OSError("只读介质")
+
+    with TestClient(create_app(kb)) as client:
+        p = client.get("/api/trash/restore/preview", params={"name": name}).json()
+        monkeypatch.setattr(kblock, "acquire", no_lockfile)
+        assert client.post("/api/restore", json={"name": name, "plan_digest": p["digest"]}).status_code == 409
+    assert not (kb / "raw" / "foo.md").exists()
+
+
+def test_queued_restore_protects_entry(kb) -> None:
+    from guanlan import trash
+
+    name = _removed(kb)
+    d = jobs_dir(kb)
+    d.mkdir(parents=True, exist_ok=True)
+    tid = "20261124-100000-restore-abcd"
+    env = {"id": tid, "kind": "restore", "state": "queued", "params": {"name": name}}
+    (d / f"{tid}.json").write_text(json.dumps(env), encoding="utf-8")
+    assert trash.get_entry(kb, name).protected
+
+
+def test_recover_restore_by_writes_began(kb) -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    d = jobs_dir(kb)
+    d.mkdir(parents=True)
+    began, fresh = "20261124-100000-restore-abcd", "20261124-100001-restore-abce"
+    for tid, extra in ((began, {"restore_writes_began": "x"}), (fresh, {})):
+        env = {"id": tid, "kind": "restore", "title": "恢复", "params": {"name": "x"}, "state": "running",
+               "owner_pid": proc.pid, "created": "2026-11-24 10:00:00", **extra}
+        (d / f"{tid}.json").write_text(json.dumps(env), encoding="utf-8")
+    store = TaskStore(kb)
+    assert sorted(store.recover()) == [began, fresh]
+    assert store.envelope(began)["error"] == RESTORE_INTERRUPTED and store.envelope(began)["state"] == "interrupted"
+    assert store.envelope(fresh)["error"] == RESTORE_NOT_STARTED and store.envelope(fresh)["state"] == "cancelled"

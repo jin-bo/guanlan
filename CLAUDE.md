@@ -30,7 +30,7 @@ uv run guanlan -C /tmp/demo search 关键词 # P5.0: BM25 + CJK 2-gram whole-pag
 #  resolving through the same P3.8 owner index as check/graph; on Feishu the `[[links]]` in an answer also
 #  come back as tappable card buttons whose taps are normalized into synthesized inbound messages.)
 uv run guanlan -C /tmp/demo remove <slug> # P3.9: retract a source → .trash/ + strip refs + fix index (zero-LLM; previews by default, --yes to write)
-uv run guanlan -C /tmp/demo trash list   # P4.36: browse .trash/ (zero-LLM; show <entry> / purge <entry> [--yes] — purge needs an exclusive KB lock and refuses protected entries)
+uv run guanlan -C /tmp/demo trash list   # P4.36: browse .trash/ (zero-LLM; show <entry> / restore <entry> [--yes] / purge <entry> [--yes] — restore and purge need an exclusive KB lock; purge refuses protected entries)
 uv run guanlan -C /tmp/demo zip --dry-run  # P3.12: pack the KB into a shareable zip — allowlist AGENTAO.md/SCHEMA.md/wiki/raw (graph opt-in); never .env/logs/.agentao/workspace/.trash/hidden files (zero-LLM; -o / --no-raw / --with-graph)
 uv run guanlan -C /tmp/demo heal --dry-run   # P3.2: materialize high-frequency missing entities (LLM via the P2 write gate; --dry-run = zero-LLM worklist)
 uv run guanlan -C /tmp/demo audit --dry-run  # P3.7: semantic audit of drifted sources (LLM via the P2 write gate; --dry-run = zero-LLM)
@@ -48,7 +48,7 @@ uv run pytest tests/test_web.py          # P4 Web host tests (skipped if guanlan
 uv run pytest tests/test_mcp.py          # P4.10 MCP host tests (skipped if guanlan-wiki[mcp] absent)
 uv run pytest tests/test_web_tasks.py    # P4.33 background task center (TaskStore, /api/tasks, restart recovery, retention, cancel + rollback)
 uv run pytest tests/test_doctor.py        # P4.34 Web checkup aggregation (/api/doctor: grouping, broken-link dedup, counts; §6.1 quote deep check /api/doctor/quotes; §6.2 index fix = `reindex` task kind)
-uv run pytest tests/test_trash.py tests/test_web_trash.py  # P4.36 trash: scan / recognition / state / delete protection / strict lock; Web list, detail, purge
+uv run pytest tests/test_trash.py tests/test_restore.py tests/test_web_trash.py  # P4.36 trash: scan / recognition / state / delete protection / strict lock; restore (eligibility, conflicts, resume); Web list, detail, purge, restore task
 uv run pytest tests/test_web_remove.py tests/test_remove_batch.py  # P4.35 Web remove: preview / digest check / no-preimage `remove` task kind; batch removal of all split parts of one original
 uv run pytest tests/test_web_profile.py  # P5.5.2 Web asker profile (source rules, per-session snapshot, /profile on|off, reader/IM never carry it)
 uv run pytest tests/test_web_mcpdiag.py  # P4.19 Web MCP diagnostics (the reverse direction: external servers injected *into* this KB)

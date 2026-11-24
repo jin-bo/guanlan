@@ -540,7 +540,7 @@ def _add_trash_parser(sub, dir_parent) -> None:
     p = sub.add_parser(
         "trash",
         parents=[dir_parent],
-        help="回收区管理：list 列出 / show 详情 / purge 彻底删除一个条目（零 LLM；purge 默认预览，--yes 才删）",
+        help="回收区管理：list 列出 / show 详情 / restore 恢复撤回条目 / purge 彻底删除一个条目（零 LLM；restore 与 purge 默认预览，--yes 才执行）",
     )
     add_trash_arguments(p)
     p.set_defaults(func=_cmd_trash)

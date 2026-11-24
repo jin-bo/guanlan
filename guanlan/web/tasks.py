@@ -41,15 +41,24 @@ from ..oneclick import iter_tasks as iter_import_tasks
 from ..rawio import atomic_write_text
 from .jobs import CANCELLED_BEFORE_START, Emit, Job
 
-TASK_KINDS = ("ingest", "backfill", "heal", "audit", "reindex", "remove")  # reindex：索引修复（P4.34 §6.2）；remove：撤回源（P4.35）
+TASK_KINDS = ("ingest", "backfill", "heal", "audit", "reindex", "remove", "restore")  # reindex：索引修复（P4.34 §6.2）；remove：撤回源（P4.35）；restore：恢复撤回条目（P4.36）
 # 不拍前像的任务（P4.35 §2）：撤回的核心动作是移走 raw，前像不含 raw/，回滚必然 rollback_failed 且留下更糟的半态。
 # 这类任务只能在开始前取消，运行中取消 → 409；中断后不给「回滚 / 保留现状」，按「重新预览再提交」向前收敛。
-NO_PREIMAGE_KINDS = ("remove",)
+NO_PREIMAGE_KINDS = ("remove", "restore")  # 恢复同理：要往 raw/ 写，前像不覆盖 raw/（P4.36 §5.3）
 REMOVE_INTERRUPTED = (
     "撤回执行中服务退出，可能已部分执行。重新预览并提交一次即可完成剩余步骤；"
     "回收区 .trash/ 里可能已有本次的 manifest（单源为 <slug>@…，整批为 <原件目录>@…）。"
 )
 REMOVE_NOT_STARTED = "服务在撤回开始写入前退出，没有写入任何内容；需要时可重新预览后再提交。"
+RESTORE_INTERRUPTED = (
+    "恢复执行中服务退出，可能已部分执行。到回收区重新预览恢复并提交一次即可完成剩余步骤（进度记在条目的 restore.json 里）。"
+)
+RESTORE_NOT_STARTED = "服务在恢复开始写入前退出，没有写入任何内容；需要时可到回收区重新预览后再提交。"
+# 不拍前像的任务：「开始写」标记字段、重启后的两种文案（中断 / 未写入）。
+NO_PREIMAGE_MARKS = {
+    "remove": ("remove_writes_began", REMOVE_INTERRUPTED, REMOVE_NOT_STARTED),
+    "restore": ("restore_writes_began", RESTORE_INTERRUPTED, RESTORE_NOT_STARTED),
+}
 PENDING_STATES = ("queued", "waiting_lock")  # 还没开始（未取得写锁）：可取消
 # 持写锁在写的：运行中、取消后正在回滚、中断任务正在回滚。
 WRITING_STATES = ("running", "cancelling", "rolling_back")
@@ -259,12 +268,14 @@ class TaskStore:
                 elif state in WRITING_STATES and env.get("kind") in NO_PREIMAGE_KINDS:
                     # 撤回不拍前像，靠 `remove_writes_began` 判断写没写（P4.35 §3.5）：它在第一次写盘之前落盘，
                     # 没有它 ⇒ 库一字未动，记 cancelled；有它 ⇒ 可能已部分执行，记 interrupted，靠重新预览收敛。
-                    if env.get("remove_writes_began"):
+                    # 恢复（P4.36）同理，标记是 `restore_writes_began`。
+                    mark, interrupted_msg, not_started_msg = NO_PREIMAGE_MARKS[env["kind"]]
+                    if env.get(mark):
                         env["state"] = "interrupted"
-                        env["error"] = REMOVE_INTERRUPTED
+                        env["error"] = interrupted_msg
                     else:
                         env["state"] = "cancelled"
-                        env["error"] = REMOVE_NOT_STARTED
+                        env["error"] = not_started_msg
                 elif state in WRITING_STATES:
                     pre_dir = self.preimage_dir(env["id"])
                     has_pre = bool(env.get("preimage")) and pre_dir.is_dir()
@@ -294,7 +305,7 @@ class TaskStore:
                 else:
                     env["state"] = "cancelled"
                     env["error"] = (
-                        REMOVE_NOT_STARTED  # 撤回没有「重试」（P4.35 §3.5）：引导重新预览
+                        NO_PREIMAGE_MARKS[env["kind"]][2]  # 撤回 / 恢复没有「重试」（P4.35 §3.5）：引导重新预览
                         if env.get("kind") in NO_PREIMAGE_KINDS
                         else "服务重启时任务尚未开始，已取消；需要时可重试。"
                     )
@@ -693,7 +704,8 @@ class TaskStore:
             if env is None:
                 raise TaskStateError("未知任务")
             if env.get("kind") in NO_PREIMAGE_KINDS:
-                raise TaskStateError("撤回任务没有前像，不能回滚；重新预览并提交一次即可完成剩余步骤。")
+                what = "恢复" if env.get("kind") == "restore" else "撤回"
+                raise TaskStateError(f"{what}任务没有前像，不能回滚；重新预览并提交一次即可完成剩余步骤。")
             if env.get("state") not in ATTENTION_STATES:
                 raise TaskStateError(f"任务当前状态为 {env.get('state')}，不能回滚。")
             if not self._has_preimage(env) or not preimage.is_ready(self.preimage_dir(task_id)):
@@ -734,7 +746,8 @@ class TaskStore:
             if env is None:
                 raise TaskStateError("未知任务")
             if env.get("kind") in NO_PREIMAGE_KINDS:
-                raise TaskStateError("撤回任务没有「保留现状」：重新预览并提交一次即可完成剩余步骤，或删除这条记录。")
+                what = "恢复" if env.get("kind") == "restore" else "撤回"
+                raise TaskStateError(f"{what}任务没有「保留现状」：重新预览并提交一次即可完成剩余步骤，或删除这条记录。")
             if env.get("state") not in ATTENTION_STATES:
                 raise TaskStateError(f"任务当前状态为 {env.get('state')}，不能选择保留现状。")
             keys = ("state", "error", "preimage", "preimage_digest", "finished")
@@ -930,6 +943,7 @@ class TaskStore:
             # 撤回（P4.35）：任务中心据此决定「重新预览」走哪个入口、是否还能续跑
             "entry": env.get("entry"),
             "remove_writes_began": env.get("remove_writes_began"),
+            "restore_writes_began": env.get("restore_writes_began"),
             "superseded_by": env.get("superseded_by"),
         }
 

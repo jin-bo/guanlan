@@ -491,7 +491,7 @@ def create_app(
         write_lock=write_gate.write_lock,
         on_job_done=lambda kind: (
             write_gate.bump_wiki_generation()
-            if kind in ("ingest", "heal", "backfill", "audit", "reindex", "oneclick", "rollback", "remove")
+            if kind in ("ingest", "heal", "backfill", "audit", "reindex", "oneclick", "rollback", "remove", "restore")
             else None
         ),
     )
@@ -881,12 +881,17 @@ def create_app(
     )
 
     # 回收区（P4.36 T1）：浏览与单条彻底删除；删除同步执行、不进任务中心，须独占库级锁。reader 下不注册。
+    async def _submit_restore(spec) -> dict:
+        return await _submit_task("restore", None, spec=spec)
+
     trash_routes.register(
         app,
         root=root,
         writer_only=_writer_only,
         reject_if_writable_active=_reject_if_writable_active,
         write_lock=write_gate.write_lock,
+        tasks=tasks,
+        submit_restore=_submit_restore,
     )
 
     # 零 LLM 报告（决策P4-7）：只序列化既有 *Report，与 CLI `--json` 字节对齐；阻塞跑 to_thread。
@@ -1124,13 +1129,14 @@ def create_app(
         async with submit_lock:
             extra = None
             if spec is not None:
-                title, params, fn, verb, extra = spec.title, spec.params, spec.make_job, "撤回", spec.extra
+                title, params, fn, extra = spec.title, spec.params, spec.make_job, spec.extra
+                verb = getattr(spec, "verb", "撤回")
                 retry_of = retry_of or spec.retry_of
             else:
                 title, params, fn, verb = _task_spec(kind, body)
             task_id: str | None = None
             if no_preimage and tasks is None:
-                raise HTTPException(status_code=503, detail="任务记录不可用（workspace/ 读写不了），没有提交撤回。")
+                raise HTTPException(status_code=503, detail="任务记录不可用（workspace/ 读写不了），没有提交任务。")
             if tasks is not None:
                 try:
                     task_id, created = await anyio.to_thread.run_sync(
@@ -1141,13 +1147,13 @@ def create_app(
                 except OSError:
                     if no_preimage:
                         raise HTTPException(
-                            status_code=503, detail="任务记录写不进（workspace/ 不可写？），没有提交撤回。"
+                            status_code=503, detail="任务记录写不进（workspace/ 不可写？），没有提交任务。"
                         ) from None
                     task_id, created = None, True
                 if not created:
                     return {"job_id": None, "task_id": task_id, "deduplicated": True}
             if no_preimage:
-                fn = fn(task_id)  # 撤回作业要知道自己的 task_id：开始写之前在信封记 remove_writes_began
+                fn = fn(task_id)  # 撤回 / 恢复作业要知道自己的 task_id：开始写之前在信封记「开始写」标记
             try:
                 # 建信封的 await 让出了事件循环：端点入口查过的层③ 可能已被期间起跑的可写 turn 推翻。入队前
                 # 再查一次（同步、紧贴 enqueue），保持 P4.33 之前「查完即入队、中间无让出点」的原子性。
@@ -1294,6 +1300,8 @@ def create_app(
         # 取消前读的状态可能已过时（期间 worker 已开始或已收尾）：报此刻的状态。
         now = await anyio.to_thread.run_sync(tasks.envelope, task_id) or env
         if now["state"] == "running" and now.get("kind") in NO_PREIMAGE_KINDS:
+            if now.get("kind") == "restore":
+                raise HTTPException(status_code=409, detail="恢复执行中，不能取消；完成后如需撤销可再次撤回。")
             raise HTTPException(status_code=409, detail="撤回执行中，不能取消；完成后可从 .trash/ 找回。")
         if now["state"] in (*PENDING_STATES, "running"):  # 刚取得写锁 / 正在收尾，或属于别的 Web 进程
             raise HTTPException(status_code=409, detail="任务正处在开始或收尾的瞬间，或不是本服务进程提交的，暂时不能取消。")
@@ -1335,7 +1343,8 @@ def create_app(
         env = await anyio.to_thread.run_sync(_envelope_or_404, task_id)  # 先 404，再 423
         if env.get("kind") in NO_PREIMAGE_KINDS:
             # 撤回的重试一律不生成任务（P4.35 §3.5）：先说「请重新预览」，比先让用户等层③ 释放更直接。
-            raise HTTPException(status_code=409, detail="撤回任务不能直接重试，请重新预览后再提交。")
+            what = "恢复" if env.get("kind") == "restore" else "撤回"
+            raise HTTPException(status_code=409, detail=f"{what}任务不能直接重试，请重新预览后再提交。")
         _reject_if_writable_active()
         if env["state"] not in DELETABLE_STATES:  # 已结束（含中断）的才能重试
             raise HTTPException(status_code=409, detail=f"任务当前状态为 {env['state']}，不能重试。")
