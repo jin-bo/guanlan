@@ -18,12 +18,14 @@ from .catalog import (
     raw_outline,
 )
 from .errors import EXIT_CHECK_FAILED, EXIT_OK, EXIT_USAGE, GuanlanError
+from .flash import clear_flash_marker
 from .gate import run_guarded_write
 from .pages import load_page
 from .paths import require_kb_root
 from .provenance import (
     RAW_DIGEST_KEY,
     compute_raw_digest,
+    is_flash_meta,
     format_digest_value,
     parse_digest_value,
     stamp_raw_digest,
@@ -61,6 +63,11 @@ _SOURCE_FOUND = (
     "本篇 source 页**已存在**：`{path}`{basis}——先读它再合并更新；桩页也是既有页，补全正文、保留既有 "
     "frontmatter 与来源，不整页覆盖，也不另建一张；"
 )
+# 该页是快速收录（flash）产出：本次就是加深，提醒把本篇整合进实体/概念页（标记由 wrapper 成功后清掉）。
+_SOURCE_FLASH = (
+    "该页是快速收录（`ingest_depth: flash`）产出，只有本篇摘要、尚未整合：本次按完整工作流把本篇"
+    "整合进相关实体/概念页与 index/overview，source 页在原有基础上补全；`ingest_depth` 键不必处理，wrapper 会清掉；"
+)
 # 文件名对不上、按页内证据认定时补一句，免得 Agent 以为该改名或另建「规范名」页。
 _SOURCE_FOUND_BY_EVIDENCE = "（文件名与本篇不同，按其{basis}认定为本篇的 source 页；沿用该页，不改名）"
 _SOURCE_CANDIDATES = (
@@ -84,6 +91,8 @@ def _source_clause(kb: Path, rel: str) -> str:
     if loc.page is not None:
         basis = "" if loc.basis == "文件名" else _SOURCE_FOUND_BY_EVIDENCE.format(basis=loc.basis)
         found = _SOURCE_FOUND.format(path=loc.page.relative_to(kb).as_posix(), basis=basis)
+        if is_flash_meta(load_page(loc.page)[0]):
+            found += _SOURCE_FLASH
         return found + _SOURCE_SLUG.format(slug=loc.page.stem) + _SOURCE_OTHERS
     if loc.candidates:
         listing = "；".join(
@@ -308,6 +317,8 @@ def run_ingest(
         _report_missing_source_page(kb, rel, loc.candidates)
         return EXIT_CHECK_FAILED
     _stamp_source_digest(kb, tpath, rel, loc.page)
+    if clear_flash_marker(loc.page):
+        print(f"ℹ 已加深：{loc.page.relative_to(kb).as_posix()} 去掉 ingest_depth: flash。", file=sys.stderr)
     return rc
 
 

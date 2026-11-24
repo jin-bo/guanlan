@@ -31,12 +31,13 @@ frontmatter 走容错档（`pages.load_page`），坏数据不中断体检——
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import posixpath
 import re
 import sys
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import EXIT_LINT_FINDINGS, EXIT_OK, GuanlanError
@@ -49,9 +50,11 @@ from .pages import (
     load_page,
     order_findings,
     page_stem_groups,
+    report_dict,
     report_json,
 )
 from .paths import require_kb_root
+from .provenance import is_flash_meta
 from .rawio import source_page_stems
 from .sourcepage import claimed_raw_paths
 
@@ -73,6 +76,8 @@ class HealthReport:
     ok: bool
     pages_checked: int
     findings: list[Finding]
+    # 快速收录、待完整 ingest 加深的 source 页（P5.6）。是状态不是问题：不进 findings、不影响 ok/--strict。
+    flash_pending: list[str] = field(default_factory=list)
 
 
 def _substantive_char_count(body: str) -> int:
@@ -357,6 +362,7 @@ def run_health(wiki: Path) -> HealthReport:
     orphan_sources: list[Finding] = []
 
     findings: list[Finding] = []
+    flash_pending: list[str] = []
     for path in content_pages:
         page = path.relative_to(root).as_posix()
         meta, body = load_page(path)  # 容错档：坏 frontmatter 不抛。
@@ -367,6 +373,8 @@ def run_health(wiki: Path) -> HealthReport:
         if stub is not None:
             findings.append(stub)
         if dir_name == "sources":
+            if is_flash_meta(meta):
+                flash_pending.append(page)
             if anchors is None:
                 anchors, unreachable = _raw_anchor_stems(root)
             orphan_source = _check_source_without_raw(
@@ -401,26 +409,45 @@ def run_health(wiki: Path) -> HealthReport:
         ok=not findings,
         pages_checked=len(content_pages),
         findings=order_findings(findings),
+        flash_pending=flash_pending,
     )
 
 
 def format_report(report: HealthReport, *, json_output: bool) -> str:
     """渲染体检结果：`--json` 走稳定契约；否则人类可读逐行报告。"""
     if json_output:
-        return report_json(
+        if not report.flash_pending:  # 没有快速收录页时逐字节保持原契约
+            return report_json(
+                ok=report.ok,
+                pages_checked=report.pages_checked,
+                items_key="findings",
+                items=report.findings,
+            )
+        data = report_dict(
             ok=report.ok,
             pages_checked=report.pages_checked,
             items_key="findings",
             items=report.findings,
         )
+        data["flash_pending"] = report.flash_pending
+        return json.dumps(data, ensure_ascii=False, indent=2)
 
+    pending = (
+        [
+            f"ℹ 待加深：{len(report.flash_pending)} 篇为快速收录（ingest_depth: flash），"
+            "不带 --flash 再跑 `guanlan ingest raw/<资料>` 即整合进实体/概念页：",
+            *(f"    {p}" for p in report.flash_pending),
+        ]
+        if report.flash_pending
+        else []
+    )
     if report.ok:
-        return f"✓ health 通过：{report.pages_checked} 页，无结构建议。"
+        return "\n".join([f"✓ health 通过：{report.pages_checked} 页，无结构建议。", *pending])
     lines = [f"· health 体检：{report.pages_checked} 页，{len(report.findings)} 条建议："]
     for f in report.findings:
         where = f.page or "(全局)"
         lines.append(f"    [{f.kind}] {where}: {f.detail}")
-    return "\n".join(lines)
+    return "\n".join([*lines, *pending])
 
 
 def health_entrypoint(root_dir: str | Path, *, json_output: bool, strict: bool) -> int:
