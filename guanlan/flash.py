@@ -225,6 +225,8 @@ def _read_candidate(
 
     raw_summary = meta.pop(SUMMARY_KEY, None)
     summary = _single_line(raw_summary, SUMMARY_MAX_CHARS) if isinstance(raw_summary, str) else ""
+    # 摘要接在 index 登记行的链接之后：中和方括号，免得模型写的 `[x](y)` 被 index 解析成多一条登记
+    summary = summary.replace("[", "［").replace("]", "］")
     merged = list(dict.fromkeys([*keep_sources, *sources]))  # 重收录只增不减来源
     meta["sources"] = merged
     if "last_updated" not in meta:
@@ -405,83 +407,88 @@ def run_flash_ingest(
             print(line, file=sys.stderr)
 
     prev_bytes = page.read_bytes() if page.is_file() else None  # 须在运行前取：Agent 越界写会改它
-    result = _run(build_flash_prompt(kb, rel, slug, staging_rel, today))
-    attempt = 0
-    while True:
-        raw_changes = diff_raw(raw_before, snapshot_raw(kb))
-        if raw_changes:
-            _finish_failed(kb, wiki_before, staging)
-            report_outcome(GateResult.raw_mutated(raw_changes), result)
-            _stats(GateResult.raw_mutated(raw_changes))
-            return EXIT_RAW_MUTATED
-        if not result.ok:
-            restored = _finish_failed(kb, wiki_before, staging)
-            report_agent_error(result)
-            if restored:
-                print(f"  另：已还原 wiki/ 下 {len(restored)} 个被改动的文件。", file=sys.stderr)
-            _stats(GateResult.agent_error(result.error_type))
-            return EXIT_AGENT_ERROR
-        stray = _restore_tree(wiki, wiki_before)
-        if stray:
-            try:
-                staging.unlink()
-            except OSError:
-                pass
-            print("✗ flash 越界写：Agent 改动了 wiki/（已逐字还原），本次未收录：", file=sys.stderr)
-            for rel_path in stray:
-                print(f"    wiki/{rel_path}", file=sys.stderr)
-            _stats(GateResult.check_failed([]))
-            return EXIT_CHECK_FAILED
-
-        problems: list[str]
-        parsed = _read_candidate(staging, slug, keep_sources, today)
-        gate: GateResult | None = None
-        if isinstance(parsed, list):
-            problems = parsed
-        else:
-            meta, body, summary = parsed
-            meta[RAW_DIGEST_KEY] = format_digest_value(f"raw/{rel}", compute_raw_digest(tpath))
-            meta[FLASH_KEY] = FLASH_VALUE
-            page.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(page, dump_frontmatter(meta, body))
-            gate = enforce(kb, raw_before, baseline=baseline)
-            if gate.ok:
-                break
-            # 回滚正式页，问题回喂候选
-            if prev_bytes is None:
-                page.unlink()
-            else:
-                atomic_write_bytes(page, prev_bytes)
-            problems = [_render_violations(gate.violations)] if gate.violations else ["门禁未通过"]
-            if gate.kind == "raw_mutated":
-                continue
-
-        if attempt >= MAX_REPAIR_ATTEMPTS:
-            _finish_failed(kb, wiki_before, staging)
-            print(f"✗ 快速收录失败（自愈 {attempt} 轮后候选页仍未通过）：", file=sys.stderr)
-            for p in problems:
-                print(f"    {p}", file=sys.stderr)
-            _stats(gate or GateResult.check_failed([]))
-            return EXIT_CHECK_FAILED
-        attempt += 1
-        print(
-            f"↻ 候选页未过校验（{len(problems)} 项），自动修复第 {attempt}/{MAX_REPAIR_ATTEMPTS} 轮…",
-            file=sys.stderr,
-        )
-        result = _run(
-            REPAIR_PROMPT.format(
-                staging=staging_rel,
-                target=page.relative_to(kb).as_posix(),
-                problems="\n".join(f"- {p}" for p in problems),
-            )
-        )
-
-    index_written = _register_index(wiki, page, summary)
-    log_written = _append_log(wiki, today, str(meta.get("title", slug)))
+    # 运行中被打断（Ctrl-C / 取消 / 意外异常）也守住「wiki/ 只由 wrapper 写」：还原越界写、删候选再上抛。
     try:
-        staging.unlink()
-    except OSError:
-        pass
+        result = _run(build_flash_prompt(kb, rel, slug, staging_rel, today))
+        attempt = 0
+        while True:
+            raw_changes = diff_raw(raw_before, snapshot_raw(kb))
+            if raw_changes:
+                _finish_failed(kb, wiki_before, staging)
+                report_outcome(GateResult.raw_mutated(raw_changes), result)
+                _stats(GateResult.raw_mutated(raw_changes))
+                return EXIT_RAW_MUTATED
+            if not result.ok:
+                restored = _finish_failed(kb, wiki_before, staging)
+                report_agent_error(result)
+                if restored:
+                    print(f"  另：已还原 wiki/ 下 {len(restored)} 个被改动的文件。", file=sys.stderr)
+                _stats(GateResult.agent_error(result.error_type))
+                return EXIT_AGENT_ERROR
+            stray = _restore_tree(wiki, wiki_before)
+            if stray:
+                try:
+                    staging.unlink()
+                except OSError:
+                    pass
+                print("✗ flash 越界写：Agent 改动了 wiki/（已逐字还原），本次未收录：", file=sys.stderr)
+                for rel_path in stray:
+                    print(f"    wiki/{rel_path}", file=sys.stderr)
+                _stats(GateResult.check_failed([]))
+                return EXIT_CHECK_FAILED
+
+            problems: list[str]
+            parsed = _read_candidate(staging, slug, keep_sources, today)
+            gate: GateResult | None = None
+            if isinstance(parsed, list):
+                problems = parsed
+            else:
+                meta, body, summary = parsed
+                meta[RAW_DIGEST_KEY] = format_digest_value(f"raw/{rel}", compute_raw_digest(tpath))
+                meta[FLASH_KEY] = FLASH_VALUE
+                page.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_text(page, dump_frontmatter(meta, body))
+                gate = enforce(kb, raw_before, baseline=baseline)
+                if gate.ok:
+                    break
+                # 回滚正式页，问题回喂候选
+                if prev_bytes is None:
+                    page.unlink()
+                else:
+                    atomic_write_bytes(page, prev_bytes)
+                problems = [_render_violations(gate.violations)] if gate.violations else ["门禁未通过"]
+                if gate.kind == "raw_mutated":
+                    continue
+
+            if attempt >= MAX_REPAIR_ATTEMPTS:
+                _finish_failed(kb, wiki_before, staging)
+                print(f"✗ 快速收录失败（自愈 {attempt} 轮后候选页仍未通过）：", file=sys.stderr)
+                for p in problems:
+                    print(f"    {p}", file=sys.stderr)
+                _stats(gate or GateResult.check_failed([]))
+                return EXIT_CHECK_FAILED
+            attempt += 1
+            print(
+                f"↻ 候选页未过校验（{len(problems)} 项），自动修复第 {attempt}/{MAX_REPAIR_ATTEMPTS} 轮…",
+                file=sys.stderr,
+            )
+            result = _run(
+                REPAIR_PROMPT.format(
+                    staging=staging_rel,
+                    target=page.relative_to(kb).as_posix(),
+                    problems="\n".join(f"- {p}" for p in problems),
+                )
+            )
+
+        index_written = _register_index(wiki, page, summary)
+        log_written = _append_log(wiki, today, str(meta.get("title", slug)))
+        try:
+            staging.unlink()
+        except OSError:
+            pass
+    except BaseException:
+        _finish_failed(kb, wiki_before, staging)
+        raise
     report_outcome(gate, runs[0])
     print(
         f"✓ 快速收录：{page.relative_to(kb).as_posix()}（ingest_depth: flash）"

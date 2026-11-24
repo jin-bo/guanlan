@@ -755,12 +755,12 @@ body.hide-thinking .chat-think { display: none; }
 .doctor-section { margin: 1rem 0 .3rem; font-size: .9rem; color: var(--lan-deep); }
 .doctor-cat { margin: .25rem 0; }
 .doctor-cat > summary { cursor: pointer; padding: .3rem 0; display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; list-style: none; }
-.doctor-cat > summary .doctor-act {  /* 修复入口：紧跟计数的幽灵小药丸，不用浏览器默认灰按钮 */
+.doctor-cat > summary .doctor-act, .doctor-deepen {  /* 修复入口：紧跟计数的幽灵小药丸，不用浏览器默认灰按钮 */
   margin-left: .25rem; padding: .05rem .6rem; font: inherit; font-size: .78rem; line-height: 1.5;
   color: var(--lan-ripple); background: transparent; border: 1px solid var(--lan-ripple); border-radius: 999px; cursor: pointer;
 }
 .doctor-cat > summary .doctor-act::after { content: " ›"; }
-.doctor-cat > summary .doctor-act:hover { background: var(--lan-foam); color: var(--lan-deep); border-color: var(--lan-deep); }
+.doctor-cat > summary .doctor-act:hover, .doctor-deepen:hover { background: var(--lan-foam); color: var(--lan-deep); border-color: var(--lan-deep); }
 .doctor-cat > summary .doctor-act:focus-visible { outline: 2px solid var(--lan-ripple); outline-offset: 1px; }
 .doctor-cat > summary::-webkit-details-marker { display: none; }
 .doctor-cat > summary::before { content: "▸"; color: var(--lan-deep); width: .8rem; }

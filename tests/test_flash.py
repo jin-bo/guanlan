@@ -191,3 +191,28 @@ def test_health_json_unchanged_without_flash_pages(kb):
 
     data = json.loads(format_report(run_health(kb / "wiki"), json_output=True))
     assert "flash_pending" not in data
+
+
+def test_flash_interrupt_restores_wiki_and_drops_candidate(kb):
+    """Agent 运行中被打断（Ctrl-C / 取消）也要还原越界写、删候选，再把中断原样上抛。"""
+    import pytest
+
+    def action(root: Path) -> None:
+        _write_candidate(_candidate())(root)
+        write_page(root, "wiki/concepts/越界.md", sources='["doc"]')
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_flash_ingest(_put_raw(kb), root=kb, runner=make_runner(action))
+    assert not (kb / "wiki" / "concepts" / "越界.md").exists()
+    assert not (kb / "wiki" / "sources" / "doc.md").exists()
+    assert not (kb / "workspace" / "flash" / "doc.md").exists()
+
+
+def test_flash_summary_brackets_neutralized_in_index(kb):
+    """模型写的摘要里的 `[x](y)` 不能被 index 解析成多一条登记。"""
+    runner = make_runner(_write_candidate(_candidate(summary="见[原文](raw/doc.md)")))
+    assert run_flash_ingest(_put_raw(kb), root=kb, runner=runner) == EXIT_OK
+    index = (kb / "wiki" / "index.md").read_text(encoding="utf-8")
+    assert "— 见［原文］(raw/doc.md)" in index
+    assert "[原文](raw/doc.md)" not in index

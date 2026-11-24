@@ -19,6 +19,7 @@ function doctorCatLabel(key) {
     case "drift": return t("doctor.cat.drift");
     case "index": return t("doctor.cat.index");
     case "quality": return t("doctor.cat.quality");
+    case "flash_pending": return t("doctor.cat.flash_pending");
     case "topology": return t("doctor.cat.topology");
     default: return key;
   }
@@ -27,6 +28,7 @@ function doctorCatLabel(key) {
 function doctorSectionLabel(key) {
   if (key === "blocking") return t("doctor.section.blocking");
   if (key === "structure") return t("doctor.section.structure");
+  if (key === "status") return t("doctor.section.status");
   return t("doctor.section.suggest");
 }
 
@@ -74,6 +76,14 @@ function doctorItemHtml(cat, it) {
     return `<div class="finding"><span class="kind">[[${escapeHtml(it.target)}]]</span> ${escapeHtml(t("doctor.refs", refs.length))}${shown}${more}` +
       (it.suggestion ? `<div class="muted">${escapeHtml(it.detail)}</div>` : "") + `</div>`;
   }
+  if (cat.key === "flash_pending") {
+    // 快速收录页（P5.6）：页面 + 原文；「加深」= 对该 raw 跑普通 ingest（与补录选单的 ingest 同一入口）。reader 下不给。
+    const deepen = it.raw && !readerMode
+      ? ` <button type="button" class="doctor-deepen" data-raw="${escapeHtml(it.raw)}">${escapeHtml(t("doctor.action.deepen"))}</button>`
+      : "";
+    const raw = it.raw ? ` ← ${doctorPageLink(it.raw)}` : "";
+    return `<div class="finding">${doctorPageLink(it.page)}${raw}${deepen}</div>`;
+  }
   if (cat.key === "drift") {
     return `<div class="finding"><span class="kind">${escapeHtml(it.slug || "")}</span> ${doctorPageLink(it.source_page)}</div>`;
   }
@@ -86,7 +96,7 @@ function renderDoctor(data, openKeys = null) {
   const cats = data.categories || [];
   const blocking = cats.find((c) => c.key === "blocking");
   const nBlock = blocking ? blocking.count : 0;
-  const nSuggest = data.total - nBlock; // 服务端 total = 必须修 + 建议处理（不含结构提示）
+  const nSuggest = data.total - nBlock; // 服务端 total = 必须修 + 建议处理（不含待加深与结构提示）
   let html = nBlock
     ? `<p class="report-bad">${escapeHtml(t("doctor.bad", nBlock, data.pages_checked))}</p>`
     : `<p class="report-ok">${escapeHtml(t("doctor.ok", data.pages_checked))}</p>`;
@@ -125,6 +135,10 @@ function paintDoctor() {
   body.querySelectorAll(".doctor-act").forEach((b) => b.addEventListener("click", (e) => {
     e.preventDefault(); // 按钮在 <summary> 里：不要顺带折叠 / 展开
     runDoctorAction(b.dataset.action, b.dataset.cat);
+  }));
+  body.querySelectorAll(".doctor-deepen").forEach((b) => b.addEventListener("click", (e) => {
+    e.preventDefault();
+    triggerIngest(b.dataset.raw);
   }));
   body.querySelectorAll("a.doctor-page").forEach((a) => a.addEventListener("click", (e) => {
     e.preventDefault();
