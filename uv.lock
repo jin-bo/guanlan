@@ -12,7 +12,7 @@ resolution-markers = [
 
 [[package]]
 name = "agentao"
-version = "0.5.22"
+version = "0.5.23"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -27,9 +27,9 @@ dependencies = [
     { name = "tree-sitter", marker = "sys_platform == 'win32'" },
     { name = "tree-sitter-powershell", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e5/fd/6c9c0fdcb02e57e2a6e7d7873d057b18dc03fee416edad507132bee1096a/agentao-0.5.22.tar.gz", hash = "sha256:23f5b274cd4596e66f0e52fd5c01599ba488b90c4340956749e6bb9350bb37c8", size = 1651549, upload-time = "2026-11-16T05:37:44.413Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/49/05/47cec4622a0e0c78c8cb61a090f389d27482456a4b2a1220124789ce3210/agentao-0.5.23.tar.gz", hash = "sha256:9fa6fb41900303bd4b9390cf3242269f566afe3ac4710ae43a2845537d60262a", size = 1698079, upload-time = "2026-11-23T15:16:38.491Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/86/5e/d56f68dc534883d5212e807e9e8d7605f947f6322ce8b45cb6ad8c95b185/agentao-0.5.22-py3-none-any.whl", hash = "sha256:72d25a65f85d024c649294b0284857fae0abfb49b2e7fbcc4c82d90b3788fc6b", size = 1488969, upload-time = "2026-11-16T05:37:42.547Z" },
+    { url = "https://files.pythonhosted.org/packages/67/39/cd019477dac980825ed70bf6612309a6d35a126bc17cece08ebc4d987d00/agentao-0.5.23-py3-none-any.whl", hash = "sha256:6bd87f3c388394720aac55d35f80c5fd92fc3b4b2be47e1e55051f7510c2b9f2", size = 1533716, upload-time = "2026-11-23T15:16:36.663Z" },
 ]
 
 [package.optional-dependencies]
@@ -687,7 +687,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentao", extras = ["cli"], specifier = ">=0.5.22,<0.6" },
+    { name = "agentao", extras = ["cli"], specifier = ">=0.5.23,<0.6" },
     { name = "anyio", marker = "extra == 'im'", specifier = ">=4.1" },
     { name = "anyio", marker = "extra == 'im-feishu'", specifier = ">=4.1" },
     { name = "anyio", marker = "extra == 'im-weixin'", specifier = ">=4.1" },

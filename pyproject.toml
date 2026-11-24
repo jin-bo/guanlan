@@ -103,7 +103,11 @@ dependencies = [
     # 网址导入按用户的 agentao 后备在 403 后再取一次（决策P4.31-14），同一开关须同一口径，故接上它：复用私有的
     # `_fetch_via_deepseek` / `_is_official_deepseek_base_url` / `_DEEPSEEK_FETCH_MAX_URL_CHARS`（契约测试守着）。
     # 同版 jina 超时不再报空错误；只读模式拦不受信 MCP 服务器的「只读」工具时说明原因——观澜的 Web 会话照常透传。
-    "agentao[cli]>=0.5.22,<0.6",
+    # >=0.5.23：取消能打断卡在网络上的模型请求（流在工作线程里读、每 0.1 s 看一次取消令牌）——Web 问答点「停止」、
+    # 后台任务取消、`agentao run` 收到 SIGINT/SIGTERM 不再要等请求超时；`agentao run` 整个运行期都装信号处理，
+    # 收尾阶段被打断也有结果文档。同版 shell 的 deny/ask 规则改为忽略大小写、识别引号与路径变体，自定义 allow
+    # 不再放行串联命令；SIGTERM 退出码改为 143——观澜不写 shell 规则，`runtime` 只认退出码 0 + 结果文档，均不受影响。
+    "agentao[cli]>=0.5.23,<0.6",
     "pyyaml>=6",        # P2 check：解析页面 frontmatter（见 docs/P2-最小闭环.md 决策2）
     # P4.31 网址导入：`guanlan/fetch.py` 用 httpx 下载（固定解析地址、逐跳检查）。它本已随 agentao 传递安装，
     # 显式声明是因为 fetch.py 是核心模块（将来 CLI `import <url>` 复用），不靠传递依赖。
