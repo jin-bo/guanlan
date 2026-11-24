@@ -60,6 +60,7 @@ function taskTitle(row) {
         : t("task.title.heal", p.limit || "");
     case "audit": return t("task.title.audit", p.limit || "");
     case "reindex": return p.prune ? t("task.title.reindexPrune") : t("task.title.reindex");
+    case "remove": return p.scope === "all" ? t("task.title.removeAll", p.raw_dir || "") : t("task.title.remove", p.source || "");
     case "import": return t("task.title.import", row.title || row.id);
     default: return (row && (row.title || row.id)) || "";
   }
@@ -368,7 +369,35 @@ async function refreshExpandedTask() {
 // 详情顶部的操作按钮（P4.33 T2）：排队 / 等锁 / 运行中的可取消（运行中的取消会回滚）；中断 / 回滚失败的
 // 可回滚或保留现状（有前像时）；已结束的可重试；没有前像的可删除记录。
 function renderTaskActions(row, box) {
+  const actions = row.kind === "remove" ? removeTaskActions(row) : [];
+  if (row.kind !== "remove") pushTaskActions(row, actions);
+  if (!actions.length) return;
+  const bar = document.createElement("div");
+  bar.className = "task-actions";
+  for (const [act, label] of actions) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.addEventListener("click", (e) => { e.stopPropagation(); taskAction(row, act, b); });
+    bar.appendChild(b);
+  }
+  box.appendChild(bar);
+}
+
+// 撤回（P4.35）：不拍前像——只能在开始前取消；没有「回滚 / 保留现状」；「重试」换成重新预览（服务端直接重试 409）。
+function removeTaskActions(row) {
   const actions = [];
+  if (["queued", "waiting_lock"].includes(row.state)) actions.push(["cancel", t("task.action.cancel")]);
+  if (["failed", "cancelled", "interrupted"].includes(row.state) && !row.superseded_by) {
+    actions.push(["repreview", t("task.action.repreview")]);
+  }
+  if (["succeeded", "failed", "cancelled", "interrupted", "abandoned"].includes(row.state)) {
+    actions.push(["delete", t("task.action.delete")]);
+  }
+  return actions;
+}
+
+function pushTaskActions(row, actions) {
   // 回滚中：只有还没开始的（排队或等命令行释放库）可撤下；已开始执行的不给按钮（服务端也会 409）。
   if (["queued", "waiting_lock", "running"].includes(row.state) || taskIsWaitingRollback(row)) {
     actions.push(["cancel", t("task.action.cancel")]);
@@ -384,17 +413,6 @@ function renderTaskActions(row, box) {
       actions.push(["delete", t("task.action.delete")]);
     }
   }
-  if (!actions.length) return;
-  const bar = document.createElement("div");
-  bar.className = "task-actions";
-  for (const [act, label] of actions) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = label;
-    b.addEventListener("click", (e) => { e.stopPropagation(); taskAction(row, act, b); });
-    bar.appendChild(b);
-  }
-  box.appendChild(bar);
 }
 
 // 需要确认的操作：运行中取消（会回滚）、回滚、保留现状。
@@ -408,6 +426,7 @@ function taskActionConfirm(row, act) {
 }
 
 async function taskAction(row, act, btn) {
+  if (act === "repreview") { reopenRemoveFromTask(row); return; } // 撤回：重新预览（remove.js）
   if (!taskActionConfirm(row, act)) return;
   btn.disabled = true;
   const id = encodeURIComponent(row.id);
@@ -481,7 +500,13 @@ function renderRollbackReceipt(rb, box) {
 function renderTaskDetail(row, box) {
   if (taskLog.id !== row.id) return;
   renderTaskActions(row, box);
-  if (row.state === "interrupted") {
+  if (row.state === "interrupted" && row.kind === "remove") {
+    // 撤回没有前像（P4.35 §3.5）：不说「检查后重新提交」，引导重新预览；回收区可能已有本次的 manifest
+    if (row.superseded_by) taskHint(box, t("task.remove.supersededHint"), "muted");
+    else taskHint(box, t("task.remove.interruptedHint"), "report-bad");
+  } else if (row.state === "cancelled" && row.kind === "remove") {
+    taskHint(box, t("task.remove.cancelledHint")); // 撤回没有「重试」：引导重新预览
+  } else if (row.state === "interrupted") {
     taskHint(box, t("task.interruptedHint"), "report-bad");
     if (row.has_preimage) taskHint(box, t("task.interruptedRollbackHint"));
   } else if (row.state === "rollback_failed") {
