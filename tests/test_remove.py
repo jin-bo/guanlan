@@ -169,7 +169,7 @@ def test_execute_relocates_and_drops_slug_and_prunes_index(tmp_path):
     assert m["slug"] == "foo"
     assert m["moved"] == ["raw/foo.md", "wiki/sources/foo.md"]
     [drop] = m["slug_dropped_from"]
-    assert drop == {"page": "wiki/concepts/x.md", "dropped_slug": "foo", "before_sources": ["bar", "foo"]}
+    assert drop == {"page": "wiki/concepts/x.md", "dropped_slug": "foo", "before_sources": ["foo", "bar"]}  # 页面原顺序（P4.36）
     assert any("sources/foo.md" in ln for ln in m["index_lines_removed"])
 
 
@@ -280,7 +280,7 @@ def test_json_contract(tmp_path, capsys):
     assert payload["slug"] == "foo"
     assert payload["executed"] is False
     assert payload["relocate"] == ["raw/foo.md", "wiki/sources/foo.md"]
-    assert payload["drop_slug"] == [{"page": "wiki/concepts/x.md", "before_sources": ["bar", "foo"]}]
+    assert payload["drop_slug"] == [{"page": "wiki/concepts/x.md", "before_sources": ["foo", "bar"]}]  # 页面原顺序（P4.36）
 
 
 def test_json_source_not_found(tmp_path, capsys):

@@ -39,6 +39,7 @@ from .remove import (
     canonical_digest,
     path_digest,
 )
+from .trash import MANIFEST_FORMAT, detect_origin  # P4.36：manifest 格式与续撤判定
 from .reindex import _prune_dangling
 from .sourcepage import _declared_raw_paths
 
@@ -580,7 +581,9 @@ def _safe_trash_name(root: Path, name: str) -> str:
     return name
 
 
-def execute_batch(root: Path, plan: BatchPlan, *, before_write: Callable[[], None] | None = None) -> Path:
+def execute_batch(
+    root: Path, plan: BatchPlan, *, before_write: Callable[[], None] | None = None, from_task: str | None = None
+) -> Path:
     """执行整批计划，返回回收目录。调用方须已在写锁内重算并核对过摘要。
 
     顺序：校验回收目录名 → `before_write()`（抛异常则零写入）→ 建 `.trash/<sample>@<ts>/` → 写 manifest →
@@ -592,9 +595,14 @@ def execute_batch(root: Path, plan: BatchPlan, *, before_write: Callable[[], Non
     name = _safe_trash_name(root, plan.key.sample)
     if before_write is not None:
         before_write()
+    origin = detect_origin(root, plan.relocate)  # 建新目录之前判定
     now = datetime.now()
     trash_dir = _new_trash_dir(root, name, now)
+    if from_task:  # 从任务中心续跑：本身就是续撤（P4.36 §5.1）
+        origin = {**origin, "kind": "resume", "from_task": from_task}
     manifest = {
+        "format": MANIFEST_FORMAT,
+        "origin": origin,
         "scope": "all",
         "removed_at": now.isoformat(timespec="seconds"),
         "group": {

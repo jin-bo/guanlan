@@ -268,7 +268,7 @@ class RemoveService:
             title=f"撤回原件全部分卷：{key.raw_dir}",
             params={"scope": "all", **key.to_dict(), "plan_digest": digest},
             extra={"entry": entry, "group": group},
-            make_job=lambda task_id: self._batch_job(task_id, key, reuse, digest),
+            make_job=lambda task_id: self._batch_job(task_id, key, reuse, digest, from_task=retry_of),
             retry_of=retry_of,
         )
 
@@ -318,7 +318,7 @@ class RemoveService:
 
         return job
 
-    def _batch_job(self, task_id: str, key: GroupKey, reuse, digest: str):
+    def _batch_job(self, task_id: str, key: GroupKey, reuse, digest: str, from_task: str | None = None):
         def job(emit) -> int:
             try:
                 plan = build_batch_plan(self.root, key, reuse=reuse)
@@ -341,7 +341,7 @@ class RemoveService:
                 began.append(True)
 
             try:
-                trash = execute_batch(self.root, plan, before_write=before)
+                trash = execute_batch(self.root, plan, before_write=before, from_task=from_task)
             except Exception as exc:  # 含 BatchError；开始写之后任何异常都要给续跑引导
                 if began:
                     print(f"✗ 撤回时写盘失败，可能已部分执行；从任务中心重新预览并提交一次即可完成剩余步骤：{exc}")

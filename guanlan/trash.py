@@ -28,7 +28,8 @@ from .paths import require_kb_root
 TRASH = ".trash"
 REMOVE_MANIFEST = "manifest.json"
 ROLLBACK_LOG = "manifest.jsonl"  # 与 preimage.TRASH_LOG 同名（回滚的逐项记录）
-RESTORE_RECORD = "restore.json"  # T2 恢复进度（§5.3）；T1 只读它判状态与删除保护
+RESTORE_RECORD = "restore.json"  # 恢复进度（§5.3）：有则 restoring / restored
+MANIFEST_FORMAT = 2  # 撤回 manifest 格式：2 = before_sources 保留原顺序、带 origin（§5.1）
 
 # 系统条目的目录名形态：`<名字>@<YYYYmmddTHHMMSS>[_微秒][-n]`（撤回 / 整批 / 回滚三种都是这个形）。
 _SYSTEM_NAME = re.compile(r"^[^/\\]+@(\d{8}T\d{6})(?:_\d{6})?(?:-\d+)?$")
@@ -99,6 +100,7 @@ class TrashEntry:
     restore: dict | None = None  # restore.json（有则记）
     note: str = ""  # unknown 的原因等
     protected: list[str] = field(default_factory=list)
+    restore_blocked: str | None = "未检查"  # 不能恢复的原因；None = 可以恢复（annotate 填）
 
     @property
     def invalid(self) -> list[str]:
@@ -116,6 +118,8 @@ class TrashEntry:
             "origin": self.origin,
             "invalid": bool(self.invalid),
             "protected": list(self.protected),
+            "restorable": self.restore_blocked is None,
+            "restore_blocked": self.restore_blocked,
             "note": self.note,
         }
 
@@ -207,18 +211,22 @@ def _clean_rel(rel: object) -> str | None:
     return rel
 
 
-def _has_link_component(base: Path, rel: str) -> bool:
-    """`base/rel` 途经的各级目录（不含最后一级）里有没有软链接。不存在的级别到此为止。"""
+def _link_component(base: Path, rel: str) -> str | None:
+    """`base/rel` 途经的各级目录（不含最后一级）里第一个软链接（相对 `base`）；没有 → None。不存在的级别到此为止。"""
     cur = base
     for part in PurePosixPath(rel).parts[:-1]:
         cur = cur / part
         try:
             st = os.lstat(cur)
         except OSError:
-            return False
+            return None
         if stat.S_ISLNK(st.st_mode):
-            return True
-    return False
+            return cur.relative_to(base).as_posix()
+    return None
+
+
+def _has_link_component(base: Path, rel: str) -> bool:
+    return _link_component(base, rel) is not None
 
 
 def _lexists(base: Path, rel: str) -> bool:
@@ -352,8 +360,12 @@ def _remove_entry(root: Path, path: Path, e: TrashEntry, manifest: dict) -> Tras
     for rel in manifest["moved"]:
         clean, bad = _check_remove_path(rel)
         item = TrashItem(path=clean, saved_as=clean, invalid=bad)
-        if bad is None and (_has_link_component(path, clean) or _has_link_component(root, clean)):
-            item.invalid = "路径途经软链接"
+        if bad is None:
+            link = _link_component(root, clean)  # 库侧（如 wiki/ 是链接）：报出是哪一级，T2 恢复预览照引（§7）
+            if link is not None:
+                item.invalid = f"路径途经软链接（{link}/）"
+            elif _has_link_component(path, clean):
+                item.invalid = "回收区里的路径途经软链接"
         if _clean_rel(rel) is not None:
             # 不合规的项不给恢复，但仍参与状态判断：原位置还在（库侧目录是链接也照常跟过去看）就算撤回未完成，
             # 宁可多保护，不能因为记录看不清就把续跑要用的 manifest 当成完整的删掉。归档侧途经链接的不认作已归档。
@@ -439,6 +451,26 @@ def summary(root: Path) -> dict:
     except Exception as exc:  # noqa: BLE001 — 体检里的信息行：任何意外都不能让整个体检 500
         return {"count": 0, "size": 0, "error": f"{type(exc).__name__}: {exc}"}
     return {"count": len(entries), "size": sum(e.size for e in entries)}
+
+
+def detect_origin(root: Path, paths: list[str]) -> dict:
+    """撤回执行前判定这次是不是续撤（§5.1「续撤判定」，单源与整批共用）：本次待移路径里只要有一项出现在某个
+    `incomplete`（或恢复做了一半的 `restoring`）旧撤回条目的 `moved` 里、而旧条目归档侧缺这一项，就是续撤。回收区不安全、扫不了 → `unknown`
+    （宁可不给恢复）。只读、不写；执行函数在写锁内、写 manifest 之前调用。"""
+    wanted = set(paths)
+    try:
+        entries = scan(root)
+    except Exception:  # noqa: BLE001 — 判定失败不能打断已开始的撤回（调用点在 before_write 之后）；记 unknown、不给恢复
+        return {"kind": "unknown"}
+    hits = [
+        e.name
+        for e in entries
+        if e.kind in ("remove", "remove_batch")
+        # 恢复做了一半（restoring）的旧条目同理：已放回原位的项若被本次再次撤回，本次只含原条目的一部分
+        and e.state in ("incomplete", "restoring")
+        and any(it.saved_as and it.path in wanted and not it.archived and it.origin_exists for it in e.items)
+    ]
+    return {"kind": "resume", "from": hits} if hits else {"kind": "first"}
 
 
 # ── 条目定位（实际目录名）─────────────────────────────────────────────────────
@@ -574,10 +606,13 @@ def protections(root: Path, entry: TrashEntry, envelopes: list[dict] | None = No
 
 def annotate(root: Path, entries: list[TrashEntry]) -> list[TrashEntry]:
     """给每个条目填上 `protected`，回滚条目的 `subject` 补上任务标题（任务记录还在时）。只读一遍任务信封。"""
+    from .restore import restore_block
+
     envs = _envelopes(Path(root))
     titles = {env["id"]: env.get("title") for env in envs if isinstance(env.get("title"), str) and env.get("title")}
     for e in entries:
         e.protected = protections(root, e, envs)
+        e.restore_blocked = restore_block(e)
         if e.kind == "rollback" and e.subject in titles:
             e.subject = f"{e.subject} · {titles[e.subject]}"
     return entries
@@ -591,10 +626,10 @@ def acquire_exclusive(root: Path, origin: str) -> kblock.KBLock:
     try:
         lock = kblock.acquire(root, origin)
     except OSError as exc:
-        raise TrashLockError(f"建不了库级锁（{exc}），无法与其它写者互斥，不删除。") from None
+        raise TrashLockError(f"建不了库级锁（{exc}），无法与其它写者互斥，不执行。") from None
     if lock.nested or not lock.held:
         lock.release()
-        raise TrashLockError("库正被另一个写操作持有（本进程只是它的子进程），不能独占，不删除。")
+        raise TrashLockError("库正被另一个写操作持有（本进程只是它的子进程），不能独占，不执行。")
     return lock
 
 
@@ -709,6 +744,8 @@ def run_trash(root: Path, *, action: str, name: str | None, yes: bool, json_outp
             else:
                 _print_detail(e)
             return EXIT_OK
+        if action == "restore":
+            return _run_restore(root, name, yes=yes, json_output=json_output)
         if action == "purge":
             if not yes:
                 e = get_entry(root, name)
@@ -731,7 +768,9 @@ def run_trash(root: Path, *, action: str, name: str | None, yes: bool, json_outp
         print(exc, file=sys.stderr)
         return exc.exit_code
     except OSError as exc:  # 删除中途失败（权限、占用等）：报错退出，不抛回溯；条目可能已删掉一部分
-        if action == "purge" and yes:
+        if action == "restore" and yes:
+            print(f"恢复失败：{exc}（可能已部分执行；再次执行 trash restore 即可续跑）", file=sys.stderr)
+        elif action == "purge" and yes:
             print(f"删除失败：{exc}（条目可能已删掉一部分，可再次执行）", file=sys.stderr)
         else:
             print(f"读取回收区失败：{exc}", file=sys.stderr)
@@ -739,9 +778,41 @@ def run_trash(root: Path, *, action: str, name: str | None, yes: bool, json_outp
     raise ValueError(f"未知动作：{action}")
 
 
+def _run_restore(root: Path, name: str, *, yes: bool, json_output: bool) -> int:
+    """`trash restore`：默认只预览；`--yes` 在独占库级锁内重算计划再执行（CLI 没有预览与执行之间的间隔，不比摘要）。"""
+    from .restore import execute_restore, format_plan, format_result, plan_restore
+
+    if not yes:
+        plan = plan_restore(root, name)
+        if json_output:
+            print(json.dumps({"executed": False, **plan.to_dict()}, ensure_ascii=False, indent=2))
+        else:
+            print(format_plan(plan))
+            if plan.ok:
+                print("以上为预览，加 --yes 执行。")
+        return EXIT_OK if plan.ok else EXIT_USAGE
+    lock = acquire_exclusive(root, "trash restore")
+    try:
+        plan = plan_restore(root, name)
+        if not plan.ok:
+            if json_output:
+                print(json.dumps({"executed": False, **plan.to_dict()}, ensure_ascii=False, indent=2))
+            else:
+                print(format_plan(plan))
+            return EXIT_USAGE
+        result = execute_restore(root, plan)
+    finally:
+        lock.release()
+    if json_output:
+        print(json.dumps({"executed": True, **result.to_dict()}, ensure_ascii=False, indent=2))
+    else:
+        print(format_result(result))
+    return EXIT_OK
+
+
 def trash_entrypoint(root_dir: str | Path, *, action: str, name: str | None, yes: bool, json_output: bool) -> int:
     try:
-        root = require_kb_root(root_dir, writable=action == "purge" and yes)
+        root = require_kb_root(root_dir, writable=action in ("purge", "restore") and yes)
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
@@ -749,12 +820,16 @@ def trash_entrypoint(root_dir: str | Path, *, action: str, name: str | None, yes
 
 
 def add_trash_arguments(p: argparse.ArgumentParser) -> None:
-    sub = p.add_subparsers(dest="trash_action", required=True, metavar="{list,show,purge}")
+    sub = p.add_subparsers(dest="trash_action", required=True, metavar="{list,show,restore,purge}")
     ls = sub.add_parser("list", help="列出回收区条目（零 LLM、只读）")
     ls.add_argument("--json", action="store_true", help="输出 JSON")
     show = sub.add_parser("show", help="查看一个条目的详情（只读）")
     show.add_argument("name", help=".trash/ 下的条目名")
     show.add_argument("--json", action="store_true", help="输出 JSON")
+    rs = sub.add_parser("restore", help="恢复一个撤回条目（默认只预览，--yes 才执行）")
+    rs.add_argument("name", help=".trash/ 下的条目名")
+    rs.add_argument("--yes", action="store_true", help="确认恢复")
+    rs.add_argument("--json", action="store_true", help="输出 JSON")
     pg = sub.add_parser("purge", help="彻底删除一个条目（不可恢复；默认只预览，--yes 才删）")
     pg.add_argument("name", help=".trash/ 下的条目名")
     pg.add_argument("--yes", action="store_true", help="确认删除")
@@ -786,7 +861,9 @@ __all__ = [
     "TrashLockError",
     "TrashNotFound",
     "TrashProtected",
+    "MANIFEST_FORMAT",
     "acquire_exclusive",
+    "detect_origin",
     "annotate",
     "fmt_size",
     "get_entry",

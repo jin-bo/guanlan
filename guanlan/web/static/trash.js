@@ -40,6 +40,99 @@ function trashStateClass(state) {
 
 // fmtBytes 用 staging.js 的全局定义（经典脚本同名函数后者覆盖前者，不在此重复定义）。
 
+// ── 恢复（T2）：预览浮层 → 确认 → POST /api/restore → 任务中心 ─────────────────────
+
+let restoreState = null; // {name, data, error, seq}
+
+async function openRestorePreview(name, notice = null) {
+  if (!name) return;
+  const st = { name, data: null, error: null, notice };
+  restoreState = st;
+  showOverlay("overlay.restore", `<p class="muted">${escapeHtml(t("common.running"))}</p>`);
+  overlayRepaint = () => renderRestorePreview(st);
+  st.repaint = overlayRepaint;
+  try {
+    const res = await fetch(`/api/trash/restore/preview?name=${encodeURIComponent(name)}`);
+    const data = await res.json().catch(() => ({}));
+    if (restoreState !== st || overlayRepaint !== st.repaint) return;
+    if (res.ok) st.data = data;
+    else st.error = apiDetail(data, res.status);
+  } catch (e) {
+    if (restoreState !== st || overlayRepaint !== st.repaint) return;
+    st.error = e.message;
+  }
+  renderRestorePreview(st);
+}
+
+function renderRestorePreview(st) {
+  const box = $("#overlay-body");
+  box.innerHTML = "";
+  if (st.notice) taskHint(box, st.notice, "report-bad");
+  if (st.error) { taskHint(box, t("trash.restorePreviewFail", st.error), "report-bad"); return; }
+  const d = st.data;
+  if (!d) { taskHint(box, t("common.running")); return; }
+  if (d.blocked) { taskHint(box, t("trash.restoreBlocked", d.blocked), "report-bad"); return; }
+  if (d.ok) {
+    const top = document.createElement("div");
+    top.className = "heal-top";
+    const go = document.createElement("button");
+    go.className = "heal-go";
+    go.textContent = t("trash.restoreGo");
+    go.addEventListener("click", () => submitRestore(st, go));
+    top.appendChild(go);
+    box.appendChild(top);
+  }
+  if (d.resume) taskHint(box, t("trash.restoreResume"));
+  trashList(box, t("trash.restoreHead.items"), d.items || [], (it) =>
+    `${it.status === "done" ? "✓" : "·"} ${it.path}${it.status === "done" ? t("trash.restoreDone") : ""}`);
+  const label = (m) => {
+    switch (m) {
+      case "clean": return t("trash.edit.clean");
+      case "append": return t("trash.edit.append");
+      case "noop": return t("trash.edit.noop");
+      default: return t("trash.edit.skip");
+    }
+  };
+  trashList(box, t("trash.restoreHead.edits"), d.edits || [], (e) =>
+    `· ${e.page} ← ${(e.add || []).join("、")}（${label(e.mode)}${e.reason && e.mode === "skip" ? "：" + e.reason : ""}）`);
+  trashList(box, t("trash.restoreHead.index"), d.index_add || [], (p) => `+ ${p}`);
+  trashList(box, t("trash.restoreHead.orphaned"), d.orphaned || [], (p) => `· ${p}`);
+  trashList(box, t("trash.restoreHead.conflicts"), d.conflicts || [], (c) => `✗ ${c}`, "report-bad");
+  taskHint(box, t("trash.restoreNote"));
+}
+
+async function submitRestore(st, btn) {
+  btn.disabled = true;
+  let res, data;
+  try {
+    res = await fetch("/api/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: st.name, plan_digest: st.data.plan_digest || st.data.digest }),
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (e) {
+    btn.disabled = false;
+    if (restoreState === st && overlayRepaint === st.repaint) showOverlayError(t("common.submitFail", e.message));
+    return;
+  }
+  if (restoreState !== st || overlayRepaint !== st.repaint) return;
+  if (!res.ok) {
+    if (res.status === 409 && data.detail && data.detail.reason === "stale") {
+      // 预览之后有变化：旧摘要再点也只会再 409，直接按当前盘面重新预览
+      openRestorePreview(st.name, t("trash.restoreStale"));
+      return;
+    }
+    btn.disabled = false;
+    if (res.status === 423) showOverlayError(t("task.busyWritable"));
+    else if (res.status === 429) showOverlayError(t("task.limit"));
+    else showOverlayError(t("common.submitFail", apiDetail(data, res.status)));
+    return;
+  }
+  $("#overlay").classList.add("hidden");
+  trackSubmittedTask(data.task_id, "restore", { name: st.name }, data.deduplicated);
+}
+
 function renderTaskTabs() {
   document.querySelectorAll(".task-tab").forEach((b) => {
     const on = b.dataset.tab === taskDrawerTab;
@@ -200,6 +293,9 @@ function renderTrashDetail(e, box) {
   trashList(box, t("trash.head.dropped"), d.slug_dropped_from || [], (x) => `· ${x.page} ← ${x.dropped_slug}`);
   trashList(box, t("trash.head.index"), d.index_lines_removed || [], (ln) => `− ${ln}`);
   if (d.restore) taskHint(box, d.restore.finished_at ? t("trash.restoredAt", d.restore.finished_at) : t("trash.restoringHint"));
+  if (d.restore_blocked && (d.kind === "remove" || d.kind === "remove_batch") && d.state !== "restored") {
+    taskHint(box, t("trash.restoreBlocked", d.restore_blocked));
+  }
 }
 
 function renderTrashActions(e, box) {
@@ -209,11 +305,14 @@ function renderTrashActions(e, box) {
   if (trashState.confirming === e.name) {
     const warn = document.createElement("p");
     warn.className = "report-bad";
-    warn.textContent = t("trash.purgeConfirm", e.name, fmtBytes(e.size), e.files);
+    // 已恢复的条目里只剩记录文件：说清楚删的只是留档，已恢复的文件不受影响
+    warn.textContent = e.state === "restored"
+      ? t("trash.purgeRecordConfirm", e.name)
+      : t("trash.purgeConfirm", e.name, fmtBytes(e.size), e.files);
     box.appendChild(warn);
     const yes = document.createElement("button");
     yes.type = "button";
-    yes.textContent = t("trash.purgeYes");
+    yes.textContent = e.state === "restored" ? t("trash.purgeRecordYes") : t("trash.purgeYes");
     yes.disabled = trashState.busy;
     yes.addEventListener("click", () => purgeTrash(e.name));
     const no = document.createElement("button");
@@ -223,9 +322,17 @@ function renderTrashActions(e, box) {
     no.addEventListener("click", () => { trashState.confirming = null; renderTaskDrawer(); });
     bar.append(yes, no);
   } else {
+    // 恢复（T2）：可恢复的撤回条目给「恢复」，点开预览浮层。
+    if (e.restorable) {
+      const rs = document.createElement("button");
+      rs.type = "button";
+      rs.textContent = t("trash.restore");
+      rs.addEventListener("click", () => openRestorePreview(e.name));
+      bar.appendChild(rs);
+    }
     const del = document.createElement("button");
     del.type = "button";
-    del.textContent = t("trash.purge");
+    del.textContent = e.state === "restored" ? t("trash.purgeRecord") : t("trash.purge");
     const ready = trashState.detail && !trashState.detail.error; // 详情没加载好（或失败）前不给删
     del.disabled = !!protectedNow || !ready;
     if (protectedNow) del.title = t("trash.protected");
