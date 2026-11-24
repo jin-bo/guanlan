@@ -502,7 +502,8 @@ function renderTaskDetail(row, box) {
   renderTaskActions(row, box);
   if (row.state === "interrupted" && row.kind === "remove") {
     // 撤回没有前像（P4.35 §3.5）：不说「检查后重新提交」，引导重新预览；回收区可能已有本次的 manifest
-    taskHint(box, t(row.superseded_by ? "task.remove.supersededHint" : "task.remove.interruptedHint"), row.superseded_by ? "muted" : "report-bad");
+    if (row.superseded_by) taskHint(box, t("task.remove.supersededHint"), "muted");
+    else taskHint(box, t("task.remove.interruptedHint"), "report-bad");
   } else if (row.state === "cancelled" && row.kind === "remove") {
     taskHint(box, t("task.remove.cancelledHint")); // 撤回没有「重试」：引导重新预览
   } else if (row.state === "interrupted") {
