@@ -878,6 +878,12 @@ function renderOneclickPanel(panel, data) {
     summary.appendChild(linkMark(task.source_url));
   }
   card.append(head, summary);
+  if (task.ingest_mode === "flash") { // P5.6：确认时选了快速收录，续跑沿用
+    const m = document.createElement("p");
+    m.className = "muted";
+    m.textContent = t("oc.flashMode");
+    card.appendChild(m);
+  }
 
   const status = document.createElement("div");
   status.className = "stage-promote-status";
@@ -910,10 +916,20 @@ function renderOneclickPanel(panel, data) {
         label.append(overwrite, document.createTextNode(" " + t("oc.overwrite")));
         card.appendChild(label);
       }
+      // P5.6：快速收录——只建摘要页，以后再加深；模式在确认时写进任务，续跑沿用
+      const flashLabel = document.createElement("label");
+      flashLabel.className = "oc-flash";
+      const flash = document.createElement("input");
+      flash.type = "checkbox";
+      flashLabel.append(flash, document.createTextNode(" " + t("oc.flash")));
+      card.appendChild(flashLabel);
       actions.appendChild(ocButton(t("oc.start"), async () => {
         if (overwrite && !overwrite.checked) { status.textContent = t("oc.overwriteNeeded"); return; }
         try {
-          await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/confirm`, { overwrite: !!(overwrite && overwrite.checked) });
+          await ocPost(`/api/oneclick/${encodeURIComponent(task.task_id)}/confirm`, {
+            overwrite: !!(overwrite && overwrite.checked),
+            flash: flash.checked,
+          });
           loadOneclickPanel();
         } catch (e) { fail(e); }
       }, { disabled: blocked }));
@@ -1066,7 +1082,7 @@ function ocProgressBlock(task) {
   if (pi.remaining) {
     const eta = document.createElement("p");
     eta.className = "muted";
-    const basis = pi.eta_basis === "history" ? t("oc.basisHistory") : pi.eta_basis === "default" ? t("oc.basisDefault") : "";
+    const basis = pi.eta_basis === "history" ? t("oc.basisHistory") : pi.eta_basis === "default" ? t("oc.basisDefault", fmtDuration(pi.default_item_seconds || 600)) : "";
     eta.textContent = t("oc.timing", fmtDuration(pi.elapsed_seconds), fmtDuration(pi.eta_seconds), pi.remaining) + basis;
     box.appendChild(eta);
   }

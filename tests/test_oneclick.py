@@ -792,9 +792,14 @@ def test_progress_info_falls_back_to_history_then_default(kb: Path):
     task = _ptask(items=[{"raw": "r1", "chars": 500, "state": "pending"}, {"raw": "r2", "chars": 1500, "state": "pending"}])
     pi = oneclick.progress_info(kb, task)
     assert pi["eta_basis"] == "default" and pi["eta_seconds"] == 2 * oneclick.DEFAULT_ITEM_SECONDS
+    assert pi["default_item_seconds"] == oneclick.DEFAULT_ITEM_SECONDS  # 前端「按每篇 N 估」
+    flash = oneclick.progress_info(kb, {**task, "ingest_mode": oneclick.FLASH_MODE})
+    assert flash["default_item_seconds"] == oneclick.FLASH_DEFAULT_ITEM_SECONDS
+    assert flash["eta_seconds"] == 2 * oneclick.FLASH_DEFAULT_ITEM_SECONDS
     oneclick.save_task(kb, _ptask("t-old", "done", [{"raw": "x", "chars": 1000, "state": "done", "seconds": 50}]))
     pi = oneclick.progress_info(kb, task)
     assert pi["eta_basis"] == "history" and pi["eta_seconds"] == 100  # 0.05 秒/字 × 2000 字
+    assert "default_item_seconds" not in pi
     assert pi["current"] is None
 
 
@@ -1082,3 +1087,69 @@ def test_task_log_md_import_points_to_source_document(kb: Path, tmp_path: Path):
     log = oneclick._log_file(kb, task["task_id"]).read_text(encoding="utf-8")
     assert "有 1 处 MinerU 图片引用（doc:）无法显示。如有生成此 Markdown 的源文档，请重新转换源文档后再导入。" in log
     assert "可用原文件重新转换" not in log
+
+
+# ── P5.6 第二期：import --flash ─────────────────────────────────────────────────
+
+
+class FlashAwareIngest(FakeIngest):
+    """记下每篇是否按快速收录调用。"""
+
+    def __init__(self, fail: set[str] | None = None) -> None:
+        super().__init__(fail)
+        self.flash: list[bool] = []
+
+    def __call__(self, raw_rel: str, root: Path, *, flash: bool = False) -> int:
+        self.flash.append(flash)
+        return super().__call__(raw_rel, root)
+
+
+def test_flash_mode_is_fixed_at_confirm_and_kept_on_resume(kb: Path, book: Path):
+    task = _prepare(kb, book)
+    second = task["items"][1]["raw"]
+    first = FlashAwareIngest(fail={second})
+    code, task = _confirm(kb, task, first, flash=True)
+    assert code == 5 and task["state"] == "paused"
+    assert task["ingest_mode"] == "flash"
+    assert load_task(kb, task["task_id"])["ingest_mode"] == "flash"
+    assert first.flash == [True, True]
+    assert task["estimate_seconds"] == 3 * oneclick.FLASH_DEFAULT_ITEM_SECONDS
+    assert any("快速收录" in line for line in oneclick.summary_lines(task))
+    again = FlashAwareIngest()
+    code, task = _resume(kb, task, again)  # 续跑不传模式：沿用清单
+    assert code == EXIT_OK and task["state"] == "done"
+    assert again.flash == [True, True]
+    log = (kb / task["log"]).read_text(encoding="utf-8")
+    assert "快速收录" in log and "guanlan health" in log
+
+
+def test_full_mode_keeps_two_arg_ingest_contract(kb: Path, book: Path):
+    """完整模式不传 `flash` 关键字：旧的两参注入函数照常可用。"""
+    task = _prepare(kb, book)
+    code, task = _confirm(kb, task, FakeIngest())
+    assert code == EXIT_OK and "ingest_mode" not in task
+    assert not any("快速收录" in line for line in oneclick.summary_lines(task))
+
+
+def test_flash_eta_uses_only_flash_history(kb: Path, book: Path):
+    task = _prepare(kb, book)
+    _confirm(kb, task, FakeIngest())  # 一次完整模式的历史
+    done = load_task(kb, task["task_id"])
+    for it in done["items"]:
+        it["seconds"] = 900.0
+    oneclick.save_task(kb, done)
+    assert oneclick._average_item_seconds(kb) == 900.0
+    assert oneclick._average_item_seconds(kb, flash=True) == oneclick.FLASH_DEFAULT_ITEM_SECONDS
+
+
+def test_flash_only_with_import_source(kb: Path):
+    for kw in ({"do_resume": True}, {"do_cancel": True}, {"status": True}):
+        code = oneclick.import_entrypoint(kb, src=None, flash=True, interactive=False, **kw)
+        assert code == EXIT_USAGE
+
+
+def test_cli_import_flash_flag_reaches_confirm(kb: Path, book: Path):
+    ingest = FlashAwareIngest()
+    code = oneclick.import_entrypoint(kb, src=str(book), yes=True, flash=True, ingest=ingest, interactive=False, toc_review=False)
+    assert code == EXIT_OK
+    assert ingest.flash and all(ingest.flash)

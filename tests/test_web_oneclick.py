@@ -491,3 +491,46 @@ def test_upload_refuses_original_of_preparing_batch(kb):
     finally:
         lock.release()
     assert (uploads / "书.pdf").read_bytes() == b"%PDF old"
+
+
+def test_web_resume_keeps_flash_mode_of_cli_task(kb, fake_convert, monkeypatch):
+    """CLI `import --flash` 确认后暂停的任务，在 Web 续跑时仍逐篇走快速收录（P5.6 第二期）。"""
+    from guanlan import flash as flash_mod
+    from guanlan.oneclick import confirm
+
+    full = FakeIngest()
+    quick = FakeIngest()
+    monkeypatch.setattr(oneclick_routes, "run_ingest", full)
+    monkeypatch.setattr(flash_mod, "run_flash_ingest", quick)
+    with TestClient(create_app(kb)) as client:
+        task = _prepare(client)
+        second = task["items"][1]["raw"]
+
+        def cli_ingest(raw_rel, root, *, flash=False):
+            assert flash
+            return 5 if raw_rel == second else quick(raw_rel, root=root)
+
+        with acquire(kb, "test"):
+            code, _ = confirm(kb, task["task_id"], ingest=cli_ingest, flash=True)
+        assert code == 5
+        job = _wait(client, client.post(f"/api/oneclick/{task['task_id']}/resume").json()["job_id"])
+        assert job["exit_code"] == 0, job["output"]
+    assert full.calls == []
+    assert quick.calls == [task["items"][0]["raw"], second, task["items"][2]["raw"]]
+
+
+def test_web_confirm_with_flash_runs_quick_capture(kb, fake_convert, monkeypatch):
+    from guanlan import flash as flash_mod
+
+    full = FakeIngest()
+    quick = FakeIngest()
+    monkeypatch.setattr(oneclick_routes, "run_ingest", full)
+    monkeypatch.setattr(flash_mod, "run_flash_ingest", quick)
+    with TestClient(create_app(kb)) as client:
+        task = _prepare(client)
+        r = client.post(f"/api/oneclick/{task['task_id']}/confirm", json={"flash": True})
+        job = _wait(client, r.json()["job_id"])
+        assert job["exit_code"] == 0, job["output"]
+        done = client.get(f"/api/oneclick/{task['task_id']}").json()
+        assert done["ingest_mode"] == "flash"
+    assert full.calls == [] and len(quick.calls) == 3
