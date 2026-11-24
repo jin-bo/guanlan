@@ -45,6 +45,7 @@ from ..check import format_report as _format_check
 from ..check import run_check
 from ..errors import EXIT_OK, EXIT_USAGE, GuanlanError
 from ..pages import index_md_links, index_sync_state
+from ..deadsrc import drop_dead_sources, format_drop_result, format_prune_result, plan_dead_sources, preview_prune, prune_pages, slugs_in_trash, index_readable
 from ..reindex import reindex_entrypoint, run_reindex
 from ..kblock import KBLockBusy
 from ..graph import build_and_write_graph
@@ -357,6 +358,21 @@ class ReindexBody(BaseModel):
     prune: bool = False
 
 
+class DropSourcesBody(BaseModel):
+    """`POST /api/sources/drop-dead` 请求体（P4.34 §6.3）。`drops` = 预览里列出、人看过的 `{页: [失效 slug]}`。
+    作业**执行时服务端重算**，只摘两边都有的：预览之后才失效的页或 slug 人没看过，不碰（同删页 `PruneBody`）。"""
+
+    drops: dict[str, list[str]] = Field(min_length=1, max_length=20000)
+
+
+class PruneBody(BaseModel):
+    """`POST /api/pages/prune` 请求体（P4.34 §6.4）。`pages` = 预览里人看过并确认要删的页（相对库根，`wiki/...`）。
+    作业执行时重算，只删其中**当时仍是全部来源失效**的页；清单外的页一律不碰（人没看过的不删）。"""
+
+    # 上限只挡畸形请求：预览默认全选，整批撤回一本书可能留下数百张失源页，过紧会让默认提交直接 422。
+    pages: list[str] = Field(min_length=1, max_length=20000)
+
+
 class McpCheckBody(BaseModel):
     """`POST /api/mcp/check` 请求体（P4.19）。`name` 可省（省略=查全部），给了则必须是当前配置里
     已存在的 server 名（否则 404）。
@@ -491,7 +507,7 @@ def create_app(
         write_lock=write_gate.write_lock,
         on_job_done=lambda kind: (
             write_gate.bump_wiki_generation()
-            if kind in ("ingest", "heal", "backfill", "audit", "reindex", "oneclick", "rollback", "remove", "restore")
+            if kind in ("ingest", "heal", "backfill", "audit", "reindex", "dropsrc", "prune", "oneclick", "rollback", "remove", "restore")
             else None
         ),
     )
@@ -1051,6 +1067,8 @@ def create_app(
         "backfill": BackfillBody,
         "audit": AuditBody,
         "reindex": ReindexBody,
+        "dropsrc": DropSourcesBody,
+        "prune": PruneBody,
     }
 
     def _with_model(params: dict, body) -> dict:
@@ -1096,6 +1114,29 @@ def create_app(
 
             title = "索引修复：登记漏登页" + ("、删除悬空条目" if body.prune else "")
             return title, {"prune": body.prune}, _job, "修复索引"
+        if kind == "dropsrc":
+            # 零 LLM、只改内容页 frontmatter 的 sources（P4.34 §6.3）：不起 Agentao、不过写门禁、不写 log.md（同 reindex）。
+            # 走任务中心是为了写锁与前像：排在在途 ingest 之后，可取消回滚。
+            # 规范化后存进 params：查重时同一批 {页: slug} 不因顺序不同算两个任务；重试也用这一份。
+            drops = {page: sorted(set(slugs)) for page, slugs in sorted(body.drops.items())}
+
+            def _job(emit) -> int:
+                done, left = drop_dead_sources(root, drops)
+                print(format_drop_result(done, left))
+                return 0
+
+            return "摘除失效来源", {"drops": drops}, _job, "摘除失效来源"
+        if kind == "prune":
+            # 零 LLM：整页移入 .trash/prune@<ts>/ + 删 index 登记行（P4.34 §6.4）。不过写门禁、不写 log.md（记录文件即审计）。
+            # 前像照拍（只覆盖 wiki/）：取消回滚会把页与 index 恢复原样，回收区里那份副本留着、可彻底删。
+            pages = sorted(set(body.pages))
+
+            def _job(emit) -> int:
+                trash_dir, plan, skipped = prune_pages(root, pages)
+                print(format_prune_result(trash_dir, plan, skipped, root))
+                return 0
+
+            return f"删除失源页：{len(pages)} 页", {"pages": pages}, _job, "删除失源页"
         if kind == "backfill":
             # 整体复用 run_query(backfill=True)，答案 + 门禁回执经 stdout 捕获进 job.output（决策P4.8-2）。
             def _job(emit) -> int:
@@ -1220,6 +1261,39 @@ def create_app(
     async def reindex(body: ReindexBody) -> dict:
         _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
         return await _submit_task("reindex", body)
+
+    # 摘除失效来源预览（P4.34 §6.3，零 LLM 读）：列出带失效来源的页，分「可摘」（另有有效来源）与「需人工」（全部失效）。
+    @_writer_only(app.get("/api/sources/drop-dead/preview"))  # reader 下不注册：只服务于写入口
+    async def drop_sources_preview() -> dict:
+        def _preview() -> dict:
+            items = plan_dead_sources(root)
+            row = lambda d: {"page": d.page, "dead": d.dead, "live": d.live}  # noqa: E731
+            # 全部来源失效的内容页：可整页删（§6.4）。每页各带 index 行与入链（不排除同批），前端按勾选现算。
+            prunable = preview_prune(root, items)
+            gone = {d["page"] for d in prunable}
+            trashed = slugs_in_trash(root) if items else set()
+            return {
+                # in_trash：失效项里回收区还能恢复的源——摘掉后再恢复它，这页不会自动补回（§6.3）
+                "droppable": [{**row(d), "in_trash": [x for x in d.dead if x in trashed]} for d in items if d.droppable],
+                "prunable": [{**d, "in_trash": [x for x in d["dead"] if x in trashed]} for d in prunable],
+                "index_readable": index_readable(root),  # 不是 UTF-8 → 删页会中止（前端禁用删页按钮并说明）
+                # 剩下的（全部失效的摘要页）只能人工：摘要页随源走，归撤回 / 恢复
+                "manual": [row(d) for d in items if not d.droppable and d.page not in gone],
+            }
+
+        return await anyio.to_thread.run_sync(_preview)
+
+    # 摘除失效来源（写，P4.34 §6.3）：进任务中心，排单写者队列、拍前像，可取消回滚。
+    @_writer_only(app.post("/api/sources/drop-dead"))  # reader 下不注册（写内容页 frontmatter）
+    async def drop_sources(body: DropSourcesBody) -> dict:
+        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
+        return await _submit_task("dropsrc", body)
+
+    # 删除失源页（写，P4.34 §6.4）：进任务中心；只删请求里列出、执行时仍全部来源失效的页。
+    @_writer_only(app.post("/api/pages/prune"))  # reader 下不注册
+    async def prune(body: PruneBody) -> dict:
+        _reject_if_writable_active()  # 层③：可写 turn 活跃 → 423（决策P4.5-10）
+        return await _submit_task("prune", body)
 
     # 写（唯一写入口之一 = backfill，P4.8）：即时入队、立刻返回 job_id。
     @_writer_only(app.post("/api/backfill"))  # reader 下不注册（回填是 gated 写，决策P4.9-2）

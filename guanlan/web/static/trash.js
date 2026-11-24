@@ -16,14 +16,15 @@ function trashKindLabel(kind) {
     case "remove": return t("trash.kind.remove");
     case "remove_batch": return t("trash.kind.removeBatch");
     case "rollback": return t("trash.kind.rollback");
+    case "prune": return t("trash.kind.prune");
     default: return t("trash.kind.unknown");
   }
 }
 
-function trashStateLabel(state) {
+function trashStateLabel(state, kind) {
   switch (state) {
     case "complete": return t("trash.state.complete");
-    case "incomplete": return t("trash.state.incomplete");
+    case "incomplete": return kind === "prune" ? t("trash.state.pruneIncomplete") : t("trash.state.incomplete");
     case "partial": return t("trash.state.partial");
     case "restoring": return t("trash.state.restoring");
     case "restored": return t("trash.state.restored");
@@ -31,8 +32,9 @@ function trashStateLabel(state) {
   }
 }
 
-function trashStateClass(state) {
+function trashStateClass(state, kind) {
   if (state === "complete" || state === "restored") return "ok";
+  if (state === "incomplete" && kind === "prune") return "idle"; // 删页未完成没有续跑步骤，不显示成「进行中」
   if (state === "incomplete" || state === "restoring") return "run";
   if (state === "partial") return "bad";
   return "idle";
@@ -238,8 +240,8 @@ function renderTrashRow(e) {
   title.className = "task-title";
   title.textContent = e.name; // 目录名按字面显示
   const state = document.createElement("span");
-  state.className = `task-state ${trashStateClass(e.state)}`;
-  state.textContent = trashStateLabel(e.state);
+  state.className = `task-state ${trashStateClass(e.state, e.kind)}`;
+  state.textContent = trashStateLabel(e.state, e.kind);
   head.append(title, state);
   head.addEventListener("click", () => toggleTrashDetail(e.name));
   el.appendChild(head);
@@ -278,7 +280,11 @@ function renderTrashDetail(e, box) {
   if (!d) { taskHint(box, t("common.running")); return; }
   if (d.error) { taskHint(box, t("trash.loadFail", d.error), "report-bad"); return; }
   if (d.note) taskHint(box, d.note);
-  if (d.state === "incomplete") taskHint(box, t("trash.hint.incomplete"), "report-bad");
+  // 删页未完成不受删除保护（trash.protections）：不能沿用撤回那句「完成后才能删除」
+  if (d.state === "incomplete") {
+    if (d.kind === "prune") taskHint(box, t("trash.hint.pruneIncomplete"));
+    else taskHint(box, t("trash.hint.incomplete"), "report-bad");
+  }
   if (d.state === "partial") taskHint(box, t("trash.hint.partial"));
   for (const r of d.protected || []) taskHint(box, t("trash.protectedReason", r), "report-bad");
   if (d.group && d.group.raw_dir) taskHint(box, t("trash.group", d.group.raw_dir, (d.group.members || []).length));
@@ -292,8 +298,9 @@ function renderTrashDetail(e, box) {
   });
   trashList(box, t("trash.head.dropped"), d.slug_dropped_from || [], (x) => `· ${x.page} ← ${x.dropped_slug}`);
   trashList(box, t("trash.head.index"), d.index_lines_removed || [], (ln) => `− ${ln}`);
+  if (d.kind === "prune") trashList(box, t("trash.head.backlinks"), d.backlinks || [], (p) => `· ${p}`);
   if (d.restore) taskHint(box, d.restore.finished_at ? t("trash.restoredAt", d.restore.finished_at) : t("trash.restoringHint"));
-  if (d.restore_blocked && (d.kind === "remove" || d.kind === "remove_batch") && d.state !== "restored") {
+  if (d.restore_blocked && (d.kind === "remove" || d.kind === "remove_batch" || d.kind === "prune") && d.state !== "restored") {
     taskHint(box, t("trash.restoreBlocked", d.restore_blocked));
   }
 }

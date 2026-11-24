@@ -23,6 +23,7 @@ from agentao.runtime.model import purge_thinking_artifacts as _purge_thinking_ar
 from agentao.tools.base import Tool
 
 from ..check import Violation
+from ..gate import _vkey
 from ..search import CorpusCache, search_result_dict
 from .defaults import DEFAULT_MAX_CONVERSATIONS, WEB_MODES
 
@@ -305,8 +306,11 @@ def _prune_old_snapshots(kb: Path, session_id: str) -> None:
 
 
 def _violation_key(v: Violation) -> tuple:
-    """check violation 的稳定身份键（页+类+详情）：用于「本轮新增」差集与基线缓存（决策P4.5-4）。"""
-    return (v.page, v.kind, v.detail)
+    """check violation 的稳定身份键（页+类+详情）：用于「本轮新增」差集与基线缓存（决策P4.5-4）。
+
+    与写门禁同一口径（`gate._vkey`）：`sources.unresolved` 的「可直接摘除」提示随同页有效来源增减而变，
+    不截掉的话，对话里给页面补上新来源会让既有失效来源被当成本轮新增（P4.34 §6.3）。"""
+    return _vkey(v)
 
 
 def _lean_messages(messages: list[dict]) -> list[dict]:

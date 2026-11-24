@@ -84,6 +84,8 @@ def restore_block(entry: TrashEntry) -> str | None:
     """这个条目能不能恢复；不能 → 原因（给人看）。不看盘面冲突，只看条目本身。"""
     if entry.kind == "rollback":
         return "回滚条目不恢复（恢复它等于撤销一次回滚）；需要时按 manifest.jsonl 人工取回。"
+    if entry.kind == "prune":
+        return "删页条目不支持自动恢复；需要时按 prune.json 把页面移回原处，并补回 index.md 的登记行。"
     if entry.kind not in ("remove", "remove_batch"):
         return "不是系统撤回条目，无法恢复。"
     if entry.state == "restored":

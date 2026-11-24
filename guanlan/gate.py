@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
-from .check import Violation, run_check
+from .check import SOURCES_HINT_RE, Violation, run_check
 from .errors import (
     EXIT_AGENT_ERROR,
     EXIT_CHECK_FAILED,
@@ -70,13 +70,22 @@ REPAIR_PROMPT = (
 
 
 def _render_violations(violations: list[Violation]) -> str:
-    """把违规渲染成回喂 agent 的逐行清单（与 report_outcome 同格式）。"""
-    return "\n".join(f"- [{v.kind}] {v.page}: {v.detail}" for v in violations)
+    """把违规渲染成回喂 agent 的逐行清单（与 report_outcome 同格式）。
+
+    `sources.unresolved` 去掉「可直接摘除」提示（取 `_vkey` 的详情）：自愈只回喂**本次新引入**的违规，
+    这时失效项多半是 agent 刚写的笔误 slug 或漏建的摘要页，提示会诱导它把来源摘掉了事、静默丢出处。"""
+    return "\n".join(f"- [{v.kind}] {v.page}: {_vkey(v)[2]}" for v in violations)
 
 
 def _vkey(v: Violation) -> tuple[str, str, str]:
-    """违规的稳定身份键，用于增量门禁的基线 diff（区分'已存在'与'本次新引入'）。"""
-    return (v.page, v.kind, v.detail)
+    """违规的稳定身份键，用于增量门禁的基线 diff（区分'已存在'与'本次新引入'）。
+
+    `sources.unresolved` 去掉「可直接摘除」提示：提示随同页有效来源的增减而变（先撤回、后补源时，
+    ingest 补上新来源就会让旧的失效项文案变样），不去掉会把既有违规误判为本次新引入而阻断。"""
+    detail = v.detail
+    if v.kind == "sources.unresolved":
+        detail = SOURCES_HINT_RE.sub("", detail)
+    return (v.page, v.kind, detail)
 
 
 def partition_violations(
@@ -676,8 +685,8 @@ def report_outcome(
         print("  raw/ 未保留副本，无法自动还原；请人工检查后重跑。", file=err)
     elif gate.kind == "check_failed":
         print(f"✗ 内容校验失败（{len(gate.violations)} 条新阻断性违规）：", file=err)
-        for v in gate.violations:
-            print(f"    [{v.kind}] {v.page}: {v.detail}", file=err)
+        for v in gate.violations:  # 只含本次新引入的违规：去掉「可直接摘除」提示（同 _render_violations）
+            print(f"    [{v.kind}] {v.page}: {_vkey(v)[2]}", file=err)
         # `wiki.missing` 下那句"改动已留在磁盘"是**字面上的假话**——目录都没了，没有"改动"留在
         # 任何地方，而这句话恰好出现在用户最慌的时刻。故按违规类型分岔：别的 check 失败下它仍成立。
         # 顺带说一句 `raw/` 完好：`enforce` 先判 raw 再跑 check（见其 docstring），能走到
