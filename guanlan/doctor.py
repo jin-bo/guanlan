@@ -67,11 +67,12 @@ def _pending_raw(root: Path) -> list[dict]:
 def _flash_item(root: Path, page: str) -> dict:
     """待加深的快速收录页（P5.6 D8）：附上 `raw_digest` 指向的 raw，前端据此逐篇「加深」（= 普通 ingest）。
 
-    digest 缺失、格式坏或越界时不带 `raw`，只列页面（前端不给加深按钮）。
+    digest 缺失、格式坏、越界或原文已不在时不带 `raw`，只列页面（前端不给加深按钮）。
     """
     meta, _body = load_page(root / page)
     parsed = parse_digest_value(meta.get(RAW_DIGEST_KEY))
-    if parsed and admit_raw_path(root, parsed[0]) is not None:
+    raw = admit_raw_path(root, parsed[0]) if parsed else None
+    if raw is not None and raw.is_file():
         return {"page": page, "raw": parsed[0]}
     return {"page": page}
 

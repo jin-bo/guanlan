@@ -120,6 +120,13 @@ def test_flash_pending_without_usable_digest_lists_page_only(kb) -> None:
     assert items == [{"page": "wiki/sources/越界.md"}]
 
 
+def test_flash_pending_with_deleted_raw_lists_page_only(kb) -> None:
+    """原文已删：仍列页面，但不给 raw（前端不给加深按钮，免得点了才报文件不存在）。"""
+    _mark_flash(source_with_digest(kb, "已删"))
+    (kb / "raw" / "已删.md").unlink()
+    assert _cats(run_doctor(kb))["flash_pending"]["items"] == [{"page": "wiki/sources/已删.md"}]
+
+
 def test_index_quality_topology_and_total_excludes_structure(kb) -> None:
     write_page(kb, "wiki/concepts/孤页.md", body="短")  # 未进 index、桩页、孤页
     r = run_doctor(kb)
