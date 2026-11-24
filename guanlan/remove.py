@@ -40,6 +40,7 @@ from .rawio import (  # slug 归一 + 逐字读写（避免半写、不静默改
     atomic_write_text,
     detect_eol,
     dump_frontmatter,
+    find_source_page,
     normalize_basename,
     raw_slug,
     read_text_verbatim,
@@ -56,6 +57,7 @@ from .reindex import (  # index 行删除的单一归口
 __all__ = [
     "DropSlug",
     "RemovePlan",
+    "resolve_source",
     "run_remove_result",
     "execute_plan",
     "plan_digest",
@@ -90,7 +92,7 @@ class RemovePlan:
     orphans: list[str]  # 独源衍生页（advisory，一期不删；相对库根 posix）
     index_lines: list[str]  # 待删的 index.md 登记行原文（通常 0/1 条）
     backlinks: list[str] = field(default_factory=list)  # 入链页：撤回后将悬链（advisory，不改）
-    requested: str = ""  # 用户给的源名（规范化后）；与 `slug` 不同 = 摘要页是按旧算法建的旧名页（#203）
+    requested: str = ""  # 用户给的源名（规范化后）；与 `slug` 不同 = 摘要页另有其名（旧算法旧名页 #203、点折横杠形等）
 
 
 def _resolve_slug(src: str) -> str:
@@ -111,6 +113,30 @@ def _resolve_slug(src: str) -> str:
     if not slug:
         raise ValueError(f"无法从 {src!r} 解析出合法源 slug。")
     return slug
+
+
+def _literal_stem(src: str) -> str | None:
+    """参数里文件名的原样 stem：只剥目录成分与 `.md`，不做 NFKC / slug 收敛；隐藏名、`..` → None。"""
+    name = PurePosixPath(src.strip().replace("\\", "/")).name
+    if name.lower().endswith(".md"):
+        name = name[:-3]
+    if not name or name.startswith(".") or "\x00" in name:
+        return None
+    return name
+
+
+def resolve_source(root: Path, src: str) -> str:
+    """用户给的源 → 撤回用的源名。先按 `_resolve_slug` 的 slug；按它找不到任何落盘物时，再试文件名原样写法。
+
+    摘要页可能按原文文件名逐字命名（`find_source_page` 认这种写法），如 `报告（2024）.md`：NFKC 把全角括号
+    折成半角、slug 再收敛成 `报告-2024`，两边都对不上。原样写法只在确有落盘物时采用，其余行为不变。
+    非法输入仍抛 `ValueError`（同 `_resolve_slug`）；raw 同名多份等认不准时也抛 `ValueError`。
+    """
+    slug = _resolve_slug(src)
+    literal = _literal_stem(src)
+    if literal is None or literal == slug or _locate(root, *_resolve_target(root, slug)):
+        return slug
+    return literal if _locate(root, *_resolve_target(root, literal)) else slug
 
 
 def _raw_file(root: Path, slug: str) -> str | None:
@@ -149,15 +175,36 @@ def _resolve_target(root: Path, slug: str) -> tuple[str | None, str]:
     sources = root / "wiki" / "sources"
     raw_rel = _raw_file(root, slug)
     if raw_rel is not None:
-        return raw_rel, source_identity(sources, PurePosixPath(raw_rel).stem, raw_rel)
+        stem = PurePosixPath(raw_rel).stem
+        # 已有摘要页就按 `find_source_page` 认领（slug 形 → 点折横杠形 → 原文件名逐字 → 旧算法形），
+        # 与「已收录」判据同口径；按原文件名逐字建的页（如 `报告（2024）.md`）只有这样才认得出。
+        page = find_source_page(sources, stem, raw_rel)
+        identity = source_identity(sources, stem, raw_rel)
+        if page is not None and page.stem != identity and not _page_owned_by(root, page, stem, raw_rel):
+            page = None  # 回退认到的页另有其主（如 `1-报告.md` 属于 `raw/1-报告.md`）：撤回不能连带移走别人的页
+        return raw_rel, page.stem if page is not None else identity
     raw_rel = _raw_from_page(root, sources, slug)
     if raw_rel is None and not (sources / f"{slug}.md").exists():
         raw_rel = _pending_legacy_raw(root, slug)
     return raw_rel, slug
 
 
+def _page_owned_by(root: Path, page: Path, raw_stem: str, raw_rel: str) -> bool:
+    """`find_source_page` 按点折横杠 / 逐字回退认到的页，撤回时是否可算这篇 raw 的：页的 `raw_digest` 指向它，
+    或 raw/ 下没有别的原文按名字就是这张页的主。认领判据本身不确证归属，撤回是破坏性的，须多这一道。"""
+    from .rawio import _digest_names_raw
+
+    if _digest_names_raw(page, raw_stem, raw_rel):
+        return True
+    try:
+        other = _raw_file(root, page.stem)
+    except ValueError:  # 多份同名原文：认不准，宁可不连带
+        return False
+    return other is None or other == raw_rel
+
+
 def _raw_from_page(root: Path, sources: Path, slug: str) -> str | None:
-    """`wiki/sources/<slug>.md` 的 `raw_digest` 指向的原文——仅当该原文的页身份就是这张页（旧名页）。"""
+    """`wiki/sources/<slug>.md` 的 `raw_digest` 指向的原文——仅当该原文认领的正是这张页（旧名页、原文件名逐字页）。"""
     from .provenance import RAW_DIGEST_KEY, parse_digest_value
 
     page = sources / f"{slug}.md"
@@ -170,7 +217,9 @@ def _raw_from_page(root: Path, sources: Path, slug: str) -> str | None:
     rel = parsed[0]
     if not rel.startswith("raw/") or not (root / rel).is_file():
         return None
-    if same_name_key(source_identity(sources, PurePosixPath(rel).stem, rel)) != same_name_key(slug):
+    # 认领口径同 `_resolve_target`：这份原文在此目录下认领到的正是这张页（旧名页、原文件名逐字页都算）
+    owner = find_source_page(sources, PurePosixPath(rel).stem, rel)
+    if owner is None or same_name_key(owner.stem) != same_name_key(slug):
         return None
     return rel
 
@@ -595,7 +644,7 @@ def format_plan(plan: RemovePlan, *, executed: bool, json_output: bool) -> str:
     verb = "已撤回" if executed else "将撤回（预览，未写盘；加 --yes 执行）"
     out = [f"· remove {plan.slug}：{verb}"]
     if plan.requested and plan.requested != plan.slug:
-        out.append(f"    注：摘要页是按旧算法建的旧名页 `{plan.slug}`（输入 `{plan.requested}`），按旧名撤回与摘除引用。")
+        out.append(f"    注：摘要页实际名为 `{plan.slug}`（输入 `{plan.requested}`），按该名撤回与摘除引用。")
     if plan.relocate:
         out.append(f"    移入 .trash/：{', '.join(plan.relocate)}")
     for d in plan.drop_slug:
@@ -619,8 +668,8 @@ def format_plan(plan: RemovePlan, *, executed: bool, json_output: bool) -> str:
 def run_remove(root: Path, *, src: str, yes: bool, json_output: bool) -> int:
     """`guanlan remove` 的核心：解析源 → 算 plan →（`--yes` 则执行）→ 渲染 → 退出码。"""
     try:
-        slug = _resolve_slug(src)
-    except ValueError as exc:
+        slug = resolve_source(root, src)
+    except ValueError as exc:  # 非法源名，或 raw/ 下同名多份认不准
         print(exc, file=sys.stderr)
         return EXIT_USAGE
 

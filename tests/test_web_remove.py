@@ -98,6 +98,21 @@ def test_single_submit_executes_like_cli(kb) -> None:
     assert not (tasks_mod.preimage_base(kb) / r["task_id"]).exists()  # 不拍前像
 
 
+def test_single_literal_named_page_submits(kb) -> None:
+    """摘要页按原文件名逐字命名（全角括号）：按页路径预览、提交都认得出，与 CLI 同一兜底。"""
+    lit = "报告（2024）"
+    (kb / "raw" / f"{lit}.md").write_text("原文", encoding="utf-8")
+    write_page(kb, f"wiki/sources/{lit}.md", type="source", sources=f"['{lit}']")
+    src = f"wiki/sources/{lit}.md"
+    with TestClient(create_app(kb)) as client:
+        p = client.get("/api/remove/preview", params={"source": src}).json()
+        assert p["slug"] == lit and set(p["relocate"]) == {f"raw/{lit}.md", src}
+        r = client.post("/api/remove", json={"source": src, "scope": "one", "plan_digest": p["plan_digest"]}).json()
+        done = _wait(client, r["task_id"])
+    assert done["state"] == "succeeded", done["log"]["text"]
+    assert not (kb / "raw" / f"{lit}.md").exists() and not (kb / src).exists()
+
+
 def test_digest_mismatch_writes_nothing(kb) -> None:
     _single(kb)
     with TestClient(create_app(kb)) as client:

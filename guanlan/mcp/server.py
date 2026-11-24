@@ -62,6 +62,7 @@ from .tools import (
     GraphEnvelope,
     PageEnvelope,
     PagesEnvelope,
+    HealthEnvelope,
     ReportEnvelope,
     SearchEnvelope,
     tool_ask,
@@ -115,7 +116,10 @@ _GRAPH_DESC = (
     "返回 wiki 链接图（节点/边/统计，含社区若已落）。**无分页**，大库上体量可能很大。"
     "只读、**不写** `graph/` 派生物。"
 )
-_HEALTH_DESC = "文件级结构体检：桩页 + index↔磁盘同步 + source 页原文（零 LLM，建议非门禁）。纯读、不写盘。"
+_HEALTH_DESC = (
+    "文件级结构体检：桩页 + index↔磁盘同步 + source 页原文（零 LLM，建议非门禁）。纯读、不写盘。"
+    "另带 `flash_pending`：待加深的快速收录页（只建了摘要页），是状态不是问题，没有时为空列表。"
+)
 _LINT_DESC = "图感知结构 lint：孤儿 / 断链 / 缺失实体（零 LLM，建议非门禁）。纯读、不写盘。"
 _ASK_DESC = (
     "把问题交给观澜自己的只读 Agentao，综合出**带 `[[引用]]`** 的答案（重路径：慢 + 费 token）。"
@@ -194,7 +198,7 @@ def build_mcp(
         return await anyio.to_thread.run_sync(functools.partial(tool_graph, root=root))
 
     @mcp.tool(name="health", description=_HEALTH_DESC, annotations=_READ_ONLY)
-    async def health() -> ReportEnvelope:
+    async def health() -> HealthEnvelope:
         return await anyio.to_thread.run_sync(functools.partial(tool_health, root=root))
 
     @mcp.tool(name="lint", description=_LINT_DESC, annotations=_READ_ONLY)

@@ -113,6 +113,9 @@ def test_prepare_stops_at_confirm_without_touching_raw(kb: Path, book: Path):
     assert load_task(kb, task["task_id"])["state"] == "awaiting_confirm"
     assert task["precheck"]["status"] == "ok"
     assert task["estimate_seconds"] == 3 * oneclick.DEFAULT_ITEM_SECONDS
+    # 确认前两种模式都估好（P5.6）：Web 勾选快速收录时据此切换，CLI 摘要也列出
+    assert task["estimate_flash_seconds"] == 3 * oneclick.FLASH_DEFAULT_ITEM_SECONDS
+    assert any("若选快速收录" in line for line in oneclick.summary_lines(task))
 
 
 def test_confirm_lands_and_ingests_in_order(kb: Path, book: Path):
@@ -1115,6 +1118,7 @@ def test_flash_mode_is_fixed_at_confirm_and_kept_on_resume(kb: Path, book: Path)
     assert first.flash == [True, True]
     assert task["estimate_seconds"] == 3 * oneclick.FLASH_DEFAULT_ITEM_SECONDS
     assert any("快速收录" in line for line in oneclick.summary_lines(task))
+    assert not any("若选快速收录" in line for line in oneclick.summary_lines(task))  # 已是快速收录，不再提议
     again = FlashAwareIngest()
     code, task = _resume(kb, task, again)  # 续跑不传模式：沿用清单
     assert code == EXIT_OK and task["state"] == "done"

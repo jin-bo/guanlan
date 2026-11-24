@@ -54,6 +54,7 @@ __all__ = [
     "PagesEnvelope",
     "GraphEnvelope",
     "ReportEnvelope",
+    "HealthEnvelope",
     "AskEnvelope",
     "tool_search",
     "tool_read_page",
@@ -148,6 +149,16 @@ class ReportEnvelope(TypedDict):
     ok: bool
     pages_checked: int
     findings: list[dict[str, Any]]
+
+
+class HealthEnvelope(ReportEnvelope):
+    """`health` 信封：在 `ReportEnvelope` 上多一个 `flash_pending`（P5.6 待加深的快速收录页，没有时为空列表）。
+
+    始终带这个键：SDK 按 TypedDict 生成输出 schema，可选键缺省时会被填成 null、过不了 schema 校验。
+    CLI `health --json` 则只在非空时才带（守原字节契约），两边内容同源（`HealthReport.flash_pending`）。
+    """
+
+    flash_pending: list[str]
 
 
 class AskEnvelope(TypedDict):
@@ -289,15 +300,20 @@ def tool_graph(*, root: Path) -> GraphEnvelope:
 
 
 @_guard("health")
-def tool_health(*, root: Path) -> ReportEnvelope:
-    """文件级结构体检（桩页 + index↔磁盘同步 + source 页原文），经 `pages.report_dict` 直接产 dict（决策P4.10-10）。"""
+def tool_health(*, root: Path) -> HealthEnvelope:
+    """文件级结构体检（桩页 + index↔磁盘同步 + source 页原文），经 `pages.report_dict` 直接产 dict（决策P4.10-10）。
+
+    另带 `flash_pending`（待加深的快速收录页，P5.6 D8：状态，不进 findings、不影响 ok）。
+    """
     report = run_health(root / "wiki")
-    return report_dict(  # type: ignore[return-value]
+    out = report_dict(
         ok=report.ok,
         pages_checked=report.pages_checked,
         items_key="findings",
         items=report.findings,
     )
+    out["flash_pending"] = list(report.flash_pending)
+    return out  # type: ignore[return-value]
 
 
 @_guard("lint")

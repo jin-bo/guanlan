@@ -235,12 +235,32 @@ def test_health_lint_match_core_and_report_dict(kb_mcp):
     rl = _run(mcp, lambda c: c.call_tool("lint", {}))
     hr = run_health(kb_mcp / "wiki")
     lr = run_lint(kb_mcp / "wiki")
-    assert rh.structured_content == report_dict(
-        ok=hr.ok, pages_checked=hr.pages_checked, items_key="findings", items=hr.findings
-    )
+    assert rh.structured_content == {
+        **report_dict(ok=hr.ok, pages_checked=hr.pages_checked, items_key="findings", items=hr.findings),
+        "flash_pending": [],  # P5.6：始终带（无快速收录页时为空）
+    }
     assert rl.structured_content == report_dict(
         ok=lr.ok, pages_checked=lr.pages_checked, items_key="findings", items=lr.findings
     )
+
+
+def test_health_carries_flash_pending(kb_mcp):
+    """快速收录页在 MCP health 里与 CLI `health --json` 同口径列出，不进 findings、不影响 ok（P5.6 D8）。"""
+    import json as _json
+
+    from guanlan.health import format_report, run_health
+
+    page = kb_mcp / "wiki" / "sources" / "快收.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntitle: 快收\ntype: source\ntags: []\nsources: ['快收']\nlast_updated: 2026-11-24\n"
+        "ingest_depth: flash\n---\n\n正文足够长，避免被判为桩页，再多写一些字。\n",
+        encoding="utf-8",
+    )
+    rh = _run(build_mcp(kb_mcp, runner=_ok_runner), lambda c: c.call_tool("health", {}))
+    cli = _json.loads(format_report(run_health(kb_mcp / "wiki"), json_output=True))
+    assert rh.structured_content["flash_pending"] == cli["flash_pending"] == ["wiki/sources/快收.md"]
+    assert rh.structured_content["findings"] == cli["findings"]
 
 
 def test_report_dict_split_preserves_report_json_bytes(kb_mcp):

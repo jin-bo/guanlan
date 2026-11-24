@@ -678,7 +678,7 @@ def test_remove_by_raw_name_takes_legacy_page_along(tmp_path: Path, given: str, 
     assert [d.page for d in plan.drop_slug] == ["wiki/concepts/x.md"] and plan.orphans == ["wiki/concepts/y.md"]
 
     assert remove_entrypoint(root, src=given, yes=True, json_output=False) == EXIT_OK
-    assert "旧名页 `re-sume`" in capsys.readouterr().out
+    assert "摘要页实际名为 `re-sume`" in capsys.readouterr().out
     assert not raw.exists() and not page.exists() and not (raw.parent / "images").exists()
     assert _sources_of(multi) == ["bar"] and orphan.exists()
     idx = (root / "wiki" / "index.md").read_text(encoding="utf-8")
@@ -838,3 +838,89 @@ def test_same_named_nfd_raws_in_two_dirs_do_not_claim_each_others_legacy_page(tm
     assert find_source_page(sources, _NFD_RESUME, f"raw/b/{_NFD_RESUME}.md") is None
     assert locate_source_page(root, f"b/{_NFD_RESUME}.md").page is None
     assert locate_source_page(root, f"a/{_NFD_RESUME}.md").page == page
+
+
+# ---------- 摘要页按原文件名逐字命名（全角括号等 NFKC 会折掉的字符） ----------
+
+_LIT = "报告（2024）"
+
+
+def _literal_kb(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """raw 与摘要页都叫 `报告（2024）`：slug 归一会把它收敛成 `报告-2024`，两边都对不上。"""
+    root = _kb(tmp_path)
+    raw = _raw(root, _LIT)
+    page = _source_page(root, _LIT, sources=f"['{_LIT}']")
+    assert stamp_raw_digest(page, format_digest_value(f"raw/{_LIT}.md", compute_raw_digest(raw)))
+    (root / "wiki" / "index.md").write_text(
+        f"# 索引\n\n## Sources\n\n- [报告](sources/{_LIT}.md) — 摘要\n", encoding="utf-8"
+    )
+    return root, raw, page
+
+
+@pytest.mark.parametrize("given", [_LIT, f"raw/{_LIT}.md", f"wiki/sources/{_LIT}.md"])
+def test_remove_literal_named_page(tmp_path: Path, given: str, capsys):
+    root, raw, page = _literal_kb(tmp_path)
+    multi = _page(root, "wiki/concepts/x.md", sources=f"['{_LIT}', 'bar']")
+    assert _resolve_slug(given) == "报告-2024"  # 归一后的 slug 找不到任何落盘物
+    assert rmmod.resolve_source(root, given) == _LIT
+
+    assert remove_entrypoint(root, src=given, yes=True, json_output=False) == EXIT_OK
+    out = capsys.readouterr().out
+    assert f"remove {_LIT}" in out and "实际名为" not in out
+    assert not raw.exists() and not page.exists()
+    assert _sources_of(multi) == ["bar"]
+    assert f"sources/{_LIT}.md" not in (root / "wiki" / "index.md").read_text(encoding="utf-8")
+
+
+def test_remove_literal_falls_back_only_when_slug_finds_nothing(tmp_path: Path):
+    """slug 形有落盘物时仍按 slug：原样写法只是兜底，不改既有行为。"""
+    root = _kb(tmp_path)
+    _raw(root, "报告-2024")
+    _source_page(root, "报告-2024")
+    assert rmmod.resolve_source(root, _LIT) == "报告-2024"
+
+
+def test_remove_unknown_literal_still_reports_not_found(tmp_path: Path, capsys):
+    root = _kb(tmp_path)
+    assert remove_entrypoint(root, src=_LIT, yes=False, json_output=False) == EXIT_USAGE
+    assert "找不到源" in capsys.readouterr().err
+
+
+def test_remove_literal_rerun_after_summary_move_converges(tmp_path: Path, monkeypatch):
+    """移完摘要页、移原文前中断：按原样名重跑仍能认出原文并移走。"""
+    root, raw, page = _literal_kb(tmp_path)
+    orig_move = rmmod._move_into_trash
+
+    def fail_before_raw(src, root_, trash_dir):
+        if src == raw:
+            raise OSError("模拟中断")
+        return orig_move(src, root_, trash_dir)
+
+    monkeypatch.setattr(rmmod, "_move_into_trash", fail_before_raw)
+    assert remove_entrypoint(root, src=_LIT, yes=True, json_output=False) == EXIT_USAGE
+    assert raw.is_file() and not page.exists()
+    monkeypatch.setattr(rmmod, "_move_into_trash", orig_move)
+    assert remove_entrypoint(root, src=_LIT, yes=True, json_output=False) == EXIT_OK
+    assert not raw.exists()
+
+
+def test_remove_does_not_claim_kebab_page_owned_by_other_raw(tmp_path: Path):
+    """`raw/1.报告.md` 未入库、`raw/1-报告.md` 已有页 `1-报告.md`：撤回前者不能按点折横杠回退连带移走后者的页。"""
+    root = _kb(tmp_path)
+    _raw(root, "1.报告")
+    _raw(root, "1-报告")
+    other = _source_page(root, "1-报告")
+    plan = rmmod.run_remove_result(root, "1.报告")
+    assert plan.slug == "1.报告"
+    assert plan.relocate == ["raw/1.报告.md"]
+    assert other.is_file()
+
+
+def test_remove_claims_kebab_page_when_no_other_owner(tmp_path: Path):
+    """没有别的原文按名字认领这张横杠页时，仍按「已收录」同口径认它。"""
+    root = _kb(tmp_path)
+    _raw(root, "1.报告")
+    page = _source_page(root, "1-报告")
+    plan = rmmod.run_remove_result(root, "1.报告")
+    assert plan.slug == "1-报告"
+    assert "wiki/sources/1-报告.md" in plan.relocate and page.is_file()

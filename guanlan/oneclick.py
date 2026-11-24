@@ -446,17 +446,22 @@ def _precheck_signature(pc: dict) -> list:
 
 def _average_item_seconds(root: Path, *, flash: bool = False) -> float:
     """最近若干篇的平均耗时；只取同一模式（完整 / 快速收录）的任务，两种模式耗时差两三倍。"""
-    samples: list[float] = []
+    return _average_item_seconds_by_mode(root)[flash]
+
+
+def _average_item_seconds_by_mode(root: Path) -> dict[bool, float]:
+    """一次扫旧任务、两种模式的平均耗时都算出（键 = 是否快速收录）：准备完成时两种都要估，免整读旧任务两遍。"""
+    samples: dict[bool, list[float]] = {False: [], True: []}
     for task in iter_tasks(root):
-        if is_flash_task(task) != flash:
-            continue
+        bucket = samples[is_flash_task(task)]
         for it in task.get("items", []):
             if it.get("state") == "done" and isinstance(it.get("seconds"), (int, float)):
-                samples.append(float(it["seconds"]))
-    samples = samples[-_RECENT_SAMPLES:]
-    if samples:
-        return sum(samples) / len(samples)
-    return float(FLASH_DEFAULT_ITEM_SECONDS if flash else DEFAULT_ITEM_SECONDS)
+                bucket.append(float(it["seconds"]))
+    out: dict[bool, float] = {}
+    for flash, vals in samples.items():
+        vals = vals[-_RECENT_SAMPLES:]
+        out[flash] = sum(vals) / len(vals) if vals else float(FLASH_DEFAULT_ITEM_SECONDS if flash else DEFAULT_ITEM_SECONDS)
+    return out
 
 
 def _rate(items) -> float | None:
@@ -1056,7 +1061,7 @@ def prepare_batch(
         for i, src in enumerate(files):
             _prepare_doc(root, task, i, src, backend=backend, log=log, toc_reviewer=toc_reviewer, dry_run=dry_run)
         task["precheck"] = precheck(root, task)
-        task["estimate_seconds"] = round(_average_item_seconds(root) * len(task["items"]))
+        _set_estimates(root, task)
         if task["precheck"]["status"] != "ok":  # 逐份明细已带份名，批内 slug 冲突也在其中
             for d in task["precheck"]["details"]:
                 log("  ✋ " + d)
@@ -1322,7 +1327,7 @@ def _prepare_steps(
     if not final:  # 批量的一份：预检与估时由整批在全部准备完后统一做一次（否则 N 份 = 整扫 raw/、读全部旧任务 N 遍）
         return
     task["precheck"] = precheck(root, task)
-    task["estimate_seconds"] = round(_average_item_seconds(root) * len(items))
+    _set_estimates(root, task)
     if task["precheck"]["status"] != "ok":
         for d in task["precheck"]["details"]:
             log("  ✋ " + d)
@@ -1672,6 +1677,15 @@ _STATE_LABEL = {
 }
 
 
+def _set_estimates(root: Path, task: dict) -> None:
+    """准备完成时估两种模式的总耗时：确认前用户要能比较完整入库与快速收录（P5.6）。确认 flash 后
+    `estimate_seconds` 改记 flash 那份（`confirm`）。"""
+    n = len(task["items"])
+    avg = _average_item_seconds_by_mode(root)
+    task["estimate_seconds"] = round(avg[False] * n)
+    task["estimate_flash_seconds"] = round(avg[True] * n)
+
+
 def summary_lines(task: dict, *, detail: bool = False, root: Path | None = None) -> list[str]:
     items = task.get("items", [])
     est = task.get("estimate_seconds")
@@ -1687,6 +1701,9 @@ def summary_lines(task: dict, *, detail: bool = False, root: Path | None = None)
             f"  文件：{task.get('upload')}",
             f"  分份：{len(items)} 份" + (f" · 预计耗时约 {_fmt_duration(est)}" if est else ""),
         ]
+    flash_est = task.get("estimate_flash_seconds")
+    if task.get("state") == "awaiting_confirm" and not is_flash_task(task) and flash_est:
+        lines.append(f"  若选快速收录（只建摘要页）预计约 {_fmt_duration(flash_est)}")
     done = sum(1 for it in items if it.get("state") == "done")
     if task.get("state") in ("running", "paused", "done"):
         lines.append(f"  进度：{done}/{len(items)} 篇已入库")
@@ -1873,7 +1890,7 @@ def _receipt(task: dict, json_output: bool, *, root: Path | None = None) -> None
     if json_output:
         keep = (
             "task_id", "kind", "ingest_mode", "state", "reason", "upload", "sample", "split", "docs", "skipped",
-            "precheck", "normalized", "warnings", "estimate_seconds", "links_before", "links_after",
+            "precheck", "normalized", "warnings", "estimate_seconds", "estimate_flash_seconds", "links_before", "links_after",
         )
         out = {k: task.get(k) for k in keep if k in task}
         out["items"] = [
