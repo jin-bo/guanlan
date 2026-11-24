@@ -66,6 +66,7 @@
 
 ### 变更
 
+- **agentao 下限升到 0.5.23**：取消现在能打断卡在网络上的模型请求——Web 问答点「停止」、后台任务取消、`agentao run` 收到 SIGINT/SIGTERM，不再要等到请求超时。同版 shell 权限规则收紧、SIGTERM 退出码改为 143，观澜都不受影响。
 - **跟上 MinerU 4.2 的变化**（对照 4.0.12 与 4.2.3 源码；Markdown 输出格式——页标记、页脚注包装、图片语法——未变，观澜的解析后处理无需改）：
   - **托管档位说明更正**（使用指南「MinerU 解析档位」、`pdf-to-markdown` 技能）：4.2 起托管档位有 `basic` / `standard` / `advanced` 三种，`standard` 引擎不再提供 `advanced`；要用 `--tier advanced` 得设 `managed_tier advanced`（复用 standard 的模型）。旧说明照做会得到 `quality_tier_unavailable`。
   - **升级后旧服务的提示**（`skills/pdf-to-markdown/scripts/convert.py`）：4.2 起命令行与后台服务间要 token 认证，升级前起的服务仍在跑时被拒（`doclib_upgrade_required` / `invalid_doclib_token`）。此前只打一行通用失败、`auto` 模式随即退到 marker/pypdf，质量差一个数量级却不显眼；现在日志明确提示 `mineru server stop && mineru server start`。脚本不替用户重启服务。
