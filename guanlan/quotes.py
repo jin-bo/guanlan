@@ -16,7 +16,7 @@
 `"`/`”` 闭合；嵌套中的 `“` 没闭合就遇到 `"`，直引号闭合外层并计一次未闭合；行尾仍在引语内计一次未闭合。未闭合只计数、不报 finding。
 
 **归一（§3.2）**：引语侧先按 `……`/`…`/`...` 切分（另认 `⋯`、全角 `．．．`、输入法常见的 `···` 与 `。。。`：切分在 NFKC 之前，不会被归一成 `...`），再逐段 `norm()`；raw 侧先剥 frontmatter 再 `norm()`。
-`norm()` 两侧共用：去上标数字（须在 NFKC 前）→ NFKC → 链接语法取显示文本 → 去 `[1]`～`[999]` 脚注 →
+`norm()` 两侧共用：剥常见 HTML 标签并解码实体（#249）→ 去上标数字（须在 NFKC 前）→ NFKC → 链接语法取显示文本 → 去 `[1]`～`[999]` 脚注 →
 去 `(未验证)` 标记 → 删全部标点与空白。不做繁简与数字写法互换。
 
 **命中（§3.3）**：全部片段在**同一份** raw 中依次、不重叠出现。**覆盖率（§3.4）**：单份 raw 上 4 字
@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import html
 import os
 import posixpath
 import re
@@ -97,14 +98,30 @@ _FOOTNOTE_RE = re.compile(r"\[\d{1,3}\]")
 # Markdown 链接与图片 `[文字](url)` / `![alt](url)`：只留文字。convert 产出的 raw 常带链接，不剥则 URL 混进正文。
 _MD_LINK_RE = re.compile(r"!?\[([^\[\]]*)\]\([^()\s]*(?:\s+\"[^\"]*\")?\)")
 _UNVERIFIED_RE = re.compile(r"[（(]未验证[）)]")
+# HTML 标签（#249）：MinerU 等转换器把表格落成 `<table><tr><td><p>…`，单元格内一句话常被拆成两个 `<p>`。
+# 末步删标点只删得掉 `<`、`/`、`>`，标签名是字母会留下、拼进正文（`同</p><p>一性` → `同pp一性`）。
+# 两侧都剥：页面引语常照抄 raw 里的 `<sub>` / `<sup>`，只剥 raw 一侧会把这些原本逐字一致的引语判失败。
+# 只认常见 HTML 标签名（不吃 `<slug>` 占位符与 `<allele>` 这类 XML 片段）；不跨行，属性须以 ASCII 字母起头，
+# 免把 `a<b … c>d`、同行的 `当 a<b 且 c>d 时` 这类比较式当标签吞掉（吞掉即漏报，且两侧对等、看不出来）。
+# 单元格边界同样剥掉：与 markdown 管道表格的 `|` 被当标点删掉同口径，相邻单元格的文字可以连着核。
+_HTML_TAGS = (
+    "a|abbr|b|big|blockquote|br|caption|center|cite|code|col|colgroup|dd|del|details|div|dl|dt|em|figcaption|figure|"
+    "font|h[1-6]|hr|i|img|ins|li|mark|ol|p|pre|q|rb|rp|rt|ruby|s|small|span|strike|strong|sub|summary|sup|table|"
+    "tbody|td|tfoot|th|thead|tr|tt|u|ul|wbr"
+)
+_HTML_TAG_RE = re.compile(rf"</?(?:{_HTML_TAGS})(?:\s+[A-Za-z][^<>\n]*)?\s*/?>", re.IGNORECASE)
 _PUNCT_RE = re.compile(r"[\W_]+", re.UNICODE)
 # 切分在 norm()（含 NFKC）之前，故 `⋯`（部分输入法的省略号）与全角 `．．．` 须显式列出，否则被当标点删掉、
 # 片段被拼成一段，原文里不相连的两句引语就判成 altered（且计入 strict）。
-_ELLIPSIS_RE = re.compile(r"……|…|⋯+|\.{3,}|．{3,}|·{3,}|。{3,}")
+# `&hellip;` 等实体写法同列：实体在 norm() 里才解码，切分时还是字面字样，不列就切不开。
+_ELLIPSIS_RE = re.compile(r"……|…|⋯+|\.{3,}|．{3,}|·{3,}|。{3,}|&hellip;|&#8230;|&#x2026;", re.IGNORECASE)
 
 
 def norm(text: str) -> str:
-    """两侧共用的归一（§3.2 第 2 步）：去上标 → NFKC → 链接取显示文本（`[[…]]` 与 Markdown `[文字](url)`）→ 去脚注编号 → 去 `(未验证)` → 删标点空白。"""
+    """两侧共用的归一（§3.2 第 2 步）：剥 HTML 标签、解码实体 → 去上标 → NFKC → 链接取显示文本（`[[…]]` 与
+    Markdown `[文字](url)`）→ 去脚注编号 → 去 `(未验证)` → 删标点空白。"""
+    # 实体在剥标签之后解码：`&lt;p&gt;` 是正文里写出来的字样，不当标签删。`&amp;` 等不解码会剩下字母 `amp`。
+    text = html.unescape(_HTML_TAG_RE.sub(" ", text))
     text = unicodedata.normalize("NFKC", _SUPERSCRIPT_RE.sub("", text))
     # `[[x|y]]` 取 `y`；`[[x#小节]]` 取 `x`（锚点不是措辞，不去掉就会被拼进正文）。`**`/`__` 强调由末步删标点一并去掉。
     text = _LINK_RE.sub(lambda m: m.group(2) if m.group(2) is not None else m.group(1).split("#", 1)[0], text)

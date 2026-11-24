@@ -662,3 +662,53 @@ def test_page_run_still_reports_undecodable_raw_and_fails_strict(tmp_path):
     (kb / "raw" / "bad.md").write_bytes(b"\xff\xfe\x00bad")
     report = run_quotes(kb, page="a", strict=True)
     assert report.raw_unreachable == ["raw/bad.md"] and report.ok is False
+
+
+# ---------- #249：HTML 标签与实体 ----------
+
+_CELL_RAW = "| 甲 |\n<table><tr><td><p>指人像、物象及音像制品的同</p><p>   一性和同源性鉴定）</p></td><td><p>台</p></td></tr></table>\n"
+_CELL_Q = "指人像、物象及音像制品的同一性和同源性鉴定"
+
+
+def test_norm_strips_html_tags_and_entities():
+    assert norm("指人像、物象及音像制品的同</p><p>   一性和同源性鉴定）</p>") == norm(_CELL_Q)
+    assert norm("<td><p>台</p></td>") == norm("台")
+    assert norm('<a href="http://x.org/p">链接文字</a>') == norm("链接文字")  # 属性里的 URL 不混进正文
+    assert norm("A&amp;B&nbsp;C") == norm("A B C")
+    assert norm("Qn<sub>和</sub>Q/ Hampel") == norm("Qn和Q/Hampel")
+
+
+def test_norm_keeps_non_html_angle_text():
+    """名单外的尖括号内容不删：`<slug>` 占位符、XML 片段、跨行的比较式都留着（漏报是沉默的）。"""
+    assert norm("撤回 <slug> 页") == "撤回slug页"
+    assert norm("<allele>12</allele>") == "allele12allele"
+    assert norm("a<b 且\nc>d") == "ab且cd"
+    assert norm("当 a<b 且 c>d 时") == "当ab且cd时"  # 同行比较式：属性不以 ASCII 字母起头，不当标签
+    assert norm("写作 &lt;p&gt; 的字样") == "写作p的字样"  # 实体解出的是正文字样，不当标签删
+
+
+def test_segments_split_on_hellip_entity():
+    assert segments("甲乙丙&hellip;丁戊己") == ["甲乙丙", "丁戊己"]
+
+
+def test_quote_across_html_paragraph_break_passes(tmp_path):
+    kb = _kb(tmp_path, {"raw/a.md": _CELL_RAW}, {"sources/a.md": _src("raw/a.md", f"分类表写明“{_CELL_Q}”。")})
+    r = run_quotes(kb)
+    assert r.findings == [] and r.counts.get("passed") == 1
+
+
+def test_text_inserted_between_tags_still_altered(tmp_path):
+    """反例：raw 在两个 `<p>` 之间多了字，引语照「同一性」写，仍要判 altered——剥标签不能把真改动吞掉。"""
+    raw = _CELL_RAW.replace("同</p><p>", "同</p>不<p>")
+    kb = _kb(tmp_path, {"raw/a.md": raw}, {"sources/a.md": _src("raw/a.md", f"分类表写明“{_CELL_Q}”。")})
+    (f,) = run_quotes(kb).findings
+    assert f.kind == "altered" and f.strict
+
+
+def test_quote_copying_raw_html_still_passes(tmp_path):
+    """页面照抄 raw 里的 `<sub>` 与 `&lt;`：两侧同样归一，不因只剥一侧而判失败。"""
+    raw = "| 算法 |\n| Qn<sub>和</sub>Q/ Hampel稳健统计方法 | 错误拒绝率:&lt;2.5%时判为不符合 |\n"
+    page = _src("raw/a.md", "表中写“Qn<sub>和</sub>Q/ Hampel稳健统计方法”，又写“错误拒绝率:&lt;2.5%时判为不符合”。")
+    kb = _kb(tmp_path, {"raw/a.md": raw}, {"sources/a.md": page})
+    r = run_quotes(kb, min_len=8)
+    assert r.findings == [] and r.counts.get("passed") == 2
