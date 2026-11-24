@@ -88,7 +88,7 @@ On the server side, put caddy/nginx in front to terminate TLS and forward to `12
 | `read_page` | no | Read a wiki page: by `path` (the `page` field from `search`, with path-traversal protection) or by `name` (page name, alias, or the text of a `[[link]]`, resolved like `check` does, so you can follow links without another `search`). Pass exactly one |
 | `list_pages` | no | List content pages |
 | `graph` | no | Graph (nodes/edges/communities/topology stats) |
-| `health` | no | Health report |
+| `health` | no | Health report; also carries `flash_pending`: quick-captured pages still to deepen (an empty list when there are none) |
 | `lint` | no | Lint report |
 | `ask` | **yes** | Ask the knowledge base (reuses the CLI-query read-only subprocess path) |
 

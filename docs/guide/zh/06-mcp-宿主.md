@@ -88,7 +88,7 @@ guanlan -C my-wiki mcp --transport http \
 | `read_page` | 否 | 读一篇 wiki 页:按 `path`(`search` 结果里的 `page` 字段,带路径穿越防护)或按 `name`(页名、别名或正文里 `[[链接]]` 的文字,与 `check` 同一套解析,顺链不必再 `search`),两者恰好给一个 |
 | `list_pages` | 否 | 列出内容页 |
 | `graph` | 否 | 图谱(节点/边/社区/拓扑统计) |
-| `health` | 否 | 体检报告 |
+| `health` | 否 | 体检报告;另带 `flash_pending`:待加深的快速收录页(没有时为空列表) |
 | `lint` | 否 | lint 报告 |
 | `ask` | **是** | 对知识库提问(复用 CLI-query 只读子进程路径) |
 

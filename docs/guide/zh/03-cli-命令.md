@@ -33,18 +33,21 @@ guanlan init -C my-wiki  # 与位置参数等价
 ```bash
 guanlan -C my-wiki ingest raw/source.md
 guanlan -C my-wiki ingest raw/source.md --model <model-id>   # 覆盖默认模型
+guanlan -C my-wiki ingest --flash raw/source.md               # 快速收录:只建摘要页,几十秒进库
 ```
 
 | 参数 | 说明 |
 |---|---|
 | `target` | `raw/` 下的 `.md` 文件,如 `raw/x.md`(**只接受 `.md`**) |
 | `--model` | 覆盖 Agentao 默认模型 |
+| `--flash` | 快速收录:只建这篇的 source 摘要页,不建实体/概念页、不改 overview |
 
 要点:
 
 - **只接受 `.md`**。非 `.md`(PDF/DOCX/…)先用 [`guanlan convert`](07-多格式转换.md) 转成 `raw/<slug>.md` 再 ingest;整本书或长报告用 [`guanlan import`](#guanlan-import-src) 一步完成。
 - **`raw/` 只读不可变**:写门禁在 Agentao 调用前后对 `raw/` 做快照(文件名+大小+mtime,必要时 SHA256)。若 Agent 误改/误删 `raw/`,退出码 `4`(`EXIT_RAW_MUTATED`)。
 - 这是受治理的写操作:经 Agentao 子进程 + 单写者门禁。
+- **快速收录 `--flash`**:先收录、以后再融入。一篇通常几十秒进库(完整 ingest 约 1.5–3 分钟),进库后即可被检索和问答召回;代价是不做跨页整合,正文里的 `[[实体]]` 多是还没有页面的前向引用。Agent 只写暂存候选,观澜校验后才提交到 `wiki/sources/`,并登记 index 与 log;`wiki/` 里任何其他改动都会被逐字还原并判失败,所以**运行期间不要手改 `wiki/`**。页上标 `ingest_depth: flash`;之后**不带 `--flash` 再跑一次 `ingest`** 即加深,成功后标记自动去掉,[`guanlan health`](04-维护-体检-图谱.md#guanlan-health) 会列出待加深的篇目。这篇已有完整入库的摘要页时,`--flash` 跳过、不覆盖。设计见 [`P5.6-快速收录.md`](../../P5.6-快速收录.md)。
 
 ---
 
@@ -143,7 +146,7 @@ guanlan -C my-wiki import --cancel           # 放弃等待确认或已暂停的
 1. **解析**:与 `convert` 同一后端(`.docx` 先用 pandoc,其余按 MinerU → marker → pypdf 回退),原样结果留在 `workspace/parsed/<名称>.origin.md`。
 2. **整理**(零 LLM):删页眉、页脚、页码和明确模式的水印,接回被分页切断的句子;书带目录时按目录定标题层级。
 3. **拆分**(零 LLM):正文 ≤ 约 4 万字不拆;否则按章节标题切,每份 ≤ 约 4 万字,相邻小章合并。
-4. **确认**:打印份数、每份字数、预计耗时和 `raw/` 冲突预检结果。
+4. **确认**:打印份数、每份字数、预计耗时(另列快速收录的估时)和 `raw/` 冲突预检结果。
 5. **落 `raw/` 并逐份 ingest**:不拆时落 `raw/<名称>.md`;拆分时落 `raw/<名称>/<名称>-NN-<章名>.md`,不再落整本。之后串行 ingest。
 
 **确认之前任何一步失败,`raw/` 都不被触碰。**
@@ -159,6 +162,7 @@ guanlan -C my-wiki import --cancel           # 放弃等待确认或已暂停的
 | `--model` / `--thinking` | 透传给每份 ingest |
 | `--backend` | 转换后端(同 `convert`,默认 `auto`) |
 | `--no-toc-review` | 目录只用规则解析,不交模型审校(这样 `--dry-run` 就是零 LLM) |
+| `--flash` | 逐份快速收录(见 [`ingest --flash`](#guanlan-ingest-target)):只建摘要页,以后再加深。模式在确认时写进任务,暂停后在 CLI 或 Web 续跑都沿用;不能与 `--resume` 同用 |
 
 要点:
 

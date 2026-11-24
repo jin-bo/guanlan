@@ -44,6 +44,7 @@ last_updated: YYYY-MM-DD
 - `aliases`（可选，常用于 entity/concept）：本页的常用别名与变体名，见〈别名〉。没有可以省略。
 - `last_updated`：每次实质修改都改成当天日期（`YYYY-MM-DD`）。
 - `raw_digest`（只出现在 source 页，由 wrapper 托管）：形如 `'raw/<原文件名>@sha256:<hex>'`，是 source 页所依据的资料版本的内容指纹。wrapper 在 ingest 通过写门禁后写入，在 `guanlan audit` 复核后刷新。不得写、改或在答复里抄录它，也不要用它做判断。`check` 不校验它。
+- `ingest_depth`（只出现在 source 页，由 wrapper 托管）：值为 `flash` 时，表示这篇资料是快速收录的，只建了这张 source 页，实体/概念页还没整合（待加深）。wrapper 在快速收录时写入，完整 ingest 成功后去掉。修改这张页时原样保留这个字段，不得写、改或删；本次要不要整合，以 wrapper 提示词为准。
 
 ## wikilink
 

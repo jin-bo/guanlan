@@ -33,18 +33,21 @@ Ingest one **`.md`** source: the Agent reads the source under `raw/` and creates
 ```bash
 guanlan -C my-wiki ingest raw/source.md
 guanlan -C my-wiki ingest raw/source.md --model <model-id>   # override the default model
+guanlan -C my-wiki ingest --flash raw/source.md               # quick capture: summary page only, in tens of seconds
 ```
 
 | Arg | Meaning |
 |---|---|
 | `target` | A `.md` file under `raw/`, e.g. `raw/x.md` (**`.md` only**) |
 | `--model` | Override the default Agentao model |
+| `--flash` | Quick capture: write only this source's summary page; no entity/concept pages, no overview change |
 
 Notes:
 
 - **`.md` only.** Convert non-`.md` (PDF/DOCX/…) into `raw/<slug>.md` with [`guanlan convert`](07-convert.md) first; for a whole book or long report, [`guanlan import`](#guanlan-import-src) does it in one step.
 - **`raw/` is read-only and immutable**: the write gate snapshots `raw/` (name + size + mtime, SHA256 if needed) around the Agentao call. If the Agent mutates/deletes `raw/`, exit code `4` (`EXIT_RAW_MUTATED`).
 - This is a governed write: Agentao subprocess + single-writer gate.
+- **Quick capture `--flash`**: capture now, integrate later. A source usually lands in tens of seconds (a full ingest takes about 1.5–3 minutes) and is searchable and answerable at once; the trade-off is no cross-page integration, so most `[[entities]]` in its text are forward links to pages that do not exist yet. The Agent writes only a staged candidate; GuanLan validates it, commits it to `wiki/sources/`, and registers index and log. Any other change under `wiki/` is restored byte for byte and the run fails, so **do not edit `wiki/` by hand while it runs**. The page is marked `ingest_depth: flash`; **run `ingest` again without `--flash`** to deepen it, and the mark is removed on success. [`guanlan health`](04-maintenance.md#guanlan-health) lists pages still to deepen. If the source already has a fully ingested summary page, `--flash` skips it and does not overwrite. Design: [`P5.6-快速收录.md`](../../P5.6-快速收录.md).
 
 ---
 
@@ -146,7 +149,7 @@ Steps:
 1. **Parse**: the same backends as `convert` (`.docx` tries pandoc first; everything else falls back MinerU → marker → pypdf). The raw result stays untouched in `workspace/parsed/<name>.origin.md`.
 2. **Normalize** (zero-LLM): remove running headers, footers, page numbers and clear-pattern watermarks, and rejoin sentences cut at page breaks. If the book has a table of contents, heading levels follow it.
 3. **Split** (zero-LLM): up to about 40,000 characters stays whole; longer text is split at chapter headings into parts of at most about 40,000 characters, and small neighboring chapters are merged.
-4. **Confirm**: print the number of parts, each part's length, the estimated time and the `raw/` conflict pre-check.
+4. **Confirm**: print the number of parts, each part's length, the estimated time (plus the quick-capture estimate) and the `raw/` conflict pre-check.
 5. **Land in `raw/` and ingest**: an unsplit document lands as `raw/<name>.md`; a split one as `raw/<name>/<name>-NN-<chapter>.md`, without a whole-book copy. Then each part is ingested in turn.
 
 **If any step before confirmation fails, `raw/` is not touched.**
@@ -162,6 +165,7 @@ Steps:
 | `--model` / `--thinking` | Passed through to each ingest |
 | `--backend` | Conversion backend (as in `convert`; default `auto`) |
 | `--no-toc-review` | Parse the TOC by rules only, without the model review (this makes `--dry-run` zero-LLM) |
+| `--flash` | Quick-capture each part (see [`ingest --flash`](#guanlan-ingest-target)): summary pages only, deepen later. The mode is fixed when you confirm and kept when the task is resumed from the CLI or the Web; cannot be combined with `--resume` |
 
 Notes:
 

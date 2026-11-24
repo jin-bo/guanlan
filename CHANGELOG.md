@@ -19,6 +19,7 @@
   - 对照实验（4 篇×3 次）：合计耗时从 26.1 分钟降到 9.9 分钟，每篇范围都不重叠；代价是前向引用断链增多。
   - Web 体检多一段「状态（不计入总数）」，列出待加深的快速收录页及其原文；每篇一个「加深」按钮，等同在补录选单里对该原文点 ingest。
   - 确认前就能比较两种模式的估时：Web 勾选「快速收录」时任务卡估时随之切换，CLI 等待确认时多一行快速收录估时。
+  - 技能约定写明 `ingest_depth` 由 wrapper 托管：修改 source 页时原样保留，免得 heal / audit 改页时把「待加深」状态弄丢（升级后跑 `guanlan install-skill --force`）。
   - MCP `health` 工具另带 `flash_pending`（没有时为空列表），与 `guanlan health --json` 同源。
   - 一键入库也能快速收录：`guanlan import <文件或目录> --flash`，或 Web 一键入库确认时勾选「快速收录」。模式在确认时写进任务，暂停后在 CLI 或 Web 续跑都沿用；预计耗时按模式分开估算。
 - **回收区恢复（T2）**（设计见 `docs/P4.36-Web回收区.md`）：`guanlan trash restore <条目>`（默认预览，`--yes` 执行），Web 回收区详情里的「恢复」→ 预览 → 后台任务。
