@@ -1082,7 +1082,7 @@ function ocProgressBlock(task) {
   if (pi.remaining) {
     const eta = document.createElement("p");
     eta.className = "muted";
-    const basis = pi.eta_basis === "history" ? t("oc.basisHistory") : pi.eta_basis === "default" ? t("oc.basisDefault") : "";
+    const basis = pi.eta_basis === "history" ? t("oc.basisHistory") : pi.eta_basis === "default" ? t("oc.basisDefault", fmtDuration(pi.default_item_seconds || 600)) : "";
     eta.textContent = t("oc.timing", fmtDuration(pi.elapsed_seconds), fmtDuration(pi.eta_seconds), pi.remaining) + basis;
     box.appendChild(eta);
   }

@@ -513,10 +513,10 @@ def progress_info(root: Path, task: dict) -> dict:
         rate = _history_rate(root, task.get("task_id"), flash=is_flash_task(task))
         basis = "history"
     eta = 0.0
+    default = FLASH_DEFAULT_ITEM_SECONDS if is_flash_task(task) else DEFAULT_ITEM_SECONDS
     for i, it in enumerate(items):
         if it.get("state") == "done":
             continue
-        default = FLASH_DEFAULT_ITEM_SECONDS if is_flash_task(task) else DEFAULT_ITEM_SECONDS
         est = rate * (it.get("chars") or 0) if rate is not None else float(default)
         eta += max(0.0, est - cur_elapsed) if i == cur_idx else est
     if rate is None:
@@ -531,6 +531,8 @@ def progress_info(root: Path, task: dict) -> dict:
         "eta_seconds": round(eta) if left else 0,
         "eta_basis": basis,
     }
+    if basis == "default":
+        out["default_item_seconds"] = default  # 前端提示「按每篇 N 估」；flash 与完整模式不同
     if task.get("kind") == "batch":
         out["docs_total"] = len(task.get("docs", []))
     return out

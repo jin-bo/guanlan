@@ -792,9 +792,14 @@ def test_progress_info_falls_back_to_history_then_default(kb: Path):
     task = _ptask(items=[{"raw": "r1", "chars": 500, "state": "pending"}, {"raw": "r2", "chars": 1500, "state": "pending"}])
     pi = oneclick.progress_info(kb, task)
     assert pi["eta_basis"] == "default" and pi["eta_seconds"] == 2 * oneclick.DEFAULT_ITEM_SECONDS
+    assert pi["default_item_seconds"] == oneclick.DEFAULT_ITEM_SECONDS  # 前端「按每篇 N 估」
+    flash = oneclick.progress_info(kb, {**task, "ingest_mode": oneclick.FLASH_MODE})
+    assert flash["default_item_seconds"] == oneclick.FLASH_DEFAULT_ITEM_SECONDS
+    assert flash["eta_seconds"] == 2 * oneclick.FLASH_DEFAULT_ITEM_SECONDS
     oneclick.save_task(kb, _ptask("t-old", "done", [{"raw": "x", "chars": 1000, "state": "done", "seconds": 50}]))
     pi = oneclick.progress_info(kb, task)
     assert pi["eta_basis"] == "history" and pi["eta_seconds"] == 100  # 0.05 秒/字 × 2000 字
+    assert "default_item_seconds" not in pi
     assert pi["current"] is None
 
 
