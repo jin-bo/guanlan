@@ -33,7 +33,8 @@ from .lint import (
     missing_entities_from_graph,
     missing_entity_detail,
 )
-from .pages import TOPOLOGY_FINDING_KINDS
+from .pages import TOPOLOGY_FINDING_KINDS, load_page
+from .provenance import RAW_DIGEST_KEY, admit_raw_path, parse_digest_value
 from .quotes import _REASONS as _QUOTE_REASONS
 from .quotes import run_quotes
 from .rawio import raw_ingest_status
@@ -63,6 +64,18 @@ def _pending_raw(root: Path) -> list[dict]:
     ]
 
 
+def _flash_item(root: Path, page: str) -> dict:
+    """待加深的快速收录页（P5.6 D8）：附上 `raw_digest` 指向的 raw，前端据此逐篇「加深」（= 普通 ingest）。
+
+    digest 缺失、格式坏或越界时不带 `raw`，只列页面（前端不给加深按钮）。
+    """
+    meta, _body = load_page(root / page)
+    parsed = parse_digest_value(meta.get(RAW_DIGEST_KEY))
+    if parsed and admit_raw_path(root, parsed[0]) is not None:
+        return {"page": page, "raw": parsed[0]}
+    return {"page": page}
+
+
 def _category(key: str, section: str, items: list[dict], action: str | None = None) -> dict:
     return {"key": key, "section": section, "count": len(items), "items": items, "action": action}
 
@@ -70,7 +83,8 @@ def _category(key: str, section: str, items: list[dict], action: str | None = No
 def run_doctor(root: Path) -> dict:
     """跑一次体检，返回 `{ok, pages_checked, total, elapsed_s, categories: [...]}`。
 
-    `categories` 按展示顺序排列，每项 `{key, section, count, items, action}`：`section` ∈ blocking / suggest / structure；
+    `categories` 按展示顺序排列，每项 `{key, section, count, items, action}`：`section` ∈ blocking / suggest / status / structure；
+    status（待加深的快速收录页，P5.6 D8）与 structure 一样是信息、不计入 `total`。
     `action` 是修复入口（heal / ingest / audit / reindex / dropsrc / graph，或 None）。`count == len(items)`，即最终展示项数。
     必须修里能一键修的只有失效来源（§6.3 摘除 / §6.4 删页）：这些条目带 `fix: "dropsrc"`，有一条以上时该类 action 为 dropsrc。
     """
@@ -149,9 +163,10 @@ def run_doctor(root: Path) -> dict:
         _category("drift", "suggest", drift_items, "audit"),
         _category("index", "suggest", index_items, "reindex"),  # Web 修复入口见 P4.34 §6.2
         _category("quality", "suggest", quality_items),
+        _category("flash_pending", "status", [_flash_item(root, p) for p in health.flash_pending]),
         _category("topology", "structure", topology_items, "graph"),
     ]
-    total = sum(c["count"] for c in categories if c["section"] != "structure")
+    total = sum(c["count"] for c in categories if c["section"] in ("blocking", "suggest"))
     return {
         "ok": not blocking,
         "pages_checked": check.pages_checked,

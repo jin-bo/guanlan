@@ -25,10 +25,12 @@ def test_clean_kb_has_no_blocking_and_counts_shown_items(kb) -> None:
     r = run_doctor(kb)
     assert r["ok"] is True
     cats = _cats(r)
-    assert list(cats) == ["blocking", "missing_entity", "broken_link", "pending_raw", "drift", "index", "quality", "topology"]
+    assert list(cats) == [
+        "blocking", "missing_entity", "broken_link", "pending_raw", "drift", "index", "quality", "flash_pending", "topology",
+    ]
     for c in r["categories"]:
         assert c["count"] == len(c["items"])  # 计数 = 最终展示项数
-    assert r["total"] == sum(c["count"] for c in r["categories"] if c["section"] != "structure")
+    assert r["total"] == sum(c["count"] for c in r["categories"] if c["section"] in ("blocking", "suggest"))
 
 
 def test_blocking_reuses_gate_partition(kb) -> None:
@@ -94,6 +96,30 @@ def test_pending_raw_lists_uningested_sources(kb) -> None:
     assert [p["page"] for p in pending["items"]] == ["raw/新资料.md"] and pending["action"] == "ingest"
 
 
+def _mark_flash(page: Path) -> None:
+    page.write_text(page.read_text(encoding="utf-8").replace("raw_digest:", "ingest_depth: flash\nraw_digest:", 1), encoding="utf-8")
+
+
+def test_flash_pending_listed_with_raw_and_not_counted(kb) -> None:
+    """快速收录页（P5.6 D8）是状态不是问题：单列「待加深」并附 raw 供逐篇加深，不计入 total、不影响 ok。"""
+    _mark_flash(source_with_digest(kb, "快收"))
+    source_with_digest(kb, "完整")
+    before = run_doctor(kb)
+    cat = _cats(before)["flash_pending"]
+    assert cat["section"] == "status" and cat["action"] is None
+    assert cat["items"] == [{"page": "wiki/sources/快收.md", "raw": "raw/快收.md"}]
+    assert before["ok"] is True
+    assert before["total"] == sum(c["count"] for c in before["categories"] if c["section"] in ("blocking", "suggest"))
+    assert "flash_pending" not in {c["key"] for c in before["categories"] if c["section"] in ("blocking", "suggest")}
+
+
+def test_flash_pending_without_usable_digest_lists_page_only(kb) -> None:
+    """digest 越界或坏掉时只列页面、不给 raw（前端随之不给加深按钮），不能因此漏报这一页。"""
+    _mark_flash(source_with_digest(kb, "越界", digest="raw/../SCHEMA.md@sha256:" + "0" * 64))
+    items = _cats(run_doctor(kb))["flash_pending"]["items"]
+    assert items == [{"page": "wiki/sources/越界.md"}]
+
+
 def test_index_quality_topology_and_total_excludes_structure(kb) -> None:
     write_page(kb, "wiki/concepts/孤页.md", body="短")  # 未进 index、桩页、孤页
     r = run_doctor(kb)
@@ -102,7 +128,7 @@ def test_index_quality_topology_and_total_excludes_structure(kb) -> None:
     quality = {i["kind"] for i in cats["quality"]["items"]}
     assert {"health.stub_page", "lint.orphan"} <= quality
     assert cats["topology"]["section"] == "structure"
-    assert r["total"] == sum(c["count"] for c in r["categories"] if c["section"] != "structure")
+    assert r["total"] == sum(c["count"] for c in r["categories"] if c["section"] in ("blocking", "suggest"))
 
 
 def test_unknown_lint_kind_falls_into_quality_not_dropped(kb, monkeypatch) -> None:
