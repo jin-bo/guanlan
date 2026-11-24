@@ -2296,8 +2296,10 @@ def test_app_info_no_conversation(chat_client) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert set(body) == {
-        "kb_name", "model", "mode", "persist", "reader", "conversations", "max_conversations"
+        "kb_name", "model", "mode", "persist", "reader", "conversations", "max_conversations",
+        "profile",
     }
+    assert body["profile"] == {"source": None, "path": None, "warning": None}  # P5.5.2：未配画像来源
     assert body["mode"] == "read-only"
     assert body["persist"] is True
     assert body["reader"] is False  # 默认非 reader（P4.9）

@@ -165,6 +165,17 @@ def _cmd_import(args: argparse.Namespace) -> int:
     )
 
 
+def _web_profile_source(args: argparse.Namespace):
+    """`guanlan web` 的画像来源（P5.5.2 决策W1/W2）：reader 与 --no-profile 不带；否则显式路径或默认路径。"""
+    from pathlib import Path
+
+    from .web.profile import ProfileSource
+
+    if args.reader or args.no_profile:
+        return None
+    return ProfileSource(Path(args.profile).expanduser() if args.profile is not None else None)
+
+
 def _cmd_web(args: argparse.Namespace) -> int:
     # web 是可选叠加层：缺 `guanlan-wiki[web]`（fastapi/uvicorn 导入失败）时优雅降级、引导安装，
     # 不让 CLI 抛 traceback（决策P4-2）。导入收在函数内，核心命令不为 Web 背 import 成本。
@@ -192,6 +203,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             confirm=args.confirm,
             confirm_timeout=args.confirm_timeout,
             goal_enabled=args.goal != "off",
+            profile=_web_profile_source(args),
         )
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
@@ -674,6 +686,22 @@ def _add_web_parser(sub, dir_parent) -> None:
         help="`/goal` 长任务自动续跑总开关（P4.16，默认 on）：浏览器内设一个长任务目标，由宿主反复"
         "驱动多轮直至 Agent 自报完成/阻塞、撞时间/轮数预算、或用户暂停；off 关闭该入口（reader 强制关）",
     )
+    # P5.5.2 问答画像：规则同 `guanlan query`（P5.5.1 决策D1）。与 --reader 冲突由 main 在解析后检查。
+    prof = p.add_mutually_exclusive_group()
+    prof.add_argument(
+        "--profile",
+        default=None,
+        metavar="路径",
+        help="对话会话附上库外的提问者画像（UTF-8 markdown，≤1500 字），放进系统提示。不给时若 "
+        "~/.guanlan/USER.md 存在则自动带上；每个新会话重读一次，会话内 /profile 查看或关闭。画像会发给"
+        "模型提供方并以明文记入库根 agentao.log；按画像写的回答随会话快照存进库内 .agentao/sessions/。"
+        "回填、入库等作业不带画像。不能与 --reader 同用",
+    )
+    prof.add_argument(
+        "--no-profile",
+        action="store_true",
+        help="对话会话不带画像（包括 ~/.guanlan/USER.md）",
+    )
     p.set_defaults(func=_cmd_web)
 
 
@@ -952,6 +980,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if getattr(args, "no_profile", False) and getattr(args, "profile", None) is not None:
         parser.error("--no-profile 不能与 --profile 同用")
+    if getattr(args, "reader", False) and getattr(args, "profile", None) is not None:
+        parser.error("--reader 不带问答画像，不能与 --profile 同用")
     # -C/--dir 用 SUPPRESS 默认（顶层与子命令共享），未给时统一回落到当前目录。
     if not hasattr(args, "dir"):
         args.dir = "."

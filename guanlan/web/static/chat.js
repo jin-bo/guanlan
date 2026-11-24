@@ -9,6 +9,9 @@ let chatStreaming = false; // 一轮在飞时为 true：发送按钮切「停止
 let pendingStop = false; // 首轮 id 未回时点了「停止」：标记待停，start 帧回填 id 后立即补发
 let currentMode = "read-only"; // 当前会话姿态（P4.5）：徽标显示、/mode 切换更新
 let defaultMode = "read-only"; // 进程 --mode 默认（启动 /api/info 拉取）：新会话开局姿态
+let appProfile = null; // 进程级画像来源（P5.5.2）：/api/info 的 profile {source, path, warning}；无会话时据它显示标记
+let sessionProfile = null; // 当前会话的画像状态（P5.5.2）：会话级 info.profile {state, path, warning}；未知为 null
+let profileInfoToken = 0; // 会话切换时自增：迟到的 info 回包不覆盖新会话的标记
 let readerMode = false; // 只读多会话部署（P4.9）：启动 /api/info 的 reader 字段；驱动隐藏写/历史/维护 chrome
                         // 与 ?c= 按-id 恢复（决策P4.9-9/12）。安全边界是端点 404，这只是 UX。
 
@@ -26,8 +29,73 @@ function syncConversationUrl() {
 
 // 唯一改写 conversationId 的入口：改值即同步 URL（含置 null → 抹掉 ?c=）。
 function setConversation(id) {
+  const changed = id !== conversationId;
   conversationId = id;
   syncConversationUrl();
+  if (changed) {
+    sessionProfile = null; // 换了会话：先按进程级来源显示，再据该会话 info 校正
+    renderProfileBadge();
+  }
+  // 会话级状态仍未知（新换的会话，或冷会话刚被首轮懒恢复——id 不变但 start/done 帧到来时已是活会话）
+  // 都要再拉一次：否则续聊的冷会话一直停在进程级预示，看不到它真实的 active/failed/none。
+  if (id && !readerMode && (changed || sessionProfile === null)) refreshSessionProfile(id);
+}
+
+// 问答画像标记（P5.5.2 决策W5）：会话级状态已知时按它显示；否则（新会话首轮前 / 冷会话）按进程级来源预示。
+// 可写姿态下显示「画像（可写）」，提醒这一轮的写入也带着画像（决策W4）。reader 下恒隐藏。
+function renderProfileBadge() {
+  const el = $("#profile-badge");
+  if (!el) return;
+  const write = currentMode === "workspace-write";
+  let state = null;
+  let path = null;
+  let warning = null;
+  if (sessionProfile && sessionProfile.state) {
+    ({ state, path, warning } = sessionProfile);
+  } else if (appProfile && appProfile.source) {
+    state = appProfile.warning ? "failed" : "pending"; // 新会话将读的那份此刻就读不了：如实标「未加载」
+    path = appProfile.path;
+    warning = appProfile.warning;
+  }
+  el.classList.remove("is-write", "is-off", "is-failed");
+  if (readerMode || !state || state === "none") {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  if (state === "off") {
+    el.textContent = t("profile.badgeOff");
+    el.title = t("profile.tipOff");
+    el.classList.add("is-off");
+  } else if (state === "failed") {
+    el.textContent = t("profile.badgeFailed");
+    el.title = t("profile.tipFailed", warning || "");
+    el.classList.add("is-failed");
+  } else if (state === "pending") {
+    el.textContent = write ? t("profile.badgeWrite") : t("profile.badge");
+    el.title = t("profile.tipNew", path || "");
+    if (write) el.classList.add("is-write");
+  } else {
+    el.textContent = write ? t("profile.badgeWrite") : t("profile.badge");
+    el.title = write ? t("profile.tipWrite", path || "") : t("profile.tip", path || "");
+    if (write) el.classList.add("is-write");
+  }
+}
+
+function setSessionProfile(profile) {
+  sessionProfile = profile || null;
+  renderProfileBadge();
+}
+
+// 拉会话级 info 校正画像标记；冷会话（live:false）的 info 不含 profile，保持进程级预示。失败静默。
+function refreshSessionProfile(id) {
+  const tok = ++profileInfoToken;
+  getJSON(`/api/chat/${encodeURIComponent(id)}/info`)
+    .then((info) => {
+      if (tok !== profileInfoToken || id !== conversationId || !info) return;
+      if (info.profile) setSessionProfile(info.profile);
+    })
+    .catch(() => {});
 }
 
 // 姿态开关（P4.5 徽标改两段式）：随 /mode 或点击翻转更新；当前段 aria-pressed=true，可写段高亮橙色；
@@ -41,6 +109,7 @@ function setModeBadge(mode) {
   // 输入框占位文案随姿态走：原先恒写「只读」，切到可写后仍显示只读，与开关矛盾。
   const input = $("#chat-input");
   if (input) input.placeholder = currentMode === "workspace-write" ? t("composer.placeholderWrite") : t("composer.placeholder");
+  renderProfileBadge(); // 画像标记随姿态显示「（可写）」
 }
 
 // 只读多会话部署（P4.9）：隐藏写 / 历史枚举 / 维护诊断 chrome——纯 UX（安全边界是端点 404、不是隐藏）。
@@ -76,6 +145,19 @@ function startNewConversation() {
   clearPendingInteractions(); // P4.15：清掉旧会话残留的确认/提问气泡 + 其倒计时 setInterval（防泄漏）
   clearAttachments(); // 弃掉未发送的附件徽章（新会话不继承上一会话的待发附件）
   setModeBadge(defaultMode); // 新会话开局 = 进程默认姿态（决策P4.5-8）
+  refreshAppProfile(); // 画像文件可能在启动后建好、改坏或修好：新会话按此刻的文件预示
+}
+
+// 重拉进程级画像来源（P5.5.2）：只在仍无会话时更新标记，迟到的回包不覆盖已开始的会话。失败静默。
+function refreshAppProfile() {
+  if (readerMode) return;
+  getJSON("/api/info")
+    .then((info) => {
+      if (!info) return;
+      appProfile = info.profile || null;
+      if (conversationId === null) renderProfileBadge();
+    })
+    .catch(() => {});
 }
 $("#chat-new").addEventListener("click", startNewConversation);
 
@@ -260,6 +342,7 @@ function slashHelpLines() {
     t("slash.help.tools"),
     ...(readerMode ? [] : [t("slash.help.mode"), t("slash.help.model")]),
     t("slash.help.goal"),
+    ...(readerMode ? [] : [t("slash.help.profile")]),
   ];
 }
 
@@ -297,7 +380,7 @@ async function handleSlash(raw) {
   // chatStreaming 守卫 + 服务端 is_busy 兜住）**不**撕毁在飞流、仍放行（决策P4.4-1 斜杠流式中可达的本意）。
   if (chatStreaming) {
     const modeArg = body.slice(1).split(/\s+/)[1] || "";
-    if (cmd === "new" || cmd === "clear" || ((cmd === "mode" || cmd === "model") && modeArg && !readerMode)) { // reader 下 /mode 直接回「不可用」
+    if (cmd === "new" || cmd === "clear" || ((cmd === "mode" || cmd === "model" || cmd === "profile") && modeArg && !readerMode)) { // reader 下 /mode 直接回「不可用」
       return noteLines([t("slash.busyLifecycle", cmd)]);
     }
   }
@@ -333,9 +416,78 @@ async function handleSlash(raw) {
       return slashInfo(cmd);
     case "goal":  // P4.16 长任务目标续跑
       return slashGoal(body);
+    case "profile": {  // P5.5.2 问答画像：无参查看；on/off 开关本会话
+      if (readerMode) return noteLines([t("slash.profileReaderDisabled")]);
+      const arg = (body.slice(1).split(/\s+/)[1] || "").toLowerCase();
+      if (!arg) return slashProfileShow();
+      if (arg !== "on" && arg !== "off") return noteLines([t("slash.profileInvalidArg", arg)]);
+      return slashProfileToggle(arg === "on");
+    }
     default:  // 含 /compact（决策P4.4-5）与一切未知命令
       return noteLines([t("slash.unknown", body)]);
   }
+}
+
+// /profile：有会话报该会话的画像状态，否则报进程级来源（新会话将带的那份）。不返回画像正文（决策W5）。
+async function slashProfileShow() {
+  let info;
+  try {
+    info = await getJSON(conversationId ? `/api/chat/${encodeURIComponent(conversationId)}/info` : "/api/info");
+  } catch (e) {
+    return noteLines([t("slash.infoFail", "profile", e.message)]);
+  }
+  const p = info && info.profile;
+  const lines = [];
+  if (p && p.state) {
+    setSessionProfile(p);
+    if (p.state === "active") lines.push(t("slash.profileActive", p.path));
+    else if (p.state === "off") lines.push(t("slash.profileOff", p.path));
+    else if (p.state === "failed") lines.push(t("slash.profileFailed", p.warning || ""));
+    else lines.push(t("slash.profileNone"));
+  } else if (p && p.source) {
+    lines.push(t("slash.profileNew", p.path)); // 无会话 / 冷会话：进程级来源
+  } else if (appProfile && appProfile.source) {
+    lines.push(t("slash.profileNew", appProfile.path));
+  } else {
+    lines.push(t("slash.profileNone"));
+  }
+  lines.push(t("slash.profileHint"));
+  return noteLines(lines);
+}
+
+// /profile on|off：POST /api/chat/{id}/profile（决策W6）。无会话先开一个空活会话（同 /mode）。
+async function slashProfileToggle(enabled) {
+  if (!conversationId) {
+    if (!(await ensureActiveConversation())) return;
+    if (chatStreaming) return noteLines([t("mode.busy")]);
+  }
+  let res;
+  try {
+    res = await fetch(`/api/chat/${encodeURIComponent(conversationId)}/profile`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+  } catch (e) {
+    return noteLines([t("slash.profileFail", e.message)]);
+  }
+  if (res.status === 423) return noteLines([t("slash.profileBusy")]);
+  if (res.status === 409) {
+    let detail = "";
+    try { ({ detail } = await res.json()); } catch { /* 响应体缺失：只给通用提示 */ }
+    return noteLines([detail && !/会话未激活|not active/i.test(detail)
+      ? t("slash.profileUnavailable", detail)
+      : t("slash.profileInactive")]);
+  }
+  if (!res.ok) return noteLines([t("slash.profileFail", `HTTP ${res.status}`)]);
+  let p;
+  try {
+    p = await res.json();
+  } catch (e) {
+    return noteLines([t("slash.profileFail", e.message)]);
+  }
+  setSessionProfile(p);
+  return noteLines([p.state === "off" ? t("slash.profileOff", p.path) : t("slash.profileActive", p.path)]);
 }
 
 // /clear：有活动会话 → DELETE 级联删盘（== 删当前 + 新建）；无活动会话退化为 /new（决策P4.4-4）。

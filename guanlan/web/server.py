@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import socket
+import sys
 import threading
 import time
 import webbrowser
@@ -21,6 +22,7 @@ from ..runtime import AgentRunner
 from .app import create_app
 from .chat import MAX_CONVERSATIONS, configure_agent_log, disable_agent_log
 from .defaults import DEFAULT_CONFIRM, DEFAULT_CONFIRM_TIMEOUT, DEFAULT_MODE, DEFAULT_PORT
+from .profile import ProfileSource, startup_line
 
 HOST = "127.0.0.1"  # 红线：绝不 0.0.0.0（决策P4-4，写端口严禁暴露网络）。
 
@@ -82,6 +84,7 @@ def serve(
     confirm: str = DEFAULT_CONFIRM,
     confirm_timeout: float = DEFAULT_CONFIRM_TIMEOUT,
     goal_enabled: bool = True,
+    profile: ProfileSource | None = None,
 ) -> int:
     """起本地 Web 宿主，长驻直到 Ctrl-C；正常停服返回 `EXIT_OK`。
 
@@ -102,7 +105,11 @@ def serve(
     `confirm`（P4.15，默认 `ask`）= workspace-write 下 ASK 决策是「弹给人确认」还是「沿用 P4.5
     静默放行」；`confirm_timeout`（默认 120s）= 确认/提问等待超时，无人应答即默认拒绝（兜写锁永占）。
     `goal_enabled`（P4.16，默认开；`--goal off` 关）= `/goal` 长任务续跑总开关；reader 强制关。
+    `profile`（P5.5.2，默认 None）= 问答画像来源。与 `reader` 同给 → `EXIT_USAGE`（决策W1）；启动时校验一次，
+    显式路径不合格拒绝启动，默认路径不合格只警告（决策W2），结果打一行到 stderr。
     """
+    if reader and profile is not None:
+        raise GuanlanError("--reader 不带问答画像（只读部署可能多人共用）。", exit_code=EXIT_USAGE)
     if reader and mode == "workspace-write":
         raise GuanlanError(
             "--reader 与 --mode workspace-write 互斥（只读部署不可起可写姿态）。",
@@ -118,6 +125,7 @@ def serve(
     if agent_log is None:
         agent_log = not reader
     kb = require_kb_root(root, writable=True)
+    profile_line = startup_line(profile, kb)  # 显式 --profile 不合格即抛，拒绝启动（决策W2）
     _ensure_port_free(HOST, port)
     if agent_log:
         # 写权限早失败（决策P4.9-13）：独立 `open(..., "a")` 探针——**不**复用 configure_agent_log
@@ -149,7 +157,10 @@ def serve(
         confirm=confirm,
         confirm_timeout=confirm_timeout,
         goal_enabled=goal_enabled,
+        profile=profile,
     )
+    if profile_line is not None:
+        print(profile_line, file=sys.stderr)
     if open_browser:
         _open_browser_when_ready(HOST, port)
     # P5.4：后台预热检索缓存，把首搜 ~1 分钟冷算移出用户关键路径（只预热本进程挂载的库，daemon、失败静默）。

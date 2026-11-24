@@ -64,7 +64,8 @@ from ..runtime import HEARTBEAT_INTERVAL_S, AgentRunner
 from ..search import CorpusCache, search_result_dict, tokenize
 from .chat import IDLE_TTL_SECONDS, MAX_CONVERSATIONS, ConversationStore
 from .chat_support import ModelSwitchError
-from .conversation import GoalActiveError
+from .conversation import GoalActiveError, ProfileUnavailableError
+from .profile import ProfileSource, load_for_session
 from .defaults import CONFIRM_MODES, DEFAULT_CONFIRM_TIMEOUT
 from .helpers import (
     _audit_preview,
@@ -258,6 +259,12 @@ class ModeBody(BaseModel):
     mode: str
 
 
+class ProfileBody(BaseModel):
+    """`POST /api/chat/{id}/profile` 请求体（P5.5.2 决策W6）：`enabled` 开或关本会话的画像。"""
+
+    enabled: bool
+
+
 class ModelBody(BaseModel):
     """`POST /api/chat/{id}/model` 请求体（P4.29）。`model` = `<provider>/<model-name>`；只带**名字**，
     凭据由服务端从进程环境解析（同 ACP「线上只传标识、不传密钥」）。多余字段（如 apiKey）一律拒。"""
@@ -404,6 +411,7 @@ def create_app(
     confirm: str = "ask",
     confirm_timeout: float = DEFAULT_CONFIRM_TIMEOUT,
     goal_enabled: bool = True,
+    profile: ProfileSource | None = None,
 ) -> FastAPI:
     """构造绑定到知识库 `root` 的 FastAPI app。
 
@@ -427,6 +435,8 @@ def create_app(
         goal_enabled: `/goal` 长任务续跑总开关（P4.16，默认开；`--goal off` 关，决策P4.16-17）。
             关时设/恢复/复活目标的端点 403；瞬时只读端点（show/pause/clear/edit/budget 非复活）仍可用。
             `reader`（匿名多用户只读部署）下**强制关**——无鉴权下放任自动续跑是 LLM 成本陷阱（见下）。
+        profile: 问答画像来源（P5.5.2，默认 None = 不带）。每个对话会话构造时按它重读一次（决策W3）；
+            `reader` 下**强制 None**（宿主机主人的画像不能套在匿名多用户头上，决策W1）。
     """
     # 权威校验（决策P4.9-18）：任何 caller（CLI/serve/嵌入/测试直建）显式传 < 1 都早失败，
     # 不下沉 ConversationStore（那时 app 已建、太晚）。CLI/serve 可另作友好早提示，但权威点在此。
@@ -443,6 +453,7 @@ def create_app(
         session_persist = False
         mode = "read-only"
         goal_enabled = False  # P4.16：匿名多用户只读部署不放任自动续跑（无鉴权 LLM 成本陷阱）
+        profile = None  # P5.5.2 决策W1：reader 一律不带画像
     app = FastAPI(title="观澜 Web 宿主", docs_url=None, redoc_url=None)
     # 配置挂在 app.state：后续提交的端点（报告/写作业/会话）从这里读 root/model/runner，
     # 避免在模块级全局变量上分裂状态（与 workers=1 单进程单事件循环假设一致，决策P4-2）。
@@ -510,6 +521,7 @@ def create_app(
         # 上限；非 reader=单用户、无上限压力，且 workspace-write 会话被逐会丢 memory-only 的 undo 日志/
         # 姿态（用户拿着的 undo token 随即 404）——故非 reader 关回收（idle_ttl=None），不动既有 P4/P4.5 行为。
         idle_ttl=IDLE_TTL_SECONDS if reader else None,
+        profile=profile,  # P5.5.2：只有对话会话带画像；回填等作业不经这里（决策W8）
     )
     app.state.conversations = conversations
     app.state.reader = reader
@@ -553,6 +565,15 @@ def create_app(
         if not reader:
             info["conversations"] = conversations.live_count()
             info["max_conversations"] = effective_max
+            # P5.5.2 决策W5：新会话首次 POST 才创建，首轮前前端靠这一项显示「新会话将带画像」。
+            # 按新会话同一读法试读一次（≤1500 字，便宜）：读不了就带上原因，前端显示「画像未加载」，
+            # 不预示一份新会话其实带不上的画像。不含正文。reader 不报（本来就不带）。
+            loaded = await anyio.to_thread.run_sync(load_for_session, profile, root)
+            info["profile"] = {
+                "source": profile.kind if loaded.path is not None else None,
+                "path": loaded.path,
+                "warning": loaded.warning,
+            }
         return info
 
     def _reject_if_writable_active(exclude_id: str | None = None) -> None:
@@ -1829,6 +1850,26 @@ def create_app(
         except ValueError as exc:  # 非法 mode（full-access/plan/未知）→ 422
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"mode": new_mode}
+
+    # 本会话画像开关（P5.5.2 决策W6）：`/profile on|off`。前置处理照抄 /mode：冷会话 409、未知 404；
+    # 取 conv.lock **前**先按层③ 拒，免得 agent 在可写轮里 curl 本端点自死锁。只改
+    # `agent.project_instructions`，不重建 agent。reader 下不注册（reader 不带画像）。
+    @_writer_only(app.post("/api/chat/{conversation_id}/profile"))
+    async def chat_profile(conversation_id: str, body: ProfileBody) -> dict:
+        conv = conversations.get(conversation_id)
+        if conv is None:
+            cold = await anyio.to_thread.run_sync(conversations.cold_info, conversation_id)
+            if cold is not None:
+                raise HTTPException(
+                    status_code=409, detail="会话未激活，先续聊一轮恢复再开关画像。"
+                )
+            raise HTTPException(status_code=404, detail=f"未知会话：{conversation_id}")
+        _reject_if_writable_active()
+        try:
+            async with conv.lock:
+                return conv.set_profile_enabled(body.enabled)
+        except ProfileUnavailableError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # 运行时切换模型（P4.29）：`/model <provider>/<model>`，仅 workspace-write 会话。reader 下不注册
     # （与 /mode 同口径：只读部署姿态恒 read-only，切模型本就不可达；匿名多用户也不该能换计费模型）。

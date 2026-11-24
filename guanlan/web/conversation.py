@@ -58,6 +58,7 @@ from .goal_io import (
     write_goal_atomic,
 )
 from .jobs import WriteGate
+from .profile import LoadedProfile, ProfileSource, load_for_session
 from .policy_fs import (
     AgentaoSnapshot,
     make_policy_fs,
@@ -112,6 +113,10 @@ def _no_progress_reason(turn_meta: dict) -> str | None:
     if isinstance(tool_count, int) and not isinstance(tool_count, bool) and tool_count > 0:
         return None
     return reason
+
+
+class ProfileUnavailableError(RuntimeError):
+    """`/profile on|off` 时本会话没有可开关的画像（无来源或构造时读取失败，P5.5.2 决策W6）→ 端点 409。"""
 
 
 class GoalActiveError(RuntimeError):
@@ -238,7 +243,7 @@ class Conversation:
 
     P4.2：`id` 改用 agentao 的稳定 UUID（=每份快照里的 `session_id`），跨重启稳定、可懒恢复；
     `persist` 开时每轮成功后 off-loop 落盘（决策P4.2-2/5）。新建与恢复**共用本 `__init__`** 的
-    只读两点置位 + 激活 `SKILL_NAME`——恢复零漂移、绝不恢复出可写会话（决策P4.2-4）。
+    姿态两点置位 + 激活 `SKILL_NAME`——恢复零漂移；恢复用进程默认姿态（决策P4.5-8 修订了 P4.2-4 的「绝不恢复出可写会话」）。
     """
 
     def __init__(
@@ -256,6 +261,7 @@ class Conversation:
         confirm_ui: bool = True,
         clock: Callable[[], float] = time.monotonic,
         mcp_registry: object = _UNSET,
+        profile: ProfileSource | None = None,
     ) -> None:
         # 先于一切副作用（skill 安装 / transport / policy_fs）拦非法姿态（决策P4.5-1）。
         _check_web_mode(mode)
@@ -399,6 +405,22 @@ class Conversation:
         # engine 上（用户规则保留），两点置位一次做齐、且不发 PERMISSION_MODE_CHANGED——开局是状态、
         # 不是切换。非法姿态已在 __init__ 开头拦下（factory 收得下 full-access，Web 不收，决策P4.5-1）。
         opts["permission_mode"] = mode
+        # P5.5.2 问答画像（决策W3）：会话构造时按进程定下的来源读一次，作为本会话快照；新建与懒恢复共用
+        # 本 __init__，恢复读的是当前文件。读取失败不拒建会话，只记原因供 `/profile` 显示。与姿态无关（W4）。
+        # 带画像时传 `project_instructions` 会顶替 agentao 读 AGENTAO.md，故 `with_profile` 里已含项目指令；
+        # `base` 留给 `/profile off`（W6），用 agentao 自己的读法，与不带画像时逐字一致。
+        self._profile: LoadedProfile = load_for_session(profile, kb)
+        self._profile_enabled = True
+        self._profile_base: str = ""
+        self._profile_with: str | None = None
+        if self._profile.text is not None:
+            from agentao.prompts import load_project_instructions
+
+            from ..query import build_profile_instructions
+
+            self._profile_base = load_project_instructions(kb) or ""
+            self._profile_with = build_profile_instructions(kb, self._profile.text)
+            opts["project_instructions"] = self._profile_with
         self.agent = chat.build_from_environment(**opts)
         # 当前 provider（P4.29 `/model`）：构造期 `.env` 已载入进程环境，此刻读到的就是本会话所用的那个。
         self._provider = current_provider()
@@ -430,6 +452,40 @@ class Conversation:
         """
         self._apply_mode(mode)
         return self._mode
+
+    @property
+    def profile_state(self) -> str:
+        """画像状态（决策W5）：none / active / off / failed。"""
+        if self._profile.warning is not None:
+            return "failed"
+        if self._profile_with is None:
+            return "none"
+        return "active" if self._profile_enabled else "off"
+
+    def profile_info(self) -> dict:
+        """`info()["profile"]` 与 `/profile` 端点的返回。**不含画像正文**（决策W5）。"""
+        return {
+            "state": self.profile_state,
+            "path": self._profile.path,
+            "warning": self._profile.warning,
+        }
+
+    def set_profile_enabled(self, enabled: bool) -> dict:
+        """`/profile on|off`（决策W6）：只改 `agent.project_instructions`，不重建 agent、不丢历史。
+
+        agentao 每轮开头按这个属性重建系统提示，下一轮即生效（契约见 test_agentao_contract）。
+        调用方须持 `self.lock`（与在飞 turn 串行）。无画像或读取失败 → `ProfileUnavailableError`（端点 409）。
+        开关状态只在内存，不落盘：懒恢复的会话回到带画像。
+        """
+        if self._profile_with is None:
+            raise ProfileUnavailableError(
+                "本会话没有可开关的画像"
+                + (f"：{self._profile.warning}" if self._profile.warning else "。")
+                + "修正画像文件后新开会话。"
+            )
+        self.agent.project_instructions = self._profile_with if enabled else self._profile_base
+        self._profile_enabled = enabled
+        return self.profile_info()
 
     def set_model(self, value: str) -> dict:
         """`/model <provider>[/<model>]` 运行时切换模型（P4.29）。**仅 workspace-write 会话**可切。
@@ -1533,6 +1589,7 @@ class Conversation:
             "provider": self._provider.lower(),  # P4.29：`/model` 显示 provider/model
             "providers": [p.lower() for p in configured_providers()],  # 只有名字，不含任何值
             "mode": self._mode,  # P4.5：报当前会话真实姿态（read-only / workspace-write）
+            "profile": self.profile_info(),  # P5.5.2：画像状态（不含正文）
             # P4.15：本会话 confirm 姿态（ask/auto）+ 当前待应答列表（带完整请求 envelope，供断线
             # 重连重渲染并让用户决策，§5.3）。confirm_mode 经气泡②或 /confirm-mode 翻、UI 据它显示
             # 「逐次确认中 / 本会话已自动放行（可恢复）」。

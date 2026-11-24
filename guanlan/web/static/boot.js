@@ -80,6 +80,8 @@ loadPages().then(() => {
       // 每会话 /info 校正），此处进程默认晚到一拍会覆盖回去——正是评审指出的「徽标说谎」竞态。
       if (conversationId === null) setModeBadge(info.mode);
     }
+    appProfile = info.profile || null; // P5.5.2：进程级画像来源（reader 下无此字段）
+    renderProfileBadge();
     if (readerMode) applyReaderMode(); // 隐藏写/历史/维护 chrome（决策P4.9-9/10/11/17）
   }
   // 后台任务中心（P4.33）：reader 下 /api/tasks 不注册，不轮询。
