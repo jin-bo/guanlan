@@ -64,22 +64,36 @@ function renderProfileBadge() {
   }
   el.hidden = false;
   if (state === "off") {
-    el.textContent = t("profile.badgeOff");
+    setProfileBadgeContent(el, "i-user-off", t("profile.badgeOff"));
     el.title = t("profile.tipOff");
     el.classList.add("is-off");
   } else if (state === "failed") {
-    el.textContent = t("profile.badgeFailed");
+    setProfileBadgeContent(el, "i-user-alert", t("profile.badgeFailed"));
     el.title = t("profile.tipFailed", warning || "");
     el.classList.add("is-failed");
   } else if (state === "pending") {
-    el.textContent = write ? t("profile.badgeWrite") : t("profile.badge");
+    setProfileBadgeContent(el, "i-user", write ? t("profile.badgeWrite") : t("profile.badge"));
     el.title = t("profile.tipNew", path || "");
     if (write) el.classList.add("is-write");
   } else {
-    el.textContent = write ? t("profile.badgeWrite") : t("profile.badge");
+    setProfileBadgeContent(el, "i-user", write ? t("profile.badgeWrite") : t("profile.badge"));
     el.title = write ? t("profile.tipWrite", path || "") : t("profile.tip", path || "");
     if (write) el.classList.add("is-write");
   }
+}
+
+// 画像标记内容：只放线性人像图标，不显示文字；状态名进 aria-label，悬停 title 给全文说明。
+function setProfileBadgeContent(el, icon, label) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("class", "ico");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS(NS, "use");
+  use.setAttribute("href", "#" + icon);
+  svg.appendChild(use);
+  el.replaceChildren(svg);
+  el.setAttribute("role", "img");
+  el.setAttribute("aria-label", label);
 }
 
 function setSessionProfile(profile) {
