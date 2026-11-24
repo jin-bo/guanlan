@@ -20,9 +20,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -54,6 +56,9 @@ __all__ = [
     "DropSlug",
     "RemovePlan",
     "run_remove_result",
+    "execute_plan",
+    "plan_digest",
+    "path_digest",
     "format_plan",
     "run_remove",
     "remove_entrypoint",
@@ -353,7 +358,14 @@ def run_remove_result(root: Path, slug: str) -> RemovePlan:
 
 
 def _drop_slug_from_page(path: Path, slug: str) -> bool:
-    """从一页 frontmatter 的 `sources` 摘掉 slug、重写回盘。返回是否改动（幂等：已无 → False）。
+    """从一页 frontmatter 的 `sources` 摘掉 slug（`_drop_slugs_from_page` 的单个版本）。"""
+    return _drop_slugs_from_page(path, {slug})
+
+
+def _drop_slugs_from_page(path: Path, slugs: set[str]) -> bool:
+    """从一页 frontmatter 的 `sources` 一次摘掉 `slugs`、重写回盘。返回是否改动（幂等：已无 → False）。
+
+    整批撤回（P4.35）一页可能要摘多个 slug：一次编辑摘净，不逐个重写。
 
     复用 `split_frontmatter` + `rawio.dump_frontmatter`（同 `apply_origin`，**绝不裸拼**）；**body 逐字
     保留**（`split_frontmatter` 返回原文 body），只重序列化 frontmatter 块。坏/无块/非映射 → 不动。
@@ -379,9 +391,10 @@ def _drop_slug_from_page(path: Path, slug: str) -> bool:
     if not isinstance(meta, dict):
         return False
     sources = meta.get("sources")
-    if not isinstance(sources, list) or slug not in sources:
+    # 只拿字符串比：手改出的 `sources: [{…}]` 之类不可哈希项不能让 `in set` 抛 TypeError（旧版逐个 `!=` 不会）
+    if not isinstance(sources, list) or not any(isinstance(s, str) and s in slugs for s in sources):
         return False  # 幂等：重跑时 slug 已不在 → no-op
-    meta["sources"] = [s for s in sources if s != slug]
+    meta["sources"] = [s for s in sources if not (isinstance(s, str) and s in slugs)]
     # 原子覆盖：崩溃不把内容页写成半截；块按原 EOL 出、body 逐字不动。
     atomic_write_text(path, dump_frontmatter(meta, body, eol=detect_eol(text)))
     return True
@@ -389,11 +402,16 @@ def _drop_slug_from_page(path: Path, slug: str) -> bool:
 
 def _prune_index_line(index_path: Path, slug: str) -> list[str]:
     """从当前 index.md 删摘要页登记行（幂等：行已删 → 不写）。返回被删行原文。"""
+    return _prune_index_targets(index_path, _index_target(slug))
+
+
+def _prune_index_targets(index_path: Path, targets: set[str]) -> list[str]:
+    """从当前 index.md 删指向 `targets`（相对 wiki/ 的 posix）的登记行（幂等）。返回被删行原文。"""
     if not index_path.is_file():
         return []
     text = read_text_verbatim(index_path)  # 逐字读：与逐字写成对，CRLF 不被静默改成 LF
     _lines, eol, trailing = _split_lines(text)  # 只为拿 EOL/尾换行，重组时按原样保真
-    kept, removed = _prune_dangling(text, _index_target(slug))
+    kept, removed = _prune_dangling(text, targets)
     if removed:
         atomic_write_text(index_path, _join_lines(kept, eol, trailing))  # 自管 EOL、逐字原子写
     return removed
@@ -409,7 +427,7 @@ def _move_into_trash(src: Path, root: Path, trash_dir: Path) -> bool:
     return True
 
 
-def _execute(root: Path, plan: RemovePlan) -> Path:
+def _execute(root: Path, plan: RemovePlan, *, before_write: Callable[[], None] | None = None) -> Path:
     """按 manifest-先写 + 幂等 + **移源放最后** 落盘（决策P3.9-10）。返回 trash_dir。
 
     执行序：① 写 manifest（意图先落） → ② 摘多源页 slug → ③ 删 index 行 → ④ **最后**移源落盘物。
@@ -420,19 +438,10 @@ def _execute(root: Path, plan: RemovePlan) -> Path:
         (rel for rel in plan.relocate if rel.startswith("raw/") and (root / rel).is_file()),
         None,
     )
+    if before_write is not None:
+        before_write()  # P4.35：任务信封记下「开始写」；抛异常则不写任何东西
     now = datetime.now()
-    # 碰撞安全建目录：微秒级时间戳几乎不撞，但若撞（或人为预建）则 exist_ok=True 会把后续
-    # `shutil.move` 的目录套嵌（`images/<slug>/<slug>`），故用 exist_ok=False + 序号兜底，保证全新目录。
-    base = root / ".trash" / f"{plan.slug}@{now.strftime('%Y%m%dT%H%M%S_%f')}"
-    (root / ".trash").mkdir(parents=True, exist_ok=True)
-    trash_dir, n = base, 1
-    while True:
-        try:
-            trash_dir.mkdir()
-            break
-        except FileExistsError:
-            trash_dir = base.with_name(f"{base.name}-{n}")
-            n += 1
+    trash_dir = _new_trash_dir(root, plan.slug, now)
 
     # ① manifest 先写（纯记录：审计 + 人工恢复配方 + 二期 restore 输入）
     manifest = {
@@ -467,6 +476,79 @@ def _execute(root: Path, plan: RemovePlan) -> Path:
         _move_into_trash(root / rel, root, trash_dir)
     _prune_empty_raw_dirs(root, plan.relocate, raw_rel)
     return trash_dir
+
+
+def _new_trash_dir(root: Path, name: str, now: datetime) -> Path:
+    """建一个全新的 `.trash/<name>@<ts>[-n]/` 并返回。
+
+    碰撞安全：微秒级时间戳几乎不撞，但若撞（或人为预建）则 exist_ok=True 会把后续 `shutil.move` 的目录
+    套嵌（`images/<slug>/<slug>`），故用 exist_ok=False + 序号兜底，保证全新目录。"""
+    base = root / ".trash" / f"{name}@{now.strftime('%Y%m%dT%H%M%S_%f')}"
+    (root / ".trash").mkdir(parents=True, exist_ok=True)
+    trash_dir, n = base, 1
+    while True:
+        try:
+            trash_dir.mkdir()
+            return trash_dir
+        except FileExistsError:
+            trash_dir = base.with_name(f"{base.name}-{n}")
+            n += 1
+
+
+def execute_plan(root: Path, plan: RemovePlan, *, before_write: Callable[[], None] | None = None) -> Path:
+    """执行一份单源撤回计划（CLI `--yes` 与 Web 单源撤回同一个执行函数，P4.35）。返回回收目录。
+
+    `before_write`：第一次写盘之前调用；抛异常则不写任何东西（Web 用它把「开始写」记进任务信封）。"""
+    return _execute(Path(root), plan, before_write=before_write)
+
+
+def path_digest(root: Path, rel: str) -> object:
+    """一个落盘物的内容指纹：文件 → sha256；目录 → 按相对路径排序的 `[相对路径, sha256]` 清单；不在 → None。"""
+    path = Path(root) / rel
+    if path.is_file():
+        return _file_sha256(path)
+    if path.is_dir():
+        return [
+            [p.relative_to(path).as_posix(), _file_sha256(p)]
+            for p in sorted(path.rglob("*"), key=lambda q: q.relative_to(path).as_posix())
+            if p.is_file()
+        ]
+    return None
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def canonical_digest(payload: object) -> str:
+    """规范 JSON（键排序、列表保持原序）的 SHA-256。"""
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def plan_digest(root: Path, plan: RemovePlan) -> str:
+    """单源撤回的确认摘要（P4.35 §3.4）：计划全部字段 + 每个待移动落盘物的内容指纹。
+
+    同名 raw 被覆盖、摘要页换了内容、图片目录增删改，都让旧摘要失效。只用于「是否同一份清单」，不防篡改。"""
+    payload = {
+        "scope": "one",
+        "plan": {
+            "ok": plan.ok,
+            "slug": plan.slug,
+            "requested": plan.requested or plan.slug,
+            "relocate": list(plan.relocate),
+            "drop_slug": [asdict(d) for d in plan.drop_slug],
+            "orphans": list(plan.orphans),
+            "index_lines": list(plan.index_lines),
+            "backlinks": list(plan.backlinks),
+        },
+        "content": [[rel, path_digest(root, rel)] for rel in plan.relocate],
+    }
+    return canonical_digest(payload)
 
 
 def _prune_empty_raw_dirs(root: Path, moved: list[str], raw_rel: str | None) -> None:

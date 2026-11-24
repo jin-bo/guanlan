@@ -83,12 +83,12 @@ from .helpers import (
 )
 from .jobs import Job, JobQueue, WriteGate
 from .deepcheck import DeepCheck
-from .tasks import DELETABLE_STATES, PENDING_STATES, TaskLimitError, TaskStateError, TaskStore
+from .tasks import DELETABLE_STATES, NO_PREIMAGE_KINDS, PENDING_STATES, TaskLimitError, TaskStateError, TaskStore
 
 # 整模块导入（不 from-import 具体函数）：端点内经 `mcpdiag.<fn>` 取属性，测试可 monkeypatch
 # 单飞/慢检查而不必真起上游进程。模块本身零 mcp SDK 依赖（只导 agentao.mcp.config）。
 from . import graphview, mcpdiag
-from . import fetch_routes, oneclick_routes
+from . import fetch_routes, oneclick_routes, remove_routes
 from .rawfeed import (
     _atomic_write_raw,
     _check_text_admission,
@@ -479,7 +479,7 @@ def create_app(
         write_lock=write_gate.write_lock,
         on_job_done=lambda kind: (
             write_gate.bump_wiki_generation()
-            if kind in ("ingest", "heal", "backfill", "audit", "reindex", "oneclick", "rollback")
+            if kind in ("ingest", "heal", "backfill", "audit", "reindex", "oneclick", "rollback", "remove")
             else None
         ),
     )
@@ -845,6 +845,19 @@ def create_app(
         start_prepare=oneclick_api.start_prepare,
     )
 
+    # P4.35 撤回源：预览 + 进任务中心（不拍前像、执行前核对摘要）。端点在 `remove_routes`，内核在 remove / remove_batch。
+    async def _submit_remove(spec) -> dict:
+        return await _submit_task("remove", None, spec=spec)
+
+    remove_routes.register(
+        app,
+        root=root,
+        tasks=tasks,
+        writer_only=_writer_only,
+        reject_if_writable_active=_reject_if_writable_active,
+        submit_remove=_submit_remove,
+    )
+
     # 零 LLM 报告（决策P4-7）：只序列化既有 *Report，与 CLI `--json` 字节对齐；阻塞跑 to_thread。
     wiki = root / "wiki"
 
@@ -1062,34 +1075,50 @@ def create_app(
 
     submit_lock = asyncio.Lock()  # P4.33：后台任务提交路径的串行锁（见 _submit_task）
 
-    async def _submit_task(kind: str, body, *, retry_of: str | None = None) -> dict:
+    async def _submit_task(kind: str, body, *, retry_of: str | None = None, spec=None) -> dict:
         """P4.33：先建任务信封、再带 task_id 入队，返回 `{job_id, task_id, deduplicated}`。
 
         - 同类型同参数的任务还没结束 → 不新建，返回已有的 `task_id`（`deduplicated: true`，`job_id` 为 None）。
         - 未结束任务已达上限 → 429。
         - 建信封失败（workspace 写不了）→ 照常入队、`task_id` 为 None：任务中心看不到它，但作业照跑。
+        - 撤回（`NO_PREIMAGE_KINDS`，P4.35）：`spec` 由 `remove_routes` 造好；**不拍前像**；信封建不成 → 503、
+          不入队（整批续跑依赖信封里的原件身份，没有信封也就没有查重与运行中取消保护）。
         """
+        no_preimage = kind in NO_PREIMAGE_KINDS
         # 整段串行：并发的同参数提交（连点两下、两个标签页）依次经过「建信封 → 层③ 复查 → 入队 → committed」，
         # 后一个必定看到前一个已入队的信封、被查重并过去，而不是两个都入队；与此同时也不会被并到一个将被撤掉的信封上。
         async with submit_lock:
-            title, params, fn, verb = _task_spec(kind, body)
+            extra = None
+            if spec is not None:
+                title, params, fn, verb, extra = spec.title, spec.params, spec.make_job, "撤回", spec.extra
+                retry_of = retry_of or spec.retry_of
+            else:
+                title, params, fn, verb = _task_spec(kind, body)
             task_id: str | None = None
+            if no_preimage and tasks is None:
+                raise HTTPException(status_code=503, detail="任务记录不可用（workspace/ 读写不了），没有提交撤回。")
             if tasks is not None:
                 try:
                     task_id, created = await anyio.to_thread.run_sync(
-                        functools.partial(tasks.create_or_reuse, kind, title, params, retry_of=retry_of)
+                        functools.partial(tasks.create_or_reuse, kind, title, params, retry_of=retry_of, extra=extra)
                     )
                 except TaskLimitError as exc:
                     raise HTTPException(status_code=429, detail=str(exc)) from None
                 except OSError:
+                    if no_preimage:
+                        raise HTTPException(
+                            status_code=503, detail="任务记录写不进（workspace/ 不可写？），没有提交撤回。"
+                        ) from None
                     task_id, created = None, True
                 if not created:
                     return {"job_id": None, "task_id": task_id, "deduplicated": True}
+            if no_preimage:
+                fn = fn(task_id)  # 撤回作业要知道自己的 task_id：开始写之前在信封记 remove_writes_began
             try:
                 # 建信封的 await 让出了事件循环：端点入口查过的层③ 可能已被期间起跑的可写 turn 推翻。入队前
                 # 再查一次（同步、紧贴 enqueue），保持 P4.33 之前「查完即入队、中间无让出点」的原子性。
                 _reject_if_writable_active()
-                if task_id is not None:  # P4.33 T2：取得写锁后先拍前像，运行中可取消、按前像回滚
+                if task_id is not None and not no_preimage:  # P4.33 T2：取得写锁后先拍前像，运行中可取消、按前像回滚
                     fn = tasks.guarded(task_id, fn)
                 job_id = jobs.enqueue(kind, fn, progress=_wiki_job_progress(verb), task_id=task_id)
             except BaseException:
@@ -1230,6 +1259,8 @@ def create_app(
             return {"task_id": task_id, "state": "cancelling"}
         # 取消前读的状态可能已过时（期间 worker 已开始或已收尾）：报此刻的状态。
         now = await anyio.to_thread.run_sync(tasks.envelope, task_id) or env
+        if now["state"] == "running" and now.get("kind") in NO_PREIMAGE_KINDS:
+            raise HTTPException(status_code=409, detail="撤回执行中，不能取消；完成后可从 .trash/ 找回。")
         if now["state"] in (*PENDING_STATES, "running"):  # 刚取得写锁 / 正在收尾，或属于别的 Web 进程
             raise HTTPException(status_code=409, detail="任务正处在开始或收尾的瞬间，或不是本服务进程提交的，暂时不能取消。")
         if now["state"] == "rolling_back":
@@ -1268,6 +1299,9 @@ def create_app(
     @_writer_only(app.post("/api/tasks/{task_id}/retry"))
     async def task_retry(task_id: str) -> dict:
         env = await anyio.to_thread.run_sync(_envelope_or_404, task_id)  # 先 404，再 423
+        if env.get("kind") in NO_PREIMAGE_KINDS:
+            # 撤回的重试一律不生成任务（P4.35 §3.5）：先说「请重新预览」，比先让用户等层③ 释放更直接。
+            raise HTTPException(status_code=409, detail="撤回任务不能直接重试，请重新预览后再提交。")
         _reject_if_writable_active()
         if env["state"] not in DELETABLE_STATES:  # 已结束（含中断）的才能重试
             raise HTTPException(status_code=409, detail=f"任务当前状态为 {env['state']}，不能重试。")

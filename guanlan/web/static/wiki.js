@@ -199,9 +199,13 @@ function paintPage(data, path) {
   // config 页（index/log/overview）不是图节点，不给入口。
   const isConfig = /^wiki\/(index|log|overview)\.md$/.test(path);
   if (!isConfig) meta += ` <button type="button" class="graph-here">${escapeHtml(t("graph.viewInGraph"))}</button>`;
+  // 「撤回此源」（P4.35）：只在摘要页、可写部署出现；预览浮层里再选「此卷 / 原件全部分卷」。
+  if (canRemoveFromPage(path)) meta += ` <button type="button" class="remove-src">${escapeHtml(t("remove.btn"))}</button>`;
   view.innerHTML = `<div class="page-meta">${meta}</div>` + data.html;
   const here = view.querySelector(".page-meta .graph-here");
   if (here) here.addEventListener("click", () => openGraph({ view: "page", name: path }));
+  const rm = view.querySelector(".page-meta .remove-src");
+  if (rm) rm.addEventListener("click", () => openRemovePreview({ source: path, scope: "one" }));
   enhanceContent(view); // 富渲染正文：```mermaid→图 / ```X→高亮 / $…$→公式；挂在 paintPage 内 → 切语言重绘也重增强
                         // （决策P4.14-9，泛化 P4.13-8）。注：view 含 .page-meta chrome + 正文，KaTeX 经 ignoredClasses 跳 chrome
 }

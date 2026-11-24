@@ -663,6 +663,33 @@ def test_prune_keeps_tasks_with_preimage(kb, monkeypatch) -> None:
     assert "20261101-100001-ingest-bbbb.json" not in names and "20261101-100001-ingest-bbbb" not in names
 
 
+def test_prune_remove_tasks(kb, monkeypatch) -> None:
+    """P4.35 §3.5：只留写了一半、未被续跑完成的整批撤回；成功的、单源失败的、已被续跑完成的中断撤回照常清。"""
+    monkeypatch.setattr(tasks_mod, "MAX_HISTORY", 1)
+    began = {"kind": "remove", "remove_writes_began": True}
+    all_p = {"params": {"scope": "all", "raw_dir": "raw/book", "parent": "book"}}
+    one_p = {"params": {"scope": "one", "source": "x"}}
+    _write_env(kb, "20261101-100000-remove-0000", state="failed", finished="2026-11-01 10:00:00", **began, **all_p)
+    _write_env(kb, "20261101-100001-remove-0001", finished="2026-11-01 10:00:01", **began, **all_p)
+    _write_env(kb, "20261101-100002-remove-0002", state="failed", finished="2026-11-01 10:00:02", **began, **one_p)
+    _write_env(
+        kb, "20261101-100003-remove-0003", state="failed", finished="2026-11-01 10:00:03",
+        superseded_by="x", **began, **all_p,
+    )
+    _write_env(
+        kb, "20261101-100004-remove-0004", state="interrupted", finished="2026-11-01 10:00:04",
+        superseded_by="x", **began, **all_p,
+    )
+    store = TaskStore(kb)
+    tid = store.create("ingest", "补录", {"target": "raw/z.md"})
+    store.on_start(_fake_job(tid))
+    store.on_finish(_fake_job(tid))
+    names = {p.name for p in jobs_dir(kb).iterdir() if p.suffix == ".json"}
+    assert "20261101-100000-remove-0000.json" in names  # 写了一半的整批：续跑要用信封里的身份
+    for gone in ("100001-remove-0001", "100002-remove-0002", "100003-remove-0003", "100004-remove-0004"):
+        assert f"20261101-{gone}.json" not in names
+
+
 def test_task_waiting_for_cli_does_not_block_worker(kb, monkeypatch) -> None:
     """等命令行释放库的任务不占 worker：排在它后面的投喂照旧立即失败（409），不跟着等。"""
     monkeypatch.setattr(jobs_mod, "LOCK_BACKOFF_START_S", 5.0)

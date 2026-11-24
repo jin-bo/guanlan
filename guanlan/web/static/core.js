@@ -31,6 +31,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 直接 new Error(d.detail) 会显示 [object Object]
 function apiDetail(d, status) {
   if (d && typeof d.detail === "string") return d.detail;
+  if (d && d.detail && typeof d.detail.message === "string") return d.detail.message; // 结构化 409（如撤回冲突，P4.35）
   if (d && Array.isArray(d.detail)) return d.detail.map((x) => (x && x.msg) || String(x)).join("；");
   return `HTTP ${status}`;
 }
