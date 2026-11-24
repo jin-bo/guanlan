@@ -1069,3 +1069,81 @@ def test_deepseek_fetch_fallback_seam():
     assert web._is_official_deepseek_base_url("https://api.deepseek.com/v1")
     for bad in (None, "", "http://api.deepseek.com", "https://gateway.example.com/deepseek", "https://u:p@api.deepseek.com"):
         assert not web._is_official_deepseek_base_url(bad), bad
+
+
+# ───────── P5.5.2 Web 问答画像：运行期改 `agent.project_instructions` 下一轮即生效（决策W6）─────────
+
+
+def test_profile_toggle_changes_the_next_turns_system_message(real_kb: Path, tmp_path_factory, monkeypatch) -> None:
+    """`/profile off|on` 只改 `agent.project_instructions`。这条锁住它依赖的上游行为：**真实**多轮里，
+    改属性后下一轮**实际发出的** system 消息随之变化。只调 `_build_system_prompt()` 不够——上游已有按
+    脏标记跳过重建的逻辑，若扩展到跨轮，直接调函数仍会绿、开关却静默失效。
+    """
+    from types import SimpleNamespace
+
+    from guanlan.web.conversation import Conversation
+    from guanlan.web.profile import ProfileSource
+
+    prof = tmp_path_factory.mktemp("outside") / "USER.md"
+    prof.write_text("## 回答方式\n画像标记词-甲乙丙", encoding="utf-8")
+    conv = Conversation(
+        "profile-cid", real_kb, None, persist=False, profile=ProfileSource(prof)
+    )
+    systems: list[str] = []
+
+    def fake_chat_stream(
+        messages,
+        tools=None,
+        max_tokens=None,
+        on_text_chunk=None,
+        cancellation_token=None,
+        *,
+        cache_boundary=None,
+        on_retry=None,
+        on_reasoning_chunk=None,
+    ):
+        systems.append(next(m["content"] for m in messages if m["role"] == "system"))
+        on_text_chunk("答")
+        message = SimpleNamespace(role="assistant", content="答", tool_calls=None)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(finish_reason="stop", message=message)], usage=None
+        )
+
+    try:
+        monkeypatch.setattr(conv.agent.llm, "chat_stream", fake_chat_stream)
+        conv.agent.chat("第一问")
+        conv.set_profile_enabled(False)
+        conv.agent.chat("第二问")
+        conv.set_profile_enabled(True)
+        conv.agent.chat("第三问")
+    finally:
+        conv.close()
+
+    assert len(systems) == 3
+    project_text = (real_kb / "AGENTAO.md").read_text(encoding="utf-8")
+    first_line = next(ln for ln in project_text.splitlines() if ln.strip() and not ln.startswith("---"))
+    assert "画像标记词-甲乙丙" in systems[0] and "=== Project Instructions ===" in systems[0]
+    assert "画像标记词-甲乙丙" not in systems[1]
+    assert first_line in systems[1]  # 关掉画像后库规约仍在（base = agentao 自己的读法）
+    assert "画像标记词-甲乙丙" in systems[2]
+
+
+def test_model_switch_keeps_profile(real_kb: Path, tmp_path_factory) -> None:
+    """P5.5.2 §4：`/model` 走 agentao 的 `set_provider`，不得丢掉经 `project_instructions` 注入的画像。"""
+    from guanlan.web.conversation import Conversation
+    from guanlan.web.profile import ProfileSource
+
+    prof = tmp_path_factory.mktemp("outside") / "USER.md"
+    prof.write_text("画像标记词-丁", encoding="utf-8")
+    conv = Conversation(
+        "model-cid", real_kb, None, persist=False, mode="workspace-write", profile=ProfileSource(prof)
+    )
+    try:
+        before = conv.agent.project_instructions
+        assert "画像标记词-丁" in before
+        conv.set_model("openai/another-model")
+        assert conv.agent.get_current_model() == "another-model"
+        assert conv.agent.project_instructions == before
+        assert "画像标记词-丁" in conv.agent._build_system_prompt()
+    finally:
+        conv.close()

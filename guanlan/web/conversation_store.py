@@ -31,6 +31,7 @@ from .chat_support import (
 )
 from .goal_io import clear_goal_sidecar, goal_sidecar_path, read_goal
 from .jobs import WriteGate
+from .profile import ProfileSource
 
 
 class ConversationStore:
@@ -57,8 +58,11 @@ class ConversationStore:
         confirm_ui: bool = True,
         clock: Callable[[], float] = time.monotonic,
         mcp_registry: object = _UNSET,
+        profile: ProfileSource | None = None,
     ) -> None:
         self._kb = kb
+        # P5.5.2（决策W1）：画像来源由 `guanlan web` 入口显式给出；默认 None = 不带。IM 与 reader 不传。
+        self._profile = profile
         # P4.21（决策P4.21-60）：透传每个会话的**可选** MCP registry。默认哨兵 = 不传给
         # `Conversation`，Web/reader 两路行为与今天逐字节相同；IM 宿主传 BoundedTimeoutRegistry
         # （给每个 server 落有限 `timeout.request`）或 `None`（`--no-mcp`，关掉文件发现）。
@@ -155,6 +159,7 @@ class ConversationStore:
                     confirm_ui=self._confirm_ui,
                     clock=self._clock,
                     mcp_registry=self._mcp_registry,  # P4.21：哨兵即"不传"，Web 零影响
+                    profile=self._profile,  # P5.5.2：每个会话按同一来源重读（决策W3）
                 )
                 self._convs[cid] = conv
                 return conv
@@ -289,7 +294,9 @@ class ConversationStore:
         return None
 
     def restore(self, cid: str) -> Conversation | None:
-        """懒恢复盘上的只读会话（端点经 anyio.to_thread.run_sync 调，off-loop 慢路径）。
+        """懒恢复盘上的会话（端点经 anyio.to_thread.run_sync 调，off-loop 慢路径）。
+
+        恢复用**进程默认姿态**（盘上不存运行时姿态，决策P4.5-8）：`--mode workspace-write` 时恢复出来即可写。
 
         含 `load_session`（磁盘）+ `Conversation` 构造（LLM client）两个慢操作。load 前过 §2.2 两道
         精确闸（规范全 UUID + 即时 catalog 精确匹配 + `SKILL_NAME` 作用域），杜绝前缀/时间戳 fallback
@@ -345,6 +352,7 @@ class ConversationStore:
                     confirm_ui=self._confirm_ui,
                     clock=self._clock,
                     mcp_registry=self._mcp_registry,  # P4.21：新建/恢复两路零漂移
+                    profile=self._profile,  # P5.5.2：恢复读当前画像文件（系统提示不落盘，决策W3）
                 )
                 conv.agent.messages = messages  # 已在锁外清过推理数据（P4.23 §3.2，见上）
                 # 只认构造已激活的 SKILL_NAME，**不**回放盘上任意 active_skills（扩大姿态，决策P4.2-4/6）
