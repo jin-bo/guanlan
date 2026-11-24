@@ -65,6 +65,10 @@ def _thinking_level(value: str) -> str:
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
+    if args.flash:
+        from .flash import run_flash_ingest
+
+        return run_flash_ingest(args.target, root=args.dir, model=args.model, thinking=args.thinking)
     return run_ingest(args.target, root=args.dir, model=args.model, thinking=args.thinking)
 
 
@@ -348,6 +352,12 @@ def _add_ingest_parser(sub, dir_parent) -> None:
         metavar="LEVEL",
         help="推理档位，透传 agentao run --thinking（如 low / high；off 用模型端默认）。"
         "可选值由模型端决定；不指定则不改变现有行为。low 通常更快、产出更简略",
+    )
+    p.add_argument(
+        "--flash",
+        action="store_true",
+        help="快速收录（原型）：只建本篇 source 页，index/log 由 wrapper 登记，不整合实体/概念页；"
+        "页上标 ingest_depth: flash，之后不带 --flash 再跑一次即加深",
     )
     p.set_defaults(func=_cmd_ingest)
 

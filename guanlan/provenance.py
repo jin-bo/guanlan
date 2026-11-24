@@ -50,6 +50,16 @@ DIGEST_MARKER = "@sha256:"
 _HEX = frozenset("0123456789abcdef")
 
 
+# 快速收录（flash，见 docs/P5.6-快速收录.md）留在 source 页上的「待加深」标记：完整 ingest 成功后由 wrapper 清掉。
+FLASH_KEY = "ingest_depth"
+FLASH_VALUE = "flash"
+
+
+def is_flash_meta(meta: object) -> bool:
+    """frontmatter 是否标着 `ingest_depth: flash`（容错：非映射 → False）。"""
+    return isinstance(meta, dict) and meta.get(FLASH_KEY) == FLASH_VALUE
+
+
 def compute_raw_digest(raw_file: Path) -> str:
     """raw 文件现字节的 sha256 十六进制摘要（小写）。"""
     return hashlib.sha256(raw_file.read_bytes()).hexdigest()

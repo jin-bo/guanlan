@@ -26,7 +26,7 @@ This is an implementation of the [Karpathy LLM Wiki pattern](https://gist.github
 | Command | Purpose | Needs a model? |
 |---|---|---|
 | `guanlan init` | Initialize a knowledge base (deterministic template) | no |
-| `guanlan ingest` | Feed a source; the Agent creates/updates wiki pages | yes |
+| `guanlan ingest` | Feed a source; the Agent creates/updates wiki pages (`--flash` writes only the summary page in tens of seconds; deepen later) | yes |
 | `guanlan import` | One-click import of a whole book/long report: parse · normalize · split → confirm → ingest part by part, pausable and resumable | yes |
 | `guanlan query` | Ask the KB (`--backfill` persists the answer back into the wiki) | yes |
 | `guanlan search` | Full-page full-text search (BM25 + CJK tokenization) | no |
