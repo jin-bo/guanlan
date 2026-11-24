@@ -1190,7 +1190,7 @@ function handleWaitingForTask(botEl, payload) {
   link.type = "button";
   link.className = "chat-wait-link";
   link.textContent = t("chat.waitingOpenTasks");
-  link.addEventListener("click", openTaskDrawer);
+  link.addEventListener("click", openTaskList);
   el.append(text, link);
   botEl.after(el);
   waitingTaskEl = el;

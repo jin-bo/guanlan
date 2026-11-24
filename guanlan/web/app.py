@@ -40,6 +40,7 @@ from ..audit import (
     run_audit_result,
 )
 from ..doctor import run_doctor, run_doctor_quotes
+from ..trash import summary as trash_summary
 from ..check import format_report as _format_check
 from ..check import run_check
 from ..errors import EXIT_OK, EXIT_USAGE, GuanlanError
@@ -89,7 +90,7 @@ from .tasks import DELETABLE_STATES, NO_PREIMAGE_KINDS, PENDING_STATES, TaskLimi
 # 整模块导入（不 from-import 具体函数）：端点内经 `mcpdiag.<fn>` 取属性，测试可 monkeypatch
 # 单飞/慢检查而不必真起上游进程。模块本身零 mcp SDK 依赖（只导 agentao.mcp.config）。
 from . import graphview, mcpdiag
-from . import fetch_routes, oneclick_routes, remove_routes
+from . import fetch_routes, oneclick_routes, remove_routes, trash_routes
 from .rawfeed import (
     _atomic_write_raw,
     _check_text_admission,
@@ -879,6 +880,15 @@ def create_app(
         submit_remove=_submit_remove,
     )
 
+    # 回收区（P4.36 T1）：浏览与单条彻底删除；删除同步执行、不进任务中心，须独占库级锁。reader 下不注册。
+    trash_routes.register(
+        app,
+        root=root,
+        writer_only=_writer_only,
+        reject_if_writable_active=_reject_if_writable_active,
+        write_lock=write_gate.write_lock,
+    )
+
     # 零 LLM 报告（决策P4-7）：只序列化既有 *Report，与 CLI `--json` 字节对齐；阻塞跑 to_thread。
     wiki = root / "wiki"
 
@@ -904,7 +914,10 @@ def create_app(
     # 分组、去重与计数都在 `doctor.run_doctor` 里做；`/api/report/{name}` 保留（CLI `--json` 字节对齐红线）。
     @app.get("/api/doctor")
     async def doctor() -> dict:
-        return await anyio.to_thread.run_sync(run_doctor, root)
+        data = await anyio.to_thread.run_sync(run_doctor, root)
+        if not reader:  # 回收区一行（P4.36 §2）：只给写者，不计入问题数
+            data["trash"] = await anyio.to_thread.run_sync(trash_summary, root)
+        return data
 
     # 体检深查·引文核对（P4.34 §6.1）：全库 `quotes` 一遍（真实库约 12 秒），点击才跑。单飞的进程内只读作业，
     # **不进任务中心**（不取写锁、不拍前像、不落盘）；结果只留最近一次。reader 下不注册：体检按钮本就隐藏，

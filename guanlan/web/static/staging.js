@@ -103,9 +103,11 @@ async function submitFeed(overwrite) {
 
 
 function fmtBytes(n) {
+  n = Number(n) || 0;
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`; // 回收区总大小可能过 GB（P4.36）
 }
 
 // 精确到秒的时长（进度用）：<1 分钟显示秒，<1 小时显示分秒，再长显示时分。

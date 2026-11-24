@@ -28,6 +28,7 @@ from .query import run_query
 from .quotes import add_quotes_arguments, quotes_entrypoint
 from .reindex import reindex_entrypoint
 from .remove import remove_entrypoint
+from .trash import add_trash_arguments, trash_entrypoint
 from .search import search_entrypoint
 from .skill import install_skill
 from .zipkb import add_zip_arguments
@@ -124,6 +125,16 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
 
 def _cmd_remove(args: argparse.Namespace) -> int:
     return remove_entrypoint(args.dir, src=args.src, yes=args.yes, json_output=args.json)
+
+
+def _cmd_trash(args: argparse.Namespace) -> int:
+    return trash_entrypoint(
+        args.dir,
+        action=args.trash_action,
+        name=getattr(args, "name", None),
+        yes=getattr(args, "yes", False),
+        json_output=args.json,
+    )
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
@@ -521,6 +532,18 @@ def _add_remove_parser(sub, dir_parent) -> None:
     )
     p.add_argument("--json", action="store_true", help="输出 JSON 契约")
     p.set_defaults(func=_cmd_remove)
+
+
+def _add_trash_parser(sub, dir_parent) -> None:
+    # trash（P4.36 T1）：回收区浏览与单条彻底删除。purge 自己独占库级锁（不接受退化与嵌套放行），
+    # 故不进 needs_kb_lock（run_locked 在锁文件建不出时会退化放行）。
+    p = sub.add_parser(
+        "trash",
+        parents=[dir_parent],
+        help="回收区管理：list 列出 / show 详情 / purge 彻底删除一个条目（零 LLM；purge 默认预览，--yes 才删）",
+    )
+    add_trash_arguments(p)
+    p.set_defaults(func=_cmd_trash)
 
 
 def _add_search_parser(sub, dir_parent) -> None:
@@ -930,6 +953,7 @@ _SUBCOMMAND_BUILDERS = (
     _add_audit_parser,
     _add_reindex_parser,
     _add_remove_parser,
+    _add_trash_parser,
     _add_search_parser,
     _add_zip_parser,
     _add_convert_parser,

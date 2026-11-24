@@ -166,7 +166,8 @@ async function pollTasksOnce() {
     } catch { /* 网络抖动：下一轮再查 */ }
   }
   renderTaskBadge();
-  if (taskDrawerOpen()) {
+  // 回收区页签不随任务轮询重画（P4.36）：缓存没变，每秒重建 DOM 会吞掉落在重建间隙的「彻底删除」点击。
+  if (taskDrawerOpen() && taskDrawerTab !== "trash") {
     await refreshExpandedTask();
     renderTaskDrawer();
   }
@@ -241,6 +242,15 @@ function openTaskDrawer() {
   scheduleTaskPoll(0);
 }
 
+// 从任务相关入口（完成 toast、对话里「查看任务」）打开：总是落在「任务」页签，不停在上次的回收区缓存上（P4.36）。
+function openTaskList() {
+  if (taskDrawerTab !== "tasks") {
+    taskDrawerTab = "tasks";
+    renderTaskTabs();
+  }
+  openTaskDrawer();
+}
+
 function closeTaskDrawer() {
   $("#task-drawer").classList.add("hidden");
 }
@@ -256,6 +266,11 @@ function renderTaskDrawer() {
   const preAtBottom = oldPre ? oldPre.scrollHeight - oldPre.scrollTop - oldPre.clientHeight < 4 : false;
   const preOwner = oldPre ? oldPre.closest(".task-row").dataset.id : null;
   body.innerHTML = "";
+  if (taskDrawerTab === "trash") { // 回收区页签（P4.36）：只用缓存重画，不随任务轮询重拉
+    renderTrashTab(body);
+    body.scrollTop = scrollTop;
+    return;
+  }
   // 刚提交、尚未出现在列表里的任务并进「进行中」组，免得抽屉里空一拍。
   const active = [...taskView.active];
   for (const id of taskTracked) {
@@ -500,6 +515,8 @@ function renderRollbackReceipt(rb, box) {
 function renderTaskDetail(row, box) {
   if (taskLog.id !== row.id) return;
   renderTaskActions(row, box);
+  // 回执里的 `.trash/…`（撤回、回滚都会写）：给「在回收区查看」链接（P4.36）
+  renderTrashLinks(box, taskLog.text, row.rollback && row.rollback.trash);
   if (row.state === "interrupted" && row.kind === "remove") {
     // 撤回没有前像（P4.35 §3.5）：不说「检查后重新提交」，引导重新预览；回收区可能已有本次的 manifest
     if (row.superseded_by) taskHint(box, t("task.remove.supersededHint"), "muted");
@@ -557,10 +574,14 @@ function showToast(text, kind = "info") {
   el.className = `toast ${kind}`;
   el.textContent = text;
   el.title = t("task.toast.open");
-  el.addEventListener("click", () => { el.remove(); openTaskDrawer(); });
+  el.addEventListener("click", () => { el.remove(); openTaskList(); });
   box.appendChild(el);
   setTimeout(() => el.remove(), 6000);
 }
 
-$("#tasks-btn").addEventListener("click", () => (taskDrawerOpen() ? closeTaskDrawer() : openTaskDrawer()));
+$("#tasks-btn").addEventListener("click", () => {
+  if (taskDrawerOpen()) { closeTaskDrawer(); return; }
+  openTaskDrawer();
+  if (taskDrawerTab === "trash") loadTrash(); // 上次停在回收区页签：重开时重拉，不显示旧缓存（P4.36）
+});
 $("#task-drawer-close").addEventListener("click", closeTaskDrawer);
