@@ -63,6 +63,10 @@ function renderProfileBadge() {
     return;
   }
   el.hidden = false;
+  // 可点开关（同 /profile on|off）：带着/将带上 → 点了关；已关 → 点了开。未加载开不了（服务端 409），不可点。
+  el.disabled = state === "failed";
+  if (state === "failed") el.removeAttribute("aria-pressed");
+  else el.setAttribute("aria-pressed", state === "off" ? "false" : "true");
   if (state === "off") {
     setProfileBadgeContent(el, "i-user-off", t("profile.badgeOff"));
     el.title = t("profile.tipOff");
@@ -82,7 +86,7 @@ function renderProfileBadge() {
   }
 }
 
-// 画像标记内容：只放线性人像图标，不显示文字；状态名进 aria-label，悬停 title 给全文说明。
+// 画像标记内容：只放线性人像图标，不显示文字；状态名进 aria-label，悬停 title 给全文说明（含「点击开关」）。
 function setProfileBadgeContent(el, icon, label) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -92,7 +96,6 @@ function setProfileBadgeContent(el, icon, label) {
   use.setAttribute("href", "#" + icon);
   svg.appendChild(use);
   el.replaceChildren(svg);
-  el.setAttribute("role", "img");
   el.setAttribute("aria-label", label);
 }
 
@@ -585,6 +588,21 @@ $("#mode-badge").addEventListener("click", (e) => {
   if (!seg || readerMode || modeSwitching || seg.dataset.mode === currentMode) return;
   if (chatStreaming) return noteLines([t("mode.busy")]);
   switchMode(seg.dataset.mode);
+});
+
+// 顶栏人像：点击开关本会话画像，走 slashProfileToggle（与 /profile on|off 同一路径、同一提示）。流式中拒绝
+// （同姿态开关）；防连点。新会话首轮前点它会先开一个空活会话再关（同 /profile off）。
+let profileSwitching = false;
+$("#profile-badge").addEventListener("click", async () => {
+  if (readerMode || profileSwitching || $("#profile-badge").disabled) return;
+  if (chatStreaming) return noteLines([t("profile.busy")]);
+  const off = sessionProfile?.state === "off"; // 严格布尔：无会话时 sessionProfile 为 null，不能把 null 发给服务端
+  profileSwitching = true;
+  try {
+    await slashProfileToggle(off);
+  } finally {
+    profileSwitching = false;
+  }
 });
 
 // /model <provider>[/<model>]：运行时切换模型（P4.29）；只给 provider 时服务端取该 provider 的 {P}_MODEL。只在 workspace-write 会话可切——前端先挡一道给出明确

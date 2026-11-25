@@ -94,10 +94,12 @@ body {
   display: inline-flex; align-items: center; justify-content: center; flex: none;
   width: 1.65rem; height: 1.65rem; margin-right: .5rem; padding: 0;
   border-radius: 50%; border: 1px solid rgba(255,255,255,.28); background: rgba(255,255,255,.06);
-  color: rgba(234,246,244,.9); cursor: help;
+  color: rgba(234,246,244,.9); cursor: pointer; font: inherit;
   transition: background .16s, border-color .16s, color .16s;
 }
-.profile-badge:hover { background: rgba(255,255,255,.12); color: #fff; }
+.profile-badge:hover:not(:disabled) { background: rgba(255,255,255,.12); color: #fff; }
+.profile-badge:disabled { cursor: help; }
+.profile-badge:focus-visible { outline: 2px solid rgba(255,255,255,.7); outline-offset: 2px; }
 .profile-badge .ico { width: .9rem; height: .9rem; }
 .profile-badge[hidden] { display: none; }
 .profile-badge.is-write { border-color: rgba(240,160,64,.75); background: rgba(240,160,64,.14); color: #f7c27a; }
