@@ -332,3 +332,19 @@ def test_cli_web_profile_source(kb, monkeypatch, argv, want) -> None:
     monkeypatch.setattr("guanlan.web.serve", lambda *a, **k: seen.update(k) or 0)
     assert cli.main(["-C", str(kb), "web", "--no-browser", *argv]) == 0
     assert seen["profile"] == want
+
+
+def test_badge_is_a_toggle_button() -> None:
+    """人像标记可点开关（与 /profile on|off 同一路径）：是 button、点击走 slashProfileToggle 且发严格布尔、
+    流式中拒绝的提示中英各一条。交互本身走 Playwright 冒烟（不进 pytest），这里只锁接线。"""
+    from guanlan.web.app import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    js = (STATIC_DIR / "chat.js").read_text(encoding="utf-8")
+    i18n = (STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
+    assert '<button type="button" id="profile-badge"' in html
+    handler = js[js.index('$("#profile-badge").addEventListener("click"'):]
+    handler = handler[: handler.index("\n});") ]
+    assert "slashProfileToggle(off)" in handler and "chatStreaming" in handler
+    assert 'const off = sessionProfile?.state === "off";' in handler  # null 会被服务端 422
+    assert i18n.count('"profile.busy"') == 2
