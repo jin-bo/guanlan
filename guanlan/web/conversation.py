@@ -232,6 +232,40 @@ def _subagent_frame(event: AgentEvent) -> dict | None:
     return frame
 
 
+# P4.37 §3.1（A 方案）：任务原文不上线，只认任务首行行首的 `【…】` 标签（由派发方写，如「【第 2 组：A.2】」）。
+_BG_LABEL_RE = re.compile(r"^\s*【([^】\n]{1,80})】")
+_BG_LABEL_MAX = 40
+
+
+def _bg_label(task: object) -> str | None:
+    """任务摘要（agentao 任务表存前 80 字）行首的 `【…】` 标签，截到 40 字；没有 → None。"""
+    if not isinstance(task, str):
+        return None
+    m = _BG_LABEL_RE.match(task)
+    if m is None:
+        return None
+    label = m.group(1).strip()
+    return label[:_BG_LABEL_MAX] or None
+
+
+def _bg_task_view(rec: dict, prog: dict) -> dict:
+    """一条后台任务记录 + 进展 → `bg_agents.tasks[]` 的一项（白名单字段）。"""
+    view: dict = {"id": str(rec["id"]), "status": str(rec.get("status") or "")}
+    label = _bg_label(rec.get("task"))
+    if label is not None:
+        view["label"] = label
+    tools = _int_or_none(prog.get("tools"))
+    if tools is not None:
+        view["tools"] = tools
+    if prog.get("tool") and view["status"] in ("pending", "running"):  # 结束了就没有「当前工具」
+        view["tool"] = str(prog["tool"])
+    for key in ("started_at", "finished_at"):
+        v = rec.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            view[key] = round(float(v), 3)
+    return view
+
+
 def _check_web_mode(mode: str) -> None:
     """Web 只收 read-only / workspace-write（决策P4.5-1）；agentao 收得下 full-access/plan，
     故必须拦在本层、先于任何 agentao 调用。非法 → ValueError（端点转 422）。"""
@@ -299,6 +333,12 @@ class Conversation:
         # 上一帧用于去重，只在内容变化时推。
         self._bg_baseline: set[str] | None = set()  # None = 本轮基线没读到，不推显示帧
         self._bg_last_frame: dict | None = None
+        # 后台子 Agent 进展（P4.37 §3.1）：agentao `relay_subagent_events` 把子 Agent 的工具事件转到父
+        # host 事件流（带子会话 ID），`spawned` 事件给出「子会话 → 后台任务 ID」。观察者在子 Agent 线程
+        # 里跑，只更新下面两张表（锁内、O(1)），显示由轮询读取。
+        self._bg_progress_lock = threading.Lock()
+        self._bg_child_sessions: dict[str, str] = {}
+        self._bg_progress: dict[str, dict] = {}
         self._write_gate = write_gate  # 进程级单写者协调（write_lock + 层③ 计数）；None=纯读测试
         self.lock = asyncio.Lock()  # 同一会话两轮不并发跑同一 agent 对象
         self.title: str | None = None
@@ -422,6 +462,9 @@ class Conversation:
         # engine 上（用户规则保留），两点置位一次做齐、且不发 PERMISSION_MODE_CHANGED——开局是状态、
         # 不是切换。非法姿态已在 __init__ 开头拦下（factory 收得下 full-access，Web 不收，决策P4.5-1）。
         opts["permission_mode"] = mode
+        if self._bg_store is not None:
+            # P4.37 §3.1：后台子 Agent 不向父 transport 发事件；开 relay 才拿得到它的工具进展。
+            opts["relay_subagent_events"] = True
         # P5.5.2 问答画像（决策W3）：会话构造时按进程定下的来源读一次，作为本会话快照；新建与懒恢复共用
         # 本 __init__，恢复读的是当前文件。读取失败不拒建会话，只记原因供 `/profile` 显示。与姿态无关（W4）。
         # 带画像时传 `project_instructions` 会顶替 agentao 读 AGENTAO.md，故 `with_profile` 里已含项目指令；
@@ -439,6 +482,8 @@ class Conversation:
             self._profile_with = build_profile_instructions(kb, self._profile.text)
             opts["project_instructions"] = self._profile_with
         self.agent = chat.build_from_environment(**opts)
+        if self._bg_store is not None:
+            self.agent.add_host_event_observer(self._on_host_event)
         # 当前 provider（P4.29 `/model`）：构造期 `.env` 已载入进程环境，此刻读到的就是本会话所用的那个。
         self._provider = current_provider()
         self.agent.skill_manager.activate_skill(
@@ -1027,10 +1072,44 @@ class Conversation:
     _BG_STOP_HINT_SECONDS = 30.0
     _BG_WATCH_INTERVAL = 1.0
 
+    def _on_host_event(self, event: object) -> None:
+        """host 事件观察者（子 Agent 线程内联调用，须便宜、不抛）：只记后台子 Agent 的工具进展。
+
+        - `subagent_lifecycle` / `spawned` 且带 `parent_task_id`（后台启动才有，= 任务表 ID）：登记
+          子会话 → 任务 ID。前台子 Agent 不带它，不登记（它的进展走 P4.26 的 transport 帧）。
+        - `tool_lifecycle` 且会话已登记：`started` 计数 +1 并记当前工具名，结束清空当前工具。
+        只存工具名与计数，不存参数、摘要、错误原文（同 P4.26 决策4）。
+        """
+        try:
+            kind = getattr(event, "event_type", None)
+            if kind == "subagent_lifecycle":
+                if getattr(event, "phase", None) != "spawned":
+                    return
+                tid = getattr(event, "parent_task_id", None)
+                sid = getattr(event, "child_session_id", None)
+                if isinstance(tid, str) and tid and isinstance(sid, str) and sid:
+                    with self._bg_progress_lock:
+                        self._bg_child_sessions[sid] = tid
+                        self._bg_progress.setdefault(tid, {"tools": 0, "tool": None})
+            elif kind == "tool_lifecycle":
+                sid = getattr(event, "session_id", None)
+                with self._bg_progress_lock:
+                    tid = self._bg_child_sessions.get(sid) if isinstance(sid, str) else None
+                    if tid is None:
+                        return
+                    prog = self._bg_progress.setdefault(tid, {"tools": 0, "tool": None})
+                    if getattr(event, "phase", None) == "started":
+                        prog["tools"] += 1
+                        prog["tool"] = str(getattr(event, "tool_name", "") or "")[:_SUBAGENT_TEXT_MAX]
+                    else:
+                        prog["tool"] = None
+        except Exception:  # noqa: BLE001 — 观察者异常会被 agentao 吞掉，这里先自己兜住
+            _logger.debug("会话 %s 处理 host 事件失败", self.id, exc_info=True)
+
     def _bg_frame(self, stopping: bool) -> dict | None:
         """本轮后台任务的 `bg_agents` 帧载荷；本轮还没派过任何后台任务 → None。
 
-        只带 ID 与状态（`task` 原文是任务提示词，不上线，同 P4.26 决策4）。"""
+        任务原文不上线（P4.26 决策4），只取行首 `【…】` 标签（P4.37 §3.1 A 方案）。"""
         store = self._bg_store
         baseline = self._bg_baseline
         if store is None or baseline is None:
@@ -1039,11 +1118,13 @@ class Conversation:
         if not recs:
             return None
         running = sum(1 for r in recs if r.get("status") in ("pending", "running"))
+        with self._bg_progress_lock:
+            progress = {r["id"]: dict(self._bg_progress.get(r["id"]) or {}) for r in recs}
         return {
             "running": running,
             "finished": len(recs) - running,
             "stopping": stopping and running > 0,
-            "tasks": [{"id": str(r["id"]), "status": str(r.get("status") or "")} for r in recs],
+            "tasks": [_bg_task_view(r, progress.get(r["id"]) or {}) for r in recs],
         }
 
     def _push_bg_frame(self, stopping: bool = False) -> None:

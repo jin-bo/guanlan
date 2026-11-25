@@ -1980,6 +1980,12 @@ class _FakeAgent:
     def set_permission_mode(self, mode, *, cause: str = "host"):
         self.mode_calls.append(mode)
 
+    def add_host_event_observer(self, callback):
+        # P4.37：镜像真 Agentao 的 host 事件观察者注册（开 --background-agents 时宿主挂一个）。
+        self.host_observers = getattr(self, "host_observers", [])
+        self.host_observers.append(callback)
+        return callback
+
     def get_current_model(self) -> str:
         return self._model or "fake-model"
 
