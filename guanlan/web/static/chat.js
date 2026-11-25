@@ -1246,7 +1246,18 @@ function bgAgentRow(task) {
     const end = typeof task.finished_at === "number" ? task.finished_at : Date.now() / 1000;
     parts.push(Math.max(0, Math.round(end - task.started_at)) + "s");
   }
-  row.textContent = "· " + parts.join(" · ");
+  // 行首状态图标（P4.37 §3.1）：运行中 ◐（呼吸）、排队 ○、完成 ✓、失败 ✗、取消 ⊘；颜色与动效在 app.css。
+  const icon = document.createElement("span");
+  const kind = st === "completed" ? "done"
+    : st === "failed" ? "failed"
+      : st === "cancelled" ? "cancelled"
+        : st === "pending" ? "pending" : "running";
+  icon.className = "chat-bg-icon " + kind;
+  icon.textContent = { done: "✓", failed: "✗", cancelled: "⊘", pending: "○", running: "◐" }[kind];
+  icon.setAttribute("aria-hidden", "true");
+  const text = document.createElement("span");
+  text.textContent = parts.join(" · ");
+  row.append(icon, text);
   row.title = task.id;
   return row;
 }
