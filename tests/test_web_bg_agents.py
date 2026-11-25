@@ -323,8 +323,10 @@ def test_frames_during_arun_show_dispatch_and_progress(chat_env):
         frames = _stream(c, {"message": "go", "conversation_id": cid})
     bg = [p for e, p in frames if e == "bg_agents"]
     assert bg[0]["running"] == 1 and bg[0]["finished"] == 0
-    (first,) = bg[0]["tasks"]
-    assert first["id"] == children[0].id and first["status"] == "running"
+    # 登记到子线程 mark_running 之间状态是 pending，负载高时首帧可能先推出 pending——那也是正确帧。
+    assert bg[0]["tasks"][0]["status"] in ("pending", "running")
+    first = next(t for p in bg for t in p["tasks"] if t["status"] == "running")
+    assert first["id"] == children[0].id
     assert "label" not in first  # 任务首行没有【…】标签
     assert bg[-1]["running"] == 0 and bg[-1]["finished"] == 1
     assert all(set(p) == {"running", "finished", "stopping", "tasks"} for p in bg)

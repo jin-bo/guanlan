@@ -185,6 +185,8 @@ dev = [
 test = [
     "pytest>=8.0",
     "pypdf>=7.0.1",
+    # CI 用 `-n 4` 并行跑全量（GitHub runner 4 核）；本地默认仍单线程，想快可自加 `-n 4`。
+    "pytest-xdist>=3.6",
 ]
 # playwright 仅用于本地调试 Web 宿主前端（截图/交互验证，非测试套件依赖）；浏览器二进制另需
 # 跑一次 `uv run playwright install chromium`。
