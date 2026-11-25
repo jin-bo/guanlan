@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -66,10 +67,11 @@ class _Child:
 
     def __init__(self, store: BackgroundTaskStore, fs, path: Path, *, delay: float = 0.0,
                  wait_for_cancel: bool = False, ignore_cancel_for: float = 0.0,
-                 write_before: Path | None = None, release: threading.Event | None = None) -> None:
+                 write_before: Path | None = None, release: threading.Event | None = None,
+                 task: str = "task", observers: list | None = None, tools: int = 0) -> None:
         self.id = uuid.uuid4().hex[:8]
         self.token = CancellationToken()
-        store.register(self.id, "generalist", "task")
+        store.register(self.id, "generalist", task[:80])  # agentao 任务表同样只存前 80 字
         store.register_token(self.id, self.token)
         self.wrote_at: float | None = None
         self.started = threading.Event()  # 已登记、已做完 write_before，进入等待
@@ -82,8 +84,21 @@ class _Child:
                 store.update(self.id, status="failed", error="test child crashed")
                 raise
 
+        def relay(event) -> None:  # 镜像 agentao relay_subagent_events：子会话事件到父观察者
+            for cb in observers or []:
+                cb(event)
+
         def body() -> None:
             store.mark_running(self.id)
+            sid = f"child-{self.id}"
+            relay(SimpleNamespace(event_type="subagent_lifecycle", phase="spawned",
+                                  parent_task_id=self.id, child_session_id=sid))
+            for k in range(tools):
+                relay(SimpleNamespace(event_type="tool_lifecycle", phase="started",
+                                      session_id=sid, tool_name="read_file"))
+                if k < tools - 1:
+                    relay(SimpleNamespace(event_type="tool_lifecycle", phase="completed",
+                                          session_id=sid, tool_name="read_file"))
             if write_before is not None:
                 fs.write_text(write_before, "早写\n")
             self.started.set()
@@ -120,6 +135,7 @@ def _spawn_action(children: list, **kw):
         extra = dict(kw)
         if extra.get("write_before") is not None:
             extra["write_before"] = root / extra["write_before"]
+        extra.setdefault("observers", getattr(agent, "host_observers", []))
         children.append(_Child(store, fs, root / path, **extra))
         if raise_after:
             raise RuntimeError("主 Agent 派发后出错")
@@ -307,7 +323,9 @@ def test_frames_during_arun_show_dispatch_and_progress(chat_env):
         frames = _stream(c, {"message": "go", "conversation_id": cid})
     bg = [p for e, p in frames if e == "bg_agents"]
     assert bg[0]["running"] == 1 and bg[0]["finished"] == 0
-    assert bg[0]["tasks"] == [{"id": children[0].id, "status": "running"}]
+    (first,) = bg[0]["tasks"]
+    assert first["id"] == children[0].id and first["status"] == "running"
+    assert "label" not in first  # 任务首行没有【…】标签
     assert bg[-1]["running"] == 0 and bg[-1]["finished"] == 1
     assert all(set(p) == {"running", "finished", "stopping", "tasks"} for p in bg)
     assert len(bg) == len({json.dumps(p, sort_keys=True) for p in bg})  # 内容不变不重复推
@@ -329,6 +347,67 @@ def test_frames_count_only_this_turn(chat_env):
     assert _first(frames, "bg_agents") is None
     bg3 = [p for e, p in frames3 if e == "bg_agents"]
     assert bg3[-1]["finished"] == 1 and [t["id"] for t in bg3[-1]["tasks"]] == [children[1].id]
+
+
+def test_frames_show_label_and_tool_progress_but_not_task_text(chat_env):
+    """P4.37 §3.1：帧里有行首【…】标签、工具次数、当前工具与起止时间；任务正文不上线。"""
+    kb, captured = chat_env
+    children: list = []
+    release = threading.Event()
+    spawn = _spawn_action(children, release=release, tools=3,
+                          task="【第 2 组：A.2】你是核查员。机密正文不应出现在界面上。")
+
+    def action(agent):
+        spawn(agent)
+        time.sleep(0.15)  # 轮询看见「运行中 · 3 次工具 · read_file」
+        release.set()
+        children[0].thread.join(timeout=5)
+        time.sleep(0.1)
+
+    with _client(kb, mode="workspace-write", background_agents=4) as c:
+        cid = _new_conv(c)
+        agent = captured["agents"][-1]
+        assert len(agent.host_observers) == 1  # 开开关即挂观察者
+        assert agent.kwargs["relay_subagent_events"] is True
+        agent.action = action
+        frames = _stream(c, {"message": "go", "conversation_id": cid})
+    bg = [p for e, p in frames if e == "bg_agents"]
+    running = next(p["tasks"][0] for p in bg if p["tasks"][0]["status"] == "running")
+    assert running["label"] == "第 2 组：A.2"
+    assert running["tools"] == 3 and running["tool"] == "read_file"
+    assert isinstance(running["started_at"], float) and "finished_at" not in running
+    last = bg[-1]["tasks"][0]
+    assert last["status"] == "completed" and "tool" not in last and "finished_at" in last
+    assert "机密正文" not in json.dumps(frames, ensure_ascii=False)
+
+
+def test_no_label_no_label_key_and_off_switch_has_no_observer(chat_env):
+    kb, captured = chat_env
+    children: list = []
+    with _client(kb, background_agents=4) as c:
+        cid = _new_conv(c)
+        captured["agents"][-1].action = _spawn_action(children, delay=0.05, task="你是核查员", path="workspace/z.md")
+        frames = _stream(c, {"message": "go", "conversation_id": cid})
+    assert all("label" not in t for e, p in frames if e == "bg_agents" for t in p["tasks"])
+    with _client(kb) as c:
+        _new_conv(c)
+    assert "relay_subagent_events" not in captured["kwargs"][-1]
+    assert not getattr(captured["agents"][-1], "host_observers", [])
+
+
+def test_host_event_observer_ignores_foreground_and_unknown_sessions(chat_env):
+    """前台子 Agent 的 spawned 不带 parent_task_id，不登记；未登记会话的工具事件不计数；坏事件不抛。"""
+    kb, captured = chat_env
+    conv = Conversation("cid-obs", kb, None, persist=False, background_agents=2)
+    try:
+        conv._on_host_event(SimpleNamespace(event_type="subagent_lifecycle", phase="spawned",
+                                            parent_task_id=None, child_session_id="fg"))
+        conv._on_host_event(SimpleNamespace(event_type="tool_lifecycle", phase="started",
+                                            session_id="fg", tool_name="read_file"))
+        conv._on_host_event(object())
+        assert conv._bg_progress == {} and conv._bg_child_sessions == {}
+    finally:
+        conv.close()
 
 
 # ── 停止 ──────────────────────────────────────────────────────────────────────

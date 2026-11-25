@@ -1215,13 +1215,40 @@ function handleBgAgents(botEl, payload) {
   }
   if (!bgAgentsEl) {
     bgAgentsEl = document.createElement("div");
-    bgAgentsEl.className = "chat-wait";
+    bgAgentsEl.className = "chat-wait chat-bg";
     botEl.after(bgAgentsEl);
   }
-  bgAgentsEl.textContent = payload.stopping
+  const head = document.createElement("span");
+  head.textContent = payload.stopping
     ? t("chat.bgAgentsStopping", n)
     : t("chat.bgAgentsRunning", n, payload.finished || 0);
+  const rows = (Array.isArray(payload.tasks) ? payload.tasks : []).map(bgAgentRow);
+  bgAgentsEl.replaceChildren(head, ...rows);
   $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+}
+
+// 每个后台子 Agent 一行：标签（任务行首【…】，没有则 ID）· 状态 · 工具次数 · 当前工具 · 已运行秒数（P4.37 §3.1）。
+// 全部走 textContent：标签来自模型写的任务文字，不当 HTML。
+function bgAgentRow(task) {
+  const row = document.createElement("div");
+  row.className = "chat-bg-row";
+  const st = task.status;
+  const parts = [task.label || task.id];
+  parts.push(
+    st === "completed" ? t("subagent.done")
+      : st === "failed" ? t("subagent.failed")
+        : st === "cancelled" ? t("subagent.cancelled")
+          : t("subagent.running"),
+  );
+  if (Number.isInteger(task.tools)) parts.push(t("subagent.tools", task.tools));
+  if (task.tool && (st === "running" || st === "pending")) parts.push(task.tool);
+  if (typeof task.started_at === "number") {
+    const end = typeof task.finished_at === "number" ? task.finished_at : Date.now() / 1000;
+    parts.push(Math.max(0, Math.round(end - task.started_at)) + "s");
+  }
+  row.textContent = "· " + parts.join(" · ");
+  row.title = task.id;
+  return row;
 }
 
 function clearBgAgents() {

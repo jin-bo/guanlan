@@ -1195,6 +1195,10 @@ def test_background_launch_counts_then_cancel_settles(bg_conv) -> None:
     assert "started" in msg
     (rec,) = store.list_current()
     assert store.count_in_flight() == 1
+    # P4.37 §3.1：relay 开着；后台启动的 spawned 事件（带 parent_task_id = 任务 ID）已经把子会话登记进来，
+    # 之后子 Agent 的工具事件才能按会话归到这个任务名下。
+    assert bg_conv.agent._relay_subagent_events is True
+    assert rec["id"] in bg_conv._bg_child_sessions.values()
     bg_conv._cancel_background()
     done = store.wait_until_settled(rec["id"], timeout=20)
     assert done is not None and done["status"] in ("cancelled", "failed")

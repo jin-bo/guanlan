@@ -744,6 +744,10 @@ body.hide-thinking .chat-think { display: none; }
 .toast.ok { background: #1b6e3a; }
 .toast.bad { background: #8a1f1f; }
 .chat-wait { align-self: flex-start; display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; font-size: .82rem; color: var(--lan-ink-soft); padding: .15rem .25rem; }
+/* P4.37 后台子 Agent 块（chat.js handleBgAgents）：汇总一行 + 每个子 Agent 一行。纵向排列；flex-shrink: 0
+   同 .chat-subagent 的理由（定高纵向 flex 溢出时会被压扁）。行内不换行、超长省略，完整 ID 在 title。 */
+.chat-bg { flex-direction: column; align-items: flex-start; gap: .1rem; flex-wrap: nowrap; flex-shrink: 0; max-width: 88%; min-width: 0; }
+.chat-bg-row { padding-left: .6rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .chat-wait-link { background: none; border: 0; padding: 0; color: var(--lan-ripple); cursor: pointer; text-decoration: underline; font-size: .8rem; }
 @media (max-width: 600px) { .task-drawer { top: 0; } }
 .task-actions { display: flex; gap: .4rem; margin-bottom: .4rem; }
