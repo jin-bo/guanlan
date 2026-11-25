@@ -23,9 +23,11 @@ PUBLIC = "93.184.216.34"
 
 def _ooxml(main: str) -> bytes:
     buf = io.BytesIO()
+    # 钉死时间戳：zip 字节进参数化用例 ID，带当前时间的话 xdist 各进程跨 2 秒边界收集到的 ID 不一致，整轮报错。
+    stamp = (2020, 1, 1, 0, 0, 0)
     with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("[Content_Types].xml", f'<Types><Override ContentType="application/vnd.openxmlformats-officedocument.{main}+xml"/></Types>')
-        zf.writestr("word/document.xml", "<x/>")
+        zf.writestr(zipfile.ZipInfo("[Content_Types].xml", stamp), f'<Types><Override ContentType="application/vnd.openxmlformats-officedocument.{main}+xml"/></Types>')
+        zf.writestr(zipfile.ZipInfo("word/document.xml", stamp), "<x/>")
     return buf.getvalue()
 
 
