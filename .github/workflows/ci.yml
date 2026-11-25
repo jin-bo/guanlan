@@ -35,12 +35,8 @@ jobs:
       - name: 装 Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      # ruff 用 uvx 临时拉，不进 lock；与本地 `uvx ruff check` 一致。
-      - name: Lint（ruff）
-        run: uvx ruff check guanlan tests
-
       # --extra web 装上 fastapi/uvicorn/markdown，--extra mcp 装上 mcp SDK，否则 test_web.py /
-      # test_aliases.py / test_mcp.py 会被 importorskip 跳过；dev 组（pytest）uv sync 默认带上。
+      # test_aliases.py / test_mcp.py 会被 importorskip 跳过。
       # --extra im-weixin / im-feishu（P4.21 决策P4.21-45，**不可省**）：不装的话
       # tests/test_im_feishu.py 里那条**真 SDK 签名探针**永远 skip，于是「lark-oapi 缺
       # extra_ua_tags 就收不到群 @ 事件」这条最关键的回归**永远不跑**——而它正是这组测试存在的理由。
@@ -58,7 +54,10 @@ jobs:
           pandoc --version | head -1
 
       - name: 装依赖
-        run: uv sync --extra web --extra mcp --extra im-weixin --extra im-feishu --python ${{ matrix.python-version }}
+        run: >-
+          uv sync --locked --no-default-groups --group test
+          --extra web --extra mcp --extra im-weixin --extra im-feishu
+          --python ${{ matrix.python-version }}
 
       # 上一步装齐四个 extra，但**没有任何东西验证它装成功了**——`pytest.importorskip` 的 skip
       # 在 CI 里照样是绿的（tests/test_im_feishu.py 里那条 skip 的理由甚至写着「CI 必装并必跑」，
@@ -74,8 +73,7 @@ jobs:
       - name: 跑测试（CI 不许静默跳过）
         run: |
           set -o pipefail
-          uv run --extra web --extra mcp --extra im-weixin --extra im-feishu \
-            --python ${{ matrix.python-version }} pytest -q -rs --color=no | tee pytest.out
+          uv run --no-sync --python ${{ matrix.python-version }} pytest -q -rs --color=no | tee pytest.out
           if grep -qE '[0-9]+ skipped' pytest.out; then
             echo "::error::CI 里有用例被跳过——最关键的回归可能根本没跑（多半是某个 extra 没装上）"
             grep '^SKIPPED' pytest.out || true
@@ -84,7 +82,7 @@ jobs:
 
   # Windows 编码回归：windows-latest 的 Python 默认按 cp1252 编解码管道和 open()，正是英文版 Windows 用户的环境。
   # 只跑编码相关的几个文件（真子进程 + 真 pypdf 后端转中文文件名、.env 中文注释、mineru 管道按 UTF-8 解），
-  # 不跑全量——全量套件从未在 Windows 上验证过，那是另一件事。同样不许静默跳过（pypdf 在 dev 组里）。
+  # 不跑全量——全量套件从未在 Windows 上验证过，那是另一件事。同样不许静默跳过（pypdf 在 test 组里）。
   windows-encoding:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -104,13 +102,13 @@ jobs:
         run: uv python install 3.12
 
       - name: 装依赖
-        run: uv sync --python 3.12
+        run: uv sync --locked --no-default-groups --group test --python 3.12
 
       - name: 编码测试（原生 cp1252，不许静默跳过）
         run: |
           set -o pipefail
-          uv run --python 3.12 python -c "import locale, sys; print('locale:', locale.getpreferredencoding(False), 'stdout:', sys.stdout.encoding)"
-          uv run --python 3.12 pytest -q -rs --color=no \
+          uv run --no-sync --python 3.12 python -c "import locale, sys; print('locale:', locale.getpreferredencoding(False), 'stdout:', sys.stdout.encoding)"
+          uv run --no-sync --python 3.12 pytest -q -rs --color=no \
             tests/test_convert_encoding.py tests/test_skill_convert_mineru.py | tee pytest.out
           if grep -qE '[0-9]+ skipped' pytest.out; then
             echo "::error::Windows 编码测试有用例被跳过"
@@ -119,7 +117,7 @@ jobs:
           fi
 
   # 改 workflow 时校验：YAML 语法 / action input / ${{ }} 表达式，并对 run: 里的内联 shell 跑 shellcheck
-  # （release.yml 那段抽 CHANGELOG 的 awk/bash 由此受检）。单跑一次、不进 Python 矩阵。
+  # （release.yml 那段抽 CHANGELOG 的 awk/bash 由此受检）。Ruff 也在这里单跑一次。
   # 钉到 actionlint v1.7.12 的镜像 digest（SHA 钉版、可复现，非浮动 :latest）；镜像自带 shellcheck。
   actionlint:
     runs-on: ubuntu-latest
@@ -130,3 +128,11 @@ jobs:
         uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
         with:
           args: -color
+
+      - name: 装 uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Lint（ruff）
+        run: uvx ruff@0.17.5 check guanlan tests

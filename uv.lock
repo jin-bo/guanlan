@@ -679,8 +679,15 @@ web = [
 ]
 
 [package.dev-dependencies]
+browser = [
+    { name = "playwright" },
+]
 dev = [
     { name = "playwright" },
+    { name = "pypdf" },
+    { name = "pytest" },
+]
+test = [
     { name = "pypdf" },
     { name = "pytest" },
 ]
@@ -711,8 +718,13 @@ requires-dist = [
 provides-extras = ["im", "im-feishu", "im-weixin", "mcp", "web"]
 
 [package.metadata.requires-dev]
+browser = [{ name = "playwright", specifier = ">=1.60" }]
 dev = [
     { name = "playwright", specifier = ">=1.60" },
+    { name = "pypdf", specifier = ">=7.0.1" },
+    { name = "pytest", specifier = ">=8.0" },
+]
+test = [
     { name = "pypdf", specifier = ">=7.0.1" },
     { name = "pytest", specifier = ">=8.0" },
 ]
