@@ -59,8 +59,11 @@ class ConversationStore:
         clock: Callable[[], float] = time.monotonic,
         mcp_registry: object = _UNSET,
         profile: ProfileSource | None = None,
+        background_agents: int | None = None,
     ) -> None:
         self._kb = kb
+        # P4.37：后台子 Agent 同时运行上限（None = 关）。透传新建与懒恢复两路，每会话各建一个 store。
+        self._background_agents = background_agents
         # P5.5.2（决策W1）：画像来源由 `guanlan web` 入口显式给出；默认 None = 不带。IM 与 reader 不传。
         self._profile = profile
         # P4.21（决策P4.21-60）：透传每个会话的**可选** MCP registry。默认哨兵 = 不传给
@@ -160,6 +163,7 @@ class ConversationStore:
                     clock=self._clock,
                     mcp_registry=self._mcp_registry,  # P4.21：哨兵即"不传"，Web 零影响
                     profile=self._profile,  # P5.5.2：每个会话按同一来源重读（决策W3）
+                    background_agents=self._background_agents,  # P4.37
                 )
                 self._convs[cid] = conv
                 return conv
@@ -353,6 +357,7 @@ class ConversationStore:
                     clock=self._clock,
                     mcp_registry=self._mcp_registry,  # P4.21：新建/恢复两路零漂移
                     profile=self._profile,  # P5.5.2：恢复读当前画像文件（系统提示不落盘，决策W3）
+                    background_agents=self._background_agents,  # P4.37
                 )
                 conv.agent.messages = messages  # 已在锁外清过推理数据（P4.23 §3.2，见上）
                 # 只认构造已激活的 SKILL_NAME，**不**回放盘上任意 active_skills（扩大姿态，决策P4.2-4/6）

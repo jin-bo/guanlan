@@ -220,6 +220,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             confirm_timeout=args.confirm_timeout,
             goal_enabled=args.goal != "off",
             profile=_web_profile_source(args),
+            background_agents=args.background_agents,
         )
     except GuanlanError as exc:
         print(exc, file=sys.stderr)
@@ -651,6 +652,7 @@ def _add_web_parser(sub, dir_parent) -> None:
     # `default=` 与 help 文案共用一个常量，文案便不可能与实际默认漂开。
     from .web.defaults import (
         CONFIRM_MODES,
+        DEFAULT_BACKGROUND_AGENTS,
         DEFAULT_CONFIRM,
         DEFAULT_CONFIRM_TIMEOUT,
         DEFAULT_MAX_CONVERSATIONS,
@@ -725,6 +727,18 @@ def _add_web_parser(sub, dir_parent) -> None:
         default="on",
         help="`/goal` 长任务自动续跑总开关（P4.16，默认 on）：浏览器内设一个长任务目标，由宿主反复"
         "驱动多轮直至 Agent 自报完成/阻塞、撞时间/轮数预算、或用户暂停；off 关闭该入口（reader 强制关）",
+    )
+    # P4.37：默认关；只给旗标 = 上限 DEFAULT_BACKGROUND_AGENTS；给值 = 自定上限（≥1 由 serve/create_app 校验）。
+    p.add_argument(
+        "--background-agents",
+        type=int,
+        nargs="?",
+        const=DEFAULT_BACKGROUND_AGENTS,
+        default=None,
+        metavar="N",
+        help=f"打开后台子 Agent（P4.37，默认关）：同一轮派出的多个子 Agent 同时运行，N 为同时运行上限"
+        f"（只给旗标为 {DEFAULT_BACKGROUND_AGENTS}）。每轮收尾前等它们全部结束，期间一直持库写锁，"
+        "其他会话与后台任务要排队（workspace-write 下；只读轮不取写锁）。不能与 --reader 同用",
     )
     # P5.5.2 问答画像：规则同 `guanlan query`（P5.5.1 决策D1）。与 --reader 冲突由 main 在解析后检查。
     prof = p.add_mutually_exclusive_group()

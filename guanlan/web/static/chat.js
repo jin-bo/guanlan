@@ -1165,6 +1165,7 @@ async function sendChat(message, attachments) {
   } finally {
     clearHeartbeat(botEl); // 兜底：任何退出路径都不留下「处理中」残影
     clearWaitingForTask(); // 同上：流结束不留等待提示（P4.33）
+    clearBgAgents(); // 同上（P4.37）
     finishSubagents(botEl); // 断流也收：仍在跑的行标「未收到结束」
     setChatSending(false); // 复位：按钮切回「发送」、清 chatStreaming/禁用
   }
@@ -1202,6 +1203,32 @@ function clearWaitingForTask() {
   waitingTaskEl = null;
 }
 
+// P4.37：本轮后台子 Agent。服务端从派出起每秒看一次任务表，变化时推 `bg_agents {running, finished, stopping,
+// tasks}`；收尾屏障也推同一帧。running 归零即收起。stopping = 停止后 30 秒仍没停完。气泡下挂一行，流结束一并清掉。
+let bgAgentsEl = null;
+
+function handleBgAgents(botEl, payload) {
+  const n = payload && payload.running ? payload.running : 0;
+  if (!n) {
+    clearBgAgents();
+    return;
+  }
+  if (!bgAgentsEl) {
+    bgAgentsEl = document.createElement("div");
+    bgAgentsEl.className = "chat-wait";
+    botEl.after(bgAgentsEl);
+  }
+  bgAgentsEl.textContent = payload.stopping
+    ? t("chat.bgAgentsStopping", n)
+    : t("chat.bgAgentsRunning", n, payload.finished || 0);
+  $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+}
+
+function clearBgAgents() {
+  if (bgAgentsEl) bgAgentsEl.remove();
+  bgAgentsEl = null;
+}
+
 function handleSSE(frame, botEl) {
   // 解析归口到唯一的 `parseSSE`（与 goal 续跑流共用同一份，杜绝两份解析逻辑漂移，评审 #11）。
   // 坏帧 / 空帧 / JSON 解析失败 → event 为 null，跳过：绝不让单帧解析失败中断整条流、抹掉已上屏的答案。
@@ -1230,6 +1257,11 @@ function handleSSE(frame, botEl) {
     handleCompaction(botEl, payload);
   } else if (event === "waiting_for_task") {
     handleWaitingForTask(botEl, payload); // P4.33：可写 turn 在等写锁（多半是后台任务）
+  } else if (event === "bg_agents") {
+    // 同 subagent：帧会重置服务端心跳等待。但这帧与前台无关、随时可能到：前台正在压缩时不撤，
+    // 否则连带停掉压缩走表（clearHeartbeat 会清 _compactTimer），「正在压缩」提示中途消失。
+    if (!botEl._compactTimer) clearHeartbeat(botEl);
+    handleBgAgents(botEl, payload); // P4.37：运行期轮询与收尾屏障都推这帧
   } else if (event === "stopped") {
     clearHeartbeat(botEl);
     finishSubagents(botEl);
@@ -2054,6 +2086,7 @@ async function sendGoalRun(attachments) {
     setGoalBannerNote(banner, t("goal.fail", e.message));
   } finally {
     clearWaitingForTask(); // 断流也不留等待提示（P4.33）
+    clearBgAgents(); // 同上（P4.37）
     if (ctx.botEl) {
       clearHeartbeat(ctx.botEl);
       finishSubagents(ctx.botEl);
@@ -2103,8 +2136,15 @@ function handleGoalSSE(frame, ctx) {
   } else if (event === "waiting_for_task") {
     // 可写 goal 的每一轮同样复用 turn()，等写锁时也会推这帧（P4.33）：不接就是无声卡住。
     if (ctx.botEl) handleWaitingForTask(ctx.botEl, payload);
+  } else if (event === "bg_agents") {
+    // 可写 goal 的每一轮也经同一道收尾屏障（P4.37）。
+    if (ctx.botEl) {
+      if (!ctx.botEl._compactTimer) clearHeartbeat(ctx.botEl); // 同 handleSSE：压缩中不撤走表
+      handleBgAgents(ctx.botEl, payload);
+    }
   } else if (event === "turn_done") {
     clearWaitingForTask();
+    clearBgAgents();
     const el = ctx.botEl;
     if (el) {
       clearHeartbeat(el);

@@ -24,6 +24,7 @@ import os
 import shutil
 import stat
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -116,6 +117,10 @@ class PolicyFileSystem:
         self._immutable = tuple(m.resolve(strict=False) for m in rule.immutable)
         # 撤销本轮写日志：path -> (写前字节|None, 写后哈希)。None = 不在记账窗口（read-only turn）。
         self._journal: Optional[dict[Path, tuple[Optional[bytes], str]]] = None
+        # 记账锁（P4.37 §2.5）：后台子 Agent 会从多个线程同时写。`begin_journal` / `end_journal` 与
+        # 撤销范围内的 `write_text` 共用这一把，开关日志与记账写互斥——一次写要么完整进本轮日志，
+        # 要么完全不进；同一路径并发写也不会打乱「首条写前字节」。
+        self._journal_lock = threading.Lock()
         # 记账作用域：wiki/ 子树 + SCHEMA.md（撤销范围，决策P4.5-4/12）。
         self._wiki = (self._kb / "wiki").resolve(strict=False)
         self._schema = (self._kb / "SCHEMA.md").resolve(strict=False)
@@ -134,28 +139,37 @@ class PolicyFileSystem:
 
     def begin_journal(self) -> None:
         """可写 turn 起跑时调：开一份新写日志（替换上轮）。"""
-        self._journal = {}
+        with self._journal_lock:
+            self._journal = {}
 
     def end_journal(self) -> dict[Path, tuple[Optional[bytes], str]]:
-        """可写 turn 收尾时调：取走并关闭本轮写日志。"""
-        journal = self._journal or {}
-        self._journal = None
+        """可写 turn 收尾时调：取走并关闭本轮写日志（等在飞的记账写记完，P4.37 §2.5）。"""
+        with self._journal_lock:
+            journal = self._journal or {}
+            self._journal = None
         return journal
 
     def write_text(self, path, data, *, append: bool = False) -> None:
         t = self._check(path)
+        # 撤销范围只看目标路径、与日志开没开无关，故可在锁外判定；范围外的写（如 workspace/）
+        # 不取锁，不拖慢并发写（P4.37 §2.5）。
+        if not self._in_undo_scope(t):
+            self._fs.write_text(path, data, append=append)
+            return
         # 进撤销作用域且在记账窗口 → 记 (写前字节, 写后哈希)。写前字节须在写**之前**读；同一 path
         # 一轮多写时保留首条写前字节、只刷新写后哈希（撤销=回到 turn 起点状态，决策P4.5-13）。
-        record = self._journal is not None and self._in_undo_scope(t)
-        before: Optional[bytes] = None
-        if record:
-            before = hash_file_bytes(t)
-        self._fs.write_text(path, data, append=append)
-        if record:
-            after = hash_file(t) or ""
-            prev = self._journal.get(t)  # type: ignore[union-attr]
-            first_before = prev[0] if prev is not None else before
-            self._journal[t] = (first_before, after)  # type: ignore[index]
+        # 「判日志开没开」也在锁内：否则 end_journal 可能落在判定与更新之间。
+        with self._journal_lock:
+            record = self._journal is not None
+            before: Optional[bytes] = None
+            if record:
+                before = hash_file_bytes(t)
+            self._fs.write_text(path, data, append=append)
+            if record:
+                after = hash_file(t) or ""
+                prev = self._journal.get(t)  # type: ignore[union-attr]
+                first_before = prev[0] if prev is not None else before
+                self._journal[t] = (first_before, after)  # type: ignore[index]
 
     def __getattr__(self, name):
         return getattr(self._fs, name)  # 其余方法/属性透传内层（只读、列目录、glob…）

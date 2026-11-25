@@ -14,6 +14,8 @@ from __future__ import annotations
 DEFAULT_PORT = 8765  # 监听端口（仅 127.0.0.1；与 mcp 的 8766 错开）
 DEFAULT_MAX_CONVERSATIONS = 100  # 内存会话硬上限（决策P4.9-18）
 DEFAULT_CONFIRM_TIMEOUT = 120.0  # confirm/ask 等人应答的秒数（P4.15）；到点默认拒绝
+# `--background-agents` 不带值时的同时运行上限（P4.37 决策7）：低于 agentao 默认 6，国内模型服务限流更紧。
+DEFAULT_BACKGROUND_AGENTS = 4
 
 # 新会话开局姿态：**绝不接受 full-access/plan**（决策P4.5-1）。cli 的 choices 与
 # `Conversation` 的校验取同一份，避免「命令行收下了、运行期再 422」这种两头不一致。
@@ -26,6 +28,7 @@ CONFIRM_MODES = ("ask", "auto")
 DEFAULT_CONFIRM = CONFIRM_MODES[0]
 
 __all__ = [
+    "DEFAULT_BACKGROUND_AGENTS",
     "CONFIRM_MODES",
     "DEFAULT_CONFIRM",
     "DEFAULT_CONFIRM_TIMEOUT",
