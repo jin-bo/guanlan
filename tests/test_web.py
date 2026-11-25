@@ -24,6 +24,7 @@ from conftest import make_runner, write_page
 
 pytest.importorskip("fastapi")
 
+import anyio  # noqa: E402 — web extra 依赖（fastapi 之后才有）
 from agentao.cancellation import AgentCancelledError  # noqa: E402
 from agentao.transport.events import AgentEvent, EventType  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -6080,6 +6081,56 @@ def _set_confirm_action(agent, tool, desc, args):
     agent.action = _act
 
 
+def _post_sse_then_disconnect(client, path: str, body: dict, until: str) -> tuple[list[str], float]:
+    """真断线：在 TestClient 的事件循环里直接驱动 ASGI，读到 `until` 帧即让 receive 返回 http.disconnect。
+
+    `client.stream` 测不了断线——TestClient 要等应用把整条 SSE 流写完才交出第一行，测试里「读到某帧就
+    break」时服务端早已跑完。这里 receive 先交请求体、再挂起到看见 `until` 帧，随后报断开；Starlette
+    StreamingResponse（ASGI spec < 2.4）由此取消流，`event_stream` 的 finally 走真实断线路径。
+    返回 (见到的事件名, 应用调用耗时秒)。
+    """
+    payload = json.dumps(body).encode()
+    events: list[str] = []
+
+    async def drive() -> float:
+        seen = anyio.Event()
+        state = {"sent": False, "buf": b""}
+
+        async def receive() -> dict:
+            if not state["sent"]:
+                state["sent"] = True
+                return {"type": "http.request", "body": payload, "more_body": False}
+            await seen.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict) -> None:
+            if message["type"] != "http.response.body":
+                return
+            state["buf"] += message.get("body", b"")
+            *lines, state["buf"] = state["buf"].split(b"\n")
+            for line in lines:
+                if line.startswith(b"event:"):
+                    events.append(line.split(b":", 1)[1].strip().decode())
+                    if events[-1] == until:
+                        seen.set()
+
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "POST", "scheme": "http", "path": path, "raw_path": path.encode(),
+            "root_path": "", "query_string": b"",
+            "headers": [(b"host", b"testserver"), (b"content-type", b"application/json"),
+                        (b"content-length", str(len(payload)).encode())],
+            "client": ("testclient", 50000), "server": ("testserver", 80),
+        }
+        t0 = time.monotonic()
+        await client.app(scope, receive, send)
+        return time.monotonic() - t0
+
+    elapsed = client.portal.call(drive)
+    assert until in events, events
+    return events, elapsed
+
+
 def _wlock_released(gate, *, timeout=3.0):
     """轮询断言进程级 write_lock 在 timeout 内被释放（可非阻塞 acquire 到即证已释）。"""
     deadline = time.monotonic() + timeout
@@ -6553,16 +6604,15 @@ def test_disconnect_during_confirm_releases_lock_promptly(chat_env, kb) -> None:
         cid = _chat(client, "建会话")[1]["conversation_id"]
         agent = captured["agents"][0]
         _set_confirm_action(agent, "run_shell_command", "shell", {"command": "sleep 20"})
-        # 读流到 confirm_request 即断开（退出 stream 上下文 = 客户端断开）
-        with client.stream("POST", "/api/chat", json={"message": "跑命令", "conversation_id": cid}) as resp:
-            event = None
-            for line in resp.iter_lines():
-                if line.startswith("event:"):
-                    event = line.split(":", 1)[1].strip()
-                    if event == "confirm_request":
-                        break  # 断开
+        # 读到 confirm_request 即真断开（client.stream 做不到：它要等整条流写完才交出第一行）
+        events, elapsed = _post_sse_then_disconnect(
+            client, "/api/chat", {"message": "跑命令", "conversation_id": cid}, "confirm_request"
+        )
+        assert "done" not in events  # 断开时 turn 仍卡在确认上
         # 断开后：has_pending → request_stop → 内层立即收尾、释写锁（远早于 30s 超时）
         assert _wlock_released(app.state.write_gate, timeout=3.0)
+        assert elapsed < 5.0
+        assert agent.confirm_results == [False]  # 确认因断线判拒，而非超时
 
 
 def test_normal_long_turn_not_killed_on_disconnect(chat_env) -> None:
@@ -6573,7 +6623,7 @@ def test_normal_long_turn_not_killed_on_disconnect(chat_env) -> None:
     app = create_app(kb)  # read-only 默认
     started = threading.Event()
     release = threading.Event()
-    done = {}
+    done = threading.Event()
 
     class _SlowAgent(_FakeAgent):
         async def arun(self, msg, images=None, **_kw):
@@ -6582,11 +6632,15 @@ def test_normal_long_turn_not_killed_on_disconnect(chat_env) -> None:
             def work():
                 started.set()
                 release.wait(timeout=5)  # 卡住模拟长轮（无 pending）
-                done["ran"] = True
 
             await loop.run_in_executor(None, work)
+            # 镜像真 arun：令牌被 trip 即在下一检查点抛——断线误触 request_stop 会让本轮到不了 done。
+            token = _kw.get("cancellation_token")
+            if token is not None and token.is_cancelled:
+                raise AgentCancelledError(token.reason)
             self.messages.append({"role": "user", "content": msg})
             self.messages.append({"role": "assistant", "content": "完成"})
+            done.set()
             return "完成"
 
     monkeypatch_bfe = lambda **kw: _SlowAgent(kw)  # noqa: E731
@@ -6594,24 +6648,12 @@ def test_normal_long_turn_not_killed_on_disconnect(chat_env) -> None:
     with _pt.MonkeyPatch.context() as mp:
         mp.setattr(chat_mod, "build_from_environment", monkeypatch_bfe)
         with TestClient(app) as client:
-            with client.stream("POST", "/api/chat", json={"message": "长轮"}) as resp:
-                it = resp.iter_lines()
-                for line in it:
-                    if line.startswith("event:") and line.split(":", 1)[1].strip() == "start":
-                        break
-                assert started.wait(timeout=3)
-                # 断开（无 pending）：不应 trip 取消，内层 shielded turn 应后台跑完
+            # 读到 start 即真断开：此时轮还卡在 work 里
+            events, _ = _post_sse_then_disconnect(client, "/api/chat", {"message": "长轮"}, "start")
+            assert started.wait(timeout=3)
+            assert not done.is_set() and "done" not in events  # 断开发生在轮跑完之前
             release.set()
-            time.sleep(0.5)
-            assert done.get("ran") is True  # 普通长轮断开后仍后台跑完（未被误杀）
-
-
-# ───────────────────────── P4.16 长任务目标续跑（/goal） ─────────────────────────
-#
-# 复用 agentao `GoalState`/`parse_duration`/`UpdateGoalTool`（不重测状态机，那有 agentao 自带
-# 测试）——这里只测 guanlan **Web 编排层**：续跑循环 / SSE 帧 / 端点 / 持久化 / 并发取消。
-# fake agent 经 `action`（executor 线程跑，镜像真 arun 写时机）在指定 goal 轮调 update_goal
-# 或阻塞，逼出真实跨线程并发（工具改 GoalState 经 _GoalProxy 取 _goal_lock）。
+            assert done.wait(timeout=3)  # 普通长轮断开后仍后台跑完（未被误杀）
 
 
 def _new_conv(client) -> str:
@@ -7433,14 +7475,28 @@ def test_delete_during_goal_run_no_resurrect(chat_client, kb):
     def drive():
         _drive_goal(client, cid)
 
+    conv = client.app.state.conversations.get(cid)
+    deleted: dict = {}
+
+    def delete():
+        deleted["status"] = client.delete(f"/api/conversations/{cid}").status_code
+
     t = threading.Thread(target=drive)
+    d = threading.Thread(target=delete)
     t.start()
     try:
         assert started.wait(timeout=3)
-        assert client.delete(f"/api/conversations/{cid}").status_code == 200
+        # 删除要等会话锁（在飞轮持有）：等它真排上锁再放行第 1 轮，确保删除插在 goal 下一轮之前。
+        # `_waiters` 是 asyncio.Lock 的私有字段；万一改名，至多多等 2 秒、断言照旧成立。
+        d.start()
+        deadline = time.monotonic() + 2
+        while not getattr(conv.lock, "_waiters", None) and time.monotonic() < deadline:
+            time.sleep(0.01)
     finally:
         release.set()
         t.join(timeout=5)
+        d.join(timeout=5)
+    assert deleted.get("status") == 200
     assert not side.exists()  # goal 循环未 resurrect 已删 sidecar
 
 
