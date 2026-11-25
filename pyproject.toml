@@ -178,12 +178,18 @@ Issues = "https://github.com/jin-bo/guanlan/issues"
 guanlan = "guanlan.cli:main"
 
 [dependency-groups]
+dev = [
+    { include-group = "test" },
+    { include-group = "browser" },
+]
+test = [
+    "pytest>=8.0",
+    "pypdf>=7.0.1",
+]
 # playwright 仅用于本地调试 Web 宿主前端（截图/交互验证，非测试套件依赖）；浏览器二进制另需
 # 跑一次 `uv run playwright install chromium`。
-dev = [
-    "pytest>=8.0",
+browser = [
     "playwright>=1.60",
-    "pypdf>=7.0.1",
 ]
 
 [build-system]
@@ -217,11 +223,10 @@ exclude = ["**/CLAUDE.md"]
 "skills/flint-chart-author" = "guanlan/_skill/flint-chart-author"
 
 # lint 规则集显式钉住，不随 ruff 版本浮动。
-# 背景：CI 用 `uvx ruff check`（不进 lock、每次取最新），本仓库此前一直吃 ruff 的**默认**规则集。
+# 背景：CI 曾用 `uvx ruff check` 取最新版本，本仓库此前一直吃 ruff 的**默认**规则集。
 # ruff 0.16.0 把默认 select 从 `E4/E7/E9/F` 扩到含 I/S/SIM/RUF/UP/PL/FURB… 的大集合，于是同一份
 # 未改动的代码在 CI 上突然报 170 处——main 也一样红，与任何具体 PR 无关。这里把仓库历史上一直在
-# 用的那套显式写下来：本地 `uvx ruff check` 与 CI 的结果不再随 ruff 升级漂移（与 ci.yml 把
-# actionlint 钉到镜像 digest 是同一取向）。
+# 用的那套显式写下来。CI 另外固定 Ruff 版本。
 # 是否采纳扩容后的规则集是另一个决定（170 处需逐条甄别，多为 RUF100/I001/RUF059），不在此顺带。
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
