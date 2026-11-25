@@ -429,6 +429,7 @@ def create_app(
     confirm_timeout: float = DEFAULT_CONFIRM_TIMEOUT,
     goal_enabled: bool = True,
     profile: ProfileSource | None = None,
+    background_agents: int | None = None,
 ) -> FastAPI:
     """构造绑定到知识库 `root` 的 FastAPI app。
 
@@ -454,6 +455,9 @@ def create_app(
             `reader`（匿名多用户只读部署）下**强制关**——无鉴权下放任自动续跑是 LLM 成本陷阱（见下）。
         profile: 问答画像来源（P5.5.2，默认 None = 不带）。每个对话会话构造时按它重读一次（决策W3）；
             `reader` 下**强制 None**（宿主机主人的画像不能套在匿名多用户头上，决策W1）。
+        background_agents: 后台子 Agent 同时运行上限（P4.37，默认 None = 关）。开时每个会话自建内存
+            store，`turn()` 收尾屏障等它们全部结束后才关写日志、释写锁。显式 `< 1` 即抛
+            `GuanlanError(EXIT_USAGE)`。`reader` 下**强制 None**（匿名多用户不放任并发子 Agent）。
     """
     # 权威校验（决策P4.9-18）：任何 caller（CLI/serve/嵌入/测试直建）显式传 < 1 都早失败，
     # 不下沉 ConversationStore（那时 app 已建、太晚）。CLI/serve 可另作友好早提示，但权威点在此。
@@ -464,6 +468,10 @@ def create_app(
         )
     # 解析有效上限（None → 模块默认 100）：传给 ConversationStore 并供 /api/info 如实回报（非 reader）。
     effective_max = MAX_CONVERSATIONS if max_conversations is None else max_conversations
+    if background_agents is not None and background_agents < 1:
+        raise GuanlanError(
+            f"--background-agents 须 ≥ 1（收到 {background_agents}）。", exit_code=EXIT_USAGE
+        )
     # reader 钳制（决策P4.9-2）：只读部署强制零写姿态——覆盖入参的 session_persist/mode，使
     # 「测试/嵌入只关了路由却仍落 .agentao/sessions/ 或起可写会话」的漏口从源头堵死。
     if reader:
@@ -471,6 +479,7 @@ def create_app(
         mode = "read-only"
         goal_enabled = False  # P4.16：匿名多用户只读部署不放任自动续跑（无鉴权 LLM 成本陷阱）
         profile = None  # P5.5.2 决策W1：reader 一律不带画像
+        background_agents = None  # P4.37：reader 不开后台子 Agent
     app = FastAPI(title="观澜 Web 宿主", docs_url=None, redoc_url=None)
     # 配置挂在 app.state：后续提交的端点（报告/写作业/会话）从这里读 root/model/runner，
     # 避免在模块级全局变量上分裂状态（与 workers=1 单进程单事件循环假设一致，决策P4-2）。
@@ -539,6 +548,7 @@ def create_app(
         # 姿态（用户拿着的 undo token 随即 404）——故非 reader 关回收（idle_ttl=None），不动既有 P4/P4.5 行为。
         idle_ttl=IDLE_TTL_SECONDS if reader else None,
         profile=profile,  # P5.5.2：只有对话会话带画像；回填等作业不经这里（决策W8）
+        background_agents=background_agents,  # P4.37：None = 关
     )
     app.state.conversations = conversations
     app.state.reader = reader

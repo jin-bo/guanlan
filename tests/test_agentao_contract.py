@@ -1147,3 +1147,55 @@ def test_model_switch_keeps_profile(real_kb: Path, tmp_path_factory) -> None:
         assert "画像标记词-丁" in conv.agent._build_system_prompt()
     finally:
         conv.close()
+
+
+# ── P4.37 后台子 Agent（`--background-agents`）────────────────────────────────
+#
+# 同样必须用带 agent 定义的库。离线死端点：子 Agent 的模型请求会立刻 ECONNREFUSED，所以这里只钉
+# 构造期接线、确认被拒、取消与计数这几条宿主依赖的契约；子 Agent 真写文件的路径靠实机验收（§5.4）。
+
+
+@pytest.fixture
+def bg_conv(kb_with_agent: Path):
+    from guanlan.web.conversation import Conversation
+
+    conv = Conversation("cid-bg", kb_with_agent, None, persist=False, mode="workspace-write",
+                        search_cache=CorpusCache(), background_agents=2)
+    try:
+        yield conv
+    finally:
+        conv.close()
+
+
+def test_background_agents_opens_the_background_surface(bg_conv) -> None:
+    """开时：`agent_*` 带 `run_in_background`，查询/取消工具已注册，store 就是宿主建的那一个。"""
+    agent = bg_conv.agent
+    assert agent.bg_store is bg_conv._bg_store
+    assert agent.bg_store.max_concurrent == 2
+    tool = agent.tools.get("agent_reviewer")
+    assert "run_in_background" in (tool.parameters.get("properties") or {})
+    assert agent.tools.get("check_background_agent") is not None
+    assert agent.tools.get("cancel_background_agent") is not None
+
+
+def test_background_child_inherits_host_filesystem_and_refuses_confirmation(bg_conv) -> None:
+    """后台子 Agent 的写经宿主 PolicyFileSystem（不可变判定、写日志都在）；需确认的调用一律拒绝、不回调宿主。"""
+    tool = bg_conv.agent.tools.get("agent_reviewer")
+    assert tool._filesystem is bg_conv._policy_fs
+    assert tool._bg_store is bg_conv._bg_store
+    transport = tool._child_transport(True, 10)  # suppress_output=True 即后台子 Agent 的 transport
+    assert transport.confirm_tool("write_file", "", {}) is False
+
+
+def test_background_launch_counts_then_cancel_settles(bg_conv) -> None:
+    """真启动一个后台任务：计数为 1；宿主逐个 cancel 后转入终态、计数归零（屏障依赖的契约）。"""
+    store = bg_conv._bg_store
+    tool = bg_conv.agent.tools.get("agent_reviewer")
+    msg = tool.execute(task="复核一页", run_in_background=True)
+    assert "started" in msg
+    (rec,) = store.list_current()
+    assert store.count_in_flight() == 1
+    bg_conv._cancel_background()
+    done = store.wait_until_settled(rec["id"], timeout=20)
+    assert done is not None and done["status"] in ("cancelled", "failed")
+    assert store.count_in_flight() == 0

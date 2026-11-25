@@ -85,6 +85,7 @@ def serve(
     confirm_timeout: float = DEFAULT_CONFIRM_TIMEOUT,
     goal_enabled: bool = True,
     profile: ProfileSource | None = None,
+    background_agents: int | None = None,
 ) -> int:
     """起本地 Web 宿主，长驻直到 Ctrl-C；正常停服返回 `EXIT_OK`。
 
@@ -107,7 +108,14 @@ def serve(
     `goal_enabled`（P4.16，默认开；`--goal off` 关）= `/goal` 长任务续跑总开关；reader 强制关。
     `profile`（P5.5.2，默认 None）= 问答画像来源。与 `reader` 同给 → `EXIT_USAGE`（决策W1）；启动时校验一次，
     显式路径不合格拒绝启动，默认路径不合格只警告（决策W2），结果打一行到 stderr。
+    `background_agents`（P4.37，默认 None = 关）= 后台子 Agent 同时运行上限；与 `reader` 同给 → `EXIT_USAGE`。
     """
+    if reader and background_agents is not None:
+        raise GuanlanError("--reader 不开后台子 Agent（只读部署可能多人共用）。", exit_code=EXIT_USAGE)
+    if background_agents is not None and background_agents < 1:
+        raise GuanlanError(
+            f"--background-agents 须 ≥ 1（收到 {background_agents}）。", exit_code=EXIT_USAGE
+        )
     if reader and profile is not None:
         raise GuanlanError("--reader 不带问答画像（只读部署可能多人共用）。", exit_code=EXIT_USAGE)
     if reader and mode == "workspace-write":
@@ -158,6 +166,7 @@ def serve(
         confirm_timeout=confirm_timeout,
         goal_enabled=goal_enabled,
         profile=profile,
+        background_agents=background_agents,
     )
     if profile_line is not None:
         print(profile_line, file=sys.stderr)

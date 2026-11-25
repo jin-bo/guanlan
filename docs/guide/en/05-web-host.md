@@ -24,6 +24,7 @@ guanlan -C my-wiki web --port 9000 --no-browser # different port / no browser
 | `--confirm` | `ask` | Under workspace-write, whether ASK operations (operator/piped shell, confirmation-required tools) are **confirmed by a human**; `auto` keeps silent auto-approve (see "Tool confirmation") |
 | `--confirm-timeout` | `120` | Seconds to wait for the user's confirm/answer; no answer ⇒ **deny by default** |
 | `--goal` | `on` | Switch for `/goal` long-task auto-continuation (P4.16); `off` removes the entry, always off under `--reader` |
+| `--background-agents [N]` | off | Turn on background sub-agents (P4.37): sub-agents launched in one turn run at the same time, at most N at once (4 when the flag has no value). Each turn waits for all of them to end before it finishes and under workspace-write holds the KB write lock the whole time, so other conversations and background tasks wait; not allowed with `--reader` |
 | `--profile PATH` / `--no-profile` | uses `~/.guanlan/USER.md` if present | Attach an asker profile from outside the KB (≤1500 chars) to chat sessions, or none (see "Asker profile"); not allowed with `--reader` |
 
 ## What it does

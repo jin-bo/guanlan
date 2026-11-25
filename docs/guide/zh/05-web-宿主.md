@@ -24,6 +24,7 @@ guanlan -C my-wiki web --port 9000 --no-browser # 换端口 / 不开浏览器
 | `--confirm` | `ask` | workspace-write 下 ASK 操作(带操作符 shell / 需确认工具)是否**弹给人确认**;`auto` 沿用静默放行(见「工具确认」) |
 | `--confirm-timeout` | `120` | confirm / 提问等用户应答的超时秒数;无人应答即**默认拒绝** |
 | `--goal` | `on` | `/goal` 长任务自动续跑开关(P4.16);`off` 关闭该入口,`--reader` 下强制关 |
+| `--background-agents [N]` | 关 | 打开后台子 Agent(P4.37):同一轮派出的多个子 Agent 同时运行,N 为同时运行上限(只给旗标为 4)。每轮收尾前等它们全部结束,workspace-write 下期间一直持库写锁,其他会话与后台任务要排队;不能与 `--reader` 同用 |
 | `--profile 路径` / `--no-profile` | 有 `~/.guanlan/USER.md` 就带 | 对话会话附上库外的提问者画像(≤1500 字),或不带(见「问答画像」);不能与 `--reader` 同用 |
 
 ## 能做什么

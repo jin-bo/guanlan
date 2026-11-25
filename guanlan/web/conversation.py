@@ -20,6 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import anyio
+from agentao.agents import BackgroundTaskStore
 from agentao.cancellation import AgentCancelledError
 from agentao.host import CancellationToken
 
@@ -262,6 +263,7 @@ class Conversation:
         clock: Callable[[], float] = time.monotonic,
         mcp_registry: object = _UNSET,
         profile: ProfileSource | None = None,
+        background_agents: int | None = None,
     ) -> None:
         # 先于一切副作用（skill 安装 / transport / policy_fs）拦非法姿态（决策P4.5-1）。
         _check_web_mode(mode)
@@ -285,6 +287,18 @@ class Conversation:
         self._model = model  # _save 用（save_session 的 model 参数）；恢复时 = load 出的 model
         self._persist = persist
         self._mode = mode  # 当前会话姿态（P4.5：read-only / workspace-write），/mode 翻转
+        # P4.37：后台子 Agent。None = 关（构造期传 `bg_store=None`，与之前逐字相同）；整数 = 同时运行
+        # 上限，每会话一个**纯内存** store（`persistence_dir=None`：不写 `.agentao/background_tasks.json`、
+        # 无跨会话 recover），`count_in_flight()` 天然只算本会话。收尾屏障见 `_drain_background`。
+        self._bg_store: BackgroundTaskStore | None = (
+            None
+            if background_agents is None
+            else BackgroundTaskStore(persistence_dir=None, max_concurrent=background_agents)
+        )
+        # `bg_agents` 帧（P4.37 §3）：本轮起跑时已有的任务 ID（之前各轮的，已全部结束）不计入本轮显示；
+        # 上一帧用于去重，只在内容变化时推。
+        self._bg_baseline: set[str] | None = set()  # None = 本轮基线没读到，不推显示帧
+        self._bg_last_frame: dict | None = None
         self._write_gate = write_gate  # 进程级单写者协调（write_lock + 层③ 计数）；None=纯读测试
         self.lock = asyncio.Lock()  # 同一会话两轮不并发跑同一 agent 对象
         self.title: str | None = None
@@ -375,7 +389,10 @@ class Conversation:
             #
             # 显式 `None` 是文档化的关闭姿态：factory 的 `if "bg_store" not in overrides` 只看
             # 键在不在，键在就跳过默认、原样转发 None（与 `mcp_registry=None` 同形）。
-            bg_store=None,
+            #
+            # P4.37（`--background-agents`）改写上面的结论：后台子 Agent 可开，但不许活过本轮——
+            # `turn()` 收尾段的屏障在关写日志、释写锁之前等它们全部结束。开时传宿主自建的内存 store。
+            bg_store=self._bg_store,
         )
         if model is not None:
             # --model 仅在给定时入 overrides：显式 model=None 会盖掉 .env 发现的模型、
@@ -830,6 +847,11 @@ class Conversation:
             # CancelledError，使「await 之后」的赋值永不执行。把置位放进线程函数则不论 CancelledError
             # 落在哪、finally 读到的都是真实持有态，杜绝锁泄漏（评审 BUG 1；当前虽被 shield 兜住、仍兜底）。
             lock_held = [False]
+            # P4.37：收尾屏障要用本轮令牌（看停止）与「本轮是否正常返回」（屏障期间被停 → 改抛停止）。
+            token: CancellationToken | None = None
+            returned = False
+            watcher: asyncio.Future | None = None
+            cancelled_on_entry = False
             try:
                 if self.closed:
                     raise RuntimeError("会话已删除")
@@ -904,6 +926,17 @@ class Conversation:
                 self.turns += 1
                 if self.title is None:
                     self.title = msg.strip()[:50] or "（空）"
+                # P4.37 §3：从起跑起每秒看一次本会话的后台任务表，有变化就推 `bg_agents`——后台子 Agent
+                # 不向父会话发事件（agentao `suppress_output`），不轮询界面上就看不到派发与进度。
+                if self._bg_store is not None:
+                    try:
+                        self._bg_baseline = {r["id"] for r in self._bg_store.list_current()}
+                    except Exception:  # noqa: BLE001 — 只供显示去重，读失败不毁本轮
+                        # 沿用旧基线会把上一轮的任务算成本轮「已结束」：宁可本轮不显示，也不显示错数。
+                        _logger.debug("会话 %s 读后台任务表失败", self.id, exc_info=True)
+                        self._bg_baseline = None
+                    self._bg_last_frame = None
+                    watcher = asyncio.ensure_future(self._watch_background())
                 # arun = chat 的 async 包装（内部 run_in_executor）；传入令牌让停止可控。
                 # images 仅本轮有图时传（None 走纯文本路径，与 agentao chat() 契约一致）。
                 answer = await self.agent.arun(
@@ -939,8 +972,31 @@ class Conversation:
                 # 与"失败轮同样落盘"同一取舍，免内存/盘上漂移。读不到可信读数（替身）→ None → 旧行为。
                 if outcome is not None and outcome["status"] == "cancelled":
                     raise AgentCancelledError(outcome["error"] or "cancelled")
+                returned = True
                 return answer
+            except asyncio.CancelledError:
+                cancelled_on_entry = True  # 收尾屏障据此按停止处理（见下）
+                raise
             finally:
+                # ── P4.37 收尾屏障：后台子 Agent 不许活过本轮 ─────────────────────────────
+                # 放在所有退出路径共用的收尾段（正常返回 / arun 抛错 / 停止），且早于关写日志、释写锁：
+                # 子 Agent 的写因此全部落在本轮写日志与库写锁之内，撤销、check、日志归属与前台写一致。
+                # 只读轮同样等（一轮的边界在两种姿态下一致）。关开关时 store 为 None，立即返回。
+                if watcher is not None:
+                    # 只 cancel 不 await：轮询协程只在 sleep 处让出，取消落在那里，不会再推帧。
+                    watcher.cancel()
+                # asyncio 取消若在 `await arun` 处就已落下（停服 / 断开时取消 pending 轮），屏障看不到
+                # 那次 CancelledError：须按停止处理（逐个取消子 Agent），否则只能干等它们自然跑完。
+                try:
+                    stopped_in_barrier, interrupted = await self._drain_background(
+                        token, interrupted=cancelled_on_entry
+                    )
+                except Exception:  # noqa: BLE001 — 屏障自身出错绝不能跳过下方收尾与释写锁
+                    # 两害取轻：不收尾 = 写锁永不释放、整库卡死；收尾 = 仍在跑的子 Agent 可能在锁外写。
+                    # 先尽力逐个取消（`_cancel_background` 自身不抛），再照常收尾，并记 error 便于排查。
+                    _logger.error("会话 %s 后台子 Agent 收尾屏障失败，已请求取消后照常收尾", self.id, exc_info=True)
+                    self._cancel_background()
+                    stopped_in_barrier, interrupted = False, cancelled_on_entry
                 # ── 可写 turn 收尾（决策P4.5-3/4，评审 High：还原须早于 error SSE / 计数-- / 释锁）──
                 if guarded:
                     try:
@@ -957,6 +1013,129 @@ class Conversation:
                 # 任何退出路径（closed 早退 / arun 抛 / 正常返回）都清掉 emit 与令牌（一处归口）。
                 self._emit = None
                 self._cancel_token = None
+                # P4.37 §2.4 第 6 步：arun 已正常返回、停止是在屏障期间才到的——收尾（排空、关日志、
+                # check、释锁）都做完了，再改走现有停止路径：Web 发 stopped（照带 meta 里的撤销/检查），
+                # goal 按暂停处理，不把这一轮当正常完成。arun 本身已 cancelled / 抛错时沿用原异常。
+                if interrupted and not cancelled_on_entry:  # 进屏障前已在传播的取消会照常抛出
+                    raise asyncio.CancelledError()
+                if stopped_in_barrier and returned:
+                    raise AgentCancelledError("user-stop")
+
+    # P4.37：屏障与显示参数（类属性，测试可缩短）。屏障复查间隔；停止后多久仍未停完就改提示「正在停止」；
+    # 本轮运行期间刷新 `bg_agents` 帧的间隔。
+    _BG_POLL_INTERVAL = 0.5
+    _BG_STOP_HINT_SECONDS = 30.0
+    _BG_WATCH_INTERVAL = 1.0
+
+    def _bg_frame(self, stopping: bool) -> dict | None:
+        """本轮后台任务的 `bg_agents` 帧载荷；本轮还没派过任何后台任务 → None。
+
+        只带 ID 与状态（`task` 原文是任务提示词，不上线，同 P4.26 决策4）。"""
+        store = self._bg_store
+        baseline = self._bg_baseline
+        if store is None or baseline is None:
+            return None
+        recs = [r for r in store.list_current() if r.get("id") not in baseline]
+        if not recs:
+            return None
+        running = sum(1 for r in recs if r.get("status") in ("pending", "running"))
+        return {
+            "running": running,
+            "finished": len(recs) - running,
+            "stopping": stopping and running > 0,
+            "tasks": [{"id": str(r["id"]), "status": str(r.get("status") or "")} for r in recs],
+        }
+
+    def _push_bg_frame(self, stopping: bool = False) -> None:
+        """内容变了才推一帧 `bg_agents`（轮询与屏障共用，去重状态在 `_bg_last_frame`）。
+
+        显示失败只记日志、绝不外抛：屏障在 `turn()` 的 finally 里调它，一抛就跳过收尾与释写锁。"""
+        try:
+            frame = self._bg_frame(stopping)
+            if frame is None or frame == self._bg_last_frame:
+                return
+            self._bg_last_frame = frame
+            emit = self._emit
+            if emit is not None:
+                emit("bg_agents", frame)
+        except Exception:  # noqa: BLE001 — 显示失败不影响本轮
+            _logger.debug("会话 %s 刷新后台子 Agent 显示失败", self.id, exc_info=True)
+
+    async def _watch_background(self) -> None:
+        """本轮 `arun` 期间的显示轮询：每 `_BG_WATCH_INTERVAL` 秒看一次任务表。只读、不碰写门禁。"""
+        while True:
+            self._push_bg_frame()  # 自身吞掉一切显示错误，不外抛
+            await asyncio.sleep(self._BG_WATCH_INTERVAL)
+
+    async def _drain_background(
+        self, token: CancellationToken | None, *, interrupted: bool = False
+    ) -> tuple[bool, bool]:
+        """P4.37 收尾屏障：等本会话的后台子 Agent 全部结束；返回 `(屏障期间看到停止, 收尾被 asyncio 取消)`。
+
+        **契约**：`count_in_flight()==0` = 每个后台任务都已结束工具执行、记录进入终态（agentao 先跑完子
+        Agent 再 `bg_store.update(status=…)`）。此后的终态事件与子 Agent 关闭不写库，不等。
+
+        - 没有总时限：停止只发出取消请求（逐个 `cancel`，**不**用 `close_owner`——它永久封住本会话的
+          后台启动），屏障继续等到计数归零。停止后 `_BG_STOP_HINT_SECONDS` 仍未停完只改提示，不放行：
+          放行会让残留写逃过 check，并与其他会话、后台任务并发写库（决策P4.37-4）。
+        - asyncio 取消（如停服）按停止处理、继续等完再报给调用方——否则会在子 Agent 仍在写时释写锁。
+        - 推 `bg_agents` 帧（与运行期轮询共用 `_push_bg_frame`），内容变化时才推；归零推一帧收起。
+        """
+        store = self._bg_store
+        if store is None:
+            return False, False
+        if interrupted:
+            # asyncio 取消落在 `await arun` 时，executor 线程里的前台 Agent 并没停：不打它的令牌，
+            # 它可能在屏障放行（计数归零）之后再派新的后台子 Agent，逃出写锁与本轮写日志。
+            self._cancel_turn_token(token)
+        if store.count_in_flight() == 0:
+            self._push_bg_frame()  # 轮询的最后一帧可能还是「运行中」：补一帧终态，前端据此收起
+            return False, interrupted
+        stop_at: float | None = None
+        while True:
+            if stop_at is None and (interrupted or (token is not None and token.is_cancelled)):
+                stop_at = time.monotonic()
+                if interrupted:
+                    self._cancel_turn_token(token)  # 屏障期间才到的 asyncio 取消同理
+            if stop_at is not None:
+                # 每拍都重发：`cancel` 对已发信号的任务幂等；停止后才登记/装令牌的任务也能被补到。
+                self._cancel_background()
+            n = store.count_in_flight()
+            stopping = stop_at is not None and time.monotonic() - stop_at >= self._BG_STOP_HINT_SECONDS
+            self._push_bg_frame(stopping)
+            if n == 0:
+                return stop_at is not None and not interrupted, interrupted
+            try:
+                await asyncio.sleep(self._BG_POLL_INTERVAL)
+            except asyncio.CancelledError:
+                interrupted = True
+
+    @staticmethod
+    def _cancel_turn_token(token: CancellationToken | None) -> None:
+        """打本轮前台令牌（幂等）；失败只记日志——屏障在 finally 里调它。"""
+        if token is None or token.is_cancelled:
+            return
+        try:
+            token.cancel("user-stop")
+        except Exception:  # noqa: BLE001
+            _logger.warning("取消本轮前台令牌失败", exc_info=True)
+
+    def _cancel_background(self) -> None:
+        """逐个取消本会话 pending/running 的后台任务（取消是请求，子 Agent 在下一个安全点停）。"""
+        store = self._bg_store
+        if store is None:
+            return
+        try:
+            recs = store.list_current()
+        except Exception:  # noqa: BLE001 — 屏障在 finally 里调它：一抛就跳过收尾与释写锁；下一拍再试
+            _logger.warning("会话 %s 列出后台子 Agent 失败", self.id, exc_info=True)
+            return
+        for rec in recs:
+            if rec.get("status") in ("pending", "running"):
+                try:
+                    store.cancel(rec["id"])
+                except Exception:  # noqa: BLE001 — 单个取消失败不挡其余；屏障仍会等它
+                    _logger.warning("会话 %s 取消后台子 Agent %s 失败", self.id, rec.get("id"), exc_info=True)
 
     def _record_outcome(self, meta_out: dict | None) -> dict | None:
         """把本轮 `agent.last_turn` 的结论写进 `meta_out`，并返回读数（P4.23 §3.1）。
