@@ -271,3 +271,63 @@ def test_unreadable_dir_reported_not_silently_dropped(kb: Path, capsys):
         locked.chmod(0o755)
     data = json.loads(capsys.readouterr().out)
     assert data["unreadable"] == ["wiki/locked/"]
+
+
+def _add_skill(kb: Path) -> None:
+    s = kb / "skills" / "doc-review"
+    (s / "references").mkdir(parents=True)
+    (s / "scripts" / "__pycache__").mkdir(parents=True)
+    (s / "SKILL.md").write_text("---\nname: doc-review\n---\n", encoding="utf-8")
+    (s / "references" / "template.md").write_text("骨架\n", encoding="utf-8")
+    (s / "scripts" / "run.py").write_text("print(1)\n", encoding="utf-8")
+    (s / "scripts" / "__pycache__" / "run.cpython-312.pyc").write_bytes(b"\0")
+    (s / ".DS_Store").write_bytes(b"\0")
+
+
+def test_skills_dir_included_by_default_and_named_in_report(kb: Path, capsys):
+    """库内 skills/ 默认收入（Agentao 从 <库>/skills/ 发现）；报告点名收入的 skill，并提示接收方会自动发现。"""
+    _add_skill(kb)
+    out = kb.parent / "out" / "a.zip"
+    assert _zip(kb, out) == EXIT_OK
+    files = _files(out)
+    assert {
+        "alpha/skills/doc-review/SKILL.md",
+        "alpha/skills/doc-review/references/template.md",
+        "alpha/skills/doc-review/scripts/run.py",
+    } <= files
+    assert not any("__pycache__" in n or n.endswith(".pyc") or ".DS_Store" in n for n in _names(out))
+    report = capsys.readouterr().out
+    assert "skills/（4 个文件）" not in report  # SKILL.md、template.md、run.py 共 3 个：缓存与隐藏文件不计
+    assert "skills/（3 个文件）" in report
+    assert "1 个 skill：doc-review" in report and "--no-skills" in report
+    assert "跳过系统杂项 1 个" in report and "__pycache__/" in report
+
+
+def test_pycache_rule_does_not_swallow_lookalike_names(kb: Path):
+    """__pycache__ 只按整段名匹配：名字里带 pycache 的正常文件、目录照收（过滤规则漏报是沉默的）。"""
+    for rel in ("wiki/pycache-notes.md", "wiki/__pycache__.md", "wiki/my__pycache__/p.md"):
+        (kb / rel).parent.mkdir(parents=True, exist_ok=True)
+        (kb / rel).write_text("x\n", encoding="utf-8")
+    out = kb.parent / "out" / "a.zip"
+    assert _zip(kb, out) == EXIT_OK
+    assert {"alpha/wiki/pycache-notes.md", "alpha/wiki/__pycache__.md", "alpha/wiki/my__pycache__/p.md"} <= _files(out)
+
+
+def test_no_skills_flag_and_json_contract(kb: Path, capsys):
+    _add_skill(kb)
+    out = kb.parent / "out" / "a.zip"
+    assert _zip(kb, out, "--json") == EXIT_OK
+    data = json.loads(capsys.readouterr().out)
+    assert data["included"]["skills/"] == 3 and data["skills"] == ["doc-review"]
+
+    out2 = kb.parent / "out" / "b.zip"
+    assert _zip(kb, out2, "--no-skills", "--json") == EXIT_OK
+    data = json.loads(capsys.readouterr().out)
+    assert not any(n.startswith("alpha/skills") for n in _names(out2))
+    assert "skills/" in data["excluded_top"] and data["skills"] == []
+
+
+def test_output_inside_skills_dir_is_refused(kb: Path):
+    _add_skill(kb)
+    assert _zip(kb, kb / "skills" / "a.zip") == EXIT_USAGE
+    assert not (kb / "skills" / "a.zip").exists()

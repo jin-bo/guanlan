@@ -518,7 +518,7 @@ def _add_reindex_parser(sub, dir_parent) -> None:
 
 
 def _add_zip_parser(sub, dir_parent) -> None:
-    # zip（P3.12）：零 LLM 打包分享。白名单只收 AGENTAO.md / SCHEMA.md / wiki/ / raw/（可选 graph/），
+    # zip（P3.12）：零 LLM 打包分享。白名单只收 AGENTAO.md / SCHEMA.md / wiki/ / raw/ / skills/（可选 graph/），
     # 私有配置、日志、会话与工作数据一律不收。
     p = sub.add_parser(
         "zip",
