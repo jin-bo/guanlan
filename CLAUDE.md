@@ -32,7 +32,7 @@ uv run guanlan -C /tmp/demo search 关键词 # P5.0: BM25 + CJK 2-gram whole-pag
 #  come back as tappable card buttons whose taps are normalized into synthesized inbound messages.)
 uv run guanlan -C /tmp/demo remove <slug> # P3.9: retract a source → .trash/ + strip refs + fix index (zero-LLM; previews by default, --yes to write)
 uv run guanlan -C /tmp/demo trash list   # P4.36: browse .trash/ (zero-LLM; show <entry> / restore <entry> [--yes] / purge <entry> [--yes] — restore and purge need an exclusive KB lock; purge refuses protected entries)
-uv run guanlan -C /tmp/demo zip --dry-run  # P3.12: pack the KB into a shareable zip — allowlist AGENTAO.md/SCHEMA.md/wiki/raw (graph opt-in); never .env/logs/.agentao/workspace/.trash/hidden files (zero-LLM; -o / --no-raw / --with-graph)
+uv run guanlan -C /tmp/demo zip --dry-run  # P3.12: pack the KB into a shareable zip — allowlist AGENTAO.md/SCHEMA.md/wiki/raw/skills (graph opt-in); never .env/logs/.agentao/workspace/.trash/hidden files (zero-LLM; -o / --no-raw / --no-skills / --with-graph)
 uv run guanlan -C /tmp/demo heal --dry-run   # P3.2: materialize high-frequency missing entities (LLM via the P2 write gate; --dry-run = zero-LLM worklist)
 uv run guanlan -C /tmp/demo audit --dry-run  # P3.7: semantic audit of drifted sources (LLM via the P2 write gate; --dry-run = zero-LLM)
 uv run guanlan -C /tmp/demo convert 报告.pdf  # P5.2: multi-format → raw/<slug>.md via pdf-to-markdown skill (zero-LLM host write; --dry-run / --overwrite / --ingest / --backend)

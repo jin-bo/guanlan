@@ -118,14 +118,15 @@ guanlan -C my-wiki zip --dry-run          # only show what would be included and
 |---|---|
 | `-o` / `--output` | Output path (must not be inside the KB) |
 | `--no-raw` | Leave out `raw/` and share only the wiki (e.g. when the sources have copyright concerns) |
+| `--no-skills` | Leave out the KB's own `skills/` (included by default) |
 | `--with-graph` | Also include `graph/` (left out by default; the recipient can rebuild it with `guanlan graph`) |
 | `--dry-run` | Preview only, no zip is written |
 | `--force` | Overwrite the output file if it exists |
 | `--json` | JSON contract (with the full file list) |
 
-Only `AGENTAO.md`, `SCHEMA.md`, `wiki/` and `raw/` (optionally `graph/`) go in; `.env`, `agentao.log*`, `.agentao/` (sessions etc.),
-`workspace/`, `.trash/` and any other file at the KB root are always left out. Hidden files, system clutter such as `Thumbs.db`, and symlinks
-inside the allowlisted directories are skipped too. The zip's top level is a directory named after the KB, so the recipient just unzips it into a parent directory.
+Only `AGENTAO.md`, `SCHEMA.md`, `wiki/`, `raw/` and `skills/` (optionally `graph/`) go in; `.env`, `agentao.log*`, `.agentao/` (sessions etc.),
+`workspace/`, `.trash/` and any other file at the KB root are always left out. Hidden files, system clutter such as `Thumbs.db`, `__pycache__/`, and symlinks
+inside the allowlisted directories are skipped too. `skills/` holds this KB's own skills: the recipient's agent discovers them automatically and may run their scripts, so the report names every skill it packs. Keep the files a skill depends on inside the skill directory — files in `workspace/` and other excluded places do not go into the zip. The zip's top level is a directory named after the KB, so the recipient just unzips it into a parent directory.
 **It filters by path only and does not inspect content** — before sharing, check yourself that the config and pages hold nothing that should not leave your hands.
 Design detail: [`P3.12-知识库打包分享.md`](../../P3.12-知识库打包分享.md) (Chinese).
 

@@ -3,6 +3,15 @@
 本项目所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本号单一来源为 `guanlan/__init__.py`。
 
+## [Unreleased]
+
+### 变更
+
+- **`guanlan zip` 默认带上库内 `skills/`**（设计见 `docs/P3.12-知识库打包分享.md` 决策P3.12-8）：放在 `<库>/skills/` 的本库专用 skill 随包送出，接收方的 Agentao 自动发现。
+  - 报告点名收入了哪些 skill，并提醒接收方的 Agent 可能执行其中的脚本；`--json` 多一个 `skills` 字段。不想送出时加 `--no-skills`。
+  - 白名单目录内另滤掉 `__pycache__/`（只按整段名匹配）；输出落在 `skills/` 内同样拒绝。
+  - skill 依赖的文件要放在 skill 目录内：放在 `workspace/` 等白名单外的文件不会随包送出，zip 不检查这一点。
+
 ## [0.1.40] - 2026-11-24
 
 ### 新增

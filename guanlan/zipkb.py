@@ -1,12 +1,13 @@
 """知识库打包分享（P3.12，见 docs/P3.12-知识库打包分享.md）。**零 LLM，只读知识库。**
 
 `guanlan zip` 把一个知识库打成可分享的 zip。核心是**白名单**：只收 `AGENTAO.md`、`SCHEMA.md`、
-`wiki/`、`raw/`（`--no-raw` 不收）与可选的 `graph/`（`--with-graph`）；库根其余一切——`.env`、
+`wiki/`、`raw/`（`--no-raw` 不收）、库内 skill 目录 `skills/`（`--no-skills` 不收）与可选的 `graph/`（`--with-graph`）；库根其余一切——`.env`、
 `agentao.log*`、`.agentao/`（会话、记忆库、权限设置、工具输出）、`workspace/`、`.trash/`、用户随手放的脚本与
 笔记——一律不收。黑名单只能挡住已知的私有文件，白名单对将来新出现的私有文件也默认不外泄。
 
 白名单目录内再滤：路径任一段以 `.` 开头的（`.DS_Store`、`._*`、`.git/`…）、操作系统杂项
 （`Thumbs.db`、`desktop.ini`、`__MACOSX/`、Office 锁文件 `~$*`、编辑器备份 `*.swp` / `*~`）、
+Python 字节码缓存 `__pycache__/`（skill 脚本运行后留下的派生物）、
 符号链接（防把库外文件打进去；白名单目录**本身**是符号链接时照常跟进，如 `raw/` 指向库外存储）、
 非普通文件。只按路径过滤，**不检查文件内容**。
 
@@ -33,17 +34,18 @@ from .paths import require_kb_root
 INCLUDE_FILES = ("AGENTAO.md", "SCHEMA.md")
 WIKI_DIR = "wiki"
 RAW_DIR = "raw"
+SKILLS_DIR = "skills"  # 库内 skill（Agentao 从 <库>/skills/ 自动发现）
 GRAPH_DIR = "graph"
 
 # 操作系统 / 编辑器杂项（按小写文件名比对）。隐藏文件另由「以 . 开头」统一处理。
-_JUNK_NAMES = frozenset({"thumbs.db", "ehthumbs.db", "desktop.ini", "__macosx", "icon\r"})
+_JUNK_NAMES = frozenset({"thumbs.db", "ehthumbs.db", "desktop.ini", "__macosx", "icon\r", "__pycache__"})
 _JUNK_SUFFIXES = (".swp", ".swo", "~")
 
 # 路径长度提醒线：zip 内路径超过它时，解压到 Windows 较深目录易超 260 字符上限。
 LONG_PATH_WARN = 200
 
 _CONTENT_NOTICE = (
-    "ℹ 只按路径过滤，不检查文件内容：分享前请自行确认 AGENTAO.md、SCHEMA.md 与 wiki 正文不含不宜外传的信息。"
+    "ℹ 只按路径过滤，不检查文件内容：分享前请自行确认 AGENTAO.md、SCHEMA.md、wiki 正文与 skills/ 不含不宜外传的信息。"
 )
 
 
@@ -63,6 +65,7 @@ class ZipPlan:
     symlinks: list[str] = field(default_factory=list)
     special: list[str] = field(default_factory=list)
     unreadable: list[str] = field(default_factory=list)  # os.walk 读不了的目录（无权限等）：不报会沉默漏收
+    skill_names: list[str] = field(default_factory=list)  # 收入的 skills/ 一级子目录名（报告里点名，免得作者不知道送出了代码与指令）
 
     def arcname(self, rel: str) -> str:
         return f"{self.top}/{rel}"
@@ -82,10 +85,17 @@ def _is_junk(name: str) -> bool:
     return low in _JUNK_NAMES or name.startswith("~$") or low.endswith(_JUNK_SUFFIXES)
 
 
-def build_plan(root: Path, *, include_raw: bool = True, include_graph: bool = False) -> ZipPlan:
+def build_plan(
+    root: Path, *, include_raw: bool = True, include_skills: bool = True, include_graph: bool = False
+) -> ZipPlan:
     """按白名单 + 路径过滤算出打包清单。只读、不跟随（白名单目录本身以外的）符号链接。"""
     plan = ZipPlan(root=root, top=root.name or "kb")
-    dirs = [WIKI_DIR] + ([RAW_DIR] if include_raw else []) + ([GRAPH_DIR] if include_graph else [])
+    dirs = (
+        [WIKI_DIR]
+        + ([RAW_DIR] if include_raw else [])
+        + ([SKILLS_DIR] if include_skills else [])
+        + ([GRAPH_DIR] if include_graph else [])
+    )
     allowed = set(INCLUDE_FILES) | set(dirs)
 
     for entry in sorted(os.listdir(root)):
@@ -126,6 +136,8 @@ def build_plan(root: Path, *, include_raw: bool = True, include_graph: bool = Fa
                 else:
                     keep.append(d)
                     plan.dirs.append(rel)
+                    if top == SKILLS_DIR and dirpath == str(base):
+                        plan.skill_names.append(d)
             dirnames[:] = keep
             for f in sorted(filenames):
                 rel = f"{rel_dir}/{f}"
@@ -163,7 +175,7 @@ def _check_output(out: Path, root: Path, *, force: bool, dry_run: bool = False) 
     out = out.expanduser()
     resolved = out.resolve() if out.exists() else out.parent.resolve() / out.name
     forbidden = [root]
-    for name in (WIKI_DIR, RAW_DIR, GRAPH_DIR):
+    for name in (WIKI_DIR, RAW_DIR, SKILLS_DIR, GRAPH_DIR):
         d = root / name
         if d.is_dir():
             forbidden.append(d.resolve())
@@ -234,6 +246,11 @@ def format_report(plan: ZipPlan, out: Path | None, compressed: int | None) -> st
         lines = [f"✓ 已打包 {out}：{n} 个文件，{_fmt_size(plan.total_bytes)}（压缩后 {_fmt_size(compressed or 0)}）。"]
     included = "、".join(f"{k}（{v} 个文件）" if k.endswith("/") else k for k, v in plan.per_dir.items())
     lines.append(f"  收入：{included or '（无）'}")
+    if plan.skill_names:
+        lines.append(
+            f"  其中 skills/ 含 {len(plan.skill_names)} 个 skill：{_sample(plan.skill_names)}"
+            "（接收方的 Agent 会自动发现并可能执行其中的指令与脚本；不想送出时加 --no-skills）"
+        )
     if plan.excluded_top:
         lines.append(f"  排除（不在分享白名单内）：{'、'.join(plan.excluded_top)}")
     for label, items in (
@@ -270,6 +287,7 @@ def format_json(plan: ZipPlan, out: Path | None, compressed: int | None, *, dry_
         "symlinks": plan.symlinks,
         "special": plan.special,
         "unreadable": plan.unreadable,
+        "skills": plan.skill_names,
         "longest_path": {"chars": len(longest), "path": longest},
         "entries": [plan.arcname(rel) for _, rel in plan.files],
     }
@@ -281,6 +299,7 @@ def zip_entrypoint(
     *,
     output: str | Path | None = None,
     include_raw: bool = True,
+    include_skills: bool = True,
     include_graph: bool = False,
     dry_run: bool = False,
     force: bool = False,
@@ -294,7 +313,7 @@ def zip_entrypoint(
         print(exc, file=sys.stderr)
         return exc.exit_code
 
-    plan = build_plan(root, include_raw=include_raw, include_graph=include_graph)
+    plan = build_plan(root, include_raw=include_raw, include_skills=include_skills, include_graph=include_graph)
     try:
         compressed = None if dry_run else write_zip(plan, out)
     except OSError as exc:  # 文件无读权限、清单算出后被删改等：给可读报错，临时文件已由 write_zip 清掉
@@ -321,6 +340,7 @@ def add_zip_arguments(p: argparse.ArgumentParser) -> None:
         help="输出 zip 路径（默认 <库名>-YYYYMMDD.zip，放当前目录；当前目录在库内时放库的上一级目录；不得在库内）",
     )
     p.add_argument("--no-raw", action="store_true", help="不收 raw/（只分享 wiki，如原始资料有版权顾虑）")
+    p.add_argument("--no-skills", action="store_true", help="不收 skills/（库内 skill；接收方 Agent 会自动发现并可能执行其中的脚本）")
     p.add_argument("--with-graph", action="store_true", help="同时收入 graph/（可由 `guanlan graph` 重新生成，默认不收）")
     p.add_argument("--dry-run", action="store_true", help="只预览将收入与排除的内容，不写 zip")
     p.add_argument("--force", action="store_true", help="输出文件已存在时覆盖")
@@ -332,6 +352,7 @@ def run_from_args(args: argparse.Namespace) -> int:
         args.dir,
         output=args.output,
         include_raw=not args.no_raw,
+        include_skills=not args.no_skills,
         include_graph=args.with_graph,
         dry_run=args.dry_run,
         force=args.force,

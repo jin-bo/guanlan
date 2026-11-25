@@ -116,13 +116,15 @@ guanlan -C my-wiki zip --dry-run          # 只看会收入与排除什么
 |---|---|
 | `-o` / `--output` | 输出路径(不得在库内) |
 | `--no-raw` | 不收 `raw/`,只分享 wiki |
+| `--no-skills` | 不收库内 `skills/`(默认收入) |
 | `--with-graph` | 同时收入 `graph/`(默认不收,接收方可用 `guanlan graph` 重建) |
 | `--dry-run` | 只预览,不写 zip |
 | `--force` | 输出文件已存在时覆盖 |
 | `--json` | 输出 JSON 契约(含完整文件清单) |
 
-只收 `AGENTAO.md`、`SCHEMA.md`、`wiki/`、`raw/`(可选 `graph/`);`.env`、`agentao.log*`、`.agentao/`(会话等)、
-`workspace/`、`.trash/` 以及库根的其他文件一律不收。白名单目录内的隐藏文件、`Thumbs.db` 之类的系统杂项和符号链接也会跳过。
+只收 `AGENTAO.md`、`SCHEMA.md`、`wiki/`、`raw/`、`skills/`(可选 `graph/`);`.env`、`agentao.log*`、`.agentao/`(会话等)、
+`workspace/`、`.trash/` 以及库根的其他文件一律不收。白名单目录内的隐藏文件、`Thumbs.db` 之类的系统杂项、`__pycache__/` 和符号链接也会跳过。
+`skills/` 是本库专用的 skill,接收方的 Agent 会自动发现并可能执行其中的脚本,报告会列出收入了哪些 skill;skill 依赖的文件要放在 skill 目录内,放在 `workspace/` 等处的不会随包送出。
 zip 顶层是库名目录,接收方解压到父目录即可使用。**只按路径过滤、不检查内容**,分享前请自行确认配置与正文不含不宜外传的信息。
 详见 [`P3.12-知识库打包分享.md`](../../P3.12-知识库打包分享.md)。
 
