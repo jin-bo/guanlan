@@ -21,12 +21,14 @@ import contextlib
 import json
 import logging
 import random
+import re
 import shutil
 import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import NamedTuple
 
 import anyio.to_thread
 
@@ -489,6 +491,35 @@ BOT_TYPE = 3
 #    "ilink_user_id":"<38字符>", "baseurl":"https://ilinkai.weixin.qq.com"}
 # 原实现认的是猜出来的 `token`/`account_id`，**一个都不对**——见 `_poll_qrcode` 里那条硬错误。
 STATUS_CONFIRMED = "confirmed"
+STATUS_WAIT = "wait"
+STATUS_SCANNED = "scaned"  # 服务端原拼写，不是笔误
+# 以下四种状态**未经真机观测**，形态取自腾讯官方插件 `@tencent-weixin/openclaw-weixin` 的源码
+# （2.3.1 起处理，2.4.10 / 3.0.0-beta-1 未变）。此前 `_poll_qrcode` 不认它们，碰上就一直轮询到
+# 墙钟上限——用户看到的是"扫了没反应"，与决策P4.21-57 要杜绝的活死人同形。
+# - `need_verifycode`：手机上显示一串数字，要在终端输入；之后每次轮询都带 `verify_code` query，
+#   直到服务端回 `scaned` / `confirmed`。再次回 `need_verifycode` = 上次输错。
+# - `verify_code_blocked`：输错太多次，换新二维码重来（计入刷新次数）。
+# - `scaned_but_redirect`：跨机房，之后改向 `https://<redirect_host>` 轮询；缺字段则留在原地。
+# - `binded_redirect`：这个机器人已经绑定过，服务端**不再发新凭据**——本机已有凭据就沿用。
+STATUS_NEED_VERIFYCODE = "need_verifycode"
+STATUS_VERIFY_BLOCKED = "verify_code_blocked"
+STATUS_REDIRECT = "scaned_but_redirect"
+STATUS_ALREADY_BOUND = "binded_redirect"
+FIELD_REDIRECT_HOST = "redirect_host"
+# 只认"主机名[:端口]"：它会被拼进 `https://…`，带 `/`、`@`、空白的值会把请求导去别处。
+# 每个标签非空（拒 `a..b`），端口另在 `_valid_redirect_host` 里核 1–65535。
+_REDIRECT_HOST_RE = re.compile(
+    r"^(?=.{1,253}(?::|$))[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*(?::(\d{1,5}))?$"
+)
+
+
+def _valid_redirect_host(host: str) -> bool:
+    m = _REDIRECT_HOST_RE.match(host)
+    if not m:
+        return False
+    port = m.group(1)
+    return port is None or 1 <= int(port) <= 65535
 FIELD_TOKEN = "bot_token"
 FIELD_BOT_ID = "ilink_bot_id"
 QRCODE_LONGPOLL_SECONDS = 30.0
@@ -500,7 +531,12 @@ QRCODE_MAX_REFRESH = 3
 QRCODE_WAIT_SECONDS = 180.0
 
 
-async def run_qrcode_login(state: Path, *, transport: object | None = None) -> int:
+async def run_qrcode_login(
+    state: Path,
+    *,
+    transport: object | None = None,
+    read_code: Callable[[str], str] | None = None,
+) -> int:
     """`guanlan im-login --platform weixin`：扫码拿 token 并落 `account.json`。
 
     原设计写「不内建扫码向导」——**推翻**（决策P4.21-23）：没有扫码流程，本适配器对没跑过参考
@@ -522,6 +558,7 @@ async def run_qrcode_login(state: Path, *, transport: object | None = None) -> i
     if transport is not None:
         kwargs["transport"] = transport
     async with httpx.AsyncClient(**kwargs) as client:
+        last_kind = QR_EXPIRED
         for refresh in range(QRCODE_MAX_REFRESH):
             # `bot_type` 走 **query**：放进请求体服务端读不到，照样回 `missing bot_type`。
             resp = await client.post(
@@ -543,13 +580,24 @@ async def run_qrcode_login(state: Path, *, transport: object | None = None) -> i
                 print(f"获取二维码失败：服务端未返回 qrcode 字段{suffix}。", flush=True)
                 return EXIT_AGENT_ERROR
             _present_qrcode(str(data.get("qrcode_img_content") or ""), code)
-            status = await _poll_qrcode(client, code)
-            if status is None:  # 过期 → 刷新重来
+            result = await _poll_qrcode(client, code, read_code=read_code)
+            last_kind = result.kind
+            if result.kind == QR_EXPIRED:
                 print(
                     f"二维码已过期或等待超时，正在刷新（{refresh + 1}/{QRCODE_MAX_REFRESH}）…",
                     flush=True,
                 )
                 continue
+            if result.kind == QR_BLOCKED:
+                print(
+                    f"配对码多次输入错误，服务端已拒绝本次扫码，正在换新二维码"
+                    f"（{refresh + 1}/{QRCODE_MAX_REFRESH}）…",
+                    flush=True,
+                )
+                continue
+            if result.kind == QR_ALREADY_BOUND:
+                return _report_already_bound(state / "account.json")
+            status = result.data
             bot_id = str(status.get(FIELD_BOT_ID) or "").strip()
             if not bot_id:
                 # 与上面 `FIELD_TOKEN` 那条**同一条判据**：拿不到就必须炸得响。写一份
@@ -581,7 +629,10 @@ async def run_qrcode_login(state: Path, *, transport: object | None = None) -> i
                 flush=True,
             )
             return 0
-    print("二维码连续过期，已放弃。请稍后重试。", flush=True)
+    if last_kind == QR_BLOCKED:
+        print("配对码多次输入错误，刷新次数已用完，已放弃。请稍后重试。", flush=True)
+    else:
+        print("二维码连续过期，已放弃。请稍后重试。", flush=True)
     return EXIT_AGENT_ERROR
 
 
@@ -640,20 +691,94 @@ def _draw_qrcode(url: str) -> bool:
     return True
 
 
+QR_CONFIRMED = "confirmed"
+QR_EXPIRED = "expired"
+QR_BLOCKED = "blocked"
+QR_ALREADY_BOUND = "already_bound"
+
+
+class QRPollResult(NamedTuple):
+    """一张二维码的轮询结局。`data` 只在 `QR_CONFIRMED` 时有内容（确认响应原样）。"""
+
+    kind: str
+    data: dict
+
+
+def _prompt_verify_code(prompt: str) -> str:
+    """从终端读配对码。**同步**读：登录流程此刻没有别的并发任务，阻塞事件循环无妨；
+
+    反过来用 `to_thread(input)` 的话，Ctrl-C 之后那条线程还卡在 stdin 上，`asyncio.run`
+    收尾时要等它——用户按了中断，进程却要再敲一次回车才退。
+    """
+    try:
+        return input(prompt)
+    except EOFError:
+        raise GuanlanError(
+            "服务端要求输入手机微信上显示的配对码，但标准输入不可交互（已到 EOF）。"
+            "请在交互式终端里重新运行 `guanlan im-login --platform weixin`。",
+            exit_code=EXIT_AGENT_ERROR,
+        ) from None
+
+
+def _read_verify_code(read_code: Callable[[str], str], *, retry: bool) -> str:
+    prompt = (
+        "配对码不匹配，请重新输入手机微信上显示的数字："
+        if retry
+        else "请输入手机微信上显示的数字，以继续登录："
+    )
+    while True:
+        code = read_code(prompt).strip()
+        if code:
+            return code
+        prompt = "未输入内容，请输入手机微信上显示的数字："
+
+
+def _report_already_bound(account_path: Path) -> int:
+    """`binded_redirect`：服务端认为已绑定、**不发新凭据**。本机凭据可用就当成功，否则说清楚。"""
+    account = read_json(account_path) or {}
+    if str(account.get("token") or "").strip() and str(account.get("account_id") or "").strip():
+        print(
+            f"✓ 这个机器人已经绑定过，服务端不再下发新凭据；沿用本机已有凭据 {account_path}。",
+            flush=True,
+        )
+        return 0
+    # 不能写凭据：服务端这次一个 token 都没给。只能把处境讲清楚，交给人决定。
+    print(
+        "服务端回复「这个机器人已经绑定过」，因此没有下发新凭据；但本机没有可用凭据"
+        f"（{account_path}）。\n"
+        "  · 若此前在别的机器上登录过：把那里的 account.json 拷到上述路径即可；\n"
+        "  · 否则需要先在手机微信里解除这个机器人的绑定，再重新运行 `guanlan im-login --platform weixin`。",
+        flush=True,
+    )
+    return EXIT_AGENT_ERROR
+
+
 async def _poll_qrcode(
-    client, code: str, *, clock: Callable[[], float] = time.monotonic
-) -> dict | None:
-    """长轮询直到确认；过期（或等满 `QRCODE_WAIT_SECONDS`）返回 `None`。
+    client,
+    code: str,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    read_code: Callable[[str], str] | None = None,
+) -> QRPollResult:
+    """长轮询一张二维码直到有结局；过期或等满 `QRCODE_WAIT_SECONDS` 都算 `QR_EXPIRED`。
 
     服务端每次挂满 30s 才回一次 `{"ret":0,"status":"wait"}`，故这里**不是**忙轮询——
     `QRCODE_POLL_INTERVAL` 只是两次长轮询之间的喘息。
     """
     import httpx
 
+    read_code = read_code or _prompt_verify_code
+    url = EP_QRCODE_STATUS  # 跨机房跳转后换成绝对地址；新二维码从默认地址重新开始
+    verify_code: str | None = None
+    scanned_noted = False
+    unknown_noted: set[str] = set()
     deadline = clock() + QRCODE_WAIT_SECONDS
     while clock() < deadline:
+        params = {"qrcode": code}
+        if verify_code:
+            params["verify_code"] = verify_code
         try:
-            resp = await client.get(EP_QRCODE_STATUS, params={"qrcode": code})
+            resp = await client.get(url, params=params)
         except httpx.ReadTimeout:
             # 长轮询被本地读超时掐断是**预期内**的（服务端也可能挂超过 30s），重来即可，
             # 不该让整个登录流程带着 traceback 崩掉。
@@ -662,7 +787,7 @@ async def _poll_qrcode(
         data = resp.json() if resp.content else {}
         state = str(data.get("status") or data.get("qrcode_status") or "").lower()
         if data.get(FIELD_TOKEN):
-            return data
+            return QRPollResult(QR_CONFIRMED, data)
         if state == STATUS_CONFIRMED:
             # 已确认却取不到 token = **字段又改名了**。这里必须炸得响：原实现认的是猜出来的
             # `token`，真实字段是 `bot_token`，于是扫完码一切如常、只是永远 `wait` 下去
@@ -674,6 +799,44 @@ async def _poll_qrcode(
                 exit_code=EXIT_AGENT_ERROR,
             )
         if state in {"expired", "timeout"} or data.get("expired"):
-            return None
+            return QRPollResult(QR_EXPIRED, {})
+        if state == STATUS_ALREADY_BOUND:
+            return QRPollResult(QR_ALREADY_BOUND, {})
+        if state == STATUS_VERIFY_BLOCKED:
+            return QRPollResult(QR_BLOCKED, {})
+        if state == STATUS_NEED_VERIFYCODE:
+            # 带着码还被要码 = 上次输错。读完立即再轮询，不喘息（用户已经在等了）。
+            verify_code = _read_verify_code(read_code, retry=verify_code is not None)
+            continue
+        if state == STATUS_REDIRECT:
+            host = str(data.get(FIELD_REDIRECT_HOST) or "").strip()
+            if not scanned_noted:  # 跨机房跳转本身就意味着已扫码
+                print("已扫码，请在手机微信上确认登录…", flush=True)
+                scanned_noted = True
+            if _valid_redirect_host(host):
+                url = f"https://{host}{EP_QRCODE_STATUS}"
+                _logger.info("扫码登录：跨机房跳转，改向 %s 轮询", host)
+            else:
+                # 缺字段或形态可疑：留在原地照常轮询（官方插件缺字段时也是如此）。
+                _logger.warning(
+                    "扫码登录：收到 %s 但 %s 缺失或不是合法主机名（%r），继续在原地址轮询",
+                    STATUS_REDIRECT, FIELD_REDIRECT_HOST, host[:80],
+                )
+        elif state == STATUS_SCANNED:
+            if verify_code is not None:
+                verify_code = None  # 服务端接受了配对码，之后不必再带
+            if not scanned_noted:
+                print("已扫码，请在手机微信上确认登录…", flush=True)
+                scanned_noted = True
+        elif state and state != STATUS_WAIT and state not in unknown_noted:
+            # 不认识的状态**说出来**再接着等：静默等到超时就是"扫了没反应"。
+            # 不直接报错——服务端新增一个无害的中间态不该让登录失败。
+            unknown_noted.add(state)
+            # 服务端给的原值：截断并转义，免得超长或带控制符的值刷屏 / 注入终端转义序列。
+            shown = ascii(state[:80])[1:-1]
+            print(
+                f"（扫码状态「{shown}」未识别，继续等待；若长时间无进展请把这一行反馈给观澜。）",
+                flush=True,
+            )
         await asyncio.sleep(QRCODE_POLL_INTERVAL)
-    return None
+    return QRPollResult(QR_EXPIRED, {})
