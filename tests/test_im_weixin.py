@@ -748,7 +748,7 @@ def test_qrcode_poll_gives_up_at_wait_deadline(monkeypatch):
         ) as c:
             return await wx._poll_qrcode(c, "c0de", clock=clock)
 
-    assert asyncio.run(go()) is None
+    assert asyncio.run(go()).kind == wx.QR_EXPIRED
     assert now[0] >= wx.QRCODE_WAIT_SECONDS
 
 
@@ -877,3 +877,218 @@ def test_bot_id_not_user_id_is_the_account_identity():
     assert map_inbound(frame(from_user_id=bot), account_id=bot) is None
     # 取成扫码人的 id 时：同一帧会被当成正常入站消息 —— 回声循环就是这么来的
     assert map_inbound(frame(from_user_id=bot), account_id="the-human") is not None
+
+
+# ── 扫码登录的另外四种状态 ─────────────────────────────────────────────────
+# 形态取自腾讯官方插件 `@tencent-weixin/openclaw-weixin` 源码（2.3.1 起），**未经真机观测**。
+# 修之前，这四种状态都落进"不认识 → 睡一下再轮询"，一直等到墙钟上限：用户看到的是
+# "扫了没反应"。下面每条用例都在修之前会红（要么超时、要么读不到码、要么写不出凭据）。
+
+CONFIRMED = {
+    "ret": 0,
+    "status": "confirmed",
+    "bot_token": "botid@im.bot:hex",
+    "ilink_bot_id": "botid@im.bot",
+    "baseurl": "https://ilinkai.weixin.qq.com",
+}
+
+
+def _login(d, server, **kw):
+    return asyncio.run(
+        wx.run_qrcode_login(d, transport=httpx.MockTransport(server.handler), **kw)
+    )
+
+
+def _no_input(prompt: str) -> str:  # pragma: no cover - 被调用即失败
+    raise AssertionError(f"不该要求输入配对码：{prompt}")
+
+
+@pytest.fixture
+def wxdir(tmp_path, monkeypatch):
+    monkeypatch.setattr(wx, "QRCODE_POLL_INTERVAL", 0.0)
+    d = tmp_path / "weixin"
+    d.mkdir()
+    return d
+
+
+def test_need_verifycode_prompts_and_sends_code_until_accepted(wxdir, capsys):
+    """`need_verifycode` → 读码 → 之后的轮询都带 `verify_code`，`scaned` 后不再带。"""
+    server = QRServer(
+        pages=[
+            {"ret": 0, "status": "need_verifycode"},
+            {"ret": 0, "status": "scaned"},
+            {"ret": 0, "status": "wait"},
+            CONFIRMED,
+        ]
+    )
+    prompts: list[str] = []
+
+    def read(prompt: str) -> str:
+        prompts.append(prompt)
+        return " 4321\n"
+
+    assert _login(wxdir, server, read_code=read) == 0, capsys.readouterr().out
+    assert len(prompts) == 1 and "手机微信上显示的数字" in prompts[0]
+    sent = [p.get("verify_code") for p in server.params(wx.EP_QRCODE_STATUS)]
+    # 第一次轮询还没有码；输入后那次带上（已去空白）；服务端回 scaned = 码被接受，之后不再带
+    assert sent == [None, "4321", None, None]
+    assert read_json(wxdir / "account.json")["account_id"] == "botid@im.bot"
+
+
+def test_need_verifycode_again_means_wrong_code(wxdir, capsys):
+    """带着码还被要码 = 输错：提示"不匹配"重输，并换成新码继续带。"""
+    server = QRServer(
+        pages=[
+            {"ret": 0, "status": "need_verifycode"},
+            {"ret": 0, "status": "need_verifycode"},
+            CONFIRMED,
+        ]
+    )
+    answers = iter(["1111", "", "2222"])  # 中间那次空输入要被拦下重问
+    prompts: list[str] = []
+
+    def read(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(answers)
+
+    assert _login(wxdir, server, read_code=read) == 0, capsys.readouterr().out
+    assert "不匹配" in prompts[1] and "未输入" in prompts[2]
+    sent = [p.get("verify_code") for p in server.params(wx.EP_QRCODE_STATUS)]
+    assert sent == [None, "1111", "2222"]
+
+
+def test_need_verifycode_without_tty_fails_loudly(wxdir, monkeypatch):
+    """非交互 stdin（EOF）时报出**原因与做法**，而不是带着 EOFError traceback 崩掉。"""
+    server = QRServer(pages=[{"ret": 0, "status": "need_verifycode"}])
+
+    def eof(prompt: str) -> str:
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", eof)
+    with pytest.raises(GuanlanError) as exc:
+        _login(wxdir, server)  # 走默认的 _prompt_verify_code
+    assert "配对码" in str(exc.value) and "交互" in str(exc.value)
+    assert not (wxdir / "account.json").exists()
+
+
+def test_verify_code_blocked_refreshes_qrcode(wxdir, capsys):
+    """输错太多次 → 换新二维码重来（计入刷新次数），新码上不再带旧配对码。"""
+    server = QRServer(
+        pages=[
+            {"ret": 0, "status": "need_verifycode"},
+            {"ret": 0, "status": "verify_code_blocked"},
+            CONFIRMED,
+        ]
+    )
+    assert _login(wxdir, server, read_code=lambda p: "9999") == 0
+    out = capsys.readouterr().out
+    assert "配对码多次输入错误" in out and "1/3" in out
+    assert len(server.params(wx.EP_QRCODE)) == 2, "没有换新二维码"
+    sent = [p.get("verify_code") for p in server.params(wx.EP_QRCODE_STATUS)]
+    assert sent == [None, "9999", None]
+
+
+def test_verify_code_blocked_every_time_gives_up(wxdir, capsys):
+    """每张码都被封 → 刷满次数后放弃并返回错误，不写凭据。"""
+    server = QRServer(pages=[{"ret": 0, "status": "verify_code_blocked"}] * 3)
+    assert _login(wxdir, server, read_code=_no_input) == EXIT_AGENT_ERROR
+    out = capsys.readouterr().out
+    # 每张码都应以"被封"收场，而不是等到墙钟上限后当作过期
+    assert out.count("配对码多次输入错误") == wx.QRCODE_MAX_REFRESH + 1  # 3 次刷新 + 放弃
+    assert "连续过期" not in out
+    assert len(server.params(wx.EP_QRCODE)) == wx.QRCODE_MAX_REFRESH
+    assert not (wxdir / "account.json").exists()
+
+
+def test_scaned_but_redirect_switches_polling_host(wxdir, capsys):
+    """跨机房：之后的轮询改发到 `https://<redirect_host>`，确认后照常落凭据。"""
+    server = QRServer(
+        pages=[
+            {"ret": 0, "status": "scaned_but_redirect", "redirect_host": "idc2.example.com"},
+            CONFIRMED,
+        ]
+    )
+    assert _login(wxdir, server, read_code=_no_input) == 0, capsys.readouterr().out
+    hosts = [u.host for u in server.urls if u.path == wx.EP_QRCODE_STATUS]
+    assert hosts == ["ilinkai.weixin.qq.com", "idc2.example.com"]
+    status_urls = [u for u in server.urls if u.path == wx.EP_QRCODE_STATUS]
+    assert status_urls[1].scheme == "https"
+    assert status_urls[1].params.get("qrcode") == "c0de"
+    assert capsys.readouterr().out.count("已扫码") == 1  # 跳转本身即已扫码，要给出提示
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,  # 字段缺失
+        "",
+        "evil.example.com/steal?x=",  # 带路径：拼进 https:// 会改掉请求目标
+        "user@evil.example.com",
+        "evil.example.com extra",
+        "-leading.example.com",
+    ],
+)
+def test_scaned_but_redirect_rejects_bad_host(wxdir, capsys, bad):
+    """**反向用例**：可疑或缺失的 `redirect_host` 一律不跟，留在原地址继续轮询。"""
+    page = {"ret": 0, "status": "scaned_but_redirect"}
+    if bad is not None:
+        page["redirect_host"] = bad
+    server = QRServer(pages=[page, CONFIRMED])
+    assert _login(wxdir, server, read_code=_no_input) == 0, capsys.readouterr().out
+    # 看**全部**请求而不只是状态端点：被注入路径的值会把请求导去别的路径，
+    # 只筛状态端点的话那条被劫持的请求根本不在视野里（变异测试实测漏过）。
+    polled = [(u.host, u.path) for u in server.urls if u.path != wx.EP_QRCODE]
+    assert polled == [("ilinkai.weixin.qq.com", wx.EP_QRCODE_STATUS)] * 2
+
+
+def test_redirect_host_with_port_is_accepted():
+    assert wx._REDIRECT_HOST_RE.match("idc2.example.com:8443")
+    assert wx._REDIRECT_HOST_RE.match("10.0.0.7")
+    assert not wx._REDIRECT_HOST_RE.match("idc2.example.com:")
+    assert wx._valid_redirect_host("idc2.example.com:8443")
+    # 反向：端口越界、空标签都不跟（否则连接期才炸，登录带着 traceback 退出）
+    for bad in ("idc2.example.com:99999", "idc2.example.com:0", "a..example.com", "a.example.com."):
+        assert not wx._valid_redirect_host(bad), bad
+
+
+def test_binded_redirect_keeps_existing_credentials(wxdir, capsys):
+    """已绑定且本机凭据可用 → 成功退出，**原凭据一字不动**。"""
+    existing = {"account_id": "old@im.bot", "token": "old-token", "base_url": wx.BASE_URL}
+    write_json_atomic(wxdir / "account.json", existing)
+    server = QRServer(pages=[{"ret": 0, "status": "binded_redirect"}])
+    assert _login(wxdir, server, read_code=_no_input) == 0
+    assert "已经绑定过" in capsys.readouterr().out
+    assert read_json(wxdir / "account.json") == existing
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [None, {"token": "t"}, {"account_id": "a@im.bot", "token": ""}],
+    ids=["missing", "no-account-id", "empty-token"],
+)
+def test_binded_redirect_without_usable_credentials_explains(wxdir, capsys, existing):
+    """已绑定但本机凭据缺失或不全 → 返回错误并给出两条出路，**不写**任何凭据。"""
+    if existing is not None:
+        write_json_atomic(wxdir / "account.json", existing)
+    server = QRServer(pages=[{"ret": 0, "status": "binded_redirect"}])
+    assert _login(wxdir, server, read_code=_no_input) == EXIT_AGENT_ERROR
+    out = capsys.readouterr().out
+    assert "已经绑定过" in out and "account.json" in out and "解除" in out
+    assert read_json(wxdir / "account.json") == existing
+
+
+def test_unknown_status_is_announced_once_then_keeps_waiting(wxdir, capsys):
+    """不认识的状态**说一次**再接着等，不报错也不刷屏；`scaned` 提示也只说一次。"""
+    server = QRServer(
+        pages=[
+            {"ret": 0, "status": "brand_new_state"},
+            {"ret": 0, "status": "brand_new_state"},
+            {"ret": 0, "status": "scaned"},
+            {"ret": 0, "status": "scaned"},
+            CONFIRMED,
+        ]
+    )
+    assert _login(wxdir, server, read_code=_no_input) == 0
+    out = capsys.readouterr().out
+    assert out.count("brand_new_state") == 1
+    assert out.count("已扫码") == 1
